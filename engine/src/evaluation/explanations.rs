@@ -1,9 +1,9 @@
 //! Root explanation type and formatting.
 //!
-//! The root `Explanation` (with `result: OperationResult`) is assembled at eval time.
-//! The tree types (`ExplanationNode`, `Cause`, `SerializedConversionTraceStep`) are
-//! factored into `planning::explanation` as the API/evaluation model; evaluation
-//! builds them while walking THE DAG.
+//! The root `Explanation` (with `result: OperationResult`) is built once per
+//! requested rule from its narrated Rule node. The tree types (`ExplanationNode`,
+//! `Cause`, `SerializedConversionTraceStep`) live in `planning::explanation`;
+//! `evaluation::narration` builds them from the filled value table.
 
 use crate::computation::{OperationResult, VetoType};
 use crate::planning::semantics::{LemmaType, RulePath};
@@ -128,7 +128,7 @@ impl<'a> FormatContext<'a> {
                 lines: self.lines,
                 indent: child_indent,
             };
-            child_ctx.render_nodes(&cause.children, None);
+            child_ctx.render_cause_children(cause, value, &line);
         }
 
         if body_shown {
@@ -144,9 +144,33 @@ impl<'a> FormatContext<'a> {
         }
     }
 
+    /// Cause children for ASCII: omit bare literals and Data that only restates
+    /// a `name is display` cause line (JSON keeps the structured child).
+    fn render_cause_children(&mut self, cause: &Cause, value: &str, line: &str) {
+        let visible: Vec<&ExplanationNode> = cause
+            .children
+            .iter()
+            .filter(|node| !is_bare_literal_compose(node))
+            .filter(|node| !data_restates_true_cause_line(node, value, line))
+            .collect();
+        let len = visible.len();
+        for (i, node) in visible.into_iter().enumerate() {
+            let connector = if i + 1 == len {
+                Connector::Last
+            } else {
+                Connector::Branch
+            };
+            self.render_node(node, connector, None);
+        }
+    }
+
     fn render_nodes(&mut self, nodes: &[ExplanationNode], parent_body: Option<&str>) {
-        let len = nodes.len();
-        for (i, node) in nodes.iter().enumerate() {
+        let visible: Vec<&ExplanationNode> = nodes
+            .iter()
+            .filter(|node| !is_bare_literal_compose(node))
+            .collect();
+        let len = visible.len();
+        for (i, node) in visible.into_iter().enumerate() {
             let connector = if i + 1 == len {
                 Connector::Last
             } else {
@@ -161,7 +185,11 @@ impl<'a> FormatContext<'a> {
         steps: &[SerializedConversionTraceStep],
         operands: &[ExplanationNode],
     ) {
-        let total = steps.len() + operands.len();
+        let visible_operands: Vec<&ExplanationNode> = operands
+            .iter()
+            .filter(|node| !is_bare_literal_compose(node))
+            .collect();
+        let total = steps.len() + visible_operands.len();
         let mut index = 0;
         for step in steps {
             index += 1;
@@ -172,7 +200,7 @@ impl<'a> FormatContext<'a> {
             };
             self.push_line(connector, &step.text);
         }
-        for operand in operands {
+        for operand in visible_operands {
             index += 1;
             let connector = if index == total {
                 Connector::Last
@@ -264,9 +292,6 @@ impl<'a> FormatContext<'a> {
                 };
                 self.push_line(connector, &text);
             }
-            ExplanationNode::Piecewise { .. } => {
-                unreachable!("BUG: Piecewise must be lowered before format")
-            }
         }
     }
 }
@@ -275,5 +300,24 @@ fn connector_str(connector: Connector) -> &'static str {
     match connector {
         Connector::Branch => "├─",
         Connector::Last => "└─",
+    }
+}
+
+/// Bare literal compose: expression text already names it; ASCII omits the node.
+fn is_bare_literal_compose(node: &ExplanationNode) -> bool {
+    matches!(node, ExplanationNode::Compose { operands, .. } if operands.is_empty())
+}
+
+/// `code is NL` already states the binding; ASCII skips child `code: NL`.
+/// Flipped / inequality cause lines do not match `{key} is {display}`.
+fn data_restates_true_cause_line(node: &ExplanationNode, value: &str, line: &str) -> bool {
+    if value != "true" {
+        return false;
+    }
+    match node {
+        ExplanationNode::Data { name, display } => {
+            line == format!("{} is {display}", name.input_key())
+        }
+        _ => false,
     }
 }

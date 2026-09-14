@@ -319,7 +319,7 @@ If `weight` is missing or vetoed on constraints but `use_estimated` is true, `sh
 
 When a Data field has no value (not provided), Rules that depend on it Veto with a "Missing data" reason. See the lookup example above when `product` is absent.
 
-After a `MissingData` or definitive veto, evaluation may still walk later siblings so nested control can record for explain and prune. Intake keeps unbound keys on `missing_data` only when some completion can still produce a **value**. For `and`, an unbound left stays `MissingData` even if a later conjunct definitively vetoes (`false and …` can still answer). Product and other operators that need both values settle on a definitive factor and clear keys that cannot un-veto. `is veto` stays a boolean probe and does not change this intake rule.
+After a `MissingData` on one operand of an arithmetic or comparison operator, evaluation still walks the other operand: a definitive veto there settles the result, and nested control can record for explain and prune. `and` is different: a left conjunct that is `MissingData`, vetoed, or `false` ends the evaluation of that `and`; the right conjunct is never visited, so its inputs never appear on `missing_data`. Intake keeps unbound keys on `missing_data` only when some completion can still produce a **value**. For `and`, an unbound left stays `MissingData` (`false and …` can still answer). Product and other operators that need both values settle on a definitive factor and clear keys that cannot un-veto. `is veto` stays a boolean probe and does not change this intake rule.
 
 ### `is veto` (boolean test)
 

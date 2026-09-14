@@ -19,9 +19,13 @@ const SHIPPING: &str = include_str!("../benches/specs/shipping.lemma");
 /// after warmup, on this machine's allocator accounting. Update deliberately
 /// when the eval path's allocation shape changes.
 ///
-/// 57 includes the rule-embed schedule: `rule_values` Vec, `marked` Vec, and
-/// the dependency-closure worklist (embeds are evaluation boundaries).
-const SHIPPING_EVAL_ALLOCATIONS: usize = 57;
+/// Measured 52: `rule_values` sized from `plan.rules`, the value table, and
+/// the results each rule walk clones out of cached cells. The lazy fill (a Kind
+/// walk that hits an empty `rule_ref` unwinds to the heap stack, which fills
+/// the reference and retries the parent) allocates nothing: it unwinds with a
+/// `RuleIndex` and re-reads cached cells. Below the eager authored-dep
+/// closure's 57 because only rules the walk actually reaches are evaluated.
+const SHIPPING_EVAL_ALLOCATIONS: usize = 52;
 
 fn shipping_effective() -> DateTimeValue {
     DateTimeValue {

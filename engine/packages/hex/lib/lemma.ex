@@ -72,7 +72,7 @@ defmodule Lemma do
   @doc """
   Loads Lemma source(s).
 
-  - binary → one volatile workspace source
+  - binary → one volatile source in the default repository
   - `[{label, code}, ...]` → labeled sources in caller list order
   - map → labeled sources in lexicographic label order (BEAM maps have no insertion order)
   """

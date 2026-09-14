@@ -488,9 +488,16 @@ rule premium: (1 / denom) * loading
         text.contains("premium:"),
         "settled run must show rule answer, got: {text}"
     );
+    // The `Missing data` section (header line, then keys) must be absent. The
+    // reasoning tree still narrates the `loading` sibling, whose own value is a
+    // `Missing data: is_smoker` veto: the explain walk visits every operand.
     assert!(
-        !text.contains("Missing data"),
+        !text.contains("Missing data\n"),
         "settled Computation must not list Missing data for leftover live keys, got: {text}"
+    );
+    assert!(
+        text.contains("loading: Missing data: is_smoker"),
+        "reasoning must narrate the sibling operand after the definitive veto, got: {text}"
     );
 }
 
@@ -3502,7 +3509,7 @@ fn test_mcp_show_json_includes_rule_units() {
         .as_str()
         .expect("show text");
     let show: serde_json::Value = serde_json::from_str(text).expect("JSON Show");
-    let units = &show["rules"]["total"]["units"];
+    let units = &show["rules"]["total"]["type"]["units"];
     assert!(
         units.is_array() && units.as_array().unwrap().len() >= 2,
         "rule total must expose unit map in JSON Show, got: {text}"

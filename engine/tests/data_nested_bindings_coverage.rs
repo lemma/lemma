@@ -95,6 +95,91 @@ rule r: m.l.v
     assert_eq!(rule_value(&resp, "r"), "7");
 }
 
+#[test]
+fn nested_binding_depth_3_data_target_reference_through_imported_spec() {
+    let code = r#"
+spec zones
+data dest_zip3: text
+rule zone: dest_zip3
+
+spec quote
+uses z: zones
+  -> with dest_zip3: dest_zip3
+data dest_zip3: text
+rule zone: z.zone
+
+spec shop
+uses q: quote
+  -> with dest_zip3: dest_zip3
+data dest_zip3: text
+rule zone: q.zone
+
+spec wrap
+uses r: shop
+  -> with dest_zip3: dest_zip3
+data dest_zip3: text
+rule answer: r.zone
+"#;
+    let mut engine = Engine::new();
+    load_ok(&mut engine, code);
+    let now = DateTimeValue::now();
+
+    let missing = engine
+        .run(None, "wrap", Some(&now), HashMap::new(), None, false)
+        .expect("evaluates");
+    assert_eq!(
+        missing
+            .results
+            .get("answer")
+            .expect("answer")
+            .missing_data(),
+        &["dest_zip3".to_string()]
+    );
+
+    let mut data = HashMap::new();
+    data.insert("dest_zip3".to_string(), "100".to_string());
+    let resp = engine
+        .run(None, "wrap", Some(&now), data, None, false)
+        .expect("evaluates");
+    assert_eq!(rule_value(&resp, "answer"), "100");
+
+    let show = engine.show(None, "wrap", Some(&now)).expect("show");
+    let dest = show.data.get("dest_zip3").expect("dest_zip3 in show.data");
+    assert!(
+        dest.needed_by_rules.iter().any(|name| name == "answer"),
+        "wrapper dest_zip3 must be needed by answer, got {:?}",
+        dest.needed_by_rules
+    );
+}
+
+#[test]
+fn nested_binding_depth_3_rule_target_reference_through_imported_spec() {
+    let code = r#"
+spec inner
+data slot: text
+
+spec mid
+uses i: inner
+  -> with slot: computed
+rule computed: "ok"
+
+spec shop
+uses m: mid
+rule through: m.i.slot
+
+spec wrap
+uses s: shop
+rule answer: s.through
+"#;
+    let mut engine = Engine::new();
+    load_ok(&mut engine, code);
+    let now = DateTimeValue::now();
+    let resp = engine
+        .run(None, "wrap", Some(&now), HashMap::new(), None, false)
+        .expect("evaluates");
+    assert_eq!(rule_value(&resp, "answer"), "ok");
+}
+
 // ─── Error cases: structural ─────────────────────────────────────────
 
 #[test]

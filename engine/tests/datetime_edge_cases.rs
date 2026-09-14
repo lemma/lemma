@@ -738,6 +738,247 @@ rule result: t - 9223372036854 second
 }
 
 #[test]
+fn date_plus_extreme_duration_conversion_fails() {
+    let mut engine = Engine::new();
+    let code = r#"
+spec test
+uses lemma units
+data d: 2024-01-01
+rule result: d + 9999999999999 second
+    "#;
+    engine
+        .load([(lemma::SourceType::Volatile, code.to_string())])
+        .expect("parse");
+    let now = lemma::DateTimeValue::now();
+    let response = engine
+        .run(
+            None,
+            "test",
+            Some(&now),
+            std::collections::HashMap::new(),
+            Some(&["result".to_string()]),
+            false,
+        )
+        .expect("run");
+    let rule_result = response.get("result").expect("rule exists");
+    assert!(rule_result.vetoed, "extreme duration must veto, not panic");
+    assert!(
+        rule_result
+            .veto_reason
+            .as_deref()
+            .is_some_and(|r| r.contains("Duration conversion failed")),
+        "huge second count must fail duration→chrono conversion: {:?}",
+        rule_result.veto_reason
+    );
+}
+
+#[test]
+fn date_minus_extreme_duration_conversion_fails() {
+    let mut engine = Engine::new();
+    let code = r#"
+spec test
+uses lemma units
+data d: 2024-01-01
+rule result: d - 9999999999999 second
+    "#;
+    engine
+        .load([(lemma::SourceType::Volatile, code.to_string())])
+        .expect("parse");
+    let now = lemma::DateTimeValue::now();
+    let response = engine
+        .run(
+            None,
+            "test",
+            Some(&now),
+            std::collections::HashMap::new(),
+            Some(&["result".to_string()]),
+            false,
+        )
+        .expect("run");
+    let rule_result = response.get("result").expect("rule exists");
+    assert!(
+        rule_result.vetoed,
+        "extreme duration subtraction must veto, not panic"
+    );
+    assert!(
+        rule_result
+            .veto_reason
+            .as_deref()
+            .is_some_and(|r| r.contains("Duration conversion failed")),
+        "huge second count must fail duration→chrono conversion: {:?}",
+        rule_result.veto_reason
+    );
+}
+
+#[test]
+fn date_plus_convertible_duration_date_overflow() {
+    let mut engine = Engine::new();
+    // Converts to chrono Duration (fits i64 micros) but overflows Date arithmetic.
+    let code = r#"
+spec test
+uses lemma units
+data d: 2024-01-01
+rule result: d + 9223372036854 second
+    "#;
+    engine
+        .load([(lemma::SourceType::Volatile, code.to_string())])
+        .expect("parse");
+    let now = lemma::DateTimeValue::now();
+    let response = engine
+        .run(
+            None,
+            "test",
+            Some(&now),
+            std::collections::HashMap::new(),
+            Some(&["result".to_string()]),
+            false,
+        )
+        .expect("run");
+    let rule_result = response.get("result").expect("rule exists");
+    assert!(rule_result.vetoed, "must veto, not panic");
+    assert_eq!(
+        rule_result.veto_reason.as_deref(),
+        Some("Date overflow"),
+        "convertible extreme duration must hit Date overflow: {:?}",
+        rule_result.veto_reason
+    );
+}
+
+#[test]
+fn date_minus_convertible_duration_date_overflow() {
+    let mut engine = Engine::new();
+    let code = r#"
+spec test
+uses lemma units
+data d: 2024-01-01
+rule result: d - 9223372036854 second
+    "#;
+    engine
+        .load([(lemma::SourceType::Volatile, code.to_string())])
+        .expect("parse");
+    let now = lemma::DateTimeValue::now();
+    let response = engine
+        .run(
+            None,
+            "test",
+            Some(&now),
+            std::collections::HashMap::new(),
+            Some(&["result".to_string()]),
+            false,
+        )
+        .expect("run");
+    let rule_result = response.get("result").expect("rule exists");
+    assert!(rule_result.vetoed, "must veto, not panic");
+    assert_eq!(
+        rule_result.veto_reason.as_deref(),
+        Some("Date overflow"),
+        "convertible extreme duration must hit Date overflow: {:?}",
+        rule_result.veto_reason
+    );
+}
+
+#[test]
+fn date_plus_i32_max_months_calendar_offset_too_large() {
+    let mut engine = Engine::new();
+    // Fits i32 months, then year*12 + offset overflows i32 — must Veto, not panic.
+    let code = r#"
+spec test
+uses lemma units
+data d: 2024-01-01
+rule result: d + 2147483647 month
+    "#;
+    engine
+        .load([(lemma::SourceType::Volatile, code.to_string())])
+        .expect("parse");
+    let now = lemma::DateTimeValue::now();
+    let response = engine
+        .run(
+            None,
+            "test",
+            Some(&now),
+            std::collections::HashMap::new(),
+            Some(&["result".to_string()]),
+            false,
+        )
+        .expect("run");
+    let rule_result = response.get("result").expect("rule exists");
+    assert!(rule_result.vetoed, "must veto, not panic");
+    assert_eq!(
+        rule_result.veto_reason.as_deref(),
+        Some("Calendar offset too large"),
+        "i32-max month add must hit Calendar offset too large: {:?}",
+        rule_result.veto_reason
+    );
+}
+
+#[test]
+fn date_minus_i32_min_months_calendar_offset_too_large() {
+    let mut engine = Engine::new();
+    // Negating i32::MIN overflows — must Veto, not panic.
+    let code = r#"
+spec test
+uses lemma units
+data d: 2024-01-01
+rule result: d - 2147483648 month
+    "#;
+    engine
+        .load([(lemma::SourceType::Volatile, code.to_string())])
+        .expect("parse");
+    let now = lemma::DateTimeValue::now();
+    let response = engine
+        .run(
+            None,
+            "test",
+            Some(&now),
+            std::collections::HashMap::new(),
+            Some(&["result".to_string()]),
+            false,
+        )
+        .expect("run");
+    let rule_result = response.get("result").expect("rule exists");
+    assert!(rule_result.vetoed, "must veto, not panic");
+    assert_eq!(
+        rule_result.veto_reason.as_deref(),
+        Some("Calendar offset too large"),
+        "i32::MIN month subtract must hit Calendar offset too large: {:?}",
+        rule_result.veto_reason
+    );
+}
+
+#[test]
+fn date_plus_huge_years_calendar_offset_too_large() {
+    let mut engine = Engine::new();
+    let code = r#"
+spec test
+uses lemma units
+data d: 2024-01-01
+rule result: d + 999999999 year
+    "#;
+    engine
+        .load([(lemma::SourceType::Volatile, code.to_string())])
+        .expect("parse");
+    let now = lemma::DateTimeValue::now();
+    let response = engine
+        .run(
+            None,
+            "test",
+            Some(&now),
+            std::collections::HashMap::new(),
+            Some(&["result".to_string()]),
+            false,
+        )
+        .expect("run");
+    let rule_result = response.get("result").expect("rule exists");
+    assert!(rule_result.vetoed, "must veto, not panic");
+    assert_eq!(
+        rule_result.veto_reason.as_deref(),
+        Some("Calendar offset too large"),
+        "huge year add must hit Calendar offset too large: {:?}",
+        rule_result.veto_reason
+    );
+}
+
+#[test]
 fn test_dec_31_plus_1_month() {
     let mut engine = Engine::new();
     let code = r#"

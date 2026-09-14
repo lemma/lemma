@@ -24,7 +24,7 @@ Numbers are produced by `cargo coverage engine`.
 
 ## Environment
 
-- Host: `Linux 7.0.0-30-generic x86_64`
+- Host: `Linux 7.0.0-31-generic x86_64`
 - Rustc:
 
 ```
@@ -41,14 +41,14 @@ LLVM version: 21.1.3
 
 | Metric | Covered | Total | Percent |
 |--------|--------:|------:|--------:|
-| Lines | 40231 | 47266 | 85.12% |
-| Functions | 3066 | 3506 | 87.45% |
-| Regions | 58981 | 70218 | 84.00% |
+| Lines | 39958 | 47082 | 84.87% |
+| Functions | 3109 | 3569 | 87.11% |
+| Regions | 58241 | 69548 | 83.74% |
 
 ## Test run
 
-- Total: 2614
-- Passed: 2614
+- Total: 2671
+- Passed: 2671
 - Skipped: 0
 - Failed: 0
 
@@ -64,10 +64,11 @@ Sorted by line coverage ascending (weakest first). Only files under `src/` for t
 | `computation/operation_result.rs` | 44.57 | 45.00 | 43.36 | 41/92 |
 | `computation/decimal_math.rs` | 48.15 | 100.00 | 40.18 | 26/54 |
 | `computation/bigint/signed.rs` | 60.82 | 57.14 | 57.08 | 177/291 |
-| `computation/comparison.rs` | 68.78 | 85.71 | 66.77 | 130/189 |
+| `api/show.rs` | 61.67 | 88.89 | 61.80 | 74/120 |
+| `computation/comparison.rs` | 68.64 | 85.71 | 66.67 | 116/169 |
 | `mcp/tools.rs` | 70.95 | 60.00 | 68.59 | 232/327 |
+| `evaluation/explanations.rs` | 74.89 | 80.00 | 74.03 | 173/231 |
 | `api/value.rs` | 75.00 | 83.33 | 71.43 | 42/56 |
-| `evaluation/explanations.rs` | 75.26 | 76.92 | 73.47 | 146/194 |
 | `computation/measure_math.rs` | 75.36 | 100.00 | 83.18 | 52/69 |
 | `computation/arithmetic.rs` | 76.78 | 76.92 | 74.76 | 787/1025 |
 | `result_value.rs` | 76.99 | 64.52 | 72.35 | 271/352 |
@@ -75,45 +76,48 @@ Sorted by line coverage ascending (weakest first). Only files under `src/` for t
 | `error.rs` | 77.27 | 78.18 | 70.81 | 442/572 |
 | `snapshot.rs` | 78.12 | 76.47 | 79.28 | 150/192 |
 | `evaluation/run_data.rs` | 78.42 | 74.19 | 82.19 | 338/431 |
-| `planning/explanation.rs` | 78.57 | 75.00 | 77.27 | 22/28 |
-| `planning/execution_plan.rs` | 80.72 | 79.84 | 77.63 | 1968/2438 |
+| `planning/execution_plan.rs` | 80.64 | 74.67 | 77.22 | 2028/2515 |
+| `planning/graph.rs` | 80.95 | 87.53 | 81.75 | 7646/9445 |
 | `evaluation/expression.rs` | 81.54 | 100.00 | 86.02 | 53/65 |
 | `computation/units.rs` | 81.56 | 89.47 | 79.34 | 199/244 |
-| `planning/semantics.rs` | 81.61 | 83.58 | 82.33 | 3720/4558 |
-| `computation/range.rs` | 81.93 | 93.75 | 80.35 | 195/238 |
-| `planning/graph.rs` | 81.98 | 87.83 | 82.45 | 7835/9557 |
+| `planning/semantics.rs` | 81.57 | 82.74 | 82.13 | 3752/4600 |
+| `computation/range.rs` | 81.62 | 93.75 | 80.06 | 191/234 |
+| `planning/typing.rs` | 82.12 | 100.00 | 78.77 | 317/386 |
 | `parsing/ast.rs` | 82.36 | 88.51 | 74.39 | 1097/1332 |
 | `computation/bigint/biguint.rs` | 83.53 | 89.80 | 81.61 | 431/516 |
 | `literals.rs` | 83.58 | 77.98 | 84.17 | 611/731 |
-| `computation/datetime.rs` | 84.78 | 80.68 | 83.19 | 947/1117 |
 | `parsing/parser.rs` | 85.02 | 88.82 | 81.06 | 1929/2269 |
-| `computation/rational.rs` | 85.65 | 97.06 | 79.38 | 776/906 |
-| `planning/ordered_dispatch.rs` | 86.23 | 90.62 | 85.71 | 313/363 |
+| `computation/datetime.rs` | 85.42 | 80.43 | 83.81 | 967/1132 |
+| `computation/rational.rs` | 85.56 | 97.00 | 79.25 | 770/900 |
+| `planning/normalize/rewrite.rs` | 87.55 | 88.89 | 85.59 | 1013/1157 |
 | `spec_set_id.rs` | 87.72 | 100.00 | 95.52 | 50/57 |
 | `api/types.rs` | 87.82 | 95.00 | 88.29 | 209/238 |
+| `planning/ordered_dispatch.rs` | 88.03 | 90.24 | 87.65 | 412/468 |
 | `parsing/lexer.rs` | 88.35 | 100.00 | 84.97 | 637/721 |
-| `planning/normalize.rs` | 88.63 | 88.75 | 87.19 | 3569/4027 |
-| `evaluation/tree.rs` | 89.53 | 93.75 | 89.96 | 1180/1318 |
+| `planning/normalize.rs` | 89.26 | 88.20 | 88.29 | 2087/2338 |
 | `string_distance.rs` | 90.48 | 83.33 | 93.22 | 57/63 |
+| `evaluation/conversion_trace.rs` | 90.53 | 100.00 | 91.32 | 153/169 |
+| `evaluation/narration.rs` | 90.77 | 87.50 | 91.95 | 462/509 |
 | `planning/unit_index.rs` | 91.26 | 96.15 | 92.27 | 501/549 |
-| `evaluation/conversion_trace.rs` | 92.22 | 100.00 | 92.49 | 154/167 |
 | `formatting/mod.rs` | 92.34 | 100.00 | 91.32 | 904/979 |
+| `planning/show_expression.rs` | 92.37 | 87.50 | 93.45 | 109/118 |
 | `registry.rs` | 92.45 | 97.44 | 94.47 | 968/1047 |
-| `evaluation/mod.rs` | 92.55 | 78.26 | 93.20 | 298/322 |
 | `parsing/mod.rs` | 92.64 | 98.92 | 89.89 | 1321/1426 |
-| `evaluation/branch_semantics.rs` | 92.86 | 100.00 | 81.82 | 39/42 |
 | `quality.rs` | 93.12 | 96.77 | 89.24 | 907/974 |
 | `limits.rs` | 93.27 | 100.00 | 85.40 | 97/104 |
+| `engine.rs` | 93.32 | 91.89 | 94.05 | 2138/2291 |
 | `planning/discovery.rs` | 93.34 | 97.06 | 94.16 | 1233/1321 |
-| `engine.rs` | 93.43 | 91.89 | 94.17 | 2147/2298 |
 | `planning/mod.rs` | 93.66 | 96.15 | 94.61 | 1358/1450 |
+| `evaluation/mod.rs` | 94.08 | 86.96 | 94.13 | 286/304 |
+| `planning/explanation.rs` | 95.65 | 100.00 | 89.47 | 22/23 |
+| `evaluation/tree.rs` | 96.12 | 100.00 | 94.43 | 396/412 |
 | `deps.rs` | 96.23 | 100.00 | 96.47 | 51/53 |
 | `planning/spec_set.rs` | 96.50 | 95.24 | 98.23 | 138/143 |
+| `evaluation/branch_semantics.rs` | 96.77 | 100.00 | 90.18 | 90/93 |
 | `planning/unit_family.rs` | 96.98 | 100.00 | 96.44 | 353/364 |
 | `parsing/assignment_continuation_tests.rs` | 97.39 | 100.00 | 93.26 | 261/268 |
 | `evaluation/response.rs` | 98.83 | 94.44 | 98.34 | 592/599 |
 | `api/response.rs` | 100.00 | 100.00 | 100.00 | 22/22 |
-| `api/show.rs` | 100.00 | 100.00 | 100.00 | 36/36 |
 | `computation/bigint/alloc.rs` | 100.00 | 100.00 | 97.37 | 20/20 |
 | `parsing/source.rs` | 100.00 | 100.00 | 99.46 | 125/125 |
 
@@ -122,4 +126,4 @@ Sorted by line coverage ascending (weakest first). Only files under `src/` for t
 - [Engine integration test catalog](../../../engine/tests/README.md) — qualitative map of scenarios and subsystem overlap clusters
 - [CLI test coverage](cli.md)
 - [Engine benchmarks](../benchmarks/engine.md)
-<!-- coverage-input-digest: dcf6c87f9868fbfb -->
+<!-- coverage-input-digest: 6cf18dcdeb4f121d -->

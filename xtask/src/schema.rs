@@ -413,6 +413,237 @@ pub fn api_v1_schema() -> Value {
                 "effective_to": nullable_string()
             }
         },
+        "ShowConversionTarget": {
+            "description": "Target of a Show `as` conversion (inspection only).",
+            "oneOf": [
+                {
+                    "type": "object",
+                    "required": ["type"],
+                    "additionalProperties": false,
+                    "properties": {
+                        "type": {"type": "string", "enum": [
+                            "boolean", "measure", "measure_range", "number", "number_range",
+                            "ratio", "ratio_range", "text", "date", "date_range", "time", "time_range"
+                        ]}
+                    }
+                },
+                {
+                    "type": "object",
+                    "required": ["unit"],
+                    "additionalProperties": false,
+                    "properties": {
+                        "unit": {
+                            "type": "object",
+                            "required": ["unit_name"],
+                            "additionalProperties": false,
+                            "properties": {"unit_name": {"type": "string"}}
+                        }
+                    }
+                }
+            ]
+        },
+        "ShowExpression": {
+            "description": "Resolved expression on a Show rule branch. Internally tagged by `type`.",
+            "oneOf": [
+                {
+                    "type": "object",
+                    "required": ["type"],
+                    "additionalProperties": false,
+                    "properties": {
+                        "type": {"const": "literal"},
+                        "display": {"type": "string"},
+                        "measure": {"type": "object", "additionalProperties": {"type": "string"}},
+                        "ratio": {"type": "object", "additionalProperties": {"type": "string"}},
+                        "number": {"type": "string"},
+                        "boolean": {"type": "boolean"},
+                        "text": {"type": "string"},
+                        "date": {"type": "string"},
+                        "time": {"type": "string"},
+                        "calendar": {"$ref": "#/$defs/CalendarResult"},
+                        "range": {"$ref": "#/$defs/RangeResult"}
+                    }
+                },
+                {
+                    "type": "object",
+                    "required": ["type", "name"],
+                    "additionalProperties": false,
+                    "properties": {"type": {"const": "data"}, "name": {"type": "string"}}
+                },
+                {
+                    "type": "object",
+                    "required": ["type", "name"],
+                    "additionalProperties": false,
+                    "properties": {"type": {"const": "rule"}, "name": {"type": "string"}}
+                },
+                {
+                    "type": "object",
+                    "required": ["type", "left", "right"],
+                    "additionalProperties": false,
+                    "properties": {
+                        "type": {"const": "and"},
+                        "left": {"$ref": "#/$defs/ShowExpression"},
+                        "right": {"$ref": "#/$defs/ShowExpression"}
+                    }
+                },
+                {
+                    "type": "object",
+                    "required": ["type", "operand"],
+                    "additionalProperties": false,
+                    "properties": {
+                        "type": {"const": "not"},
+                        "operand": {"$ref": "#/$defs/ShowExpression"}
+                    }
+                },
+                {
+                    "type": "object",
+                    "required": ["type", "op", "left", "right"],
+                    "additionalProperties": false,
+                    "properties": {
+                        "type": {"const": "arithmetic"},
+                        "op": {"type": "string", "enum": ["add", "subtract", "multiply", "divide", "modulo", "power"]},
+                        "left": {"$ref": "#/$defs/ShowExpression"},
+                        "right": {"$ref": "#/$defs/ShowExpression"}
+                    }
+                },
+                {
+                    "type": "object",
+                    "required": ["type", "op", "left", "right"],
+                    "additionalProperties": false,
+                    "properties": {
+                        "type": {"const": "comparison"},
+                        "op": {"type": "string", "enum": [
+                            "greater_than", "less_than", "greater_than_or_equal",
+                            "less_than_or_equal", "is", "is_not"
+                        ]},
+                        "left": {"$ref": "#/$defs/ShowExpression"},
+                        "right": {"$ref": "#/$defs/ShowExpression"}
+                    }
+                },
+                {
+                    "type": "object",
+                    "required": ["type", "operand", "target"],
+                    "additionalProperties": false,
+                    "properties": {
+                        "type": {"const": "unit_conversion"},
+                        "operand": {"$ref": "#/$defs/ShowExpression"},
+                        "target": {"$ref": "#/$defs/ShowConversionTarget"}
+                    }
+                },
+                {
+                    "type": "object",
+                    "required": ["type", "op", "operand"],
+                    "additionalProperties": false,
+                    "properties": {
+                        "type": {"const": "math"},
+                        "op": {"type": "string", "enum": [
+                            "sqrt", "sin", "cos", "tan", "asin", "acos", "atan",
+                            "log", "exp", "abs", "floor", "ceil", "round"
+                        ]},
+                        "operand": {"$ref": "#/$defs/ShowExpression"}
+                    }
+                },
+                {
+                    "type": "object",
+                    "required": ["type"],
+                    "additionalProperties": false,
+                    "properties": {
+                        "type": {"const": "veto"},
+                        "message": {"type": "string"}
+                    }
+                },
+                {
+                    "type": "object",
+                    "required": ["type"],
+                    "additionalProperties": false,
+                    "properties": {"type": {"const": "now"}}
+                },
+                {
+                    "type": "object",
+                    "required": ["type", "kind", "operand"],
+                    "additionalProperties": false,
+                    "properties": {
+                        "type": {"const": "date_relative"},
+                        "kind": {"type": "string", "enum": ["in_past", "in_future"]},
+                        "operand": {"$ref": "#/$defs/ShowExpression"}
+                    }
+                },
+                {
+                    "type": "object",
+                    "required": ["type", "kind", "unit", "operand"],
+                    "additionalProperties": false,
+                    "properties": {
+                        "type": {"const": "date_calendar"},
+                        "kind": {"type": "string", "enum": ["current", "past", "future", "not_in"]},
+                        "unit": {"type": "string", "enum": ["year", "month", "week"]},
+                        "operand": {"$ref": "#/$defs/ShowExpression"}
+                    }
+                },
+                {
+                    "type": "object",
+                    "required": ["type", "from", "to"],
+                    "additionalProperties": false,
+                    "properties": {
+                        "type": {"const": "range_literal"},
+                        "from": {"$ref": "#/$defs/ShowExpression"},
+                        "to": {"$ref": "#/$defs/ShowExpression"}
+                    }
+                },
+                {
+                    "type": "object",
+                    "required": ["type", "kind", "operand"],
+                    "additionalProperties": false,
+                    "properties": {
+                        "type": {"const": "past_future_range"},
+                        "kind": {"type": "string", "enum": ["in_past", "in_future"]},
+                        "operand": {"$ref": "#/$defs/ShowExpression"}
+                    }
+                },
+                {
+                    "type": "object",
+                    "required": ["type", "value", "range"],
+                    "additionalProperties": false,
+                    "properties": {
+                        "type": {"const": "range_containment"},
+                        "value": {"$ref": "#/$defs/ShowExpression"},
+                        "range": {"$ref": "#/$defs/ShowExpression"}
+                    }
+                },
+                {
+                    "type": "object",
+                    "required": ["type", "operand"],
+                    "additionalProperties": false,
+                    "properties": {
+                        "type": {"const": "is_veto"},
+                        "operand": {"$ref": "#/$defs/ShowExpression"}
+                    }
+                }
+            ]
+        },
+        "ShowBranch": {
+            "type": "object",
+            "required": ["result"],
+            "additionalProperties": false,
+            "description": "One arm of a rule's flat last-match table. Default arm omits condition.",
+            "properties": {
+                "condition": {"$ref": "#/$defs/ShowExpression"},
+                "result": {"$ref": "#/$defs/ShowExpression"}
+            }
+        },
+        "ShowRule": {
+            "type": "object",
+            "required": ["type", "branches", "depends_on_rules"],
+            "additionalProperties": false,
+            "description": "Local rule on Show: result type, authored default/unless branches, stored planning depends_on_rules.",
+            "properties": {
+                "type": {"$ref": "#/$defs/LemmaType"},
+                "branches": {"type": "array", "items": {"$ref": "#/$defs/ShowBranch"}},
+                "depends_on_rules": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Local rule names this rule depends on (planning topo). Always present."
+                }
+            }
+        },
         "SourceType": {
             "description": "Provenance of a loaded source. Externally tagged; the unit `Volatile` variant is the bare string \"volatile\".",
             "oneOf": [
@@ -468,7 +699,7 @@ pub fn api_v1_schema() -> Value {
             "type": "object",
             "required": ["spec", "start_line", "data", "rules", "meta"],
             "additionalProperties": false,
-            "description": "Result of Engine::show: declared promptable data catalog (needed_by_rules empty = reuse-only), local rule result types, and resolved temporal window.",
+            "description": "Result of Engine::show: declared promptable data catalog (needed_by_rules empty = reuse-only), local rule graph (ShowRule with type, branches, depends_on_rules), and resolved temporal window.",
             "properties": {
                 "spec": {"type": "string"},
                 "commentary": nullable_string(),
@@ -478,7 +709,7 @@ pub fn api_v1_schema() -> Value {
                 "start_line": {"type": "integer"},
                 "source_type": {"$ref": "#/$defs/SourceType"},
                 "data": {"type": "object", "additionalProperties": {"$ref": "#/$defs/ShowData"}},
-                "rules": {"type": "object", "additionalProperties": {"$ref": "#/$defs/LemmaType"}},
+                "rules": {"type": "object", "additionalProperties": {"$ref": "#/$defs/ShowRule"}},
                 "meta": {"type": "object", "additionalProperties": {"$ref": "#/$defs/LiteralValue"}}
             }
         },
@@ -516,7 +747,7 @@ pub fn api_v1_schema() -> Value {
             "type": "object",
             "required": ["specs"],
             "additionalProperties": false,
-            "description": "One repository group from Engine::list. `repository` is absent for the local workspace group.",
+            "description": "One repository group from Engine::list. `repository` is absent for the default unnamed repository.",
             "properties": {
                 "repository": {"type": "string"},
                 "specs": {"type": "array", "items": {"$ref": "#/$defs/ListedSpec"}}

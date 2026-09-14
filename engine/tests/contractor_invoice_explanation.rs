@@ -77,6 +77,7 @@ total: 4821.09 eur
    │     │     ├─ hourly_rate: 85.00 eur
    │     │     └─ hours_worked: 37.5
    │     └─ rush_surcharge: 796.88 eur
+   │        ├─ is_super_rush is false
    │        ├─ is_rush is true
    │        └─ labor * 25%
    │           └─ labor: 3187.50 eur
@@ -92,6 +93,7 @@ total: 4821.09 eur
                │     ├─ hourly_rate: 85.00 eur
                │     └─ hours_worked: 37.5
                └─ rush_surcharge: 796.88 eur
+                  ├─ is_super_rush is false
                   ├─ is_rush is true
                   └─ labor * 25%
                      └─ labor: 3187.50 eur

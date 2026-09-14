@@ -233,7 +233,7 @@ Cycles across temporal rows (2026 → 2027 → 2026) are rejected as dependency 
 
 ## Repositories
 
-When Specs in the same workspace share a name, Repo blocks namespace them so they do not collide. Cross-repo targets use a repo qualifier on the Uses line:
+When Specs in the same project share a name, Repo blocks namespace them so they do not collide. Cross-repo targets use a repo qualifier on the Uses line:
 
 ```lemma
 repo accounting
@@ -250,13 +250,13 @@ uses inv: accounting invoice
 rule out: inv.total
 ```
 
-Cross-repo targets use a repo qualifier on the Uses line (`accounting invoice`). When you `run` a Spec from the workspace (main) repository, use its unqualified name; the CLI does not pick between two loaded Specs with the same name in different repos.
+Cross-repo targets use a repo qualifier on the Uses line (`accounting invoice`). When you `run` a Spec from the default repository, use its unqualified name; the CLI does not pick between two loaded Specs with the same name in different repos.
 
-Most workspaces never need Repo blocks: files without one belong to the implicit workspace repository. Repositories installed from LemmaBase live under their own `@owner/name` names (see [LemmaBase](#lemmabase) below).
+Most projects never need Repo blocks: files without one belong to the default repository. Repositories installed from LemmaBase live under their own `@owner/name` names (see [LemmaBase](#lemmabase) below).
 
 ## LemmaBase
 
-When Specs live outside your workspace, import them from LemmaBase with `@owner/repo` qualifiers:
+When Specs live outside your project, import them from LemmaBase with `@owner/repo` qualifiers:
 
 ```lemma
 spec invoicing

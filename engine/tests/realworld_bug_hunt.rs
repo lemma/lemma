@@ -343,7 +343,7 @@ rule ten_items: price * 10
 
 // ===========================================================================
 // BUG HUNT 7: Unless condition referencing a rule that vetoes
-// The unless condition itself uses a rule that might veto
+// Last-unless-first: `is veto` last wins; reverse order Propagates the veto.
 // ===========================================================================
 
 #[test]
@@ -368,8 +368,8 @@ rule result: 0
         )])
         .unwrap();
 
-    // input=2000: validated vetoes. `validated > 50` does not match (vetoed compare).
-    // Last-wins `unless validated is veto then 0` matches → result 0.
+    // input=2000: validated vetoes. Scan last-unless-first: `is veto` wins first;
+    // the compare arm above is never evaluated.
     let resp = run_spec(&engine, "unless_veto_cond", &[("input", "2000")]);
     let display = rule_display(&resp, "result");
     assert_eq!(display, "0", "is veto arm must win when validated vetoes");
@@ -377,6 +377,41 @@ rule result: 0
     // input=100: validated = 100. 100 > 50 → result = 100
     let resp = run_spec(&engine, "unless_veto_cond", &[("input", "100")]);
     assert_eq!(rule_display(&resp, "result"), "100");
+}
+
+#[test]
+fn hunt_unless_compare_last_propagates_vetoed_condition() {
+    let mut engine = Engine::new();
+    engine
+        .load([(
+            src("unless_veto_prop.lemma"),
+            r#"
+spec unless_veto_prop
+
+data input: number
+
+rule validated: input
+  unless input > 1000 then veto "too large"
+
+rule result: 0
+  unless validated is veto then 0
+  unless validated > 50 then 100
+"#
+            .to_string(),
+        )])
+        .unwrap();
+
+    let resp = run_spec(&engine, "unless_veto_prop", &[("input", "2000")]);
+    let result = resp
+        .results
+        .values()
+        .find(|r| r.rule.name == "result")
+        .expect("result");
+    assert!(
+        result.vetoed,
+        "vetoed compare condition must Propagate when scanned first"
+    );
+    assert_eq!(result.veto_reason.as_deref(), Some("too large"));
 }
 
 // ===========================================================================

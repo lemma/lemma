@@ -40,7 +40,7 @@ fn source_unknown_qualifier_errors() {
     let engine = Engine::new();
     let err = engine
         .source(Some("workspace"), None, None)
-        .expect_err("workspace is not a repository qualifier");
+        .expect_err("'workspace' is not a repository qualifier");
     assert!(
         err.kind() == ErrorKind::Request,
         "expected request error, got: {err:?}"

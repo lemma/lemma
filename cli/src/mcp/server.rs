@@ -10,48 +10,50 @@ mod imp {
     use std::time::Duration;
     use tracing::{debug, error, info};
 
-    const PROTOCOL_VERSION: &str = "2026-07-28";
+    pub(crate) const PROTOCOL_VERSION: &str = "2026-07-28";
     /// Legacy handshake revision spoken via `initialize` (`2025-11-25` and earlier).
-    const LEGACY_PROTOCOL_VERSION: &str = "2025-11-25";
-    const UNSUPPORTED_PROTOCOL_VERSION: i32 = -32022;
-    const SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");
+    pub(crate) const LEGACY_PROTOCOL_VERSION: &str = "2025-11-25";
+    pub(crate) const UNSUPPORTED_PROTOCOL_VERSION: i32 = -32022;
+    /// Streamable HTTP header/body mismatch (MCP 2026-07-28).
+    pub(crate) const HEADER_MISMATCH: i32 = -32020;
+    pub(crate) const SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");
 
-    /// Upper bound on a single stdin JSON-RPC line. Lines beyond this are
-    /// consumed and rejected with a JSON-RPC error instead of being buffered
+    /// Upper bound on a single JSON-RPC request body (stdio line or HTTP POST).
+    /// Oversized input is rejected with a JSON-RPC error instead of being buffered
     /// unboundedly.
-    const MAX_STDIN_LINE_BYTES: usize = 10 * 1024 * 1024;
+    pub(crate) const MAX_REQUEST_BYTES: usize = 10 * 1024 * 1024;
 
     #[derive(Debug, Deserialize)]
-    struct McpRequest {
-        jsonrpc: String,
+    pub(crate) struct McpRequest {
+        pub(crate) jsonrpc: String,
         #[serde(skip_serializing_if = "Option::is_none")]
-        id: Option<serde_json::Value>,
-        method: String,
+        pub(crate) id: Option<serde_json::Value>,
+        pub(crate) method: String,
         #[serde(default)]
-        params: Option<serde_json::Value>,
+        pub(crate) params: Option<serde_json::Value>,
     }
 
     #[derive(Debug, Serialize)]
-    struct McpResponse {
-        jsonrpc: String,
+    pub(crate) struct McpResponse {
+        pub(crate) jsonrpc: String,
         #[serde(skip_serializing_if = "Option::is_none")]
-        id: Option<serde_json::Value>,
+        pub(crate) id: Option<serde_json::Value>,
         #[serde(skip_serializing_if = "Option::is_none")]
-        result: Option<serde_json::Value>,
+        pub(crate) result: Option<serde_json::Value>,
         #[serde(skip_serializing_if = "Option::is_none")]
-        error: Option<McpError>,
+        pub(crate) error: Option<McpError>,
     }
 
-    #[derive(Debug, Serialize)]
-    struct McpError {
-        code: i32,
-        message: String,
+    #[derive(Debug, Serialize, Clone)]
+    pub(crate) struct McpError {
+        pub(crate) code: i32,
+        pub(crate) message: String,
         #[serde(skip_serializing_if = "Option::is_none")]
-        data: Option<serde_json::Value>,
+        pub(crate) data: Option<serde_json::Value>,
     }
 
     impl McpError {
-        fn parse_error(message: String) -> Self {
+        pub(crate) fn parse_error(message: String) -> Self {
             Self {
                 code: -32700,
                 message,
@@ -83,7 +85,7 @@ mod imp {
             }
         }
 
-        fn internal_error(message: String) -> Self {
+        pub(crate) fn internal_error(message: String) -> Self {
             Self {
                 code: -32603,
                 message,
@@ -91,7 +93,7 @@ mod imp {
             }
         }
 
-        fn unsupported_protocol_version(requested: &str) -> Self {
+        pub(crate) fn unsupported_protocol_version(requested: &str) -> Self {
             Self {
                 code: UNSUPPORTED_PROTOCOL_VERSION,
                 message: format!("Unsupported protocol version: {requested}"),
@@ -101,14 +103,31 @@ mod imp {
                 })),
             }
         }
+
+        pub(crate) fn header_mismatch(message: String) -> Self {
+            Self {
+                code: HEADER_MISMATCH,
+                message,
+                data: None,
+            }
+        }
     }
 
-    fn requested_protocol_version(params: &Option<serde_json::Value>) -> Option<&str> {
+    pub(crate) fn requested_protocol_version(params: &Option<serde_json::Value>) -> Option<&str> {
         params
             .as_ref()
             .and_then(|value| value.get("_meta"))
             .and_then(|meta| meta.get("io.modelcontextprotocol/protocolVersion"))
             .and_then(|value| value.as_str())
+    }
+
+    pub(crate) fn error_response(id: Option<serde_json::Value>, error: McpError) -> McpResponse {
+        McpResponse {
+            jsonrpc: "2.0".to_string(),
+            id,
+            result: None,
+            error: Some(error),
+        }
     }
 
     fn server_info() -> serde_json::Value {
@@ -527,7 +546,7 @@ mod imp {
                             },
                             "repository": {
                                 "type": "string",
-                                "description": "Repository qualifier when the spec is not in the workspace"
+                                "description": "Repository qualifier when the spec is not in the default repository"
                             },
                             "effective": {
                                 "type": "string",
@@ -1186,6 +1205,108 @@ mod imp {
         }
     }
 
+    /// One work item for the sequential MCP worker. Reply channel is oneshot:
+    /// if the caller times out and drops the receiver, a late send fails and
+    /// the worker continues to the next request.
+    struct McpWork {
+        request: McpRequest,
+        reply: std::sync::mpsc::Sender<Option<McpResponse>>,
+    }
+
+    /// Handle to the sequential MCP worker that owns `Engine`.
+    #[derive(Clone)]
+    pub(crate) struct McpDispatcher {
+        work_tx: std::sync::mpsc::Sender<McpWork>,
+        request_timeout: Duration,
+    }
+
+    impl McpDispatcher {
+        pub(crate) fn spawn(engine: Engine, config: McpConfig, workdir: PathBuf) -> Self {
+            let request_timeout = config.request_timeout;
+            let registries = lemma::Registries::default();
+            let transport = lemma_cli::install::ReqwestTransport::new();
+            let (work_tx, work_rx) = std::sync::mpsc::channel::<McpWork>();
+            std::thread::spawn(move || {
+                let mut server = McpServer::new(engine, config, workdir, registries, transport);
+                for work in work_rx {
+                    let request_id = work.request.id.clone();
+                    let response =
+                        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            server.handle_request(work.request)
+                        })) {
+                            Ok(resp) => resp,
+                            Err(panic_payload) => {
+                                let msg = panic_payload
+                                    .downcast_ref::<&str>()
+                                    .copied()
+                                    .or_else(|| {
+                                        panic_payload.downcast_ref::<String>().map(|s| s.as_str())
+                                    })
+                                    .unwrap_or("unknown internal error");
+                                error!("engine panic caught: {}", msg);
+                                Some(McpResponse {
+                                    jsonrpc: "2.0".to_string(),
+                                    id: request_id,
+                                    result: None,
+                                    error: Some(McpError::internal_error(
+                                        "internal engine error".to_string(),
+                                    )),
+                                })
+                            }
+                        };
+                    // Receiver may have timed out and dropped; ignore late reply.
+                    let _ = work.reply.send(response);
+                }
+            });
+            Self {
+                work_tx,
+                request_timeout,
+            }
+        }
+
+        /// Dispatch a parsed request to the worker and wait up to `request_timeout`.
+        /// On timeout: drop the oneshot receiver (late worker reply discarded) and
+        /// return a JSON-RPC timeout error for requests; `None` for notifications.
+        pub(crate) fn dispatch(
+            &self,
+            request: McpRequest,
+        ) -> Result<Option<McpResponse>, anyhow::Error> {
+            let request_id = request.id.clone();
+            let is_notification = request_id.is_none();
+            let (reply_tx, reply_rx) = std::sync::mpsc::channel();
+            self.work_tx
+                .send(McpWork {
+                    request,
+                    reply: reply_tx,
+                })
+                .map_err(|_| anyhow::anyhow!("BUG: MCP worker thread exited"))?;
+            match reply_rx.recv_timeout(self.request_timeout) {
+                Ok(response) => Ok(response),
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                    // Drop reply_rx by leaving this scope; worker late send fails.
+                    error!(
+                        "request timed out after {}s",
+                        self.request_timeout.as_secs()
+                    );
+                    Ok(if is_notification {
+                        None
+                    } else {
+                        Some(error_response(
+                            request_id,
+                            McpError::internal_error(format!(
+                                "Request timed out after {}s",
+                                self.request_timeout.as_secs()
+                            )),
+                        ))
+                    })
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                    anyhow::bail!("BUG: MCP worker thread exited mid-request")
+                }
+            }
+        }
+    }
+
     pub fn start_server(engine: Engine, config: McpConfig, workdir: &Path) -> Result<()> {
         tracing_subscriber::fmt()
             .with_env_filter(
@@ -1203,85 +1324,33 @@ mod imp {
             info!("Read-only mode (default)");
         }
 
-        let request_timeout = config.request_timeout;
-        let workdir = workdir.to_path_buf();
-
-        let registries = lemma::Registries::default();
-        let transport = lemma_cli::install::ReqwestTransport::new();
-
-        // Requests are handled on a dedicated worker thread that owns the
-        // engine state, so the reader loop can enforce a wall-clock timeout
-        // per request. The worker sends exactly one response per request; a
-        // timed-out request's late response is counted in `abandoned` and
-        // discarded when it eventually arrives.
-        let (request_tx, request_rx) = std::sync::mpsc::channel::<McpRequest>();
-        let (response_tx, response_rx) = std::sync::mpsc::channel::<Option<McpResponse>>();
-        std::thread::spawn(move || {
-            let mut server = McpServer::new(engine, config, workdir, registries, transport);
-            for request in request_rx {
-                let request_id = request.id.clone();
-                let response = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    server.handle_request(request)
-                })) {
-                    Ok(resp) => resp,
-                    Err(panic_payload) => {
-                        let msg = panic_payload
-                            .downcast_ref::<&str>()
-                            .copied()
-                            .or_else(|| panic_payload.downcast_ref::<String>().map(|s| s.as_str()))
-                            .unwrap_or("unknown internal error");
-                        error!("engine panic caught: {}", msg);
-                        Some(McpResponse {
-                            jsonrpc: "2.0".to_string(),
-                            id: request_id,
-                            result: None,
-                            error: Some(McpError::internal_error(
-                                "internal engine error".to_string(),
-                            )),
-                        })
-                    }
-                };
-                if response_tx.send(response).is_err() {
-                    break;
-                }
-            }
-        });
+        let dispatcher = McpDispatcher::spawn(engine, config, workdir.to_path_buf());
 
         let mut stdin = io::stdin().lock();
         let mut stdout = io::stdout();
-        let mut abandoned: usize = 0;
 
         loop {
-            let line = match read_line_capped(&mut stdin, MAX_STDIN_LINE_BYTES)? {
+            let line = match read_line_capped(&mut stdin, MAX_REQUEST_BYTES)? {
                 CappedLine::Eof => break,
                 CappedLine::Line(line) => line,
                 CappedLine::TooLong => {
-                    error!(
-                        "stdin line exceeds {} bytes, rejected",
-                        MAX_STDIN_LINE_BYTES
+                    error!("stdin line exceeds {} bytes, rejected", MAX_REQUEST_BYTES);
+                    let response = error_response(
+                        None,
+                        McpError::parse_error(format!(
+                            "Request line exceeds {MAX_REQUEST_BYTES} bytes"
+                        )),
                     );
-                    let response = McpResponse {
-                        jsonrpc: "2.0".to_string(),
-                        id: None,
-                        result: None,
-                        error: Some(McpError::parse_error(format!(
-                            "Request line exceeds {MAX_STDIN_LINE_BYTES} bytes"
-                        ))),
-                    };
                     writeln!(stdout, "{}", serde_json::to_string(&response)?)?;
                     stdout.flush()?;
                     continue;
                 }
                 CappedLine::InvalidUtf8 => {
                     error!("stdin line is not valid UTF-8, rejected");
-                    let response = McpResponse {
-                        jsonrpc: "2.0".to_string(),
-                        id: None,
-                        result: None,
-                        error: Some(McpError::parse_error(
-                            "Request line is not valid UTF-8".to_string(),
-                        )),
-                    };
+                    let response = error_response(
+                        None,
+                        McpError::parse_error("Request line is not valid UTF-8".to_string()),
+                    );
                     writeln!(stdout, "{}", serde_json::to_string(&response)?)?;
                     stdout.flush()?;
                     continue;
@@ -1294,69 +1363,17 @@ mod imp {
 
             debug!("Received: {}", line);
 
-            // Drain late responses from previously timed-out requests so the
-            // response channel stays aligned with the request we are about to
-            // send.
-            while abandoned > 0 {
-                match response_rx.try_recv() {
-                    Ok(_) => abandoned -= 1,
-                    Err(std::sync::mpsc::TryRecvError::Empty) => break,
-                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                        anyhow::bail!("BUG: MCP worker thread exited while requests pending")
-                    }
-                }
-            }
-
             // Parse error responds with id: null (JSON-RPC 2.0 §4.2). For
             // any successfully-parsed notification, handle_request returns
             // None and we MUST NOT write anything back.
             let response = match serde_json::from_str::<McpRequest>(&line) {
-                Ok(request) => {
-                    let request_id = request.id.clone();
-                    let is_notification = request_id.is_none();
-                    request_tx
-                        .send(request)
-                        .map_err(|_| anyhow::anyhow!("BUG: MCP worker thread exited"))?;
-                    loop {
-                        match response_rx.recv_timeout(request_timeout) {
-                            Ok(response) => {
-                                if abandoned > 0 {
-                                    abandoned -= 1;
-                                    continue;
-                                }
-                                break response;
-                            }
-                            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-                                abandoned += 1;
-                                error!("request timed out after {}s", request_timeout.as_secs());
-                                break if is_notification {
-                                    None
-                                } else {
-                                    Some(McpResponse {
-                                        jsonrpc: "2.0".to_string(),
-                                        id: request_id,
-                                        result: None,
-                                        error: Some(McpError::internal_error(format!(
-                                            "Request timed out after {}s",
-                                            request_timeout.as_secs()
-                                        ))),
-                                    })
-                                };
-                            }
-                            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
-                                anyhow::bail!("BUG: MCP worker thread exited mid-request")
-                            }
-                        }
-                    }
-                }
+                Ok(request) => dispatcher.dispatch(request)?,
                 Err(e) => {
                     error!("Parse error: {}", e);
-                    Some(McpResponse {
-                        jsonrpc: "2.0".to_string(),
-                        id: None,
-                        result: None,
-                        error: Some(McpError::parse_error(format!("Parse error: {e}"))),
-                    })
+                    Some(error_response(
+                        None,
+                        McpError::parse_error(format!("Parse error: {e}")),
+                    ))
                 }
             };
 
@@ -1858,3 +1875,8 @@ mod imp {
 
 pub use imp::start_server;
 pub use imp::McpConfig;
+pub(crate) use imp::{
+    error_response, requested_protocol_version, McpDispatcher, McpError, McpRequest, McpResponse,
+    HEADER_MISMATCH, LEGACY_PROTOCOL_VERSION, MAX_REQUEST_BYTES, PROTOCOL_VERSION, SERVER_VERSION,
+    UNSUPPORTED_PROTOCOL_VERSION,
+};

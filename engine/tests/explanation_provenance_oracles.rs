@@ -91,7 +91,7 @@ rule total: line
     }
 }
 
-/// Folded `sqrt_two * sqrt_two` still explains with two `sqrt_two` rule embeds.
+/// Folded `sqrt_two * sqrt_two` still explains with two `sqrt_two` rule references.
 #[test]
 fn folded_sqrt_product_explanation_embeds_both_sqrt_two_rules() {
     let engine = load(
@@ -151,13 +151,13 @@ rule sqrt_product: sqrt_two * sqrt_two
     assert_eq!(
         sqrt_two_embeds.len(),
         2,
-        "expected two sqrt_two rule embeds in explanation, got {json}"
+        "expected two sqrt_two rule references in explanation, got {json}"
     );
     for embed in &sqrt_two_embeds {
         let result = embed
             .get("result")
             .and_then(|r| r.as_str())
-            .expect("rule embed result string");
+            .expect("rule reference result string");
         assert!(
             !result.is_empty(),
             "sqrt_two embed must carry a result, got {embed}"
@@ -265,7 +265,7 @@ rule c: b
     );
 }
 
-/// Nested unless via rule embed: outer arm taken; body/result is the inner winner.
+/// Nested unless via rule reference: outer arm taken; body/result is the inner winner.
 #[test]
 fn nested_piecewise_outer_taken_explains_inner_winner() {
     let engine = load(

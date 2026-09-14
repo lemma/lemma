@@ -376,7 +376,7 @@ rule r: 1
       assert(Object.keys(show.data).includes('x'));
     });
 
-    await run('show → spec/data/rules with ShowData + flat type', () => {
+    await run('show → spec/data/rules with ShowData + ShowRule', () => {
       const show = engine.show(null, 'test', null);
       assert(show.spec === 'test');
       assert(show.data && typeof show.data === 'object');
@@ -387,7 +387,9 @@ rule r: 1
       assert(x && typeof x === 'object' && !Array.isArray(x), 'ShowData is a named object');
       assert(x.type && typeof x.type.kind === 'string', 'type carries `kind` discriminator');
       const doubleRule = show.rules.double;
-      assert(typeof doubleRule.kind === 'string', 'rule types expose `kind` at the top level');
+      assert(doubleRule.type && typeof doubleRule.type.kind === 'string', 'ShowRule nests type');
+      assert(Array.isArray(doubleRule.branches) && doubleRule.branches.length >= 1);
+      assert(Array.isArray(doubleRule.depends_on_rules));
     });
 
     await run('show rule result units for measure and ratio', () => {
@@ -400,10 +402,10 @@ data rate: ratio
 rule total: money
 rule rate_out: rate` });
       const show = engine.show(null, 'units_contract', null);
-      assert(Array.isArray(show.rules.total.units) && show.rules.total.units.length >= 1);
-      assert(show.rules.total.units[0].factor, 'measure rule units expose factor');
-      assert(Array.isArray(show.rules.rate_out.units) && show.rules.rate_out.units.length >= 1);
-      assert(show.rules.rate_out.units[0].value, 'ratio rule units expose value');
+      assert(Array.isArray(show.rules.total.type.units) && show.rules.total.type.units.length >= 1);
+      assert(show.rules.total.type.units[0].factor, 'measure rule units expose factor');
+      assert(Array.isArray(show.rules.rate_out.type.units) && show.rules.rate_out.type.units.length >= 1);
+      assert(show.rules.rate_out.type.units[0].value, 'ratio rule units expose value');
     });
 
     await run('run rule filter', () => {

@@ -782,3 +782,19 @@ rule out: window
         other => panic!("expected DateRange, got {other:?}"),
     }
 }
+
+#[test]
+fn generic_measure_range_suggest_without_units_is_planning_error() {
+    let code = r#"
+spec s
+data band: measure range
+  -> suggest 1 kilogram...5 kilogram
+
+rule out: band
+"#;
+    let err = load_err(code);
+    assert!(
+        err.contains("Unknown unit") && err.contains("kilogram"),
+        "generic measure range suggest without units must planning Error, not panic or Ok: {err}"
+    );
+}

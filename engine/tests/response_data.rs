@@ -152,7 +152,7 @@ spec outer
 uses i: inner
   -> with slot: src.computed
 uses src: source_spec
-rule r: i.slot + 1
+rule r: i.slot
 "#
             .to_string(),
         )])

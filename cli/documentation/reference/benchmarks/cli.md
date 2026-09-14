@@ -14,7 +14,7 @@ Numbers are produced by `cargo benchmarks cli`. Measures the `lemma` binary and 
 
 - Spawns `lemma server --prefix engine/documentation/examples` on `127.0.0.1:19877` once per Criterion group.
 - Each iteration: blocking `reqwest` POST with `application/x-www-form-urlencoded` body (coffee order, library fees, Dutch net salary) or GET for show-only retrieval.
-- Examples loaded from [`engine/documentation/examples`](https://github.com/lemma/lemma/tree/a30d02d30d2fd73357d815ad467a89e4b77aacf3/engine/documentation/examples).
+- Examples loaded from [`engine/documentation/examples`](https://github.com/lemma/lemma/tree/3b3dcdaaf63a1fab1ec2b983f4be43ecb552cc34/engine/documentation/examples).
 - Latency: Criterion (3s warmup, 10s measurement for evaluate group, 5s for show). Median and standard deviation reported.
 
 ### Engine profile (`engine_profile`)
@@ -26,8 +26,8 @@ Numbers are produced by `cargo benchmarks cli`. Measures the `lemma` binary and 
 
 ## Environment
 
-- Host: `Linux 7.0.0-30-generic x86_64`
-- Lemma git SHA: `a30d02d30d2fd73357d815ad467a89e4b77aacf3`
+- Host: `Linux 7.0.0-31-generic x86_64`
+- Lemma git SHA: `3b3dcdaaf63a1fab1ec2b983f4be43ecb552cc34`
 - Rustc:
 
 ```
@@ -44,17 +44,17 @@ LLVM version: 21.1.3
 
 | Case | Median | Std dev |
 |------|-------:|--------:|
-| POST `/coffee_order` | 196.89 us | 25.88 us |
-| POST `/library_fees` | 145.46 us | 12.84 us |
-| POST `/net_salary` | 259.12 us | 16.66 us |
-| GET `/net_salary` (show only) | 203.18 us | 14.67 us |
+| POST `/coffee_order` | 140.90 us | 14.39 us |
+| POST `/library_fees` | 113.78 us | 11.84 us |
+| POST `/net_salary` | 201.15 us | 10.05 us |
+| GET `/net_salary` (show only) | 402.33 us | 5.41 us |
 
 ## Engine profile latency (Dutch net salary)
 
 | Case | Median | Std dev |
 |------|-------:|--------:|
-| Full `Engine::run` | 87.41 us | 2.34 us |
-| Single-rule evaluate (`periods_per_year`) | 9.47 us | 120 ns |
-| Envelope JSON serialize | 22.58 us | 1.45 us |
-| Raw response JSON serialize | 9.11 us | 363 ns |
+| Full `Engine::run` | 71.38 us | 3.35 us |
+| Single-rule evaluate (`periods_per_year`) | 7.67 us | 307 ns |
+| Envelope JSON serialize | 19.48 us | 476 ns |
+| Raw response JSON serialize | 8.08 us | 394 ns |
 

@@ -270,14 +270,11 @@ rule out: 1 unless false then 2 unless x then 3
     );
     let explanation = out_explanation(&response);
     assert_eq!(explanation.body, "3");
-    assert_eq!(
-        cause_pairs(explanation),
-        vec![("false", "false"), ("x is true", "true")]
-    );
+    assert_eq!(cause_pairs(explanation), vec![("x is true", "true")]);
 }
 
 #[test]
-fn and_false_conjunct_in_unless_keeps_flag_in_explanation() {
+fn and_false_conjunct_static_states_false_literal() {
     let engine = load(
         r#"
 spec and_false_flag
@@ -298,30 +295,20 @@ rule out: 1 unless flag and false then 2
     );
     let explanation = out_explanation(&response);
     assert_eq!(explanation.body, "1");
-    assert_eq!(explanation.causes.len(), 1);
-    assert_eq!(explanation.causes[0].condition, "flag and false");
-    assert_eq!(explanation.causes[0].value, "false");
-    let json = explanation_json(explanation);
-    let children = json["causes"][0]["children"]
-        .as_array()
-        .expect("cause children");
-    assert_eq!(children.len(), 1);
-    assert_eq!(children[0]["type"], "data_unused");
-    assert_eq!(children[0]["name"], "flag");
-    assert!(
-        children[0].get("display").is_none(),
-        "unused flag has no display field, got {}",
-        children[0]
+    assert_eq!(
+        cause_pairs(explanation),
+        vec![("false", "false")],
+        "static false conjunct decides; unused flag is not a cause child"
     );
-    let formatted = lemma::format_explanation(explanation);
     assert!(
-        formatted.contains("flag"),
-        "formatter must render unused path, got {formatted}"
+        explanation.causes[0].children.is_empty(),
+        "literal false cause has no children, got {:?}",
+        explanation.causes[0].children
     );
 }
 
 #[test]
-fn bound_and_false_in_unless_fills_cause_displays_and_formats() {
+fn bound_and_false_states_failing_left_conjunct() {
     let engine = load(
         r#"
 spec bound_and
@@ -340,33 +327,29 @@ rule out: "ok"
         Some("ok")
     );
     let explanation = out_explanation(&response);
-    assert_eq!(explanation.causes.len(), 1);
-    assert_eq!(explanation.causes[0].condition, "a and b");
-    assert_eq!(explanation.causes[0].value, "false");
-    let json = explanation_json(explanation);
-    let children = json["causes"][0]["children"]
-        .as_array()
-        .expect("cause children");
-    assert_eq!(children.len(), 2);
-    let mut by_data = std::collections::HashMap::new();
-    for child in children {
-        assert_eq!(child["type"], "data");
-        by_data.insert(
-            child["name"].as_str().expect("name").to_string(),
-            child["display"].as_str().expect("display").to_string(),
-        );
-    }
-    assert_eq!(by_data.get("a").map(String::as_str), Some("false"));
-    assert_eq!(by_data.get("b").map(String::as_str), Some("true"));
+    assert_eq!(
+        cause_pairs(explanation),
+        vec![("a is false", "true")],
+        "false and states the deciding left conjunct"
+    );
+    assert!(
+        explanation.causes[0].children.is_empty(),
+        "bare bool data is fully stated in the cause line, got {:?}",
+        explanation.causes[0].children
+    );
     let formatted = lemma::format_explanation(explanation);
     assert!(
-        formatted.contains("a: false") && formatted.contains("b: true"),
-        "formatter must render bound And cause children, got {formatted}"
+        formatted.contains("a is false"),
+        "ASCII states the failing conjunct, got {formatted}"
+    );
+    assert!(
+        !formatted.contains("a and b"),
+        "ASCII must not keep the authored and line, got {formatted}"
     );
 }
 
 #[test]
-fn and_short_circuit_unused_sibling_stays_unused() {
+fn and_short_circuit_left_fail_omits_right_from_cause() {
     let engine = load(
         r#"
 spec short_and
@@ -384,24 +367,101 @@ rule out: "ok"
         Some("ok")
     );
     let explanation = out_explanation(&response);
-    let json = explanation_json(explanation);
-    let children = json["causes"][0]["children"]
-        .as_array()
-        .expect("cause children");
-    assert_eq!(children.len(), 2);
-    let mut types = std::collections::HashMap::new();
-    for child in children {
-        types.insert(
-            child["name"].as_str().expect("name").to_string(),
-            child["type"].as_str().expect("type").to_string(),
-        );
-    }
-    assert_eq!(types.get("a").map(String::as_str), Some("data"));
-    assert_eq!(types.get("b").map(String::as_str), Some("data_unused"));
+    assert_eq!(cause_pairs(explanation), vec![("a is false", "true")]);
     let formatted = lemma::format_explanation(explanation);
     assert!(
-        formatted.contains("a: false") && formatted.contains("b"),
-        "formatter must render bound and unused And children, got {formatted}"
+        formatted.contains("a is false"),
+        "ASCII states the failing left, got {formatted}"
+    );
+    assert!(
+        !formatted.contains("b"),
+        "short-circuit right must not appear under the cause, got {formatted}"
+    );
+}
+
+#[test]
+fn and_right_comparison_fail_states_flipped_fact() {
+    let engine = load(
+        r#"
+spec rental_view
+data active: boolean
+data views_consumed: number
+data max_views: number
+rule can_view: false
+  unless active and views_consumed < max_views then true
+"#,
+    );
+    let mut data = HashMap::new();
+    data.insert("active".into(), "true".into());
+    data.insert("views_consumed".into(), "6".into());
+    data.insert("max_views".into(), "5".into());
+    let response = run(
+        &engine,
+        "rental_view",
+        data,
+        Some(&["can_view".to_string()]),
+        true,
+    );
+    assert_eq!(
+        response
+            .results
+            .get("can_view")
+            .expect("can_view")
+            .display(),
+        Some("false")
+    );
+    let explanation = response
+        .results
+        .get("can_view")
+        .expect("can_view")
+        .explanation
+        .as_ref()
+        .expect("explanation");
+    assert_eq!(
+        cause_pairs(explanation),
+        vec![("views_consumed >= max_views", "true")],
+        "right conjunct decides; flipped comparison, got {:?}",
+        explanation.causes
+    );
+    let formatted = lemma::format_explanation(explanation);
+    assert!(
+        !formatted.contains(" is false"),
+        "ASCII must not tag the and as is false, got {formatted}"
+    );
+    assert!(
+        !formatted.contains(" and "),
+        "ASCII must not print the authored and line, got {formatted}"
+    );
+}
+
+#[test]
+fn and_left_comparison_fail_omits_unbound_right() {
+    let engine = load(
+        r#"
+spec left_fail
+data code: text
+data amount: number
+rule out: "no"
+  unless code is "NL" and amount > 0 then "yes"
+"#,
+    );
+    let mut data = HashMap::new();
+    data.insert("code".into(), "BE".into());
+    let response = run(&engine, "left_fail", data, Some(&["out".to_string()]), true);
+    assert_eq!(
+        response.results.get("out").expect("out").display(),
+        Some("no")
+    );
+    let explanation = out_explanation(&response);
+    assert_eq!(
+        cause_pairs(explanation),
+        vec![("code is not NL", "true")],
+        "left comparison fails first"
+    );
+    let formatted = lemma::format_explanation(explanation);
+    assert!(
+        !formatted.contains("amount"),
+        "unbound right conjunct must stay out of the cause, got {formatted}"
     );
 }
 
@@ -681,6 +741,38 @@ rule out: true unless 5 < 3 then false
     assert_eq!(left.display(), right.display());
     assert!(left.explanation.is_none());
     assert!(right.explanation.is_some());
+}
+
+#[test]
+fn explain_lower_unless_condition_veto_does_not_change_value() {
+    // Winner is the last unless (true → 2). Exhaustive explain still evaluates
+    // the lower condition `1/x > 0` (div-by-zero Veto) and must discard it.
+    let engine = load(
+        r#"
+spec lower_veto
+data x: number
+rule out: 1
+  unless 1 / x > 0 then 99
+  unless true then 2
+"#,
+    );
+    let rules = ["out".to_string()];
+    let data = HashMap::from([("x".into(), "0".into())]);
+    let without = run(&engine, "lower_veto", data.clone(), Some(&rules), false);
+    let with = run(&engine, "lower_veto", data, Some(&rules), true);
+    let left = without.results.get("out").expect("out");
+    let right = with.results.get("out").expect("out");
+    assert!(
+        !left.vetoed,
+        "plain run must keep winner value, not lower veto"
+    );
+    assert_eq!(left.display(), Some("2"));
+    assert_eq!(left.vetoed, right.vetoed);
+    assert_eq!(left.display(), right.display());
+    assert!(
+        right.explanation.is_some(),
+        "explain must narrate without panic"
+    );
 }
 
 #[test]

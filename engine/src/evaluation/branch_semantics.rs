@@ -50,10 +50,98 @@ pub(crate) fn condition_outcome(condition: &OperationResult) -> BranchOutcome {
     }
 }
 
+/// Where the Piecewise arm scan stopped. Arm 0 is the default; unless arms
+/// `1..arm_count` are scanned from the highest index down, like the evaluator.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PiecewiseDecision {
+    /// Arm `arm` wins: every condition above it was `NotTaken`.
+    Taken { arm: usize },
+    /// Every unless condition was `NotTaken`; the default body wins.
+    Default,
+    /// The scan stopped at `arm`: its condition is not a settled boolean
+    /// (not evaluated yet, or vetoed). Conditions above it were `NotTaken`.
+    Undecided { arm: usize },
+}
+
+/// Scan unless-arm conditions high to low. `outcome(arm)` reports the
+/// condition's decision, or `None` when there is none to read.
+pub(crate) fn piecewise_decision(
+    arm_count: usize,
+    mut outcome: impl FnMut(usize) -> Option<BranchOutcome>,
+) -> PiecewiseDecision {
+    assert!(arm_count > 0, "BUG: empty piecewise");
+    for arm in (1..arm_count).rev() {
+        match outcome(arm) {
+            Some(BranchOutcome::Taken) => return PiecewiseDecision::Taken { arm },
+            Some(BranchOutcome::NotTaken) => continue,
+            Some(BranchOutcome::Propagate(_)) | None => {
+                return PiecewiseDecision::Undecided { arm };
+            }
+        }
+    }
+    PiecewiseDecision::Default
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::computation::VetoType;
+
+    fn outcome_from(
+        list: &[Option<BranchOutcome>],
+    ) -> impl FnMut(usize) -> Option<BranchOutcome> + '_ {
+        move |arm| list[arm].clone()
+    }
+
+    #[test]
+    fn piecewise_decision_default_when_all_not_taken() {
+        let outcomes = [
+            None,
+            Some(BranchOutcome::NotTaken),
+            Some(BranchOutcome::NotTaken),
+        ];
+        assert_eq!(
+            piecewise_decision(3, outcome_from(&outcomes)),
+            PiecewiseDecision::Default
+        );
+    }
+
+    #[test]
+    fn piecewise_decision_highest_taken_wins() {
+        let outcomes = [None, Some(BranchOutcome::Taken), Some(BranchOutcome::Taken)];
+        assert_eq!(
+            piecewise_decision(3, outcome_from(&outcomes)),
+            PiecewiseDecision::Taken { arm: 2 }
+        );
+    }
+
+    #[test]
+    fn piecewise_decision_stops_at_unfilled_condition() {
+        let outcomes = [
+            None,
+            Some(BranchOutcome::Taken),
+            None,
+            Some(BranchOutcome::NotTaken),
+        ];
+        assert_eq!(
+            piecewise_decision(4, outcome_from(&outcomes)),
+            PiecewiseDecision::Undecided { arm: 2 }
+        );
+    }
+
+    #[test]
+    fn piecewise_decision_stops_at_vetoed_condition() {
+        let veto = OperationResult::Veto(VetoType::computation("no"));
+        let outcomes = [
+            None,
+            Some(BranchOutcome::Taken),
+            Some(BranchOutcome::Propagate(veto)),
+        ];
+        assert_eq!(
+            piecewise_decision(3, outcome_from(&outcomes)),
+            PiecewiseDecision::Undecided { arm: 2 }
+        );
+    }
     use crate::planning::semantics::{DataPath, LiteralValue};
 
     fn boolean(value: bool) -> OperationResult {

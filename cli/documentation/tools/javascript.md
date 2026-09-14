@@ -89,11 +89,11 @@ A pre-wired Monaco adapter ships at `@lemmabase/lemma-engine/monaco`.
 |--------|-------------|
 | `Engine.withLimits(limits)` | Static: create engine with named limit overrides (unknown keys throw) |
 | `Engine.fromSnapshot(bytes)` | Static: restore engine from `snapshot()` bytes (`Uint8Array`) |
-| `load(code)` | Load inline Lemma source as a volatile workspace source |
+| `load(code)` | Load inline Lemma source as a volatile source in the default repository |
 | `load(sources)` | Load multiple sources in one planning pass (object or `[label, code][]`; object keys keep insertion order, array form is the explicit ordered API; `@owner/name` keys tag LemmaBase repositories) |
 | `install(name)` | Download a repository from LemmaBase; resolves with `{ source, id }`. Does not load and does not write `lemma_deps/`. |
 | `list()` | JSON array of `ResolvedRepository`: each has `repository` and `specs`. |
-| `show(repo?, spec, effective?)` | `Show`: declared data catalog + temporal window (no Lemma text; empty `needed_by_rules` = reuse-only) |
+| `show(repo?, spec, effective?)` | `Show`: data catalog + local rule graph (`ShowRule`: `type`, `branches`, `depends_on_rules`) + temporal window (no Lemma text; empty `needed_by_rules` = reuse-only) |
 | `source(repo?, spec?, effective?)` | Formatted Lemma source (omit `spec` for whole repo) |
 | `run({ spec, repository?, effective?, data?, rules?, explain? })` | Evaluate. Omit `rules` for all rules; pass a non-empty array to scope. `[]` errors. Returns a `Response`. With `explain: true`, per-rule `explanation` matches [api.v1.json](../../../engine/schemas/api.v1.json). |
 | `remove(repo?, name, effective?)` | Remove a temporal spec slice. |

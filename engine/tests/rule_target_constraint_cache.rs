@@ -27,7 +27,7 @@ spec outer
 uses i: inner
   -> with slot: src.computed
 uses src: source_spec
-rule r: i.slot + 1
+rule r: i.slot
 "#
             .to_string(),
         )])
@@ -41,8 +41,11 @@ rule r: i.slot + 1
     assert!(!r.vetoed);
     assert_eq!(
         r.value.as_ref().and_then(|v| v.display.as_deref()),
-        Some("11")
+        Some("10")
     );
+
+    let show = engine.show(None, "outer", Some(&now)).expect("show");
+    assert_eq!(show.rules.get("r").expect("r").lemma_type.name(), "slot");
 }
 
 #[test]
@@ -62,7 +65,7 @@ spec outer
 uses i: inner
   -> with slot: src.computed
 uses src: source_spec
-rule r: i.slot + 1
+rule r: i.slot
 "#
             .to_string(),
         )])

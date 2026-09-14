@@ -30,7 +30,7 @@ fn run_input_schema() -> serde_json::Value {
             },
             "repository": {
                 "type": "string",
-                "description": "Optional repository qualifier (e.g. lemma, @org/repo). Omit for workspace."
+                "description": "Optional repository qualifier (e.g. lemma, @org/repo). Omit for the default repository."
             },
             "rules": {
                 "description": "Optional: one rule name (string) or several (string array). Omit for all rules.",
@@ -75,7 +75,7 @@ pub fn list_tools() -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: "show",
-            description: "Return JSON Show for a spec: declared data catalog (types, constraints, suggestions, units, help; empty needed_by_rules = reuse-only) and rule output types. Call once after list. Static catalog — not a required-input list, not a questionnaire, not something to re-call between run/ask turns. Human intake: call guide (default = evaluate guide); bind only missing_data keys, not reuse-only slots.",
+            description: "Return JSON Show for a spec: declared data catalog (types, constraints, suggestions, units, help; empty needed_by_rules = reuse-only) and local rule graph (ShowRule: type, branches, depends_on_rules). Call once after list. Static catalog — not a required-input list, not a questionnaire, not something to re-call between run/ask turns. Human intake: call guide (default = evaluate guide); bind only missing_data keys, not reuse-only slots.",
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -85,7 +85,7 @@ pub fn list_tools() -> Vec<ToolDefinition> {
                     },
                     "repository": {
                         "type": "string",
-                        "description": "Optional repository qualifier (e.g. lemma, @org/repo). Omit for workspace."
+                        "description": "Optional repository qualifier (e.g. lemma, @org/repo). Omit for the default repository."
                     },
                     "effective": {
                         "type": "string",
@@ -97,7 +97,7 @@ pub fn list_tools() -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: "source",
-            description: "Return formatted Lemma source. Pass `repository` (e.g. `lemma` for embedded units stdlib) for the whole repo, or `spec` for a workspace or repository spec. After add_spec / update_spec, call this and paste the result in chat for user verify; do not present the draft you authored.",
+            description: "Return formatted Lemma source. Pass `repository` (e.g. `lemma` for embedded units stdlib) for the whole repo, or `spec` for a spec. After add_spec / update_spec, call this and paste the result in chat for user verify; do not present the draft you authored.",
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -107,7 +107,7 @@ pub fn list_tools() -> Vec<ToolDefinition> {
                     },
                     "spec": {
                         "type": "string",
-                        "description": "Spec set id (workspace when repository omitted)"
+                        "description": "Spec set id (default repository when repository omitted)"
                     },
                     "effective": {
                         "type": "string",

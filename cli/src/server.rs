@@ -761,9 +761,7 @@ pub mod http {
                                     .list()
                                     .into_iter()
                                     .find(|repository_group| repository_group.repository.is_none())
-                                    .expect(
-                                        "BUG: workspace repository must exist after Engine::new",
-                                    )
+                                    .expect("BUG: default repository must exist after Engine::new")
                                     .specs;
                                 let unique_specs: std::collections::BTreeSet<&str> =
                                     workspace_specs.iter().map(|ls| ls.name.as_str()).collect();

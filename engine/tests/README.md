@@ -28,20 +28,13 @@ cargo nextest run -p lemma-engine --tests
 | File | Focus |
 |------|--------|
 | `veto.rs` | Veto propagation, unless interaction |
-| `veto_inversion.rs` | Veto + inversion |
 | `missing_data_propagation.rs` | Missing data through rules |
 | `branch_aware_missing_data.rs` | Per-rule `missing_data` and missing-data veto propagation |
+| `per_rule_missing_data.rs` | Per-rule `missing_data` contract matrix: overlays, requested rules, unless pruning, And Propagate, Product/Comparison sibling walks, short-circuit release |
 | `linear_rule_chain_stack.rs` | Linear rule-chain stack safety (tip-only eval depth; load NF depth) |
 | `load_scaling.rs` | Deep/wide/unless load wall-clock bounds; wide show transitive needed_by pin |
-| `rule_embed_schedule.rs` | Rule-embed schedule: gated missing_data, cross-spec tip-only |
-
-### Inversion
-
-| File | Focus |
-|------|--------|
-| `test_discount_inversion.rs` | Discount inversion scenario |
-| `inversion_constraint_linear.rs` | Linear constraints |
-| `inversion_display_serialize.rs` | Inversion result display/JSON |
+| `rule_ref_schedule.rs` | Requested-rule missing_data through unless and rule references (And left, Piecewise condition); cross-spec requested run |
+| `eval_allocations.rs` | `SHIPPING_EVAL_ALLOCATIONS` pin: allocations per `Engine::run` on the shipping fixture |
 
 ### Temporal versioning & planning
 
@@ -91,7 +84,7 @@ cargo nextest run -p lemma-engine --tests
 | `measure_unit_conversion.rs` | Unit conversion + validation bounds |
 | `measure_number_refactoring.rs` | Measure/number interactions |
 | `measure_duration_arithmetic_types.rs` | Measure + duration types |
-| `ratio_measure_units.rs` | Ratio vs measure units |
+| `unified_ratio_units.rs` | Ratio vs measure units |
 | `ratio_runtime_input.rs` | Runtime ratio input grammar |
 | `multidim_unit_system.rs` | Multi-dimensional units |
 | `unit_percentage_operations.rs` | Percentage on units |
@@ -110,6 +103,7 @@ cargo nextest run -p lemma-engine --tests
 | `typed_values.rs` | Typed value handling |
 | `show_suggestion_distinction.rs` | Show vs suggestions (`-> suggest` never commits) |
 | `show_only_rule_used_data.rs` | Show lists declared data; needed_by_rules marks intake vs reuse |
+| `show_rule_graph.rs` | Show.rules is ShowRule: branches, depends_on_rules, rule-target with-binding |
 | `show_with_bindings.rs` | Show + `with` / fill bindings |
 | `show_unless_last_wins_pruning.rs` | Show after static unless collapse |
 | `show_unit_constraints.rs` | Show unit / suggest magnitudes |
@@ -126,7 +120,7 @@ cargo nextest run -p lemma-engine --tests
 | `explanation_format.rs` | Explanation formatting + JSON |
 | `explanation_parity.rs` | Explain true/false value parity |
 | `explanation_complete_narration.rs` | Piecewise / algebra / conversion explanation contracts |
-| `explanation_provenance_oracles.rs` | Origin / rule-embed explanation oracles |
+| `explanation_provenance_oracles.rs` | Origin / rule-ref explanation oracles |
 | `tree_evaluator.rs` | NormalForm tree evaluator |
 | `normalization_strict_semantics.rs` | Normalize contracts |
 | `transitive_normalization.rs` | Cross-rule sharing / fold contracts |
@@ -169,7 +163,7 @@ cargo nextest run -p lemma-engine --tests
 | File | Focus |
 |------|--------|
 | `engine_snapshot.rs` | Binary snapshot round-trip, determinism, corrupt/stale bytes, wide N=5000 |
-| `load_wasm_planning_parity.rs` | WASM vs native planning parity |
+| `load_batch_wasm_planning_parity.rs` | npm (WASM binding) vs native planning parity for batch loads |
 | `repro_finance_dual_slice_registry_uses.rs` | Registry + dual slice |
 | `resource_limits_test.rs` | Resource limits |
 
@@ -202,7 +196,6 @@ Coverage for these lives mainly in this directory (integration) or in `engine/sr
 | `computation/mod.rs` | |
 | `evaluation/expression.rs` | |
 | `evaluation/explanations.rs` |
-| `inversion/target.rs`, `inversion/derived.rs` | |
 | `literals.rs` | Partial coverage via `src/tests/ast.rs` |
 | `parsing/parser.rs` | Lexer/AST have unit tests |
 | `serialization/mod.rs` | `json.rs` has unit tests |
@@ -224,7 +217,7 @@ Prefer adding **unit** tests beside the module when testing private helpers; add
 | WASM npm | `engine/packages/npm/test.js` | JS `Engine` | Shape of load/run/list/show |
 | Hex | `engine/packages/hex/test/` | `Lemma.*` NIF | Lifecycle, list groups, run JSON |
 
-**Integration binaries:** one per `engine/tests/*.rs` file (**126** as of this refresh). Run `cargo nextest run -p lemma-engine --lib` / `--tests` for current test counts.
+**Integration binaries:** one per `engine/tests/*.rs` file (**144** as of this refresh). Run `cargo nextest run -p lemma-engine --lib` / `--tests` for current test counts.
 
 ### Primary APIs used here
 
@@ -234,10 +227,7 @@ Prefer adding **unit** tests beside the module when testing private helpers; add
 | `Engine::run` | many | Evaluate rules |
 | `Engine::show` | many (`show_*`, response/data contracts) | Spec interface API without full eval |
 | `Engine::load` (batch) | few | Dependency bundles (multi-source load) |
-| `Engine::invert` | few | Inversion only in dedicated files |
 | `parse` / `format_source` | 2 | `formatter.rs`, `format_weather_clothing_integration.rs` (no `Engine`) |
-
-`inversion_display_serialize.rs` tests `Domain` JSON only (no engine).
 
 ### Unit-test coverage by production module
 
@@ -245,13 +235,12 @@ Prefer adding **unit** tests beside the module when testing private helpers; add
 |--------|-------------------|----------------------|
 | `parsing/` (lexer, ast, mod) | Heavy (~110+) | `expression_syntax`, `error_messages`, `data_literals_coverage` |
 | `planning/` (graph, normalize, semantics, execution_plan) | Heavy (~150+) | `temporal_*`, `validator_*`, `uses_lemma_*`, `type_definitions` |
-| `inversion/` | Moderate (~45) | `inversion_*`, `test_discount_inversion`, `veto_inversion` |
 | `computation/datetime`, `rational`, `units` | datetime/rational heavy | `datetime_*`, `arithmetic_*`, `measure_*`, `ratio_*` |
 | `computation/arithmetic`, `comparison`, `range` | **None** | `arithmetic_type_combinations`, `math_ops`, `range_*`, `equal_operator` |
 | `evaluation/expression`, `explanations` | **None** | E2E via `run` in most files |
 | `engine.rs` | ~32 | `integration_*`, `coffee_order`, registry repros |
 | `formatting/` | ~25 | `formatter`, `format_weather_clothing_integration` |
-| `registry` | ~8 | `repo_keyword`, `load_wasm_planning_parity`, repros |
+| `registry` | ~8 | `repo_keyword`, `load_batch_wasm_planning_parity`, repros |
 | `literals.rs` | via `src/tests/ast.rs` | `data_literals_coverage`, `ratio_runtime_input` |
 
 ### Overlap clusters (consolidation candidates)
@@ -262,13 +251,13 @@ When changing behavior, run the whole cluster: scenarios often duplicate.
 |---------|--------|
 | Datetime eval | `datetime_sugar`, `datetime_edge_cases`, `datetime_edge_hunting`, `timezone`, `date_range` |
 | Duration trait | `duration_trait_anonymous`, `_arithmetic`, `_precision`, `_temporal`, `_planning` |
-| Measure / ratio | `measure_unit_conversion`, `measure_number_refactoring`, `measure_duration_arithmetic_types`, `ratio_measure_units`, `ratio_runtime_input`, `unit_percentage_operations`, `type_aware_arithmetic`, `multidim_unit_system` |
+| Measure / ratio | `measure_unit_conversion`, `measure_number_refactoring`, `measure_duration_arithmetic_types`, `unified_ratio_units`, `ratio_runtime_input`, `unit_percentage_operations`, `type_aware_arithmetic`, `multidim_unit_system` |
 | Decimal eval precision | `measure_unit_conversion` (`precision_*` stress: prime chains from 37, API unit toggles, mixed `*`/`/`); `arithmetic_exactness` (`runtime_data_ten_divide_three_*`) |
 | Arithmetic | `arithmetic_type_combinations`, `arithmetic_exactness`, `math_ops`, `modulo_power`, `equal_operator` |
 | Range | `range_generic`, `range_semantics_table`, `date_range` |
 | Spec graph | `nested_spec_references`, `cross_spec_references`, `required_data_names_nested_spec`, `inline_type_imports` |
 | Temporal | `temporal_slicing`, `type_import_temporal`, `temporal_range_references`, `temporal_type_resolver_instant`, `temporal_timezone_ordering`, `temporal_interface_deep_slice`, `temporal_boundary_explosion` |
-| Registry / plan identity | `spec_name_repository_plan_collision`, `repro_finance_dual_slice_registry_uses`, `load_wasm_planning_parity` |
+| Registry / plan identity | `spec_name_repository_plan_collision`, `repro_finance_dual_slice_registry_uses`, `load_batch_wasm_planning_parity` |
 | Example E2E | `coffee_order`, `integration_examples`, `integration_comprehensive` |
 | Data QA matrix | `data_literals_coverage`, `data_type_declarations_coverage`, `data_binding_type_validation`, `data_with_values_contract`, `data_nested_bindings_coverage`, `data_references` |
 
@@ -291,7 +280,6 @@ No integration file uses `#[should_panic]`.
 | Gap | Recommendation |
 |-----|----------------|
 | No `computation/*` unit tests except datetime/rational/units | Add unit tests beside `arithmetic.rs` / `comparison.rs` for edge cases; keep integration matrix |
-| Thin `Engine::invert` integration surface | Extend when changing inversion UX; unit tests in `inversion/` are primary |
 | `evaluation/expression.rs` untested in isolation | Unit-test eval of individual ops; integration already heavy via `run` |
 | Duplicate example runners | `integration_examples` vs CLI `documentation_examples`: different roots; keep both |
 | Stale “must fail” comments | `spec_name_*` / `repro_finance_*` **pass** when fixed; comments describe failure mode if bug returns |

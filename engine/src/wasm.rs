@@ -55,7 +55,7 @@ impl WasmEngine {
 
     /// Load Lemma source(s).
     ///
-    /// - string → one volatile workspace source
+    /// - string → one volatile source in the default repository
     /// - plain object or `[label, code][]` → labeled sources in one planning pass
     ///
     /// Throws with an array of serialized errors on failure. `null` / `undefined` are rejected.

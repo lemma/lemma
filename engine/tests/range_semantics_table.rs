@@ -300,8 +300,9 @@ data weight: measure -> unit gram: 1 -> unit kilogram: 1000
 rule sum: (3 kilogram...5 kilogram) + (6 kilogram...7 kilogram)
 rule diff: (3 kilogram...5 kilogram) - (6 kilogram...7 kilogram)
 rule cmp: (3 kilogram...5 kilogram) >= 2 kilogram"#;
-    assert_contains_all(&eval_rule(code, "test", "sum"), &["3", "kilogram"]);
-    assert_contains_all(&eval_rule(code, "test", "diff"), &["1", "kilogram"]);
+    // Span result promotes via signature_index to the canonical unit (gram).
+    assert_contains_all(&eval_rule(code, "test", "sum"), &["3000", "gram"]);
+    assert_contains_all(&eval_rule(code, "test", "diff"), &["1000", "gram"]);
     assert!(eval_bool(code, "test", "cmp"));
 }
 

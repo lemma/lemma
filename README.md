@@ -340,7 +340,7 @@ See [engine/packages/hex/README.md](engine/packages/hex/README.md) and [cli/docu
 <dependency>
   <groupId>com.lemmabase</groupId>
   <artifactId>lemma-engine</artifactId>
-  <version>0.9.9</version>
+  <version>0.9.10</version>
 </dependency>
 ```
 

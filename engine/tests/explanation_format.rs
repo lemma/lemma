@@ -1,4 +1,4 @@
-use lemma::{Engine, SourceType};
+use lemma::{format_explanation, Engine, SourceType};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -64,11 +64,11 @@ fn assert_rule_binary_right_veto_children(explanation: &Value, body_needle: &str
     assert_eq!(children[1]["name"], "base");
 }
 
-fn run_settled_left_right_veto_explanation(
+fn run_settled_left_right_veto(
     engine: &mut Engine,
     spec: &str,
     rule_body: &str,
-) -> Value {
+) -> lemma::Response {
     engine
         .load([(
             SourceType::Volatile,
@@ -85,25 +85,163 @@ rule main: {rule_body}
         .expect("load");
     let mut data = HashMap::new();
     data.insert("age".to_string(), "80".to_string());
-    let response = engine
+    engine
         .run(None, spec, None, data, Some(&["main".to_string()]), true)
-        .expect("evaluation must succeed");
-    explanation_json(&response, "main")
+        .expect("evaluation must succeed")
+}
+
+fn assert_empty_operand_compose(child: &Value, expression: &str) {
+    assert_eq!(child["type"], "compose");
+    assert_eq!(child["expression"], expression);
+    let operands = child["operands"]
+        .as_array()
+        .expect("compose operands array");
+    assert!(
+        operands.is_empty(),
+        "bare literal compose must have empty operands, got: {child}"
+    );
+}
+
+fn assert_formatted_omits_literal_lines(formatted: &str, literals: &[&str]) {
+    for literal in literals {
+        assert!(
+            !formatted.lines().any(|line| {
+                let trimmed = line.trim_start();
+                trimmed == format!("├─ {literal}") || trimmed == format!("└─ {literal}")
+            }),
+            "ASCII must not reprint literal {literal:?}, got:\n{formatted}"
+        );
+    }
+}
+
+fn run_explained(source: &str, spec: &str, rule: &str) -> (Value, String) {
+    let mut engine = Engine::new();
+    engine
+        .load([(SourceType::Volatile, source.to_string())])
+        .unwrap();
+    let response = engine
+        .run(
+            None,
+            spec,
+            None,
+            HashMap::new(),
+            Some(&[rule.to_string()]),
+            true,
+        )
+        .unwrap();
+    let explanation = response
+        .results
+        .get(rule)
+        .unwrap_or_else(|| panic!("rule {rule}"))
+        .explanation
+        .as_ref()
+        .expect("explanation");
+    (
+        explanation_json(&response, rule),
+        format_explanation(explanation),
+    )
+}
+
+#[test]
+fn explanation_pure_literal_divide_keeps_json_omits_ascii() {
+    let (json, formatted) = run_explained(
+        r#"
+spec t
+rule dep: 5 / 2
+"#,
+        "t",
+        "dep",
+    );
+    assert_eq!(json["body"], "5 / 2");
+    let children = json["children"].as_array().expect("children");
+    assert_eq!(children.len(), 2);
+    assert_empty_operand_compose(&children[0], "5");
+    assert_empty_operand_compose(&children[1], "2");
+    assert_eq!(
+        formatted,
+        "\
+dep: 2.5
+└─ 5 / 2"
+    );
+}
+
+#[test]
+fn explanation_mixed_divide_keeps_data_and_literal_json_omits_literal_ascii() {
+    let (json, formatted) = run_explained(
+        r#"
+spec t
+data n: 10
+rule out: n / 2
+"#,
+        "t",
+        "out",
+    );
+    assert_eq!(json["body"], "n / 2");
+    let children = json["children"].as_array().expect("children");
+    assert_eq!(children.len(), 2);
+    assert_eq!(children[0]["type"], "data");
+    assert_eq!(children[0]["name"], "n");
+    assert_eq!(children[0]["display"], "10");
+    assert_empty_operand_compose(&children[1], "2");
+    assert_eq!(
+        formatted,
+        "\
+out: 5
+└─ n / 2
+   └─ n: 10"
+    );
+}
+
+#[test]
+fn explanation_product_literal_kept_in_json_omitted_in_ascii() {
+    let (json, formatted) = run_explained(
+        r#"
+spec t
+data labor: 100
+rule surcharge: labor * 25%
+"#,
+        "t",
+        "surcharge",
+    );
+    assert_eq!(json["body"], "labor * 25%");
+    let children = json["children"].as_array().expect("children");
+    assert_eq!(children.len(), 2);
+    assert_eq!(children[0]["type"], "data");
+    assert_eq!(children[0]["name"], "labor");
+    assert_eq!(children[0]["display"], "100");
+    assert_empty_operand_compose(&children[1], "25%");
+    assert_eq!(
+        formatted,
+        "\
+surcharge: 25
+└─ labor * 25%
+   └─ labor: 100"
+    );
 }
 
 #[test]
 fn explanation_comparison_right_veto_compose() {
     let mut engine = Engine::new();
-    let explanation = run_settled_left_right_veto_explanation(&mut engine, "demo", "100 > base");
+    let response = run_settled_left_right_veto(&mut engine, "demo", "100 > base");
+    let explanation = explanation_json(&response, "main");
     assert_rule_binary_right_veto_children(&explanation, ">");
     assert_eq!(explanation["body"], "100 > base");
     assert_eq!(explanation["children"][0]["expression"], "100");
+    let typed = response
+        .results
+        .get("main")
+        .expect("main")
+        .explanation
+        .as_ref()
+        .expect("explanation");
+    assert_formatted_omits_literal_lines(&format_explanation(typed), &["100"]);
 }
 
 #[test]
 fn explanation_range_literal_right_veto_compose() {
     let mut engine = Engine::new();
-    let explanation = run_settled_left_right_veto_explanation(&mut engine, "demo", "0...base");
+    let response = run_settled_left_right_veto(&mut engine, "demo", "0...base");
+    let explanation = explanation_json(&response, "main");
     assert_rule_binary_right_veto_children(&explanation, "base");
     assert!(
         explanation["body"]
@@ -113,13 +251,21 @@ fn explanation_range_literal_right_veto_compose() {
         explanation["body"]
     );
     assert_eq!(explanation["children"][0]["expression"], "0");
+    let typed = response
+        .results
+        .get("main")
+        .expect("main")
+        .explanation
+        .as_ref()
+        .expect("explanation");
+    assert_formatted_omits_literal_lines(&format_explanation(typed), &["0"]);
 }
 
 #[test]
 fn explanation_range_containment_right_veto_compose() {
     let mut engine = Engine::new();
-    let explanation =
-        run_settled_left_right_veto_explanation(&mut engine, "demo", "50 in 0...base");
+    let response = run_settled_left_right_veto(&mut engine, "demo", "50 in 0...base");
+    let explanation = explanation_json(&response, "main");
     assert!(
         explanation["body"]
             .as_str()
@@ -161,6 +307,14 @@ fn explanation_range_containment_right_veto_compose() {
         has_rule_named_base(&children[1]),
         "range compose must still embed vetoing base rule: {explanation}"
     );
+    let typed = response
+        .results
+        .get("main")
+        .expect("main")
+        .explanation
+        .as_ref()
+        .expect("explanation");
+    assert_formatted_omits_literal_lines(&format_explanation(typed), &["50", "0"]);
 }
 
 #[test]
@@ -188,13 +342,19 @@ rule out: 1 unless x is "b" then 2
     assert_eq!(explanation["name"], "out");
     assert_eq!(explanation["result"], "1");
     assert_eq!(explanation["body"], "1");
-    let causes = explanation["causes"].as_array().unwrap();
-    assert_eq!(causes.len(), 1);
-    assert_eq!(causes[0]["condition"], "x is not b");
-    assert_eq!(causes[0]["value"], "true");
-    let cause_children = causes[0]["children"].as_array().unwrap();
-    assert_eq!(cause_children[0]["name"], "x");
-    assert_eq!(cause_children[0]["display"], "a");
+    let causes = explanation["causes"].as_array();
+    assert!(
+        causes.is_none() || causes.unwrap().is_empty(),
+        "exclusive default must not dump is-not causes, got {:?}",
+        explanation["causes"]
+    );
+    let children = explanation["children"]
+        .as_array()
+        .expect("exclusive default attaches scrutinee as children");
+    assert_eq!(children.len(), 1);
+    assert_eq!(children[0]["type"], "data");
+    assert_eq!(children[0]["name"], "x");
+    assert_eq!(children[0]["display"], "a");
 }
 
 #[test]
@@ -302,13 +462,27 @@ rule out: n * 2
 
     assert_eq!(explanation["result"], "Missing data: n");
     // Walk-faithful: missing data leaf is data; veto text is on result (and display).
+    // Literal `2` remains in JSON for parsers; ASCII omits it.
     let children = explanation["children"].as_array().unwrap();
+    assert_eq!(children.len(), 2);
     assert_eq!(children[0]["type"], "data");
     assert_eq!(children[0]["name"], "n");
-    assert!(children[0]["display"]
-        .as_str()
-        .unwrap()
-        .contains("Missing data: n"));
+    assert_eq!(children[0]["display"], "Missing data: n");
+    assert_empty_operand_compose(&children[1], "2");
+    let typed = response
+        .results
+        .get("out")
+        .expect("out")
+        .explanation
+        .as_ref()
+        .expect("explanation");
+    assert_eq!(
+        format_explanation(typed),
+        "\
+out: Missing data: n
+└─ n * 2
+   └─ n: Missing data: n"
+    );
 }
 
 #[test]

@@ -72,45 +72,7 @@ rule step3: step2 - 3
         if !reachable.insert(id.index() as u32) {
             continue;
         }
-        match &plan.normal_form(id).kind {
-            NormalFormKind::Leaf(_) | NormalFormKind::Veto(_) | NormalFormKind::Now => {}
-            NormalFormKind::Sum(children)
-            | NormalFormKind::Product(children)
-            | NormalFormKind::And(children) => {
-                worklist.extend(children.iter().copied());
-            }
-            NormalFormKind::Subtract(a, b)
-            | NormalFormKind::Divide(a, b)
-            | NormalFormKind::Power(a, b)
-            | NormalFormKind::Modulo(a, b)
-            | NormalFormKind::Comparison(a, _, b)
-            | NormalFormKind::RangeLiteral(a, b)
-            | NormalFormKind::RangeContainment(a, b) => {
-                worklist.push(*a);
-                worklist.push(*b);
-            }
-            NormalFormKind::Negate(x)
-            | NormalFormKind::Reciprocal(x)
-            | NormalFormKind::Not(x)
-            | NormalFormKind::MathOp(_, x)
-            | NormalFormKind::UnitConversion(x, _)
-            | NormalFormKind::DateRelative(_, x)
-            | NormalFormKind::DateCalendar(_, _, x)
-            | NormalFormKind::PastFutureRange(_, x)
-            | NormalFormKind::ResultIsVeto(x) => worklist.push(*x),
-            NormalFormKind::Piecewise(arms) => {
-                for (c, r) in arms {
-                    worklist.push(*c);
-                    worklist.push(*r);
-                }
-            }
-            NormalFormKind::OrderedDispatch {
-                scrutinee, regions, ..
-            } => {
-                worklist.push(*scrutinee);
-                worklist.extend(regions.iter().copied());
-            }
-        }
+        worklist.extend(plan.normal_form(id).kind.children());
         if let Some(origin) = plan.normal_form(id).origin {
             worklist.push(origin);
         }
@@ -182,6 +144,55 @@ rule discount: 0
         );
     };
     assert_eq!(boundaries.len(), 2);
+}
+
+#[test]
+fn conjunctive_key_lut_folds_to_nested_ordered_dispatch() {
+    let code = r#"
+spec rates
+data zone: number
+data weight: number
+rule rate: 0
+  unless zone is 2 and weight >= 1 then 10
+  unless zone is 2 and weight >= 5 then 20
+  unless zone is 3 and weight >= 1 then 30
+"#;
+    let plan = plan_from_code(code);
+    let root = rule_root(&plan, "rate");
+    let NormalFormKind::OrderedDispatch {
+        boundaries,
+        regions,
+        ..
+    } = &root.kind
+    else {
+        panic!(
+            "conjunctive LUT must fold to an outer OrderedDispatch, got {:?}",
+            root.kind
+        );
+    };
+    assert_eq!(
+        boundaries.len(),
+        2,
+        "outer breakpoints are the two zone keys"
+    );
+    let mut nested = 0;
+    for (index, region) in regions.iter().enumerate() {
+        match &plan.normal_form(*region).kind {
+            NormalFormKind::OrderedDispatch { boundaries, .. } if index % 2 == 1 => {
+                assert!(
+                    !boundaries.is_empty(),
+                    "inner dispatch must key on weight breaks"
+                );
+                nested += 1;
+            }
+            NormalFormKind::Leaf(LeafKind::Literal(_)) if index % 2 == 0 => {}
+            other if index % 2 == 0 => {
+                panic!("interval region must be the default literal, got {other:?}")
+            }
+            other => panic!("point region must be an inner OrderedDispatch, got {other:?}"),
+        }
+    }
+    assert_eq!(nested, 2, "one inner dispatch per zone key");
 }
 
 #[test]
@@ -269,7 +280,7 @@ rule log_one: log exp_one
 }
 
 #[test]
-fn bare_use_site_exposes_exp_kind_with_rule_embed() {
+fn bare_use_site_exposes_exp_kind_with_rule_ref() {
     let code = r#"
 spec test
 rule exp_one: exp 1
@@ -285,15 +296,15 @@ rule just: exp_one
         "bare use-site must share body Exp Kind, got {:?}",
         just.kind
     );
-    let embed = just
-        .rule_embed
+    let rule_ref = just
+        .rule_ref
         .as_ref()
-        .expect("bare use-site must keep rule_embed");
-    assert_eq!(embed.rule, "exp_one");
+        .expect("bare use-site must keep rule_ref");
+    assert_eq!(rule_ref.rule, "exp_one");
 }
 
 #[test]
-fn identity_elim_keeps_rule_embed_on_survivor() {
+fn identity_elim_keeps_rule_ref_on_survivor() {
     let code = r#"
 spec test
 rule exp_one: exp 1
@@ -309,11 +320,11 @@ rule r: exp_one + 0
         "identity-elim survivor must keep Exp Kind, got {:?}",
         r.kind
     );
-    let embed = r
-        .rule_embed
+    let rule_ref = r
+        .rule_ref
         .as_ref()
-        .expect("identity-elim must copy rule_embed onto survivor");
-    assert_eq!(embed.rule, "exp_one");
+        .expect("identity-elim must copy rule_ref onto survivor");
+    assert_eq!(rule_ref.rule, "exp_one");
 }
 
 #[test]
@@ -343,7 +354,7 @@ rule flag: n > 0
 }
 
 #[test]
-fn linear_chain_normal_form_depth_treats_embeds_as_leaves() {
+fn linear_chain_normal_form_depth_treats_rule_refs_as_leaves() {
     use crate::planning::normalize::normal_form_depth;
 
     let mut code = String::from("spec chain\ndata x0: number\nrule r1: x0 + 1\n");
@@ -361,12 +372,12 @@ fn linear_chain_normal_form_depth_treats_embeds_as_leaves() {
     );
     assert_eq!(
         depth_r2, depth_r50,
-        "tip of a 50-rule chain must have the same NF depth as r2 (embeds are leaves); r2={depth_r2} r50={depth_r50}"
+        "tip of a 50-rule chain must have the same NF depth as r2 (rule references are leaves); r2={depth_r2} r50={depth_r50}"
     );
 }
 
 #[test]
-fn linear_chain_node_budget_treats_embeds_as_leaves() {
+fn linear_chain_node_budget_treats_rule_refs_as_leaves() {
     use crate::planning::normalize::normal_form_exceeds_node_budget;
 
     let mut code = String::from("spec chain\ndata x0: number\nrule r1: x0 + 1\n");
@@ -377,6 +388,6 @@ fn linear_chain_node_budget_treats_embeds_as_leaves() {
     let r50 = plan.get_rule("r50").expect("r50").normal_form;
     assert!(
         !normal_form_exceeds_node_budget(&plan.normal_forms, r50, 3),
-        "tip of a 50-rule chain must fit in budget 3 (Sum(embed, 1) = 3 cells; embeds are leaves)"
+        "tip of a 50-rule chain must fit in budget 3 (Sum(rule_ref, 1) = 3 cells; rule references are leaves)"
     );
 }

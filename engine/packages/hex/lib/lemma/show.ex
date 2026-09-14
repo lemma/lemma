@@ -3,16 +3,19 @@ defmodule Lemma.Show do
   Typed projection of the JSON map returned by `Lemma.show/4`: spec interface and
   resolved temporal window.
 
-  `rules` values and each `data` entry's `type` are raw `LemmaType` JSON maps (a Rust
-  discriminated union tagged by `"kind"`), and `meta` values are raw `LiteralValue` JSON
-  maps (tagged by `"number"`, `"text"`, etc.). Pattern-match on those tags directly
-  rather than through a parallel Elixir struct hierarchy — see `Lemma.ShowData`.
+  Each `data` entry's `type` and each `rules` entry's `type` are raw `LemmaType` JSON
+  maps (a Rust discriminated union tagged by `"kind"`). Rule values are
+  `Lemma.ShowRule` structs (`type`, `branches`, `depends_on_rules`). `meta` values are
+  raw `LiteralValue` JSON maps. Pattern-match on those tags directly rather than
+  through a parallel Elixir struct hierarchy — see `Lemma.ShowData` and
+  `Lemma.ShowRule`.
 
   `Lemma.show/4` itself still returns the plain decoded JSON map for backward
   compatibility; call `from_map/1` on that map to get a typed struct.
   """
 
   alias Lemma.ShowData
+  alias Lemma.ShowRule
   alias Lemma.ShowVersion
 
   @type t :: %__MODULE__{
@@ -24,7 +27,7 @@ defmodule Lemma.Show do
           source_type: String.t() | map() | nil,
           versions: [ShowVersion.t()],
           data: %{optional(String.t()) => ShowData.t()},
-          rules: %{optional(String.t()) => map()},
+          rules: %{optional(String.t()) => ShowRule.t()},
           meta: %{optional(String.t()) => map()}
         }
 
@@ -63,7 +66,10 @@ defmodule Lemma.Show do
         map
         |> Map.fetch!("data")
         |> Map.new(fn {key, entry} -> {key, ShowData.from_map(entry)} end),
-      rules: Map.fetch!(map, "rules"),
+      rules:
+        map
+        |> Map.fetch!("rules")
+        |> Map.new(fn {key, entry} -> {key, ShowRule.from_map(entry)} end),
       meta: Map.get(map, "meta", %{})
     }
   end

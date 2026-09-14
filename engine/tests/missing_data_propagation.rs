@@ -210,3 +210,42 @@ rule out: i.divided
          got: {s}"
     );
 }
+
+/// Unary minus and reciprocal over an unbound input veto with Missing data
+/// (they used to abort the process: the operand passed no veto check).
+#[test]
+fn unary_minus_and_reciprocal_over_unbound_input_veto_with_missing_data() {
+    let code = r#"
+spec unary
+data b: number
+rule negated: -b
+rule inverted: 1 / b
+rule negated_explained: -b
+"#;
+    let mut engine = Engine::new();
+    engine
+        .load([(
+            lemma::SourceType::Path(std::sync::Arc::new(std::path::PathBuf::from("unary.lemma"))),
+            code.to_string(),
+        )])
+        .expect("spec must load");
+
+    let now = DateTimeValue::now();
+    for explain in [false, true] {
+        let response = engine
+            .run(None, "unary", Some(&now), HashMap::new(), None, explain)
+            .expect("run must not error");
+        for rule in ["negated", "inverted", "negated_explained"] {
+            let result = response.results.get(rule).expect("rule result");
+            assert!(
+                result.vetoed,
+                "{rule} must veto without b (explain={explain})"
+            );
+            assert_eq!(
+                result.missing_data(),
+                ["b".to_string()],
+                "{rule} must list b as missing (explain={explain})"
+            );
+        }
+    }
+}

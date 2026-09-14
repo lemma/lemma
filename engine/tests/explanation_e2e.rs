@@ -81,13 +81,23 @@ rule quadruple: doubled * 2
     assert!(text.contains("doubled * 2"));
 
     let json: serde_json::Value = serde_json::to_value(explanation).expect("serialize");
-    // The multiplication's literal operand is shown in the body line itself;
-    // the embedded rule is the only child.
+    // Literal `2` stays in JSON for parsers; ASCII omits the reprint.
+    assert_eq!(json["children"].as_array().expect("children").len(), 2);
     let child_type = json["children"][0]["type"]
         .as_str()
         .expect("embedded rule child type");
     assert_eq!(child_type, "rule");
     assert_eq!(json["children"][0]["name"], "doubled");
+    assert_eq!(json["children"][1]["type"], "compose");
+    assert_eq!(json["children"][1]["expression"], "2");
+    assert!(json["children"][1]["operands"]
+        .as_array()
+        .expect("operands")
+        .is_empty());
+    assert!(!text.lines().any(|line| {
+        let trimmed = line.trim_start();
+        trimmed == "├─ 2" || trimmed == "└─ 2"
+    }));
 }
 
 #[test]

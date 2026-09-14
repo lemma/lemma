@@ -8,7 +8,7 @@ repository.workspace = true
 description = "OpenAPI 3.1 specification generator for Lemma specs."
 
 [dependencies]
-lemma = { package = "lemma-engine", version = "=0.9.9", path = "../engine" }
+lemma = { package = "lemma-engine", version = "=0.9.10", path = "../engine" }
 serde.workspace = true
 serde_json.workspace = true
 

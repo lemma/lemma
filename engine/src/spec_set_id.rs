@@ -6,11 +6,11 @@
 use crate::error::Error;
 use crate::limits::MAX_SPEC_NAME_LENGTH;
 
-/// Validate and normalize a spec set identifier (a workspace spec name).
+/// Validate and normalize a spec set identifier (a spec name in the default repository).
 ///
 /// Trims whitespace and rejects empty input, embedded whitespace, and the
 /// version sigils `~` / `^` (which once denoted revisions and are now reserved).
-/// Evaluation entry points use the workspace main base only, so temporal or version
+/// Evaluation entry points use the default repository, so temporal or version
 /// sigils on the spec set name are not accepted here.
 pub fn parse_spec_set_id(s: &str) -> Result<String, Error> {
     let s = s.trim();
@@ -38,7 +38,7 @@ pub fn parse_spec_set_id(s: &str) -> Result<String, Error> {
     if s.split_whitespace().count() != 1 {
         return Err(Error::request(
             "Spec set identifier must be a single spec name",
-            Some("Specs run from the workspace main base; do not include an extra repository qualifier"),
+            Some("Specs run from the default repository; do not include an extra repository qualifier"),
         ));
     }
 

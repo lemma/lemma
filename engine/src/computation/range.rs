@@ -206,8 +206,6 @@ pub fn check_containment(
     range_right: &LiteralValue,
     endpoint_type: &Arc<LemmaType>,
 ) -> OperationResult {
-    let unit_context = super::UnitResolutionContext::NamedMeasureOnly;
-
     let (lo, hi) = match comparison_boolean_result(
         super::comparison_operation(
             range_left,
@@ -215,7 +213,6 @@ pub fn check_containment(
             &ComparisonComputation::LessThan,
             range_right,
             endpoint_type,
-            unit_context,
         ),
         "range endpoint ordering",
     ) {
@@ -231,7 +228,6 @@ pub fn check_containment(
             &ComparisonComputation::GreaterThanOrEqual,
             lo,
             endpoint_type,
-            unit_context,
         ),
         "range containment lower bound",
     ) {
@@ -245,7 +241,6 @@ pub fn check_containment(
             &ComparisonComputation::LessThan,
             hi,
             endpoint_type,
-            unit_context,
         ),
         "range containment upper bound",
     ) {

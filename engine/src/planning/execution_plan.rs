@@ -9,7 +9,6 @@
 //! - [`Show`] is the IO contract surface for consumers (data and rule outputs).
 //!   IO compatibility is the consumer-facing guarantee.
 
-use crate::computation::UnitResolutionContext;
 use crate::literals::Value;
 use crate::parsing::ast::{DateTimeValue, EffectiveDate, LemmaSpec};
 use crate::parsing::source::{Source, SourceType};
@@ -23,6 +22,7 @@ use crate::planning::semantics::{
     value_kind_matches_spec, ComparisonComputation, DataDefinition, DataPath, LemmaType,
     LiteralValue, ReferenceEnd, ReferenceTarget, RulePath, TypeSpecification, ValueKind,
 };
+use crate::planning::show_expression::{project_depends_on_rules, show_branches_from};
 use crate::planning::spec_set::LemmaSpecSet;
 use crate::planning::unit_family::FamilyUnitCatalog;
 use crate::result_value::RuleResultValue;
@@ -31,6 +31,10 @@ use indexmap::{IndexMap, IndexSet};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
+
+pub use crate::planning::show_expression::{
+    ShowBranch, ShowConversionTarget, ShowExpression, ShowRule,
+};
 
 /// A complete execution plan ready for the evaluator
 ///
@@ -97,7 +101,7 @@ pub struct ExecutionPlan {
     pub source_type: Option<SourceType>,
 
     /// Per [`Self::data`] position: positions in [`Self::rules`] of local rules that
-    /// transitively need that slot (through rule embeds), in alphabetical rule-name order.
+    /// transitively need that slot (through rule references), in alphabetical rule-name order.
     /// Non-promptable slots (references, imports) have empty lists: leaves are mapped to
     /// their promptable target before recording. `len() == data.len()`.
     /// Built in [`build_execution_plan`].
@@ -107,9 +111,9 @@ pub struct ExecutionPlan {
     /// Built once at plan time so show does not re-run unit expansion per request.
     pub(crate) data_display: IndexMap<DataPath, ShowDataCache>,
 
-    /// Show rule schemas with family-merged unit metadata, keyed by rule path.
-    /// Filled by [`attach_show_cache`].
-    pub(crate) show_rule_types: IndexMap<RulePath, LemmaType>,
+    /// Show rule graph (type, branches, depends_on_rules), keyed by local rule path.
+    /// Built in [`build_execution_plan`].
+    pub(crate) show_rules: IndexMap<RulePath, ShowRule>,
 
     /// Every [`DataDefinition::Reference`] path → where its chain ends.
     /// Copied from [`Graph::reference_ends`] in [`build_execution_plan`].
@@ -145,18 +149,28 @@ pub struct ExecutableRule {
     /// Source location for error messages (always present for rules from parsed specs)
     pub source: Source,
 
-    /// Computed type of this rule's result
-    /// Every rule MUST have a type (Lemma is strictly typed)
+    /// Type of the rule as written: the lowered source expression typed at
+    /// planning, equal to validation's inferred type. The root cell at
+    /// `normal_form` has the same value type but may carry a different name
+    /// after rewrites (`x + 0` → `x`), so the API type reads this field.
     pub rule_type: Arc<LemmaType>,
-
-    /// Direct rule dependencies (rule refs and rule-target data refs). Every
-    /// entry precedes this rule in [`ExecutionPlan::rules`] (topo order).
-    pub depends_on_rules: Vec<RulePath>,
 }
 
 impl ExecutableRule {
     pub fn name(&self) -> &str {
         &self.path.rule
+    }
+}
+
+/// Position of a rule in [`ExecutionPlan::rules`]; indexes the evaluation
+/// context's `rule_values` table. Plain `Copy` so the evaluation walk can
+/// unwind to a rule without cloning its [`RulePath`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct RuleIndex(usize);
+
+impl RuleIndex {
+    pub(crate) fn index(self) -> usize {
+        self.0
     }
 }
 
@@ -233,39 +247,82 @@ pub(crate) fn build_execution_plan(
         return Err(undetermined_errors);
     }
 
-    let signature_index =
-        crate::planning::graph::build_signature_index(&main_spec.name, &resolved_types.unit_index)
-            .expect("BUG: signature_index build already validated during resolve_and_validate");
+    let signature_index = resolved_types.signature_index.clone();
 
     let family_units = FamilyUnitCatalog::build(&resolved_types.unit_index);
 
     let reference_ends = graph.reference_ends();
+    let rule_types: HashMap<RulePath, Arc<LemmaType>> = graph
+        .rules()
+        .iter()
+        .map(|(path, node)| (path.clone(), Arc::clone(&node.rule_type)))
+        .collect();
     let mut rules: IndexMap<RulePath, ExecutableRule> = IndexMap::new();
     let mut completed_rules: HashMap<RulePath, NormalFormId> = HashMap::new();
+    let mut show_rules: IndexMap<RulePath, ShowRule> = IndexMap::new();
+
+    let local_rule_names: HashSet<String> = graph
+        .rules()
+        .keys()
+        .filter(|path| path.segments.is_empty())
+        .map(|path| path.rule.clone())
+        .collect();
 
     for rule_path in rule_order {
         let rule_node = graph.rules().get(rule_path).expect(
             "bug: rule from topological sort not in graph - validation should have caught this",
         );
 
-        let unit_ctx = UnitResolutionContext::WithIndex(&resolved_types.unit_index);
+        let measure_scope = crate::planning::typing::MeasureScope {
+            unit_index: &resolved_types.unit_index,
+            signature_index: &resolved_types.signature_index,
+        };
         let normalize_ctx = NormalizeContext {
             data: &data,
-            unit_ctx: &unit_ctx,
+            measure_scope,
             max_normalized_expression_nodes: limits.max_normalized_expression_nodes,
             max_normal_form_depth: limits.max_normal_form_depth,
         };
         let normalized = crate::planning::normalize::build_normalized_rule(
             &normalize_ctx,
             &completed_rules,
+            &rule_types,
             reference_ends,
             &rule_node.branches,
             Some(rule_node.source.clone()),
             interner,
         )
         .map_err(|error| vec![error])?;
-        let NormalizedRule { body } = normalized;
+        let NormalizedRule { body, source_type } = normalized;
+        assert_eq!(
+            &source_type, &rule_node.rule_type,
+            "BUG: rule '{}' typed differently by planning and validation",
+            rule_path.rule
+        );
+        assert!(
+            interner
+                .result_type(body)
+                .same_value_type(&rule_node.rule_type),
+            "BUG: rewrites changed the value type of rule '{}': {:?} from {:?}",
+            rule_path.rule,
+            interner.result_type(body),
+            rule_node.rule_type
+        );
         completed_rules.insert(rule_path.clone(), body);
+
+        if rule_path.segments.is_empty() {
+            show_rules.insert(
+                rule_path.clone(),
+                ShowRule {
+                    lemma_type: family_units.rule_type_for_show(rule_node.rule_type.as_ref()),
+                    branches: show_branches_from(&rule_node.branches, &local_rule_names),
+                    depends_on_rules: project_depends_on_rules(
+                        &rule_node.depends_on_rules,
+                        &local_rule_names,
+                    ),
+                },
+            );
+        }
 
         rules.insert(
             rule_path.clone(),
@@ -273,8 +330,7 @@ pub(crate) fn build_execution_plan(
                 path: rule_path.clone(),
                 normal_form: body,
                 source: rule_node.source.clone(),
-                rule_type: Arc::clone(&rule_node.rule_type),
-                depends_on_rules: rule_node.depends_on_rules.iter().cloned().collect(),
+                rule_type: source_type,
             },
         );
     }
@@ -309,7 +365,7 @@ pub(crate) fn build_execution_plan(
         source_type: None,
         needed_by_rules: Vec::new(),
         data_display: IndexMap::new(),
-        show_rule_types: IndexMap::new(),
+        show_rules,
         // Filled below after validation succeeds.
         reference_ends: IndexMap::new(),
         input_key_index: IndexMap::new(),
@@ -346,6 +402,10 @@ pub(crate) fn build_execution_plan(
 /// and return the path → id index. Expression lowering already creates leaves for
 /// referenced paths; unused paths get orphan leaves appended so evaluation can
 /// still store bindings/defaults/reference copies in the value table.
+///
+/// Rule reference cells share a body's Kind, so a `Leaf(DataPath)` cell may carry
+/// `rule_ref`. Those cells hold the referenced rule's value in the value table and
+/// must never be the binding slot for the path.
 fn ensure_data_leaves(
     normal_forms: &mut Vec<NormalForm>,
     data: &IndexMap<DataPath, DataDefinition>,
@@ -355,6 +415,9 @@ fn ensure_data_leaves(
 
     let mut data_leaf: IndexMap<DataPath, NormalFormId> = IndexMap::new();
     for (index, cell) in normal_forms.iter().enumerate() {
+        if cell.rule_ref.is_some() {
+            continue;
+        }
         if let NormalFormKind::Leaf(LeafKind::DataPath(path)) = &cell.kind {
             data_leaf.insert(path.clone(), NormalFormId::from_index(index));
         }
@@ -367,9 +430,10 @@ fn ensure_data_leaves(
         normal_forms.push(NormalForm {
             kind: NormalFormKind::Leaf(LeafKind::DataPath(path.clone())),
             result_type: data_path_result_type(data, path),
+            fold_types: Vec::new(),
             source: None,
             origin: None,
-            rule_embed: None,
+            rule_ref: None,
         });
         data_leaf.insert(path.clone(), id);
     }
@@ -392,18 +456,6 @@ pub(crate) fn attach_show_cache(
     plan.start_line = spec.start_line;
     plan.source_type = spec.source_type.clone();
     plan.data_display = build_data_display(plan);
-    plan.show_rule_types = plan
-        .rules
-        .values()
-        .filter(|rule| rule.path.segments.is_empty())
-        .map(|rule| {
-            (
-                rule.path.clone(),
-                plan.family_units
-                    .rule_type_for_show(rule.rule_type.as_ref()),
-            )
-        })
-        .collect();
 }
 
 fn build_data_display(plan: &ExecutionPlan) -> IndexMap<DataPath, ShowDataCache> {
@@ -477,8 +529,9 @@ impl std::fmt::Display for ShowVersion {
 }
 
 /// Consumer [`Engine::show`] result: declared promptable data catalog (with
-/// [`ShowData::needed_by_rules`] for intake vs reuse), local rule result types,
-/// and resolved temporal window. Source: [`Engine::source`].
+/// [`ShowData::needed_by_rules`] for intake vs reuse), local rule graph
+/// ([`ShowRule`] with type, branches, depends_on_rules), and resolved temporal
+/// window. Source: [`Engine::source`].
 #[derive(Debug, Clone, PartialEq)]
 pub struct Show {
     pub spec: String,
@@ -489,7 +542,7 @@ pub struct Show {
     pub start_line: usize,
     pub source_type: Option<crate::parsing::source::SourceType>,
     pub data: indexmap::IndexMap<String, ShowData>,
-    pub rules: indexmap::IndexMap<String, LemmaType>,
+    pub rules: indexmap::IndexMap<String, ShowRule>,
     /// Spec metadata, in declaration order.
     pub meta: IndexMap<String, Value>,
 }
@@ -561,8 +614,15 @@ impl std::fmt::Display for Show {
 
         if !self.rules.is_empty() {
             write!(f, "\n\nRules:")?;
-            for (name, rule_type) in &self.rules {
-                write!(f, "\n  {} ({})", name, rule_type.specifications)?;
+            for (name, rule) in &self.rules {
+                write!(f, "\n  {} ({})", name, rule.lemma_type.specifications)?;
+                if !rule.depends_on_rules.is_empty() {
+                    write!(
+                        f,
+                        "\n    depends_on_rules: {}",
+                        rule.depends_on_rules.join(", ")
+                    )?;
+                }
             }
         }
 
@@ -836,14 +896,14 @@ impl ExecutionPlan {
     }
 
     /// Per [`Self::data`] position: local [`Self::rules`] positions that transitively need
-    /// that slot (through rule embeds), in alphabetical rule-name order.
+    /// that slot (through rule references), in alphabetical rule-name order.
     ///
-    /// Built in plan topological order: at a rule-embed cell, OR the target rule's
-    /// already-computed bitset instead of descending Kind (embeds are evaluation
+    /// Built in plan topological order: at a rule-ref cell, OR the target rule's
+    /// already-computed bitset instead of descending Kind (rule references are evaluation
     /// boundaries). Walks the normalized body so constant-dead unless arms removed
     /// by normalize stay out of the index.
     fn build_needed_by_rules(&self) -> Vec<Vec<u32>> {
-        use crate::planning::normalize::{push_child_ids, LeafKind, NormalFormKind};
+        use crate::planning::normalize::{LeafKind, NormalFormKind};
 
         let data_len = self.data.len();
         let words = data_len.div_ceil(64);
@@ -858,19 +918,19 @@ impl ExecutionPlan {
                     continue;
                 }
                 let nf = self.normal_form(id);
-                if let Some(embed_path) = &nf.rule_embed {
-                    let embed_pos = self.rules.get_index_of(embed_path).unwrap_or_else(|| {
+                if let Some(ref_path) = &nf.rule_ref {
+                    let ref_pos = self.rules.get_index_of(ref_path).unwrap_or_else(|| {
                         panic!(
-                            "BUG: embed target '{embed_path}' missing from plan.rules (rule '{}')",
+                            "BUG: rule_ref target '{ref_path}' missing from plan.rules (rule '{}')",
                             rule.path
                         )
                     });
                     assert!(
-                        embed_pos < rule_pos,
-                        "BUG: embed target '{embed_path}' must precede '{}' in topo order",
+                        ref_pos < rule_pos,
+                        "BUG: rule_ref target '{ref_path}' must precede '{}' in topo order",
                         rule.path
                     );
-                    let dep = &bits_by_rule[embed_pos];
+                    let dep = &bits_by_rule[ref_pos];
                     for (word, dep_word) in bits.iter_mut().zip(dep.iter()) {
                         *word |= *dep_word;
                     }
@@ -893,15 +953,13 @@ impl ExecutionPlan {
                         // so shadowed arms stay in the Show needed set.
                         let origin = nf.origin.unwrap_or_else(|| {
                             panic!(
-                                "BUG: non-embed OrderedDispatch must carry origin (rule '{}')",
+                                "BUG: non-rule_ref OrderedDispatch must carry origin (rule '{}')",
                                 rule.path
                             )
                         });
                         stack.push(origin);
                     }
-                    _ => {
-                        push_child_ids(&nf.kind, &mut stack);
-                    }
+                    _ => stack.extend(nf.kind.children()),
                 }
             }
             bits_by_rule.push(bits);
@@ -1008,6 +1066,29 @@ impl ExecutionPlan {
         &self.normal_form(id).result_type
     }
 
+    /// Position of `path` in [`Self::rules`]. Every rule path a plan cell
+    /// references was planned, so absence is a bug.
+    pub(crate) fn rule_index(&self, path: &RulePath) -> RuleIndex {
+        RuleIndex(
+            self.rules
+                .get_index_of(path)
+                .unwrap_or_else(|| panic!("BUG: rule '{}' missing from execution plan", path.rule)),
+        )
+    }
+
+    pub(crate) fn rule_at(&self, index: RuleIndex) -> &ExecutableRule {
+        self.rules
+            .get_index(index.0)
+            .map(|(_, rule)| rule)
+            .unwrap_or_else(|| {
+                panic!(
+                    "BUG: rule index {} out of plan.rules range ({} rules)",
+                    index.0,
+                    self.rules.len()
+                )
+            })
+    }
+
     /// Data paths a caller can be prompted for, in declaration order.
     ///
     /// A path is promptable when it carries its own value slot: [`DataDefinition::Value`]
@@ -1029,18 +1110,61 @@ impl ExecutionPlan {
     }
 }
 
+/// Follow nested [`NormalFormKind::OrderedDispatch`] region bodies using filled
+/// scrutinee slots until a non-dispatch cell. Stops at rule-reference cells:
+/// those borrow another rule's Kind and must compare as the origin arm body, not
+/// the body that rule would itself select. `None` when a nested scrutinee is
+/// unset or vetoed (the walk has not decided that nest yet).
+pub(crate) fn resolve_nested_dispatch_body(
+    plan: &ExecutionPlan,
+    values: &[Option<crate::computation::OperationResult>],
+    mut body: NormalFormId,
+) -> Option<NormalFormId> {
+    use crate::computation::OperationResult;
+    use crate::planning::normalize::NormalFormKind;
+    use crate::planning::ordered_dispatch::region_of_scrutinee;
+
+    for _ in 0..=plan.normal_forms.len() {
+        let cell = plan.normal_form(body);
+        if cell.rule_ref.is_some() {
+            return Some(body);
+        }
+        let NormalFormKind::OrderedDispatch {
+            scrutinee,
+            boundaries,
+            regions,
+        } = &cell.kind
+        else {
+            return Some(body);
+        };
+        let literal = match values.get(scrutinee.index()).and_then(|slot| slot.as_ref()) {
+            Some(OperationResult::Value(literal)) => literal,
+            Some(OperationResult::Veto(_)) | None => return None,
+        };
+        let region = region_of_scrutinee(boundaries, &literal.value).ok()?;
+        body = regions[region];
+    }
+    panic!("BUG: nested OrderedDispatch chain longer than the normal-form table");
+}
+
 /// DataPath leaves reachable from `root` in evaluator decision-tree preorder.
 ///
-/// Control liveness is derived from `values` (the evaluation value table):
-/// - [`NormalFormKind::Piecewise`]: arms decided by filled condition slots
-/// - [`NormalFormKind::And`]: right child skipped when left slot is `false`
-/// - [`NormalFormKind::OrderedDispatch`]: only the region for the scrutinee slot
+/// Control liveness is derived from `values` (the evaluation value table), matching
+/// the evaluator's own decisions:
+/// - [`NormalFormKind::And`]: right child live only when the left slot is `true`.
+///   A `false`, vetoed, or unfilled left slot means the evaluator never visits the
+///   right child.
+/// - [`NormalFormKind::Piecewise`]: arms decided from filled condition slots, high to
+///   low. An unfilled or vetoed condition before a winner is found means no decision:
+///   every arm stays live.
+/// - [`NormalFormKind::OrderedDispatch`]: only the region for the scrutinee slot. An
+///   unfilled scrutinee means every origin arm stays live.
 ///
-/// Empty / unfilled slots mean "no decision yet" — all children stay live
-/// (Show's static walk and mid-evaluation MissingData probes).
+/// Every cell the evaluator visits owns its slot, including rule reference cells
+/// (they hold the referenced rule's value).
 ///
 /// Order matches the evaluator walk (`tree.rs`): first-seen [`DataPath`] wins
-/// (rule embeds may share a leaf under distinct cell ids). Iterative DFS with
+/// (rule references may share a leaf under distinct cell ids). Iterative DFS with
 /// pop-time visited; children pushed in reverse evaluation order.
 pub(crate) fn reachable_data_paths(
     plan: &ExecutionPlan,
@@ -1048,80 +1172,81 @@ pub(crate) fn reachable_data_paths(
     values: &[Option<crate::computation::OperationResult>],
 ) -> IndexSet<DataPath> {
     use crate::computation::OperationResult;
+    use crate::evaluation::branch_semantics::{
+        condition_outcome, piecewise_decision, BranchOutcome, PiecewiseDecision,
+    };
     use crate::planning::normalize::LeafKind;
     use crate::planning::normalize::NormalFormKind;
-    use crate::planning::ordered_dispatch::{
-        dispatch_probe_of, region_for_value, DispatchProbeOutcome,
-    };
+    use crate::planning::ordered_dispatch::region_of_scrutinee;
 
-    fn slot_bool(values: &[Option<OperationResult>], id: NormalFormId) -> Option<bool> {
-        match values.get(id.index()).and_then(|s| s.as_ref()) {
-            Some(OperationResult::Value(literal)) => match &literal.value {
-                ValueKind::Boolean(b) => Some(*b),
-                _ => None,
-            },
-            _ => None,
-        }
+    fn slot_outcome(values: &[Option<OperationResult>], id: NormalFormId) -> Option<BranchOutcome> {
+        values
+            .get(id.index())
+            .and_then(|slot| slot.as_ref())
+            .map(condition_outcome)
     }
 
-    fn slot_value_kind(values: &[Option<OperationResult>], id: NormalFormId) -> Option<&ValueKind> {
-        match values.get(id.index()).and_then(|s| s.as_ref()) {
-            Some(OperationResult::Value(literal)) => Some(&literal.value),
-            _ => None,
+    /// Piecewise pre-image of a dispatch cell.
+    ///
+    /// A cell that borrows a rule's Kind (`rule_ref`) records no `origin` of its
+    /// own, and the rule it names can itself be a bare reference to a further
+    /// rule (`rule alias: country`), so the fold can sit any number of
+    /// references away. Every hop moves to a rule earlier in topological order,
+    /// so the chain is shorter than the rule table.
+    fn dispatch_origin(plan: &ExecutionPlan, cell: &NormalForm) -> NormalFormId {
+        let mut current = cell;
+        for _ in 0..=plan.rules.len() {
+            if let Some(origin) = current.origin {
+                return origin;
+            }
+            let ref_path = current.rule_ref.as_ref().unwrap_or_else(|| {
+                panic!("BUG: OrderedDispatch without origin must carry rule_ref")
+            });
+            let body = plan
+                .rules
+                .get(ref_path)
+                .unwrap_or_else(|| {
+                    panic!("BUG: rule reference '{ref_path}' missing from plan.rules")
+                })
+                .normal_form;
+            current = plan.normal_form(body);
         }
+        panic!("BUG: rule reference chain over a dispatch cell does not terminate");
     }
 
-    /// Push Piecewise children that are live given filled condition slots.
-    /// Evaluation order: cond_n, body_n, …, cond_1, body_1, default.
-    /// Push reverse so pop yields that order.
-    fn push_piecewise_live(
+    /// Piecewise children the evaluator visits under `decision`, in evaluation
+    /// order: `cond_n, body_n, …, cond_1, body_1, default`.
+    fn live_piecewise_children(
         arms: &[(NormalFormId, NormalFormId)],
-        values: &[Option<OperationResult>],
-        stack: &mut Vec<NormalFormId>,
-    ) {
-        assert!(!arms.is_empty(), "BUG: empty piecewise");
-        // Decide from high to low (same as evaluate_piecewise).
-        let mut taken: Option<usize> = None;
-        for i in (1..arms.len()).rev() {
-            match slot_bool(values, arms[i].0) {
-                Some(true) => {
-                    taken = Some(i);
-                    break;
+        decision: PiecewiseDecision,
+    ) -> Vec<NormalFormId> {
+        let mut live = Vec::new();
+        match decision {
+            PiecewiseDecision::Taken { arm } => {
+                for (condition, _) in arms.iter().skip(arm + 1).rev() {
+                    live.push(*condition);
                 }
-                Some(false) => continue,
-                None => break,
+                live.push(arms[arm].0);
+                live.push(arms[arm].1);
+            }
+            PiecewiseDecision::Default => {
+                for (condition, _) in arms.iter().skip(1).rev() {
+                    live.push(*condition);
+                }
+                live.push(arms[0].1);
+            }
+            PiecewiseDecision::Undecided { arm } => {
+                for (condition, _) in arms.iter().skip(arm + 1).rev() {
+                    live.push(*condition);
+                }
+                for (condition, body) in arms.iter().take(arm + 1).skip(1).rev() {
+                    live.push(*condition);
+                    live.push(*body);
+                }
+                live.push(arms[0].1);
             }
         }
-
-        match taken {
-            Some(i) => {
-                // Live: false conditions above i, condition i, body i.
-                stack.push(arms[i].1);
-                stack.push(arms[i].0);
-                for (cond, _) in arms.iter().skip(i + 1) {
-                    stack.push(*cond);
-                }
-            }
-            None => {
-                // Default wins (all conditions false), or a condition yielded
-                // MissingData/veto without recording dead edges — all arms live
-                // (same as the old empty dead_control_edges set), or no decisions.
-                let default_wins =
-                    (1..arms.len()).all(|i| matches!(slot_bool(values, arms[i].0), Some(false)));
-                if default_wins {
-                    stack.push(arms[0].1);
-                    for (cond, _) in arms.iter().skip(1) {
-                        stack.push(*cond);
-                    }
-                } else {
-                    stack.push(arms[0].1);
-                    for (cond, body) in arms.iter().skip(1) {
-                        stack.push(*body);
-                        stack.push(*cond);
-                    }
-                }
-            }
-        }
+        live
     }
 
     let mut out = IndexSet::new();
@@ -1133,116 +1258,97 @@ pub(crate) fn reachable_data_paths(
             continue;
         }
         let nf = plan.normal_form(id);
-        match &nf.kind {
+        let live: Vec<NormalFormId> = match &nf.kind {
             NormalFormKind::Leaf(LeafKind::DataPath(path)) => {
                 out.insert(path.clone());
+                Vec::new()
             }
-            NormalFormKind::Leaf(LeafKind::Literal(_))
-            | NormalFormKind::Now
-            | NormalFormKind::Veto(_) => {}
-            NormalFormKind::Sum(children) | NormalFormKind::Product(children) => {
-                for child in children.iter().rev() {
-                    stack.push(*child);
-                }
-            }
-            NormalFormKind::And(children) => {
-                // Left false → right dead. Otherwise both live.
-                if children.len() >= 2 && matches!(slot_bool(values, children[0]), Some(false)) {
-                    stack.push(children[0]);
-                } else {
-                    for child in children.iter().rev() {
-                        stack.push(*child);
+            NormalFormKind::And(left, right) => {
+                // Match evaluate_and: only a settled `true` left keeps the right live.
+                match slot_outcome(values, *left) {
+                    Some(BranchOutcome::Taken) => vec![*left, *right],
+                    Some(BranchOutcome::NotTaken | BranchOutcome::Propagate(_)) | None => {
+                        vec![*left]
                     }
                 }
             }
-            NormalFormKind::Subtract(a, b)
-            | NormalFormKind::Divide(a, b)
-            | NormalFormKind::Power(a, b)
-            | NormalFormKind::Modulo(a, b)
-            | NormalFormKind::Comparison(a, _, b)
-            | NormalFormKind::RangeLiteral(a, b)
-            | NormalFormKind::RangeContainment(a, b) => {
-                stack.push(*b);
-                stack.push(*a);
-            }
-            NormalFormKind::Negate(x)
-            | NormalFormKind::Reciprocal(x)
-            | NormalFormKind::Not(x)
-            | NormalFormKind::MathOp(_, x)
-            | NormalFormKind::UnitConversion(x, _)
-            | NormalFormKind::DateRelative(_, x)
-            | NormalFormKind::DateCalendar(_, _, x)
-            | NormalFormKind::PastFutureRange(_, x)
-            | NormalFormKind::ResultIsVeto(x) => {
-                stack.push(*x);
-            }
             NormalFormKind::Piecewise(arms) => {
-                push_piecewise_live(arms, values, &mut stack);
+                let decision =
+                    piecewise_decision(arms.len(), |arm| slot_outcome(values, arms[arm].0));
+                live_piecewise_children(arms, decision)
             }
             NormalFormKind::OrderedDispatch {
                 scrutinee,
                 boundaries,
                 regions,
             } => {
-                let origin_id = match nf.origin {
-                    Some(origin) => origin,
-                    None => {
-                        let embed_path = nf.rule_embed.as_ref().unwrap_or_else(|| {
-                            panic!("BUG: OrderedDispatch without origin must carry rule_embed")
-                        });
-                        let body_id = plan
-                            .rules
-                            .get(embed_path)
-                            .unwrap_or_else(|| {
-                                panic!("BUG: rule embed '{embed_path}' missing from plan.rules")
-                            })
-                            .normal_form;
-                        plan.normal_form(body_id).origin.unwrap_or_else(|| {
-                            panic!(
-                                "BUG: OrderedDispatch body for '{embed_path}' must have Piecewise origin"
-                            )
-                        })
-                    }
-                };
-                let origin_nf = plan.normal_form(origin_id);
-                let NormalFormKind::Piecewise(arms) = &origin_nf.kind else {
+                let origin_id = dispatch_origin(plan, nf);
+                let NormalFormKind::Piecewise(arms) = &plan.normal_form(origin_id).kind else {
                     panic!("BUG: OrderedDispatch origin must be Piecewise");
                 };
                 visited.insert(origin_id);
 
-                // Scrutinee always live.
-                stack.push(*scrutinee);
-
-                if let Some(scrutinee_kind) = slot_value_kind(values, *scrutinee) {
-                    match dispatch_probe_of(scrutinee_kind) {
-                        DispatchProbeOutcome::Probe(probe) => {
-                            if let Ok(region) = region_for_value(boundaries, &probe) {
-                                // Only selected region body + Piecewise conditions for order.
-                                let selected = regions[region];
-                                // Push conditions from origin (all evaluated conceptually via table).
-                                for (cond, body) in arms.iter().skip(1).rev() {
-                                    if *body == selected {
-                                        stack.push(*body);
-                                        stack.push(*cond);
-                                        // Higher conditions that were false
-                                    } else {
-                                        stack.push(*cond);
-                                    }
-                                }
-                                if arms[0].1 == selected {
-                                    stack.push(arms[0].1);
-                                }
-                                continue;
-                            }
-                        }
-                        DispatchProbeOutcome::CalendarFailure(_)
-                        | DispatchProbeOutcome::Unsupported => {}
+                let selected = match values.get(scrutinee.index()).and_then(|slot| slot.as_ref()) {
+                    Some(OperationResult::Value(literal)) => {
+                        region_of_scrutinee(boundaries, &literal.value)
+                            .ok()
+                            .map(|region| regions[region])
                     }
+                    Some(OperationResult::Veto(_)) | None => None,
+                };
+                let resolved =
+                    selected.and_then(|body| resolve_nested_dispatch_body(plan, values, body));
+                let decision = match resolved {
+                    Some(resolved) => {
+                        let winner = arms.iter().rposition(|(_, body)| *body == resolved);
+                        match winner {
+                            Some(0) => PiecewiseDecision::Default,
+                            Some(arm) => PiecewiseDecision::Taken { arm },
+                            None => panic!(
+                                "BUG: OrderedDispatch selected region body is not an origin arm body"
+                            ),
+                        }
+                    }
+                    // Outer key decided but nest open, or outer scrutinee open:
+                    // keep every origin arm live (safe over-approx).
+                    None => PiecewiseDecision::Undecided {
+                        arm: arms.len() - 1,
+                    },
+                };
+                let mut live = vec![*scrutinee];
+                // Origin Piecewise conditions are not filled under the dispatch
+                // value walk, so an undecided nest must be visited directly —
+                // otherwise And short-circuit on empty slots drops the residual
+                // scrutinee (e.g. weight in `zone is K and weight >= N`).
+                if let (Some(selected_body), None) = (selected, resolved) {
+                    live.push(selected_body);
                 }
-                // No decision: all Piecewise origin children live.
-                push_piecewise_live(arms, &[], &mut stack);
+                live.extend(live_piecewise_children(arms, decision));
+                live
             }
-        }
+            NormalFormKind::Leaf(LeafKind::Literal(_))
+            | NormalFormKind::Now
+            | NormalFormKind::Veto(_)
+            | NormalFormKind::Sum(_)
+            | NormalFormKind::Product(_)
+            | NormalFormKind::Subtract(_, _)
+            | NormalFormKind::Divide(_, _)
+            | NormalFormKind::Power(_, _)
+            | NormalFormKind::Modulo(_, _)
+            | NormalFormKind::Comparison(_, _, _)
+            | NormalFormKind::RangeLiteral(_, _)
+            | NormalFormKind::RangeContainment(_, _)
+            | NormalFormKind::Negate(_)
+            | NormalFormKind::Reciprocal(_)
+            | NormalFormKind::Not(_)
+            | NormalFormKind::MathOp(_, _)
+            | NormalFormKind::UnitConversion(_, _)
+            | NormalFormKind::DateRelative(_, _)
+            | NormalFormKind::DateCalendar(_, _, _)
+            | NormalFormKind::PastFutureRange(_, _)
+            | NormalFormKind::ResultIsVeto(_) => nf.kind.children(),
+        };
+        stack.extend(live.into_iter().rev());
     }
     out
 }
@@ -1289,6 +1395,7 @@ pub(crate) fn validate_value_against_type(
             },
             ValueKind::Number(n),
         ) => {
+            use std::cmp::Ordering;
             if let Some(d) = decimals {
                 if exceeds_decimal_places(n, *d) {
                     return Err(format!(
@@ -1298,7 +1405,10 @@ pub(crate) fn validate_value_against_type(
                 }
             }
             if let Some(min) = minimum {
-                if n < min {
+                if n.try_cmp(min)
+                    .map_err(|failure| format!("minimum bound compare failed: {failure}"))?
+                    == Ordering::Less
+                {
                     return Err(format!(
                         "{} is below minimum {}",
                         format_rational_for_validation_message(expected_type, n),
@@ -1307,7 +1417,10 @@ pub(crate) fn validate_value_against_type(
                 }
             }
             if let Some(max) = maximum {
-                if n > max {
+                if n.try_cmp(max)
+                    .map_err(|failure| format!("maximum bound compare failed: {failure}"))?
+                    == Ordering::Greater
+                {
                     return Err(format!(
                         "{} is above maximum {}",
                         format_rational_for_validation_message(expected_type, n),
@@ -1329,6 +1442,7 @@ pub(crate) fn validate_value_against_type(
         ) => {
             use crate::computation::rational::checked_div;
             use crate::planning::semantics::measure_declared_bound_to_canonical;
+            use std::cmp::Ordering;
             let unit = expected_type
                 .measure_binding_unit
                 .as_deref()
@@ -1366,7 +1480,11 @@ pub(crate) fn validate_value_against_type(
                     expected_type.name().as_str(),
                     "minimum",
                 )?;
-                if magnitude < &canonical_min {
+                if magnitude
+                    .try_cmp(&canonical_min)
+                    .map_err(|failure| format!("minimum bound compare failed: {failure}"))?
+                    == Ordering::Less
+                {
                     let min_in_unit = checked_div(&canonical_min, factor).map_err(|failure| {
                         format!("cannot de-canonicalize minimum for validation: {failure}")
                     })?;
@@ -1391,7 +1509,11 @@ pub(crate) fn validate_value_against_type(
                     expected_type.name().as_str(),
                     "maximum",
                 )?;
-                if magnitude > &canonical_max {
+                if magnitude
+                    .try_cmp(&canonical_max)
+                    .map_err(|failure| format!("maximum bound compare failed: {failure}"))?
+                    == Ordering::Greater
+                {
                     let max_in_unit = checked_div(&canonical_max, factor).map_err(|failure| {
                         format!("cannot de-canonicalize maximum for validation: {failure}")
                     })?;
@@ -1445,6 +1567,7 @@ pub(crate) fn validate_value_against_type(
             ValueKind::Ratio(r),
         ) => {
             use crate::computation::rational::checked_mul;
+            use std::cmp::Ordering;
 
             let primary_unit = expected_type
                 .measure_binding_unit
@@ -1467,7 +1590,10 @@ pub(crate) fn validate_value_against_type(
                 }
             }
             if let Some(type_minimum) = minimum {
-                if r < type_minimum {
+                if r.try_cmp(type_minimum)
+                    .map_err(|failure| format!("minimum bound compare failed: {failure}"))?
+                    == Ordering::Less
+                {
                     let message = match primary_unit {
                         Some(unit) => {
                             let ratio_unit = units.get(unit)?;
@@ -1498,7 +1624,10 @@ pub(crate) fn validate_value_against_type(
                 }
             }
             if let Some(type_maximum) = maximum {
-                if r > type_maximum {
+                if r.try_cmp(type_maximum)
+                    .map_err(|failure| format!("maximum bound compare failed: {failure}"))?
+                    == Ordering::Greater
+                {
                     let message = match primary_unit {
                         Some(unit) => {
                             let ratio_unit = units.get(unit)?;
@@ -1540,6 +1669,7 @@ pub(crate) fn validate_value_against_type(
             },
             ValueKind::Number(n),
         ) => {
+            use std::cmp::Ordering;
             if let Some(d) = decimals {
                 if exceeds_decimal_places(n, *d) {
                     return Err(format!(
@@ -1549,7 +1679,10 @@ pub(crate) fn validate_value_against_type(
                 }
             }
             if let Some(type_minimum) = minimum {
-                if n < type_minimum {
+                if n.try_cmp(type_minimum)
+                    .map_err(|failure| format!("minimum bound compare failed: {failure}"))?
+                    == Ordering::Less
+                {
                     return Err(format!(
                         "{} is below minimum {}",
                         format_rational_for_validation_message(expected_type, n),
@@ -1558,7 +1691,10 @@ pub(crate) fn validate_value_against_type(
                 }
             }
             if let Some(type_maximum) = maximum {
-                if n > type_maximum {
+                if n.try_cmp(type_maximum)
+                    .map_err(|failure| format!("maximum bound compare failed: {failure}"))?
+                    == Ordering::Greater
+                {
                     return Err(format!(
                         "{} is above maximum {}",
                         format_rational_for_validation_message(expected_type, n),
@@ -1648,7 +1784,7 @@ fn validate_range_literal(
     right: &LiteralValue,
     unit_index: &crate::planning::unit_index::UnitIndex,
 ) -> Result<(), String> {
-    use crate::computation::{comparison_operation, OperationResult, UnitResolutionContext};
+    use crate::computation::{comparison_operation, OperationResult};
     use crate::planning::semantics::{
         compare_semantic_dates, compare_semantic_times, measure_declared_bound_to_canonical,
         ValueKind,
@@ -1680,11 +1816,17 @@ fn validate_range_literal(
     validate_value_against_type(element_type.as_ref(), &right, unit_index)?;
 
     let ordering = match (&left.value, &right.value) {
-        (ValueKind::Number(l), ValueKind::Number(r)) => l.cmp(r),
+        (ValueKind::Number(l), ValueKind::Number(r)) => l
+            .try_cmp(r)
+            .map_err(|failure| format!("range endpoint compare failed: {failure}"))?,
         (ValueKind::Date(l), ValueKind::Date(r)) => compare_semantic_dates(l, r),
         (ValueKind::Time(l), ValueKind::Time(r)) => compare_semantic_times(l, r),
-        (ValueKind::Ratio(l), ValueKind::Ratio(r)) => l.cmp(r),
-        (ValueKind::Measure(l), ValueKind::Measure(r)) => l.cmp(r),
+        (ValueKind::Ratio(l), ValueKind::Ratio(r)) => l
+            .try_cmp(r)
+            .map_err(|failure| format!("range endpoint compare failed: {failure}"))?,
+        (ValueKind::Measure(l), ValueKind::Measure(r)) => l
+            .try_cmp(r)
+            .map_err(|failure| format!("range endpoint compare failed: {failure}"))?,
         (left_kind, right_kind) => unreachable!(
             "BUG: range endpoints have mismatched value kinds after typing: {left_kind:?} vs {right_kind:?}"
         ),
@@ -1705,14 +1847,7 @@ fn validate_range_literal(
                          op: ComparisonComputation,
                          fail_msg: String|
      -> Result<(), String> {
-        match comparison_operation(
-            &range_lit,
-            &range_type,
-            &op,
-            bound,
-            bound_type,
-            UnitResolutionContext::WithIndex(unit_index),
-        ) {
+        match comparison_operation(&range_lit, &range_type, &op, bound, bound_type) {
             OperationResult::Value(result) => match &result.value {
                 ValueKind::Boolean(true) => Ok(()),
                 ValueKind::Boolean(false) => Err(fail_msg),
@@ -1914,7 +2049,7 @@ fn validate_literal_data_against_types(plan: &ExecutionPlan) -> Vec<Error> {
 }
 
 fn validate_unit_conversion_targets(plan: &ExecutionPlan) -> Result<(), Error> {
-    use crate::planning::normalize::{push_child_ids, NormalFormKind};
+    use crate::planning::normalize::NormalFormKind;
 
     let mut errors: Vec<Error> = Vec::new();
     let mut visited = HashSet::new();
@@ -1925,7 +2060,8 @@ fn validate_unit_conversion_targets(plan: &ExecutionPlan) -> Result<(), Error> {
             continue;
         }
         let nf = plan.normal_form(id);
-        if let NormalFormKind::UnitConversion(inner, target) = &nf.kind {
+        worklist.extend(nf.kind.children());
+        if let NormalFormKind::UnitConversion(_, target) = &nf.kind {
             if let Some((unit_name, owning_type)) =
                 crate::computation::units::conversion_target_declares_unit(target)
             {
@@ -1943,9 +2079,6 @@ fn validate_unit_conversion_targets(plan: &ExecutionPlan) -> Result<(), Error> {
                     ));
                 }
             }
-            worklist.push(*inner);
-        } else {
-            push_child_ids(&nf.kind, &mut worklist);
         }
     }
     if let Some(error) = errors.into_iter().next() {
@@ -2202,7 +2335,7 @@ mod tests {
             source_type: None,
             needed_by_rules: vec![Vec::new(); data_len],
             data_display: IndexMap::new(),
-            show_rule_types: IndexMap::new(),
+            show_rules: IndexMap::new(),
             reference_ends: IndexMap::new(),
             input_key_index,
             data_leaf: IndexMap::new(),
@@ -2277,7 +2410,7 @@ mod tests {
             source_type: None,
             needed_by_rules: vec![Vec::new(); data_len],
             data_display: IndexMap::new(),
-            show_rule_types: IndexMap::new(),
+            show_rules: IndexMap::new(),
             reference_ends: IndexMap::new(),
             input_key_index,
             data_leaf: IndexMap::new(),
@@ -2364,7 +2497,7 @@ mod tests {
             source_type: None,
             needed_by_rules: vec![Vec::new(); data_len],
             data_display: IndexMap::new(),
-            show_rule_types: IndexMap::new(),
+            show_rules: IndexMap::new(),
             reference_ends: IndexMap::new(),
             input_key_index,
             data_leaf: IndexMap::new(),
@@ -2404,7 +2537,7 @@ mod tests {
             source_type: None,
             needed_by_rules: Vec::new(),
             data_display: IndexMap::new(),
-            show_rule_types: IndexMap::new(),
+            show_rules: IndexMap::new(),
             reference_ends: IndexMap::new(),
             input_key_index: IndexMap::new(),
             data_leaf: IndexMap::new(),
@@ -2665,16 +2798,22 @@ mod tests {
 
         let cost = &value["rules"]["cost"];
         assert_eq!(
-            cost["kind"], "measure",
-            "rule types use the same flat shape"
+            cost["type"]["kind"], "measure",
+            "rule types nest under type"
         );
         assert!(
-            cost["units"].is_array() && !cost["units"].as_array().unwrap().is_empty(),
+            cost["type"]["units"].is_array()
+                && !cost["type"]["units"].as_array().unwrap().is_empty(),
             "measure rule result types expose declared units"
         );
         assert!(
-            cost["units"][0].get("factor").is_some(),
+            cost["type"]["units"][0].get("factor").is_some(),
             "measure rule units use factor field"
+        );
+        assert!(cost.get("branches").is_some(), "ShowRule exposes branches");
+        assert!(
+            cost.get("depends_on_rules").is_some(),
+            "ShowRule exposes depends_on_rules"
         );
     }
 
@@ -2720,7 +2859,7 @@ mod tests {
         assert!(rate_units[0]["value"].get("numer").is_some());
         assert!(rate_units[0]["value"].get("denom").is_some());
 
-        let total_rule_units = &value["rules"]["total"]["units"];
+        let total_rule_units = &value["rules"]["total"]["type"]["units"];
         let money_unit_names: Vec<_> = money_units
             .as_array()
             .unwrap()
@@ -2735,7 +2874,7 @@ mod tests {
             .collect();
         assert_eq!(total_rule_unit_names, money_unit_names);
 
-        let rate_out_rule_units = &value["rules"]["rate_out"]["units"];
+        let rate_out_rule_units = &value["rules"]["rate_out"]["type"]["units"];
         let rate_unit_names: Vec<_> = rate_units
             .as_array()
             .unwrap()

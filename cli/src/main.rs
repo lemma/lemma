@@ -140,7 +140,7 @@ enum Commands {
         #[arg(long, hide = true)]
         stdio: bool,
     },
-    /// Start MCP server for AI assistant integration (stdio)
+    /// Start MCP server for AI assistant integration (stdio by default; `--http` for Streamable HTTP)
     Mcp {
         /// Workspace directory or `.lemma` file (default: current directory)
         #[arg(long, value_name = "PATH")]
@@ -151,6 +151,18 @@ enum Commands {
         /// Wall-clock timeout for a single request, in second
         #[arg(long, default_value = "10", value_name = "SECONDS")]
         request_timeout: u64,
+        /// Serve Streamable HTTP (POST /mcp) instead of stdio
+        #[arg(long)]
+        http: bool,
+        /// Host address to bind to (requires `--http`)
+        #[arg(long, default_value = "127.0.0.1", requires = "http")]
+        host: String,
+        /// Port to listen on (requires `--http`; default 8013, not 8012 used by `lemma server`)
+        #[arg(long, default_value = "8013", requires = "http")]
+        port: u16,
+        /// Allow cross-origin browser requests from any origin (requires `--http`)
+        #[arg(long, requires = "http")]
+        cors: bool,
     },
     /// Install repositories from LemmaBase into lemma_deps/
     Install {
@@ -234,7 +246,7 @@ fn resolve_spec(engine: &Engine, spec: Option<&str>, interactive: bool) -> Resul
         .list()
         .into_iter()
         .find(|repository_group| repository_group.repository.is_none())
-        .expect("BUG: workspace repository must exist after Engine::new")
+        .expect("BUG: default repository must exist after Engine::new")
         .specs;
     let unique_names: std::collections::BTreeSet<&str> =
         workspace.iter().map(|ls| ls.name.as_str()).collect();
@@ -323,7 +335,19 @@ fn main() {
             prefix,
             write,
             request_timeout,
-        } => mcp_command(workspace_dir(prefix.as_ref()), *write, *request_timeout),
+            http,
+            host,
+            port,
+            cors,
+        } => mcp_command(
+            workspace_dir(prefix.as_ref()),
+            *write,
+            *request_timeout,
+            *http,
+            host,
+            *port,
+            *cors,
+        ),
         Commands::Install {
             repository,
             prefix,
@@ -385,7 +409,7 @@ fn run_command(options: RunOptions<'_>) -> Result<()> {
                 .list()
                 .into_iter()
                 .find(|repository_group| repository_group.repository.is_none())
-                .expect("BUG: workspace repository must exist after Engine::new")
+                .expect("BUG: default repository must exist after Engine::new")
                 .specs
                 .iter()
                 .any(|ls| ls.name == *one);
@@ -541,7 +565,7 @@ fn resolve_show_target(
                 .list()
                 .into_iter()
                 .find(|repository_group| repository_group.repository.is_none())
-                .expect("BUG: workspace repository must exist after Engine::new")
+                .expect("BUG: default repository must exist after Engine::new")
                 .specs
                 .iter()
                 .any(|ls| ls.name == *one);
@@ -657,7 +681,7 @@ fn server_command(
             .list()
             .into_iter()
             .find(|repository_group| repository_group.repository.is_none())
-            .expect("BUG: workspace repository must exist after Engine::new")
+            .expect("BUG: default repository must exist after Engine::new")
             .specs;
         let unique_specs: std::collections::BTreeSet<&str> =
             workspace.iter().map(|ls| ls.name.as_str()).collect();
@@ -686,7 +710,15 @@ fn lsp_command() -> Result<()> {
     lemma_lsp::stdio::run_stdio(Some(workspace_files)).map_err(anyhow::Error::from)
 }
 
-fn mcp_command(workdir: &Path, write: bool, request_timeout_secs: u64) -> Result<()> {
+fn mcp_command(
+    workdir: &Path,
+    write: bool,
+    request_timeout_secs: u64,
+    http: bool,
+    host: &str,
+    port: u16,
+    cors: bool,
+) -> Result<()> {
     let mut engine = Engine::new();
     load_workspace(&mut engine, workdir)?;
 
@@ -699,15 +731,35 @@ fn mcp_command(workdir: &Path, write: bool, request_timeout_secs: u64) -> Result
         .list()
         .into_iter()
         .find(|repository_group| repository_group.repository.is_none())
-        .expect("BUG: workspace repository must exist after Engine::new")
+        .expect("BUG: default repository must exist after Engine::new")
         .specs;
     let unique_specs: std::collections::BTreeSet<&str> =
         workspace_specs.iter().map(|ls| ls.name.as_str()).collect();
-    eprintln!(
-        "Starting MCP server with {} spec(s) loaded",
-        unique_specs.len()
-    );
-    mcp::server::start_server(engine, config, workdir)?;
+
+    if http {
+        eprintln!(
+            "Starting MCP HTTP server with {} spec(s) loaded",
+            unique_specs.len()
+        );
+        use tokio::runtime::Runtime;
+        let rt = Runtime::new()?;
+        rt.block_on(mcp::http::start_http_server(
+            engine,
+            config,
+            workdir,
+            mcp::http::McpHttpBind {
+                host: host.to_string(),
+                port,
+                cors,
+            },
+        ))?;
+    } else {
+        eprintln!(
+            "Starting MCP server with {} spec(s) loaded",
+            unique_specs.len()
+        );
+        mcp::server::start_server(engine, config, workdir)?;
+    }
     Ok(())
 }
 

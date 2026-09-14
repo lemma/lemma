@@ -4,7 +4,6 @@ use std::sync::Arc;
 
 use crate::computation::operation_result::{OperationResult, VetoType};
 use crate::computation::rational::RationalInteger;
-use crate::computation::UnitResolutionContext;
 use crate::planning::semantics::{ComparisonComputation, LemmaType, LiteralValue, ValueKind};
 
 /// Perform type-aware comparison, returning OperationResult (Veto on error)
@@ -14,9 +13,7 @@ pub fn comparison_operation(
     op: &ComparisonComputation,
     right: &LiteralValue,
     right_type: &Arc<LemmaType>,
-    unit_context: UnitResolutionContext<'_>,
 ) -> OperationResult {
-    let _ = unit_context;
     match (&left.value, &right.value) {
         (ValueKind::Range(range_left, range_right), ValueKind::Measure(_))
             if left_type.is_date_range() && right_type.is_calendar_like() =>
@@ -203,14 +200,7 @@ fn compare_with_operation_result(
         OperationResult::Value(value) => value,
         OperationResult::Veto(reason) => return OperationResult::Veto(reason),
     };
-    comparison_operation(
-        &left_value,
-        left_type,
-        op,
-        right,
-        right_type,
-        UnitResolutionContext::NamedMeasureOnly,
-    )
+    comparison_operation(&left_value, left_type, op, right, right_type)
 }
 
 /// Endpoint type for runtime range span, with decomposition filled when units exist
@@ -244,14 +234,7 @@ fn compare_with_right_result(
         OperationResult::Value(value) => value,
         OperationResult::Veto(reason) => return OperationResult::Veto(reason),
     };
-    comparison_operation(
-        left,
-        left_type,
-        op,
-        &right_value,
-        right_type,
-        UnitResolutionContext::NamedMeasureOnly,
-    )
+    comparison_operation(left, left_type, op, &right_value, right_type)
 }
 
 #[cfg(test)]
@@ -262,14 +245,9 @@ mod tests {
 
     fn eval_bool(left: &LiteralValue, op: &ComparisonComputation, right: &LiteralValue) -> bool {
         let number_ty = primitive_number_arc();
-        let OperationResult::Value(lit) = comparison_operation(
-            left,
-            number_ty,
-            op,
-            right,
-            number_ty,
-            UnitResolutionContext::NamedMeasureOnly,
-        ) else {
+        let OperationResult::Value(lit) =
+            comparison_operation(left, number_ty, op, right, number_ty)
+        else {
             panic!("expected boolean value");
         };
         match &lit.value {

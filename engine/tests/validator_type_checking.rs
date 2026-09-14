@@ -15,6 +15,28 @@ rule result: 5 and true
 }
 
 #[test]
+fn test_logical_and_requires_boolean_right_operand() {
+    let code = r#"
+spec test
+data flag: boolean
+rule result: flag and 5
+"#;
+
+    let mut engine = Engine::new();
+    let result = engine.load([(lemma::SourceType::Volatile, code.to_string())]);
+    assert!(
+        result.is_err(),
+        "Should reject non-boolean right operand of 'and'"
+    );
+    let errs = result.unwrap_err();
+    assert!(
+        errs.iter()
+            .any(|e| e.to_string().contains("boolean right operand")),
+        "expected right-operand error, got: {errs:?}"
+    );
+}
+
+#[test]
 fn test_mixed_text_and_number_not_allowed() {
     let code = r#"
 spec test

@@ -11,14 +11,6 @@ use crate::planning::semantics::{
 };
 use std::sync::Arc;
 
-/// Describes what type-resolution infrastructure is available at call sites that
-/// still resolve unit names from an expression-scope index (e.g. arithmetic naming).
-#[derive(Copy, Clone)]
-pub enum UnitResolutionContext<'a> {
-    WithIndex(&'a crate::planning::unit_index::UnitIndex),
-    NamedMeasureOnly,
-}
-
 /// Apply a type cast (`as <target>`).
 pub fn convert_unit(
     value: &LiteralValue,

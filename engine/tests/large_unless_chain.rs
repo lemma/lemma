@@ -175,12 +175,29 @@ fn alpha2_analog_explanation_states_evaluated_conditions() {
         .expect("explanation built");
     assert_eq!(
         explanation.causes.len(),
-        1,
-        "the latest slice has one unless condition; only it produces a cause, got {:?}",
+        0,
+        "exclusive default must not dump is-not causes, got {:?}",
         explanation.causes
     );
-    // The condition `code is "L17"` was false; the cause states the
-    // flipped fact that held.
-    assert_eq!(explanation.causes[0].condition, "code is not L17");
-    assert_eq!(explanation.causes[0].value, "true");
+    assert!(
+        explanation.children.iter().any(|child| {
+            matches!(
+                child,
+                lemma::ExplanationNode::Data { name, display }
+                    if name.input_key() == "code" && display == "C042"
+            ) || matches!(
+                child,
+                lemma::ExplanationNode::Compose { operands, .. }
+                    if operands.iter().any(|op| {
+                        matches!(
+                            op,
+                            lemma::ExplanationNode::Data { name, display }
+                                if name.input_key() == "code" && display == "C042"
+                        )
+                    })
+            )
+        }),
+        "exclusive default must attach scrutinee data, got {:?}",
+        explanation.children
+    );
 }

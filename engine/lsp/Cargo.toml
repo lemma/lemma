@@ -22,7 +22,7 @@ workspace = true
 default = []
 
 [dependencies]
-lemma = { package = "lemma-engine", version = "=0.9.9", path = ".." }
+lemma = { package = "lemma-engine", version = "=0.9.10", path = ".." }
 serde_json.workspace = true
 
 # Native: tokio (multi-threaded) + tower-lsp with stdio transport

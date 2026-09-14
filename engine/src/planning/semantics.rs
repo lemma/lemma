@@ -40,7 +40,7 @@ pub fn mirrored_comparison(op: ComparisonComputation) -> ComparisonComputation {
 }
 
 // Internal-only parsing imports (used only within this module for value/type resolution).
-use crate::computation::rational::{checked_div, checked_mul, rational_new, RationalInteger};
+use crate::computation::rational::{checked_div, rational_new, RationalInteger};
 use crate::parsing::ast::Constraint;
 use crate::parsing::ast::{
     BooleanValue, CalendarPeriodUnit, CommandArg, ConversionTarget, DateCalendarKind,
@@ -168,10 +168,12 @@ pub fn calendar_unit_factor(name: &str) -> Option<crate::computation::rational::
 
 fn reject_negative_width_magnitude(magnitude: &RationalInteger, cmd: &str) -> Result<(), String> {
     use crate::computation::rational::rational_zero;
-    if magnitude < &rational_zero() {
-        return Err(format!("{cmd} width must not be negative"));
+    use std::cmp::Ordering;
+    match magnitude.try_cmp(&rational_zero()) {
+        Ok(Ordering::Less) => Err(format!("{cmd} width must not be negative")),
+        Ok(Ordering::Equal | Ordering::Greater) => Ok(()),
+        Err(failure) => Err(format!("{cmd} width compare failed: {failure}")),
     }
-    Ok(())
 }
 
 /// Store a width bound as declared `(magnitude, unit)`. Family and factors are resolved
@@ -231,7 +233,11 @@ pub(crate) fn check_range_bound_consistency(
             ..
         } => {
             if let (Some(lo), Some(hi)) = (lower, upper) {
-                if lo > hi {
+                if lo
+                    .try_cmp(hi)
+                    .map_err(|failure| format!("range endpoint compare failed: {failure}"))?
+                    == Ordering::Greater
+                {
                     return Err(format!(
                         "invalid range: lower {} is greater than upper {}",
                         lo.display_str(),
@@ -240,7 +246,11 @@ pub(crate) fn check_range_bound_consistency(
                 }
             }
             if let (Some(min_w), Some(max_w)) = (minimum, maximum) {
-                if min_w > max_w {
+                if min_w
+                    .try_cmp(max_w)
+                    .map_err(|failure| format!("range width compare failed: {failure}"))?
+                    == Ordering::Greater
+                {
                     return Err(format!(
                         "invalid range: minimum width {} is greater than maximum width {}",
                         min_w.display_str(),
@@ -263,7 +273,11 @@ pub(crate) fn check_range_bound_consistency(
                     measure_declared_bound_to_canonical(&lo.0, &lo.1, units, "range", "lower")?;
                 let hi_c =
                     measure_declared_bound_to_canonical(&hi.0, &hi.1, units, "range", "upper")?;
-                if lo_c > hi_c {
+                if lo_c
+                    .try_cmp(&hi_c)
+                    .map_err(|failure| format!("range endpoint compare failed: {failure}"))?
+                    == Ordering::Greater
+                {
                     return Err(format!(
                         "invalid range: lower {} {} is greater than upper {} {}",
                         lo.0.display_str(),
@@ -280,7 +294,11 @@ pub(crate) fn check_range_bound_consistency(
                 let max_c = measure_declared_bound_to_canonical(
                     &max_w.0, &max_w.1, units, "range", "maximum",
                 )?;
-                if min_c > max_c {
+                if min_c
+                    .try_cmp(&max_c)
+                    .map_err(|failure| format!("range width compare failed: {failure}"))?
+                    == Ordering::Greater
+                {
                     return Err(format!(
                         "invalid range: minimum width {} {} is greater than maximum width {} {}",
                         min_w.0.display_str(),
@@ -334,6 +352,7 @@ fn check_temporal_width_pair_consistency(
     unit_index: &crate::planning::unit_index::UnitIndex,
     allow_calendar: bool,
 ) -> Result<(), String> {
+    use std::cmp::Ordering;
     let resolve = |bound: &(RationalInteger, String),
                    command: &str|
      -> Result<(RationalInteger, Arc<LemmaType>), String> {
@@ -388,7 +407,11 @@ fn check_temporal_width_pair_consistency(
                         .to_string(),
                 );
             }
-            if min_c > max_c {
+            if min_c
+                .try_cmp(&max_c)
+                .map_err(|failure| format!("range width compare failed: {failure}"))?
+                == Ordering::Greater
+            {
                 return Err(format!(
                     "invalid range: minimum width {} {} is greater than maximum width {} {}",
                     min_w.0.display_str(),
@@ -3648,6 +3671,44 @@ impl LemmaType {
             .or_else(|| self.ratio_family_name())
     }
 
+    /// Same base kind and, for measures / measure ranges, the same dimensions:
+    /// the relation under which two types describe the same values. Names and
+    /// constraints may differ. RatioRange stays base-kind only (endpoint policy).
+    #[must_use]
+    pub(crate) fn same_value_type(&self, other: &LemmaType) -> bool {
+        if !self.has_same_base_type(other) {
+            return false;
+        }
+        if self.is_measure() {
+            return self.measure_type_decomposition() == other.measure_type_decomposition();
+        }
+        if self.is_measure_range() {
+            let self_element = self
+                .specifications
+                .element_from_range()
+                .expect("BUG: MeasureRange always defines element_from_range");
+            let other_element = other
+                .specifications
+                .element_from_range()
+                .expect("BUG: MeasureRange always defines element_from_range");
+            match (&self_element, &other_element) {
+                (
+                    TypeSpecification::Measure {
+                        decomposition: self_decomp,
+                        ..
+                    },
+                    TypeSpecification::Measure {
+                        decomposition: other_decomp,
+                        ..
+                    },
+                ) => self_decomp == other_decomp,
+                _ => unreachable!("BUG: element_from_range of MeasureRange yields Measure"),
+            }
+        } else {
+            true
+        }
+    }
+
     /// Returns true if both types are measure and belong to the same named measure family.
     #[must_use]
     pub fn same_measure_family(&self, other: &LemmaType) -> bool {
@@ -5009,29 +5070,29 @@ pub fn refresh_measure_literal_canonical_magnitude(
     lit: &mut LiteralValue,
     previous_type: &LemmaType,
     resolved_type: &LemmaType,
-) {
+) -> Result<(), crate::computation::rational::NumericFailure> {
+    use crate::computation::rational::{checked_div, checked_mul};
     let ValueKind::Measure(magnitude) = &mut lit.value else {
-        return;
+        return Ok(());
     };
     // Binding unit is no longer on ValueKind; magnitude was canonicalized at bind time
     // against the then-current unit table. When a single-term runtime signature unit
     // exists on both tables, rescale if that unit's factor changed.
     let signature = previous_type.measure_runtime_signature();
     let Some((unit_name, 1)) = signature.first().map(|(n, e)| (n.as_str(), *e)) else {
-        return;
+        return Ok(());
     };
     if signature.len() != 1 {
-        return;
+        return Ok(());
     }
     let stored_factor = previous_type.measure_unit_factor(unit_name);
     let resolved_factor = resolved_type.measure_unit_factor(unit_name);
     if stored_factor == resolved_factor {
-        return;
+        return Ok(());
     }
-    let scaled = checked_mul(magnitude, resolved_factor)
-        .expect("BUG: measure recanonicalization multiply overflow");
-    *magnitude =
-        checked_div(&scaled, stored_factor).expect("BUG: measure recanonicalization divide failed");
+    let scaled = checked_mul(magnitude, resolved_factor)?;
+    *magnitude = checked_div(&scaled, stored_factor)?;
+    Ok(())
 }
 
 /// Convert parser [`Value`] to [`ValueKind`] using the target type (canonicalizes ratio at bind).

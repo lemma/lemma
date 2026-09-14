@@ -20,7 +20,7 @@ declare module './lemma.bindings.js' {
   interface Engine {
     /**
      * Load Lemma source(s).
-     * - string → volatile workspace source
+     * - string → volatile source in the default repository
      * - object → labeled sources (key insertion order); `[label, code][]` → labeled sources (array order)
      * Throws `EngineError[]` on failure. `null`/`undefined` rejected.
      */
@@ -36,7 +36,7 @@ declare module './lemma.bindings.js' {
 
     /**
      * JSON serialization of `Vec<ResolvedRepository>` from [`Engine::list`]:
-     * each item has `repository` (name or null for workspace) and `specs`
+     * each item has `repository` (name, or omitted for the default repository) and `specs`
      * (`ListedSpec` rows: name, effective_from, effective_to).
      */
     list(): ResolvedRepository[];
@@ -109,7 +109,7 @@ declare module './lemma.bindings.js' {
 export interface RunOptions {
   /** Spec name (required). */
   spec: string;
-  /** Repository qualifier (e.g. `@org/repo`), or omit for workspace. */
+  /** Repository qualifier (e.g. `@org/repo`), or omit for the default repository. */
   repository?: string | null;
   /** ISO datetime for temporal resolution, or omit for now. */
   effective?: string | null;
@@ -455,6 +455,112 @@ export type LiteralValue =
   | { boolean: "true" | "false" | "yes" | "no" }
   | { range: [LiteralValue, LiteralValue] };
 
+/** Conversion target on a Show `as` expression. */
+export type ShowConversionTarget =
+  | {
+      type:
+        | "boolean"
+        | "measure"
+        | "measure_range"
+        | "number"
+        | "number_range"
+        | "ratio"
+        | "ratio_range"
+        | "text"
+        | "date"
+        | "date_range"
+        | "time"
+        | "time_range";
+    }
+  | { unit: { unit_name: string } };
+
+/** Resolved expression on a Show rule branch (tagged by `type`). */
+export type ShowExpression =
+  | ({ type: "literal" } & RuleResultValue)
+  | { type: "data"; name: string }
+  | { type: "rule"; name: string }
+  | { type: "and"; left: ShowExpression; right: ShowExpression }
+  | { type: "not"; operand: ShowExpression }
+  | {
+      type: "arithmetic";
+      op: "add" | "subtract" | "multiply" | "divide" | "modulo" | "power";
+      left: ShowExpression;
+      right: ShowExpression;
+    }
+  | {
+      type: "comparison";
+      op:
+        | "greater_than"
+        | "less_than"
+        | "greater_than_or_equal"
+        | "less_than_or_equal"
+        | "is"
+        | "is_not";
+      left: ShowExpression;
+      right: ShowExpression;
+    }
+  | {
+      type: "unit_conversion";
+      operand: ShowExpression;
+      target: ShowConversionTarget;
+    }
+  | {
+      type: "math";
+      op:
+        | "sqrt"
+        | "sin"
+        | "cos"
+        | "tan"
+        | "asin"
+        | "acos"
+        | "atan"
+        | "log"
+        | "exp"
+        | "abs"
+        | "floor"
+        | "ceil"
+        | "round";
+      operand: ShowExpression;
+    }
+  | { type: "veto"; message?: string }
+  | { type: "now" }
+  | {
+      type: "date_relative";
+      kind: "in_past" | "in_future";
+      operand: ShowExpression;
+    }
+  | {
+      type: "date_calendar";
+      kind: "current" | "past" | "future" | "not_in";
+      unit: "year" | "month" | "week";
+      operand: ShowExpression;
+    }
+  | { type: "range_literal"; from: ShowExpression; to: ShowExpression }
+  | {
+      type: "past_future_range";
+      kind: "in_past" | "in_future";
+      operand: ShowExpression;
+    }
+  | {
+      type: "range_containment";
+      value: ShowExpression;
+      range: ShowExpression;
+    }
+  | { type: "is_veto"; operand: ShowExpression };
+
+/** One arm of a rule's flat last-match table. Default arm omits condition. */
+export interface ShowBranch {
+  condition?: ShowExpression;
+  result: ShowExpression;
+}
+
+/** Local rule on Show: result type, branches, stored depends_on_rules. */
+export interface ShowRule {
+  type: LemmaType;
+  branches: ShowBranch[];
+  depends_on_rules: string[];
+}
+
 /** Return shape of {@link Engine.show}. */
 export interface Show {
   spec: string;
@@ -465,8 +571,8 @@ export interface Show {
   source_type?: SourceType;
   versions?: ShowVersion[];
   data: Record<string, ShowData>;
-  /** Rule result types; measure and ratio entries expose `units[]` like their data counterparts. */
-  rules: Record<string, LemmaType>;
+  /** Local rule graph; measure/ratio units live under `type.units`. */
+  rules: Record<string, ShowRule>;
   meta: Record<string, LiteralValue>;
 }
 
@@ -479,7 +585,7 @@ export interface ListedSpec {
 
 /** Rust `ResolvedRepository` (engine `list`). */
 export interface ResolvedRepository {
-  /** Absent for the local workspace group (only real repositories carry a name). */
+  /** Absent for the default unnamed repository (only named repositories carry a name). */
   repository?: string;
   specs: ListedSpec[];
 }

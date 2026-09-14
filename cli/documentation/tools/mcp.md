@@ -16,7 +16,9 @@ Point the server at a workspace directory (or a single `.lemma` file) with `--pr
 
 ## Connect
 
-All of these clients start Lemma as a local stdio MCP server. Replace `/path/to/workspace` with your project directory. Add `--write` to the args only when the assistant should create, update, remove, or install repositories from LemmaBase (see [Read-only vs write](#read-only-vs-write)).
+Clients can use stdio (spawn `lemma mcp`) or Streamable HTTP (`lemma mcp --http`). Replace `/path/to/workspace` with your project directory. Add `--write` to the args only when the assistant should create, update, remove, or install repositories from LemmaBase (see [Read-only vs write](#read-only-vs-write)).
+
+### Stdio
 
 Shared shape:
 
@@ -28,6 +30,28 @@ Shared shape:
 ```
 
 Older MCP clients use `initialize` / `notifications/initialized` (protocol `2025-11-25`; later `tools/list` / `tools/call` need no per-request `_meta`). Clients on `2026-07-28` send `_meta.io.modelcontextprotocol/protocolVersion` on every request and may call `server/discover` first.
+
+### Streamable HTTP
+
+Start a long-lived server (default `http://127.0.0.1:8013/mcp`):
+
+```bash
+lemma mcp --http --prefix /path/to/workspace
+```
+
+Point an HTTP MCP client at that URL. Example Cursor / Claude Desktop `url` entry:
+
+```json
+{
+  "mcpServers": {
+    "lemma": {
+      "url": "http://127.0.0.1:8013/mcp"
+    }
+  }
+}
+```
+
+Optional flags: `--host`, `--port` (default `8013`), `--cors`. No built-in auth or TLS; prefer localhost or a reverse proxy.
 
 ### Claude
 
@@ -89,7 +113,6 @@ Cursor Settings → MCP, or a project `.cursor/mcp.json` / user MCP config. Add:
 ```
 
 Enable the server in Cursor’s MCP UI if it is listed but off.
-
 ## What you can do
 
 Once connected, ask the assistant in natural language, for example:
@@ -110,7 +133,7 @@ Pass `--write` when you want the assistant to load or replace specs, remove them
 ## How to work
 
 1. Install the CLI and set `--prefix` to your specs directory.
-2. Connect Claude, Gemini CLI, or Cursor as above (restart the client after config changes).
+2. Connect Claude, Gemini CLI, or Cursor via stdio or Streamable HTTP as above (restart the client after config changes).
 3. Ask questions against your specs; ask for explanations when you care how a rule fired.
 4. For drafting new specs, enable `--write` and ask the assistant to validate, then update the workspace when you are ready.
 

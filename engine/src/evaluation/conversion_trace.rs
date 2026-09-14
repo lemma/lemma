@@ -160,10 +160,10 @@ fn ordered_number_pair<'a>(
     let ValueKind::Number(right_number) = &right.value else {
         unreachable!("BUG: ordered_number_pair called with non-number operand");
     };
-    if left_number <= right_number {
-        (left, right)
-    } else {
-        (right, left)
+    match left_number.try_cmp(right_number) {
+        Ok(Ordering::Greater) => (right, left),
+        Ok(Ordering::Less | Ordering::Equal) => (left, right),
+        Err(_) => unreachable!("BUG: range endpoint compare after successful span conversion"),
     }
 }
 
@@ -177,10 +177,10 @@ fn ordered_measure_pair<'a>(
     let ValueKind::Measure(right_magnitude) = &right.value else {
         unreachable!("BUG: ordered_measure_pair called with non-measure operand");
     };
-    if *left_magnitude <= *right_magnitude {
-        (left, right)
-    } else {
-        (right, left)
+    match left_magnitude.try_cmp(right_magnitude) {
+        Ok(Ordering::Greater) => (right, left),
+        Ok(Ordering::Less | Ordering::Equal) => (left, right),
+        Err(_) => unreachable!("BUG: range endpoint compare after successful span conversion"),
     }
 }
 

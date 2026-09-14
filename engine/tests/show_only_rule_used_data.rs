@@ -103,8 +103,8 @@ rule r: dead
             .get("dead")
             .expect("dead")
             .needed_by_rules
-            .is_empty(),
-        "dead not needed by remaining rules"
+            .contains(&"r".to_string()),
+        "dep < 4 does not fold through rule_ref; default arm stays live so dead is needed by r"
     );
 }
 
@@ -170,7 +170,7 @@ data rate: ratio
     }
 }
 
-/// Transitive needed_by_rules through a linear rule-embed chain.
+/// Transitive needed_by_rules through a linear rule-ref chain.
 #[test]
 fn show_needed_by_rules_transitive_through_chain_embeds() {
     let code = r#"
@@ -225,7 +225,7 @@ rule tip: left + right
     );
 }
 
-/// Rule-target data via `uses`/`with` lowers to the same `rule_embed` cut as a
+/// Rule-target data via `uses`/`with` lowers to the same `rule_ref` cut as a
 /// direct rule ref: consumer's needed set unions the target rule's set.
 #[test]
 fn show_needed_by_rules_through_rule_target_with_binding() {
@@ -241,7 +241,7 @@ spec outer
 uses i: inner
   -> with slot: src.computed
 uses src: source_spec
-rule r: i.slot + 1
+rule r: i.slot
 "#;
 
     let mut engine = Engine::new();
@@ -258,8 +258,18 @@ rule r: i.slot + 1
     );
 
     // Outer plan embeds src.computed via the with-bound i.slot DataPath; show
-    // must still succeed (topo memo handles imported embed targets).
-    engine
+    // must still succeed (topo memo handles imported embed targets) and union
+    // the target rule's needed set onto the consumer.
+    let show_outer = engine
         .show(None, "outer", Some(&DateTimeValue::now()))
         .expect("show outer");
+    assert_eq!(
+        show_outer
+            .data
+            .get("src.x0")
+            .expect("src.x0 must appear in outer show catalog")
+            .needed_by_rules,
+        vec!["r".to_string()],
+        "outer needed_by_rules must union target rule's set through with-bound rule_ref"
+    );
 }

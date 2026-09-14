@@ -22,7 +22,7 @@ Add the crate:
 
 ```toml
 [dependencies]
-lemma-engine = "0.9.9"
+lemma-engine = "0.9.10"
 ```
 
 ### Minimal example
@@ -108,7 +108,7 @@ let response = engine.run(
 
 ### Discovering required data
 
-`Engine::show` is static: every declared promptable data slot, plus local rule result types and temporal window. Empty `needed_by_rules` means offered for reuse (`data x: alias.slot`). Types, filled literals, and `-> suggest` hints live on `Show.data`. For run-data-aware requirements on a partial run, call `run` and inspect each rule's `missing_data`:
+`Engine::show` is static: every declared promptable data slot, plus the local rule graph (`ShowRule` with result type, default/`unless` branches, and `depends_on_rules`) and temporal window. Empty `needed_by_rules` means offered for reuse (`data x: alias.slot`). Types, filled literals, and `-> suggest` hints live on `Show.data`. For run-data-aware requirements on a partial run, call `run` and inspect each rule's `missing_data`:
 
 ```rust
 let response = engine.run(
@@ -242,7 +242,7 @@ Build: `node build.js` (from `engine/packages/npm/`). See [packages/npm/README.m
 <dependency>
   <groupId>com.lemmabase</groupId>
   <artifactId>lemma-engine</artifactId>
-  <version>0.9.9</version>
+  <version>0.9.10</version>
 </dependency>
 ```
 

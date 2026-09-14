@@ -734,9 +734,11 @@ rule main: missing_factor * loading
     );
 }
 
-/// And Propagate (left MissingData) must still eval right so nested unless records.
+/// And Propagate (left MissingData): value walk and missing_data both leave the
+/// right conjunct unreachable (matches `evaluate_and`). The `loading` arms are
+/// absent because the right conjunct is never reached, whatever `is_smoker` is.
 #[test]
-fn d4_and_propagate_still_prunes_unless_under_right_conjunct() {
+fn d4_and_propagate_leaves_right_conjunct_unreachable() {
     let mut engine = Engine::new();
     load(
         &mut engine,
@@ -762,11 +764,11 @@ rule main: missing_flag and (loading > 0)
     );
     assert!(
         !md.contains(&"is_former_smoker".to_string()),
-        "former arm must be dead when last unless is_smoker=true: {md:?}"
+        "right conjunct is unreachable after left MissingData: {md:?}"
     );
     assert!(
         !md.contains(&"years_since_quit".to_string()),
-        "years_since_quit must be dead when last unless is_smoker=true: {md:?}"
+        "right conjunct is unreachable after left MissingData: {md:?}"
     );
 }
 
@@ -904,7 +906,7 @@ rule main: missing_factor * base
 }
 
 /// And left MissingData + right definitive: MissingData wins intake (`false` can still answer).
-/// Right still walks for explain / nested prune (parity with d4).
+/// The right conjunct is never visited (parity with d4), so `age` is not listed.
 #[test]
 fn d8_and_missing_left_awaits_despite_later_definitive_veto() {
     let mut engine = Engine::new();
@@ -994,9 +996,9 @@ rule main: missing_flag and (base > 0)
     );
 }
 
-/// Both conjuncts explore when each is a definitive user veto (`veto and veto`).
+/// Left definitive veto settles And; right conjunct is not visited (value or explain).
 #[test]
-fn d8b_and_explores_both_definitive_user_vetoes() {
+fn d8b_and_left_definitive_veto_does_not_explore_right() {
     let mut engine = Engine::new();
     load(
         &mut engine,
@@ -1022,7 +1024,7 @@ rule z: x and y
         true,
     );
     let z = rule(&plain, "z");
-    assert!(z.vetoed, "z must veto when both conjuncts veto");
+    assert!(z.vetoed, "z must veto when left conjunct vetoes");
     assert!(
         !z.awaits_missing_data(),
         "definitive And must not await MissingData"
@@ -1038,21 +1040,21 @@ rule z: x and y
         "And settles on left definitive veto: {:?}",
         z.veto_reason
     );
-    let explanation = explained
-        .results
-        .get("z")
-        .expect("z")
-        .explanation
-        .as_ref()
-        .expect("explain on");
+    let z_explained = rule(&explained, "z");
+    assert_eq!(
+        z_explained.veto_reason.as_deref(),
+        Some("left veto"),
+        "explain must agree on left veto"
+    );
+    let explanation = z_explained.explanation.as_ref().expect("explain on");
     let names = explanation_rule_names(&explanation.children);
     assert!(
         names.iter().any(|n| n == "x"),
         "left conjunct x must be an explanation child: {names:?}"
     );
     assert!(
-        names.iter().any(|n| n == "y"),
-        "right conjunct y must be explored as an explanation child: {names:?}"
+        !names.iter().any(|n| n == "y"),
+        "right conjunct y must not run after left Propagate: {names:?}"
     );
 }
 
@@ -1074,8 +1076,7 @@ fn explanation_rule_names(nodes: &[ExplanationNode]) -> Vec<String> {
             }
             ExplanationNode::Data { .. }
             | ExplanationNode::DataUnused { .. }
-            | ExplanationNode::Veto { .. }
-            | ExplanationNode::Piecewise { .. } => {}
+            | ExplanationNode::Veto { .. } => {}
         }
     }
     for node in nodes {
@@ -1421,7 +1422,7 @@ rule main: 50 in 0...base
 // --- E. Embeds / references ---
 
 #[test]
-fn e1_rule_embed_surfaces_inner_unbound_on_outer_missing_data() {
+fn e1_rule_ref_surfaces_inner_unbound_on_outer_missing_data() {
     let mut engine = Engine::new();
     load(
         &mut engine,

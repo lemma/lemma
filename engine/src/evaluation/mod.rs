@@ -1,8 +1,9 @@
 //! Pure Rust evaluation engine for Lemma
 //!
 //! Executes pre-validated execution plans by walking each rule's
-//! [`NormalForm`] equation DAG. When `explain` is true the same walk fills
-//! planning-time explanation trees; when false, values only.
+//! [`NormalForm`] equation DAG into one value table ([`tree`]). When `explain`
+//! is true the walk is exhaustive (visits every cell narration displays) and a
+//! second pass ([`narration`]) builds explanation trees from the filled table.
 //!
 //! Request state is one value table indexed by [`NormalFormId`]: the plan's
 //! node table *is* the arena.
@@ -11,6 +12,7 @@ pub(crate) mod branch_semantics;
 pub(crate) mod conversion_trace;
 pub mod explanations;
 pub mod expression;
+pub(crate) mod narration;
 pub mod response;
 pub mod run_data;
 pub(crate) mod tree;
@@ -38,16 +40,16 @@ fn closest_ignored_key(needed: &str, ignored: &[String]) -> Option<String> {
 /// Request-local mutable state for one plan run.
 ///
 /// The value table is indexed by [`NormalFormId`] and doubles as memo and data
-/// store. Rule-embed values live in [`Self::rule_values`], filled in plan
-/// topological order before a consumer body walks. Control decisions for
-/// missing-data walks are read from filled condition / scrutinee slots — there
-/// is no separate log.
+/// store. Rule reference values live in [`Self::rule_values`], filled by
+/// [`tree::evaluate_rule`] before a consumer rule reference reads them. Control decisions
+/// for missing-data walks are read from filled condition / scrutinee slots —
+/// there is no separate log.
 pub(crate) struct EvaluationContext {
     /// One slot per `plan.normal_forms` cell. Filled by data resolve and by
     /// `eval`; never cleared mid-request (values are a function of data).
     pub(crate) values: Vec<Option<OperationResult>>,
     /// One slot per `plan.rules` entry (same index as `IndexMap`). Filled by
-    /// [`tree::evaluate_rule`] before consumers read embeds.
+    /// [`tree::evaluate_rule`] before consumers read rule references.
     pub(crate) rule_values: Vec<Option<OperationResult>>,
     now: LiteralValue,
     /// Ignored input keys from run data (typo hints for MissingData).
@@ -56,12 +58,17 @@ pub(crate) struct EvaluationContext {
     any_promptable_data_unbound: bool,
     /// Successful overlays stamped with the caller-supplied unit (display/veto).
     overlay_types: HashMap<DataPath, Arc<LemmaType>>,
-    /// Explain mode only: Rule explanation nodes filled on demand for embeds.
+    /// Evaluation policy: visit every cell narration displays (rewrite
+    /// pre-images, arithmetic siblings after a definitive veto). Set for explain
+    /// runs. Never changes a value. Unless arms after the winner are already
+    /// visited by the last-wins reverse scan.
+    pub(crate) exhaustive: bool,
+    /// Explain runs only: narrated Rule nodes, filled in plan order after the walk.
     pub(crate) rule_explanations: HashMap<RulePath, crate::planning::explanation::ExplanationNode>,
 }
 
 impl EvaluationContext {
-    fn new(plan: &ExecutionPlan, run_data: &RunData, now: LiteralValue) -> Self {
+    fn new(plan: &ExecutionPlan, run_data: &RunData, now: LiteralValue, exhaustive: bool) -> Self {
         let mut values: Vec<Option<OperationResult>> = vec![None; plan.normal_forms.len()];
 
         // Caller bindings into their data-leaf slots.
@@ -139,8 +146,18 @@ impl EvaluationContext {
                 Some(DataDefinition::Reference {
                     target: ReferenceTarget::Rule(_),
                     ..
-                }) => {}
-                Some(_) => {}
+                }) => unreachable!(
+                    "BUG: data_reference_order holds only data-target references; '{}' targets a rule",
+                    reference_path
+                ),
+                Some(
+                    DataDefinition::Value { .. }
+                    | DataDefinition::TypeDeclaration { .. }
+                    | DataDefinition::Import { .. },
+                ) => unreachable!(
+                    "BUG: data_reference_order entry '{}' is not a reference",
+                    reference_path
+                ),
                 None => unreachable!(
                     "BUG: data_reference_order references missing data path '{}'",
                     reference_path
@@ -163,6 +180,7 @@ impl EvaluationContext {
             ignored_unknown: run_data.ignored_unknown.clone(),
             any_promptable_data_unbound,
             overlay_types: run_data.overlay_types.clone(),
+            exhaustive,
             rule_explanations: HashMap::new(),
         }
     }
@@ -173,18 +191,14 @@ impl EvaluationContext {
         plan: &ExecutionPlan,
         path: &RulePath,
     ) -> &'a OperationResult {
-        let index = plan.rules.get_index_of(path).unwrap_or_else(|| {
-            panic!(
-                "BUG: rule '{}' missing from execution plan while reading embed value",
-                path.rule
-            )
-        });
-        self.rule_values[index].as_ref().unwrap_or_else(|| {
-            panic!(
-                "BUG: rule '{}' embedded before evaluation (plan.rules topological order broken)",
-                path.rule
-            )
-        })
+        self.rule_values[plan.rule_index(path).index()]
+            .as_ref()
+            .unwrap_or_else(|| {
+                panic!(
+                    "BUG: rule '{}' rule reference read before evaluation",
+                    path.rule
+                )
+            })
     }
 
     pub(crate) fn now(&self) -> &LiteralValue {
@@ -302,15 +316,16 @@ impl EvaluationContext {
 pub(crate) struct Evaluator;
 
 impl Evaluator {
-    /// Evaluate an execution plan: dependency closure of requested local rules
-    /// in plan topological order, then report requested results.
+    /// Evaluate an execution plan: walk each requested local rule's NormalForm,
+    /// then report requested results.
     ///
-    /// Rule embeds are evaluation boundaries: a dependency's value is read from
+    /// Rule references are evaluation boundaries: a dependency's value is read from
     /// [`EvaluationContext::rule_values`], never by re-entering its body.
     /// Unbound live inputs are reported per rule as `missing_data` (reachable
     /// under control decisions derived from filled slots, intersected with
-    /// unbound promptable paths). When `explain` is true, dependency
-    /// explanations are ensured before each requested rule's explain walk.
+    /// unbound promptable paths). When `explain` is true the walk is exhaustive
+    /// and every rule with a value is narrated in plan order
+    /// ([`narration::narrate_rule`]) before the response is built.
     pub(crate) fn evaluate(
         &self,
         plan: &ExecutionPlan,
@@ -323,7 +338,7 @@ impl Evaluator {
             ValueKind::Date(date) => date.to_string(),
             other => panic!("BUG: evaluation now must be a date, got {other:?}"),
         };
-        let mut context = EvaluationContext::new(plan, run_data, now);
+        let mut context = EvaluationContext::new(plan, run_data, now, explain);
 
         let mut response = Response {
             spec_name: plan.spec_name.clone(),
@@ -335,54 +350,31 @@ impl Evaluator {
             results: IndexMap::new(),
         };
 
-        let mut marked = vec![false; plan.rules.len()];
-        let mut worklist: Vec<usize> = Vec::new();
-        for (index, (path, _)) in plan.rules.iter().enumerate() {
-            if path.segments.is_empty() && response_rules.contains(path.rule.as_str()) {
-                marked[index] = true;
-                worklist.push(index);
-            }
+        let requested: Vec<&crate::planning::execution_plan::ExecutableRule> = plan
+            .rules
+            .values()
+            .filter(|rule| rule.path.segments.is_empty() && response_rules.contains(rule.name()))
+            .collect();
+
+        for exec_rule in &requested {
+            tree::ensure_rule_values(plan.rule_index(&exec_rule.path), plan, &mut context);
         }
-        while let Some(index) = worklist.pop() {
-            let rule = plan
-                .rules
-                .get_index(index)
-                .map(|(_, rule)| rule)
-                .expect("BUG: marked rule index out of plan.rules range");
-            for dep in &rule.depends_on_rules {
-                let dep_index = plan.rules.get_index_of(dep).unwrap_or_else(|| {
-                    panic!(
-                        "BUG: depends_on_rules entry '{}' missing from plan.rules",
-                        dep.rule
-                    )
-                });
-                if !marked[dep_index] {
-                    marked[dep_index] = true;
-                    worklist.push(dep_index);
+
+        if explain {
+            for (index, rule) in plan.rules.values().enumerate() {
+                if context.rule_values[index].is_some() {
+                    narration::narrate_rule(rule, plan, &mut context);
                 }
             }
         }
 
-        for (index, exec_rule) in plan.rules.values().enumerate() {
-            if !marked[index] {
-                continue;
-            }
+        for exec_rule in requested {
+            let result = context.rule_value(plan, &exec_rule.path).clone();
+            let rule_type = context.rule_result_type(plan, exec_rule);
 
-            let result = tree::evaluate_rule(exec_rule, plan, &mut context);
-            let report =
-                exec_rule.path.segments.is_empty() && response_rules.contains(exec_rule.name());
-            if !report {
-                continue;
-            }
-
-            let explanation = if explain {
-                for dep in &exec_rule.depends_on_rules {
-                    tree::ensure_rule_explained(dep, plan, &mut context);
-                }
-                Some(tree::evaluate_rule_explained(exec_rule, plan, &mut context).1)
-            } else {
-                None
-            };
+            let explanation = explain.then(|| {
+                narration::explanation_for(exec_rule, &context, &result, Arc::clone(&rule_type))
+            });
 
             let missing_data = match &result {
                 OperationResult::Veto(VetoType::MissingData { .. }) => {
@@ -390,8 +382,6 @@ impl Evaluator {
                 }
                 _ => Vec::new(),
             };
-
-            let rule_type = context.rule_result_type(plan, exec_rule);
 
             response.add_result(RuleResult::from_operation_result(
                 EvaluatedRule {
@@ -471,7 +461,7 @@ rule r: i.slot
                 crate::planning::semantics::date_time_to_semantic(&now),
             ),
         };
-        let context = EvaluationContext::new(plan_basis, &run_data, now_lit);
+        let context = EvaluationContext::new(plan_basis, &run_data, now_lit, false);
 
         let stored = context
             .data_slot(plan_basis, &reference_path)

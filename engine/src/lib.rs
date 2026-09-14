@@ -56,7 +56,9 @@ pub use literals::{DateGranularity, MeasureUnit, MeasureUnits, RatioUnit, RatioU
 pub use parsing::ast::DateTimeValue;
 pub use parsing::source::SourceType;
 pub use planning::execution_plan::type_detail_lines;
-pub use planning::execution_plan::{Show, ShowData, ShowVersion};
+pub use planning::execution_plan::{
+    Show, ShowBranch, ShowConversionTarget, ShowData, ShowExpression, ShowRule, ShowVersion,
+};
 pub use planning::explanation::{ConversionTraceRole, SerializedConversionTraceStep};
 pub use planning::semantics::{DataPath, LemmaType, LiteralValue, TypeSpecification, ValueKind};
 pub use result_value::{CalendarResult, RangeResult, RuleResultValue, RuleResultValueFailure};

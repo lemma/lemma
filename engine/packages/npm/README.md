@@ -111,13 +111,13 @@ A pre-wired Monaco adapter ships at `@lemmabase/lemma-engine/monaco`.
 
 | Method | Description |
 |--------|-------------|
-| `load(code)` | Load inline Lemma source as a volatile workspace source |
+| `load(code)` | Load inline Lemma source as a volatile source in the default repository |
 | `load(sources)` | Load multiple sources in one planning pass (`Record<label, text>` or `[label, code][]`; object keys keep insertion order; `@org/pkg` keys tag LemmaBase repositories) |
 | `Engine.withLimits(limits)` | Static: create engine with named limit overrides (unknown keys throw) |
 | `Engine.fromSnapshot(bytes)` | Static: restore engine from `snapshot()` bytes (`Uint8Array`) |
 | `install(name)` | Download a repository from LemmaBase; resolves with `{ source, id }`. Does not load. Rejects with `EngineError[]`. |
 | `list()` | Slim catalog: `ResolvedRepository[]` with `repository` and temporal `specs` rows. Always includes embedded `lemma` / `spec units`. |
-| `show(repo, name, effective?)` | Spec interface + temporal window; `repo` null for workspace. |
+| `show(repo, name, effective?)` | Spec interface + temporal window; `repo` null for the default repository. |
 | `source(repo, spec?, effective?)` | Canonical Lemma source text. Omit `spec` for whole repository. |
 | `run({ spec, repository?, effective?, data?, rules?, explain? })` | Evaluate. Omit `rules` for all rules; pass a non-empty array to scope. `[]` errors. Returns a `Response`. `explain: true` adds per-rule explanation trees. |
 | `remove(repo, name, effective?)` | Remove a temporal spec slice. |

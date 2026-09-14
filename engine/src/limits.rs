@@ -60,7 +60,7 @@ pub struct ResourceLimits {
     pub max_sources: usize,
 
     /// Maximum unique normal-form cells reachable from one rule root in the
-    /// shared graph after normalize. Rule embeds count as one cell: embeds are
+    /// shared graph after normalize. Rule references count as one cell: rule references are
     /// evaluation boundaries, so this bounds only intra-rule IR size. Bounds
     /// planning work and shipped table size. Default: 30,000.
     pub max_normalized_expression_nodes: usize,
@@ -75,7 +75,7 @@ pub struct ResourceLimits {
     pub max_dag_specs: usize,
 
     /// Maximum nesting depth of a rule's normalized NormalForm DAG. Leaves and
-    /// rule embeds count as depth 1: embeds are evaluation boundaries, so this
+    /// rule references count as depth 1: rule references are evaluation boundaries, so this
     /// bounds only intra-rule Kind nesting. The evaluator walks recursively
     /// within one rule; planning must guarantee no rule root overflows the
     /// stack. Lemma's runtime does not return errors — this limit is the
@@ -95,7 +95,7 @@ impl Default for ResourceLimits {
             max_normalized_expression_nodes: 30_000,
             max_spec_dependency_depth: 32,
             max_dag_specs: 4096,
-            // Bounds recursive eval stack depth within one rule (embeds = leaves).
+            // Bounds recursive eval stack depth within one rule (rule references = leaves).
             max_normal_form_depth: 4096,
         }
     }

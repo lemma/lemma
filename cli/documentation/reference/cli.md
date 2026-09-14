@@ -45,7 +45,7 @@ lemma run '@iso/countries' alpha2
 
 ### `lemma show`: declared data catalog and rules
 
-Shows declared data slots with types and constraints (minimum, maximum, units, decimals, text options), filled values, suggestions, and rule result types. Lemma source text is available via `Engine::source` (API) only.
+Shows declared data slots with types and constraints (minimum, maximum, units, decimals, text options), filled values, suggestions, and the local rule graph (`ShowRule`: type, branches, depends_on_rules). Lemma source text is available via `Engine::source` (API) only.
 
 `show` lists every declared promptable data slot (types, constraints, `fill`, suggestions). `needed_by_rules` names local rules that still need the slot after normalize; empty means offered for reuse (`data x: alias.slot`), not an eval intake key for this spec. Run-data-aware pruning for a concrete `run` is per-rule `results.*.missing_data`.
 
@@ -167,17 +167,23 @@ lemma lsp
 
 ### `lemma mcp`: start MCP server
 
-Start the MCP server over stdio so AI assistants can work with workspace specs. Full setup guide: [MCP](../tools/mcp.md).
+Start the MCP server so AI assistants can work with workspace specs. Default transport is stdio. Pass `--http` for Streamable HTTP (`POST /mcp`). Full setup guide: [MCP](../tools/mcp.md).
 
 ```bash
 lemma mcp [--prefix PATH] [--write] [--request-timeout SECONDS]
+lemma mcp --http [--prefix PATH] [--write] [--request-timeout SECONDS] [--host HOST] [--port PORT] [--cors]
 ```
 
 **Options:**
 - `--prefix <path>`: workspace directory or `.lemma` file (default: current directory)
 - `--write`: enable write tools (read-only by default)
 - `--request-timeout <seconds>`: wall-clock timeout for a single request (default: `10`)
+- `--http`: Streamable HTTP instead of stdio
+- `--host <host>`: bind address when using `--http` (default: `127.0.0.1`)
+- `--port <port>`: listen port when using `--http` (default: `8013`; `lemma server` uses `8012`)
+- `--cors`: permissive CORS when using `--http` (off by default)
 
+HTTP MCP has no built-in authentication or TLS. It binds to localhost by default; for non-localhost bind, put it behind a reverse proxy that terminates TLS and enforces access control.
 ## Workspace
 
 A workspace is a directory containing `.lemma` files. Commands that load specs use `--prefix` to select the workspace (default: current directory). Every `.lemma` file is loaded recursively from that directory, plus any repositories in `lemma_deps/`.
@@ -200,8 +206,8 @@ Resource limits control parse-time and planning-time budgets. These are security
 | `max_source_size_bytes` | 5 MB | Single source file size |
 | `max_expression_depth` | 7 | AST nesting depth |
 | `max_expression_count` | 65,536 | Expression nodes per source (parser) |
-| `max_normalized_expression_nodes` | 30,000 | Unique normal-form cells reachable from one rule root after normalize (rule embeds count as one cell) |
-| `max_normal_form_depth` | 4096 | Nesting depth of a rule's normalized NormalForm DAG (rule embeds count as one level) |
+| `max_normalized_expression_nodes` | 30,000 | Unique normal-form cells reachable from one rule root after normalize (rule references count as one cell) |
+| `max_normal_form_depth` | 4096 | Nesting depth of a rule's normalized NormalForm DAG (rule references count as one level) |
 | `max_data_value_bytes` | 1 KB | Single data value size |
 | `max_spec_dependency_depth` | 32 | `uses` chain depth |
 | `max_dag_specs` | 4096 | Total specs in dependency DAG |

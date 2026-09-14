@@ -1,16 +1,13 @@
-//! Explanation API types built during evaluation.
+//! Explanation API types built by narration after evaluation.
 //!
 //! Planning ships THE DAG (`NormalForm` nodes with optional fold `origin`).
-//! Evaluation walks that DAG — following non-piecewise origins for structure;
-//! piecewise origins supply cause records without re-entering live arm control —
-//! and fills these nodes for the response.
+//! Narration ([`crate::evaluation::narration`]) reads the filled value table,
+//! follows origins so rewritten cells display their pre-image, and fills these
+//! nodes for the response.
 //!
 //! Bound data narration is `Data` with a required `display` string.
 //! Structural mentions of paths that were never looked up are `DataUnused`
-//! (no display field) — distinct from a Missing-data veto on a live leaf walk.
-//!
-//! `Piecewise` is eval-internal only. It must be lowered to Rule causes +
-//! winner children before any API serialize.
+//! (no display field), distinct from a Missing-data veto on a visited leaf.
 
 use crate::planning::semantics::{DataPath, RulePath};
 use serde::{Serialize, Serializer};
@@ -74,30 +71,6 @@ pub enum ExplanationNode {
         #[serde(skip_serializing_if = "Option::is_none")]
         message: Option<String>,
     },
-    /// Planning/eval only. Never reaches the API — lowered to causes + winner first.
-    Piecewise {
-        #[serde(serialize_with = "forbid_piecewise_serialize")]
-        arms: Vec<PiecewiseArm>,
-    },
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PiecewiseArm {
-    pub condition: ExplanationNode,
-    pub result: ExplanationNode,
-    /// Plan-time truth of the condition after constant-fold / unless-force.
-    /// `None` means the condition still needs runtime evaluation.
-    pub static_condition: Option<bool>,
-    /// Cause.value when `static_condition` is `Some`. True for held arms and
-    /// narrated flipped comparison facts; false for bare / and-false static miss.
-    pub static_cause_value: Option<bool>,
-}
-
-fn forbid_piecewise_serialize<S: Serializer>(
-    _: &Vec<PiecewiseArm>,
-    _: S,
-) -> Result<S::Ok, S::Error> {
-    panic!("BUG: Piecewise must be lowered before serialize")
 }
 
 fn serialize_option_string<S>(value: &Option<String>, serializer: S) -> Result<S::Ok, S::Error>

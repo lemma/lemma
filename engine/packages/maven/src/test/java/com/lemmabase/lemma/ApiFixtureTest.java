@@ -81,6 +81,7 @@ final class ApiFixtureTest {
         assertEquals("@iso/countries", result.id());
         assertTrue(result.source().contains("repo @iso/countries"));
       }
+      case "show_expression_variant_strings.json" -> parseShowExpressionVariantStrings(json);
       default -> fail("no parse dispatch for fixture: " + name);
     }
   }
@@ -233,5 +234,30 @@ final class ApiFixtureTest {
       }
     }
     assertEquals(LEMMA_TYPE_KINDS, kinds);
+  }
+
+  private static void parseShowExpressionVariantStrings(String json) throws Exception {
+    try (JsonParser p = FACTORY.createParser(json)) {
+      p.nextToken();
+      JsonReading.expectStartObject(p, "show_expression_variant_strings");
+      List<String> variants = null;
+      while (p.nextToken() != JsonToken.END_OBJECT) {
+        String field = p.currentName();
+        p.nextToken();
+        switch (field) {
+          case "description" -> JsonReading.readString(p);
+          case "variants" -> variants = JsonReading.readList(p, JsonReading::readString);
+          default -> JsonReading.unknownField(field, "show_expression_variant_strings");
+        }
+      }
+      if (variants == null) {
+        JsonReading.missingRequired("variants", "show_expression_variant_strings");
+      }
+      assertTrue(!variants.isEmpty());
+      assertTrue(variants.contains("literal"));
+      assertTrue(variants.contains("data"));
+      assertTrue(variants.contains("rule"));
+      assertTrue(variants.contains("arithmetic"));
+    }
   }
 }

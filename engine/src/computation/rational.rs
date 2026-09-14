@@ -556,18 +556,6 @@ impl std::hash::Hash for RationalInteger {
     }
 }
 
-impl PartialOrd for RationalInteger {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl Ord for RationalInteger {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.try_cmp(other).expect("BUG: rational compare OOM")
-    }
-}
-
 impl fmt::Display for RationalInteger {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.display_str())

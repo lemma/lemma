@@ -6,7 +6,7 @@
 
   <groupId>com.lemmabase</groupId>
   <artifactId>lemma-engine</artifactId>
-  <version>0.9.9</version>
+  <version>0.9.10</version>
   <packaging>jar</packaging>
 
   <name>Lemma Engine</name>

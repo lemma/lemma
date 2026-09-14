@@ -7,19 +7,30 @@ use crate::parsing::ast::{
 use crate::parsing::source::Source;
 use crate::planning::discovery;
 use crate::planning::semantics::{
-    self, calendar_decomposition, canonicalize_signature, combine_decompositions,
-    conversion_target_to_semantic, duration_decomposition, number_with_unit_to_value_kind,
-    parser_value_to_value_kind, primitive_boolean_arc, primitive_date_arc,
-    primitive_date_range_arc, primitive_number_arc, primitive_ratio_arc, primitive_text_arc,
-    primitive_time_arc, range_type_specification_from_endpoints, value_kind_from_raw_suggestion,
-    value_kind_matches_spec, value_to_semantic, ArithmeticComputation, BaseMeasureVector,
-    ComparisonComputation, DataDefinition, DataPath, Expression, ExpressionKind, LemmaType,
-    LiteralValue, PathSegment, RawSuggestion, ReferenceEnd, ReferenceTarget, RulePath,
-    SemanticConversionTarget, TypeDefiningSpec, TypeExtends, TypeSpecification, TypedLiteral,
-    ValueKind,
+    self, calendar_decomposition, canonicalize_signature, conversion_target_to_semantic,
+    duration_decomposition, number_with_unit_to_value_kind, parser_value_to_value_kind,
+    primitive_boolean_arc, primitive_date_arc, primitive_number_arc, primitive_ratio_arc,
+    primitive_text_arc, primitive_time_arc, range_type_specification_from_endpoints,
+    value_kind_from_raw_suggestion, value_kind_matches_spec, value_to_semantic,
+    ArithmeticComputation, BaseMeasureVector, ComparisonComputation, DataDefinition, DataPath,
+    Expression, ExpressionKind, LemmaType, LiteralValue, PathSegment, RawSuggestion, ReferenceEnd,
+    ReferenceTarget, RulePath, SemanticConversionTarget, TypeDefiningSpec, TypeExtends,
+    TypeSpecification, TypedLiteral, ValueKind,
+};
+use crate::planning::typing::{
+    comparison_type, date_predicate_type, logical_and_type, logical_not_type, math_op_type,
+    measure_range_matches_measure, past_future_range_type, piecewise_type,
+    range_matches_measure_type, range_matches_range_measure, range_span_type, result_is_veto_type,
+    unit_conversion_type, MeasureScope,
 };
 use crate::planning::unit_index::{UnitIndex, UnitMergeConflict, UnitOwner};
 use crate::Error;
+
+pub use crate::planning::typing::DecompositionMatch;
+pub(crate) use crate::planning::typing::{
+    compute_arithmetic_result_type, find_unique_measure_type_in_unit_index,
+    infer_range_type_from_endpoint_types,
+};
 use ast::DataValue as ParsedDataValue;
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
@@ -215,11 +226,18 @@ impl<'a> Graph<'a> {
             };
             if let Some(type_name) = schema_type.name.as_deref() {
                 if let Some(resolved) = resolved_by_type_name.get(type_name) {
-                    semantics::refresh_measure_literal_canonical_magnitude(
+                    if let Err(failure) = semantics::refresh_measure_literal_canonical_magnitude(
                         value,
                         schema_type.as_ref(),
                         resolved,
-                    );
+                    ) {
+                        coercion_errors.push(Error::validation(
+                            format!("Data '{path}' measure recanonicalization failed: {failure}"),
+                            value_sources.get(path).cloned(),
+                            None::<String>,
+                        ));
+                        continue;
+                    }
                 }
             }
             let typed = TypedLiteral {
@@ -1189,11 +1207,12 @@ fn reference_error(main_spec: &LemmaSpec, source: &Source, message: String) -> E
 /// "Same kind" requires:
 /// 1. matching base type spec (number / measure / text / ratio / …) — see
 ///    [`LemmaType::has_same_base_type`]; and
-/// 2. for measure types, matching measure family — see
-///    [`LemmaType::same_measure_family`]. Two quantities in different families
-///    (e.g. `eur` vs `celsius`) share the `Measure` discriminant but are not
-///    interchangeable values; copying one into the other would silently
-///    propagate a wrong-domain measure.
+/// 2. for measure and measure-range types, matching measure family — see
+///    [`LemmaType::same_measure_family`] (ranges via [`range_span_type`]
+///    element). Two quantities in different families (e.g. `eur` vs
+///    `celsius`) share the `Measure` discriminant but are not interchangeable
+///    values; copying one into the other would silently propagate a
+///    wrong-domain measure. Ratio / ratio-range refs stay base-kind only.
 ///
 /// `target_kind_label` distinguishes the two callers ("target" for data
 /// references, "target rule" for rule references) so the message reads
@@ -1215,29 +1234,47 @@ fn reference_kind_mismatch_message<P: fmt::Display>(
             target_type.name(),
         ));
     }
-    if lhs.is_measure() && !lhs.same_measure_family(target_type) {
-        let lhs_family = lhs.measure_family_name().expect(
-            "BUG: declared measure data must carry a family name; \
-             anonymous measure types only arise from runtime synthesis \
-             and never appear as a reference's LHS-declared type",
-        );
-        let target_family = target_type.measure_family_name().expect(
-            "BUG: declared measure data must carry a family name; \
-             anonymous measure types only arise from runtime synthesis \
-             and never appear as a reference target's schema type",
-        );
-        return Some(format!(
-            "Data reference '{}' measure family mismatch: declared as '{}' (family '{}') but {} '{}' is '{}' (family '{}')",
-            reference_path,
-            lhs.name(),
-            lhs_family,
-            target_kind_label,
-            target_path,
-            target_type.name(),
-            target_family,
-        ));
+
+    let lhs_span;
+    let target_span;
+    let (lhs_measure, target_measure): (&LemmaType, &LemmaType) = if lhs.is_measure() {
+        (lhs, target_type)
+    } else if lhs.is_measure_range() {
+        lhs_span = range_span_type(lhs);
+        target_span = range_span_type(target_type);
+        if lhs_span.is_undetermined() || target_span.is_undetermined() {
+            unreachable!(
+                "BUG: MeasureRange reference kinds must yield measure elements via range_span_type"
+            );
+        }
+        (lhs_span.as_ref(), target_span.as_ref())
+    } else {
+        return None;
+    };
+
+    if lhs_measure.same_measure_family(target_measure) {
+        return None;
     }
-    None
+    let lhs_family = lhs_measure.measure_family_name().expect(
+        "BUG: declared measure data must carry a family name; \
+         anonymous measure types only arise from runtime synthesis \
+         and never appear as a reference's LHS-declared type",
+    );
+    let target_family = target_measure.measure_family_name().expect(
+        "BUG: declared measure data must carry a family name; \
+         anonymous measure types only arise from runtime synthesis \
+         and never appear as a reference target's schema type",
+    );
+    Some(format!(
+        "Data reference '{}' measure family mismatch: declared as '{}' (family '{}') but {} '{}' is '{}' (family '{}')",
+        reference_path,
+        lhs.name(),
+        lhs_family,
+        target_kind_label,
+        target_path,
+        target_type.name(),
+        target_family,
+    ))
 }
 
 /// Type name shown in `-> suggest` constraint errors (the declared type, not the data slot).
@@ -1854,7 +1891,7 @@ impl<'a> GraphBuilder<'a> {
         reference: &ast::Reference,
         reference_source: &Source,
         containing_spec: &'a LemmaSpec,
-        containing_segments_names: &[String],
+        containing_segments: &[PathSegment],
         effective: &EffectiveDate,
     ) -> Option<ReferenceTarget> {
         let containing_data_map: HashMap<String, LemmaData> = containing_spec
@@ -1870,13 +1907,7 @@ impl<'a> GraphBuilder<'a> {
             .map(|r| r.name.as_str())
             .collect();
 
-        let containing_segments: Vec<PathSegment> = containing_segments_names
-            .iter()
-            .map(|name| PathSegment {
-                data: name.clone(),
-                spec: containing_spec.name.clone(),
-            })
-            .collect();
+        let containing_segments = containing_segments.to_vec();
 
         if reference.segments.is_empty() {
             let is_data = containing_data_map.contains_key(&reference.name);
@@ -1970,7 +2001,7 @@ impl<'a> GraphBuilder<'a> {
     fn build_data_bindings(
         &mut self,
         spec: &'a LemmaSpec,
-        current_segment_names: &[String],
+        current_segments: &[PathSegment],
         effective: &EffectiveDate,
     ) -> Result<DataBindings, Vec<Error>> {
         let mut bindings: DataBindings = HashMap::new();
@@ -2060,7 +2091,10 @@ impl<'a> GraphBuilder<'a> {
                     continue;
                 }
 
-                let mut binding_key: Vec<String> = current_segment_names.to_vec();
+                let mut binding_key: Vec<String> = current_segments
+                    .iter()
+                    .map(|segment| segment.data.clone())
+                    .collect();
                 binding_key.extend(binding_reference.segments.iter().cloned());
                 binding_key.push(binding_reference.name.clone());
 
@@ -2071,7 +2105,7 @@ impl<'a> GraphBuilder<'a> {
                             target,
                             &binding.source_location,
                             spec,
-                            current_segment_names,
+                            current_segments,
                             effective,
                         ) else {
                             continue;
@@ -2243,14 +2277,28 @@ impl<'a> GraphBuilder<'a> {
                 );
 
                 if is_generic_measure_range {
-                    if let Some(ValueKind::Range(left, right)) = &declared_suggestion {
-                        if let (ValueKind::Measure(_), ValueKind::Measure(_)) =
-                            (&left.value, &right.value)
-                        {
-                            todo!(
-                                "specialize generic measure range suggestion: endpoint binding units no longer on ValueKind::Range"
-                            );
-                        }
+                    let measure_endpoint_suggest = matches!(
+                        &declared_suggestion,
+                        Some(ValueKind::Range(left, right))
+                            if matches!(
+                                (&left.value, &right.value),
+                                (ValueKind::Measure(_), ValueKind::Measure(_))
+                            )
+                    );
+                    let measure_endpoint_fill = matches!(
+                        &declared_fill,
+                        Some(ValueKind::Range(left, right))
+                            if matches!(
+                                (&left.value, &right.value),
+                                (ValueKind::Measure(_), ValueKind::Measure(_))
+                            )
+                    );
+                    if measure_endpoint_suggest || measure_endpoint_fill {
+                        self.errors.push(self.engine_error(
+                            "measure range requires unit declarations before a measure-endpoint suggest or fill".to_string(),
+                            &effective_source,
+                        ));
+                        return;
                     }
                 }
 
@@ -2701,14 +2749,14 @@ impl<'a> GraphBuilder<'a> {
             current_segments.iter().map(|s| s.data.clone()).collect();
 
         // Step 2: Build data bindings declared in this spec (for passing to referenced specs)
-        let this_spec_bindings =
-            match self.build_data_bindings(spec, &current_segment_names, effective) {
-                Ok(bindings) => bindings,
-                Err(errors) => {
-                    self.errors.extend(errors);
-                    HashMap::new()
-                }
-            };
+        let this_spec_bindings = match self.build_data_bindings(spec, &current_segments, effective)
+        {
+            Ok(bindings) => bindings,
+            Err(errors) => {
+                self.errors.extend(errors);
+                HashMap::new()
+            }
+        };
 
         // Build data_map for rule resolution and other lookups
         let data_map: HashMap<String, &LemmaData> = spec
@@ -3339,66 +3387,21 @@ fn find_types_by_spec<'b>(
         .map(|(_, _, t)| t)
 }
 
-/// Result of a decomposition-based type lookup in scope.
-///
-/// Used by both `infer_expression_type` (to promote anonymous results to named types) and the
-/// rule-boundary check (to produce precise error messages naming candidate types).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum DecompositionMatch {
-    /// No declared measure type in scope has this decomposition.
-    None,
-    /// Exactly one declared measure type in scope has this decomposition.
-    Unique(Arc<LemmaType>),
-    /// Multiple measure families in scope share this decomposition; family names are
-    /// sorted for stable diagnostic ordering.
-    Multiple(Vec<String>),
-}
-
-/// Find the measure family (ies) in scope whose decomposition matches `decomposition` exactly.
-///
-/// Uses the consumer spec's `unit_index` only. Units belong to families; binding aliases in
-/// `resolved` are ignored. Imports are already merged into `unit_index` during resolution.
-pub fn find_unique_measure_type_by_decomposition(
-    resolved_types: &ResolvedTypesMap,
-    spec: &LemmaSpec,
-    decomposition: &BaseMeasureVector,
-) -> DecompositionMatch {
-    let mut seen: HashMap<String, Arc<LemmaType>> = HashMap::new();
-
-    let Some(spec_types) = find_types_by_spec(resolved_types, spec) else {
-        return DecompositionMatch::None;
-    };
-
-    for arc in spec_types.unit_index.values() {
-        let lemma_type = arc.as_ref();
-        if !matches!(lemma_type.specifications, TypeSpecification::Measure { .. }) {
-            continue;
-        }
-        if lemma_type
-            .measure_type_decomposition()
-            .is_none_or(|decomposition_vector| decomposition_vector != decomposition)
-        {
-            continue;
-        }
-        let measure_family = lemma_type
-            .measure_family_name()
-            .expect("BUG: unit_index measure type must carry a family name");
-        seen.entry(measure_family.to_string())
-            .or_insert_with(|| Arc::clone(arc));
-    }
-
-    match seen.len() {
-        0 => DecompositionMatch::None,
-        1 => DecompositionMatch::Unique(
-            seen.into_values()
-                .next()
-                .expect("BUG: seen has exactly one element, len checked"),
-        ),
-        _ => {
-            let mut family_names: Vec<String> = seen.into_keys().collect();
-            family_names.sort();
-            DecompositionMatch::Multiple(family_names)
-        }
+/// The one measure scope of a plan: the main spec's resolved unit index and
+/// signature index, which already merge every `uses` import. Graph inference,
+/// NormalForm cell stamping and evaluation all resolve arithmetic in it, for
+/// imported rules too, so a rule has exactly one type inside a plan.
+fn arithmetic_scope<'b>(resolved_types: &'b ResolvedTypesMap, graph: &Graph) -> MeasureScope<'b> {
+    let main_spec = graph.main_spec();
+    let types = find_types_by_spec(resolved_types, main_spec).unwrap_or_else(|| {
+        panic!(
+            "BUG: main spec '{}' typed before its types were resolved",
+            main_spec.name
+        )
+    });
+    MeasureScope {
+        unit_index: &types.unit_index,
+        signature_index: &types.signature_index,
     }
 }
 
@@ -3419,13 +3422,13 @@ fn anonymous_rule_boundary_requires_rejection() -> bool {
 fn anonymous_rule_boundary_error(
     rule_path: &RulePath,
     spec: &LemmaSpec,
+    graph: &Graph,
     resolved_types: &ResolvedTypesMap,
     decomposition: &BaseMeasureVector,
     branch_index: Option<usize>,
 ) -> String {
-    let candidates_hint = match find_unique_measure_type_by_decomposition(
-        resolved_types,
-        spec,
+    let candidates_hint = match find_unique_measure_type_in_unit_index(
+        arithmetic_scope(resolved_types, graph).unit_index,
         decomposition,
     ) {
         DecompositionMatch::Multiple(family_names) => format!(
@@ -3436,404 +3439,13 @@ fn anonymous_rule_boundary_error(
     };
     match branch_index {
         Some(index) => format!(
-            "Unless clause {} in rule '{}' (spec '{}') returns an anonymous intermediate with \
-             unresolved dimensions {:?}. Give the rule a named measure or ratio type with \
-             declared units, or rewrite the expression so dimensions resolve to a named type in scope.{}",
+            "Unless clause {} in rule '{}' (spec '{}') returns an anonymous intermediate with              unresolved dimensions {:?}. Give the rule a named measure or ratio type with              declared units, or rewrite the expression so dimensions resolve to a named type in scope.{}",
             index, rule_path.rule, spec.name, decomposition, candidates_hint
         ),
         None => format!(
-            "Rule '{}' in spec '{}' returns an anonymous intermediate with unresolved \
-             dimensions {:?}. Give the rule a named measure or ratio type with declared units, \
-             or rewrite the expression so dimensions resolve to a named type in scope.{}",
+            "Rule '{}' in spec '{}' returns an anonymous intermediate with unresolved              dimensions {:?}. Give the rule a named measure or ratio type with declared units,              or rewrite the expression so dimensions resolve to a named type in scope.{}",
             rule_path.rule, spec.name, decomposition, candidates_hint
         ),
-    }
-}
-
-pub(crate) fn compute_arithmetic_result_type(
-    left_type: Arc<LemmaType>,
-    op: &ArithmeticComputation,
-    right_type: Arc<LemmaType>,
-) -> Arc<LemmaType> {
-    compute_arithmetic_result_type_recursive(left_type, op, right_type, false)
-}
-
-fn compute_arithmetic_result_type_recursive(
-    left_type: Arc<LemmaType>,
-    op: &ArithmeticComputation,
-    right_type: Arc<LemmaType>,
-    swapped: bool,
-) -> Arc<LemmaType> {
-    match (&left_type.specifications, &right_type.specifications) {
-        (TypeSpecification::Veto { .. }, _) | (_, TypeSpecification::Veto { .. }) => {
-            Arc::new(LemmaType::veto_type())
-        }
-        (TypeSpecification::Undetermined, _) => Arc::new(LemmaType::undetermined_type()),
-
-        (TypeSpecification::Date { .. }, TypeSpecification::Time { .. }) => Arc::new(
-            LemmaType::anonymous_for_decomposition(duration_decomposition()),
-        ),
-
-        // Measure pairs must fall through to operator-specific arms below.
-        // The general equal-type guard must not short-circuit those.
-        _ if *left_type == *right_type
-            && !matches!(
-                &left_type.specifications,
-                TypeSpecification::Measure { .. }
-                    | TypeSpecification::MeasureRange { .. }
-                    | TypeSpecification::NumberRange { .. }
-                    | TypeSpecification::DateRange { .. }
-                    | TypeSpecification::TimeRange { .. }
-                    | TypeSpecification::RatioRange { .. }
-            ) =>
-        {
-            Arc::clone(&left_type)
-        }
-
-        (TypeSpecification::Date { .. }, TypeSpecification::Measure { .. })
-            if right_type.is_duration_like_measure() =>
-        {
-            Arc::clone(&left_type)
-        }
-        (TypeSpecification::Date { .. }, TypeSpecification::Measure { .. })
-            if right_type.is_calendar_like_measure() =>
-        {
-            Arc::clone(&left_type)
-        }
-        (TypeSpecification::Measure { .. }, TypeSpecification::Date { .. })
-            if left_type.is_calendar_like_measure() =>
-        {
-            Arc::clone(&right_type)
-        }
-        (TypeSpecification::Time { .. }, TypeSpecification::Measure { .. })
-            if right_type.is_duration_like_measure() =>
-        {
-            Arc::clone(&left_type)
-        }
-
-        (TypeSpecification::Measure { .. }, TypeSpecification::Ratio { .. }) => {
-            Arc::clone(&left_type)
-        }
-        (TypeSpecification::Measure { .. }, TypeSpecification::Number { .. }) => match op {
-            ArithmeticComputation::Multiply
-            | ArithmeticComputation::Divide
-            | ArithmeticComputation::Modulo
-            | ArithmeticComputation::Power => Arc::clone(&left_type),
-            _ => Arc::new(LemmaType::undetermined_type()),
-        },
-        (
-            TypeSpecification::Measure {
-                decomposition: l_decomp_opt,
-                ..
-            },
-            TypeSpecification::Measure {
-                decomposition: r_decomp_opt,
-                ..
-            },
-        ) => match op {
-            ArithmeticComputation::Add | ArithmeticComputation::Subtract => {
-                if left_type.compatible_with_anonymous_measure(&right_type)
-                    || right_type.compatible_with_anonymous_measure(&left_type)
-                {
-                    let left_decomp = left_type.measure_type_decomposition();
-                    let right_decomp = right_type.measure_type_decomposition();
-                    if let (Some(ld), Some(rd)) = (left_decomp, right_decomp) {
-                        if ld == rd {
-                            if *ld == duration_decomposition() {
-                                Arc::new(LemmaType::anonymous_for_decomposition(
-                                    duration_decomposition(),
-                                ))
-                            } else {
-                                Arc::new(LemmaType::anonymous_for_decomposition(ld.clone()))
-                            }
-                        } else if left_type.is_duration_like_measure()
-                            && right_type.is_duration_like_measure()
-                        {
-                            Arc::new(LemmaType::anonymous_for_decomposition(
-                                duration_decomposition(),
-                            ))
-                        } else if left_type.is_calendar_like() && right_type.is_calendar_like() {
-                            Arc::new(LemmaType::anonymous_for_decomposition(
-                                calendar_decomposition(),
-                            ))
-                        } else {
-                            Arc::clone(&left_type)
-                        }
-                    } else if left_type.is_duration_like_measure()
-                        && right_type.is_duration_like_measure()
-                    {
-                        Arc::new(LemmaType::anonymous_for_decomposition(
-                            duration_decomposition(),
-                        ))
-                    } else if left_type.is_calendar_like() && right_type.is_calendar_like() {
-                        Arc::new(LemmaType::anonymous_for_decomposition(
-                            calendar_decomposition(),
-                        ))
-                    } else {
-                        Arc::clone(&left_type)
-                    }
-                } else {
-                    Arc::clone(&left_type)
-                }
-            }
-            ArithmeticComputation::Multiply | ArithmeticComputation::Divide => {
-                match (l_decomp_opt, r_decomp_opt) {
-                    (Some(l_decomp), Some(r_decomp)) => {
-                        let combined = combine_decompositions(
-                            l_decomp,
-                            r_decomp,
-                            matches!(op, ArithmeticComputation::Multiply),
-                        );
-                        if combined.is_empty() {
-                            primitive_number_arc().clone()
-                        } else {
-                            Arc::new(LemmaType::anonymous_for_decomposition(combined))
-                        }
-                    }
-                    _ => Arc::clone(&left_type),
-                }
-            }
-            _ => primitive_number_arc().clone(),
-        },
-
-        (
-            TypeSpecification::Number { .. },
-            TypeSpecification::Measure {
-                decomposition: r_decomp_opt,
-                ..
-            },
-        ) => match op {
-            ArithmeticComputation::Multiply => Arc::clone(&right_type),
-            ArithmeticComputation::Divide => match r_decomp_opt {
-                Some(r_decomp) if !r_decomp.is_empty() => {
-                    let negated: BaseMeasureVector =
-                        r_decomp.iter().map(|(k, &e)| (k.clone(), -e)).collect();
-                    Arc::new(LemmaType::anonymous_for_decomposition(negated))
-                }
-                _ => primitive_number_arc().clone(),
-            },
-            _ => Arc::new(LemmaType::undetermined_type()),
-        },
-
-        (TypeSpecification::Number { .. }, TypeSpecification::Ratio { .. }) => {
-            primitive_number_arc().clone()
-        }
-        (TypeSpecification::Ratio { .. }, TypeSpecification::Number { .. }) => match op {
-            ArithmeticComputation::Multiply => primitive_number_arc().clone(),
-            _ => Arc::clone(&left_type),
-        },
-        (TypeSpecification::Number { .. }, TypeSpecification::Number { .. }) => {
-            primitive_number_arc().clone()
-        }
-
-        (TypeSpecification::Ratio { .. }, TypeSpecification::Ratio { .. }) => {
-            Arc::clone(&left_type)
-        }
-        (TypeSpecification::DateRange { .. }, TypeSpecification::DateRange { .. }) => match op {
-            ArithmeticComputation::Add | ArithmeticComputation::Subtract => {
-                range_span_type(&left_type)
-            }
-            _ => Arc::new(LemmaType::undetermined_type()),
-        },
-        (TypeSpecification::NumberRange { .. }, TypeSpecification::NumberRange { .. }) => {
-            match op {
-                ArithmeticComputation::Add | ArithmeticComputation::Subtract => {
-                    range_span_type(&left_type)
-                }
-                _ => Arc::new(LemmaType::undetermined_type()),
-            }
-        }
-        (TypeSpecification::MeasureRange { .. }, TypeSpecification::MeasureRange { .. }) => {
-            match op {
-                ArithmeticComputation::Add | ArithmeticComputation::Subtract
-                    if range_matches_range_measure(&left_type, &right_type) =>
-                {
-                    range_span_type(&left_type)
-                }
-                _ => Arc::new(LemmaType::undetermined_type()),
-            }
-        }
-        (TypeSpecification::RatioRange { .. }, TypeSpecification::RatioRange { .. }) => match op {
-            ArithmeticComputation::Add | ArithmeticComputation::Subtract => {
-                range_span_type(&left_type)
-            }
-            _ => Arc::new(LemmaType::undetermined_type()),
-        },
-        (TypeSpecification::NumberRange { .. }, TypeSpecification::Number { .. })
-        | (TypeSpecification::RatioRange { .. }, TypeSpecification::Ratio { .. }) => match op {
-            ArithmeticComputation::Add | ArithmeticComputation::Subtract => {
-                range_span_type(&left_type)
-            }
-            _ => Arc::new(LemmaType::undetermined_type()),
-        },
-        (TypeSpecification::MeasureRange { .. }, TypeSpecification::Measure { .. }) => match op {
-            ArithmeticComputation::Add | ArithmeticComputation::Subtract
-                if range_matches_measure_type(&left_type, &right_type) =>
-            {
-                range_span_type(&left_type)
-            }
-            _ => Arc::new(LemmaType::undetermined_type()),
-        },
-        (TypeSpecification::Number { .. }, TypeSpecification::NumberRange { .. }) => match op {
-            ArithmeticComputation::Add | ArithmeticComputation::Subtract => {
-                range_span_type(&right_type)
-            }
-            _ => Arc::new(LemmaType::undetermined_type()),
-        },
-        (TypeSpecification::Measure { .. }, TypeSpecification::MeasureRange { .. }) => match op {
-            ArithmeticComputation::Add | ArithmeticComputation::Subtract
-                if range_matches_measure_type(&right_type, &left_type) =>
-            {
-                range_span_type(&right_type)
-            }
-            _ => Arc::new(LemmaType::undetermined_type()),
-        },
-        (TypeSpecification::Ratio { .. }, TypeSpecification::RatioRange { .. }) => match op {
-            ArithmeticComputation::Add | ArithmeticComputation::Subtract => {
-                range_span_type(&right_type)
-            }
-            _ => Arc::new(LemmaType::undetermined_type()),
-        },
-        (TypeSpecification::DateRange { .. }, TypeSpecification::Measure { .. })
-            if right_type.is_duration_like_measure() =>
-        {
-            match op {
-                ArithmeticComputation::Add | ArithmeticComputation::Subtract => {
-                    range_span_type(&left_type)
-                }
-                _ => Arc::new(LemmaType::undetermined_type()),
-            }
-        }
-        (TypeSpecification::DateRange { .. }, TypeSpecification::Measure { .. })
-            if right_type.is_calendar_like_measure() =>
-        {
-            match op {
-                ArithmeticComputation::Add | ArithmeticComputation::Subtract => {
-                    Arc::clone(&left_type)
-                }
-                _ => Arc::new(LemmaType::undetermined_type()),
-            }
-        }
-        (TypeSpecification::Measure { .. }, TypeSpecification::DateRange { .. })
-            if left_type.is_duration_like_measure() =>
-        {
-            match op {
-                ArithmeticComputation::Add | ArithmeticComputation::Subtract => {
-                    range_span_type(&right_type)
-                }
-                _ => Arc::new(LemmaType::undetermined_type()),
-            }
-        }
-        (TypeSpecification::Measure { .. }, TypeSpecification::DateRange { .. })
-            if left_type.is_calendar_like_measure() =>
-        {
-            match op {
-                ArithmeticComputation::Add | ArithmeticComputation::Subtract => {
-                    Arc::clone(&right_type)
-                }
-                _ => Arc::new(LemmaType::undetermined_type()),
-            }
-        }
-        _ => {
-            if swapped {
-                Arc::new(LemmaType::undetermined_type())
-            } else {
-                compute_arithmetic_result_type_recursive(right_type, op, left_type, true)
-            }
-        }
-    }
-}
-
-pub(crate) fn infer_range_type_from_endpoint_types(
-    left_type: &LemmaType,
-    right_type: &LemmaType,
-) -> Arc<LemmaType> {
-    range_type_specification_from_endpoints(left_type, right_type)
-        .map(|spec| Arc::new(LemmaType::primitive(spec)))
-        .unwrap_or_else(|| Arc::new(LemmaType::undetermined_type()))
-}
-
-fn range_span_type(range_type: &LemmaType) -> Arc<LemmaType> {
-    match &range_type.specifications {
-        TypeSpecification::DateRange { .. } => Arc::new(LemmaType::anonymous_for_decomposition(
-            duration_decomposition(),
-        )),
-        TypeSpecification::TimeRange { .. } => Arc::new(LemmaType::anonymous_for_decomposition(
-            duration_decomposition(),
-        )),
-        TypeSpecification::NumberRange { .. } => primitive_number_arc().clone(),
-        TypeSpecification::MeasureRange { .. } | TypeSpecification::RatioRange { .. } => {
-            let element_spec = range_type
-                .specifications
-                .element_from_range()
-                .expect("BUG: MeasureRange and RatioRange always define element_from_range");
-            Arc::new(LemmaType {
-                name: range_type.name.clone(),
-                specifications: element_spec,
-                extends: range_type.extends.clone(),
-                measure_binding_unit: None,
-            })
-        }
-        _ => Arc::new(LemmaType::undetermined_type()),
-    }
-}
-
-fn range_matches_measure_type(range_type: &LemmaType, measure_type: &LemmaType) -> bool {
-    match &range_type.specifications {
-        TypeSpecification::DateRange { .. } => {
-            measure_type.is_duration_like() || measure_type.is_calendar_like()
-        }
-        TypeSpecification::TimeRange { .. } => measure_type.is_duration_like(),
-        TypeSpecification::NumberRange { .. } => measure_type.is_number(),
-        TypeSpecification::MeasureRange { .. } => {
-            measure_type.is_measure() && measure_range_matches_measure(range_type, measure_type)
-        }
-        TypeSpecification::RatioRange { .. } => measure_type.is_ratio(),
-        _ => false,
-    }
-}
-
-fn range_matches_range_measure(left_range: &LemmaType, right_range: &LemmaType) -> bool {
-    let right_measure_type = range_span_type(right_range);
-    !right_measure_type.is_undetermined()
-        && range_matches_measure_type(left_range, &right_measure_type)
-}
-
-fn measure_range_matches_measure(range_type: &LemmaType, measure_type: &LemmaType) -> bool {
-    if !measure_type.is_measure() {
-        return false;
-    }
-    if let Some(element_spec) = range_type.specifications.element_from_range() {
-        let endpoint_type = LemmaType::primitive(element_spec);
-        if endpoint_type.same_measure_family(measure_type)
-            || endpoint_type.compatible_with_anonymous_measure(measure_type)
-            || measure_type.compatible_with_anonymous_measure(&endpoint_type)
-        {
-            return true;
-        }
-    }
-    match (&range_type.specifications, &measure_type.specifications) {
-        (
-            TypeSpecification::MeasureRange {
-                units: range_units,
-                decomposition: range_decomposition,
-                ..
-            },
-            TypeSpecification::Measure {
-                units: measure_units,
-                decomposition: measure_decomposition,
-                ..
-            },
-        ) => {
-            if range_units.0.is_empty() && range_decomposition.is_none() {
-                true
-            } else if measure_decomposition.is_none() {
-                range_units == measure_units
-            } else {
-                range_units == measure_units && range_decomposition == measure_decomposition
-            }
-        }
-        _ => false,
     }
 }
 
@@ -3898,32 +3510,13 @@ fn infer_expression_type_uncached(
                 infer_expression_type(left, graph, computed_rule_types, resolved_types, spec);
             let right_type =
                 infer_expression_type(right, graph, computed_rule_types, resolved_types, spec);
-            if left_type.vetoed() || right_type.vetoed() {
-                return Arc::new(LemmaType::veto_type());
-            }
-            if left_type.is_undetermined() || right_type.is_undetermined() {
-                return Arc::new(LemmaType::undetermined_type());
-            }
-            if !left_type.is_boolean() {
-                return Arc::new(LemmaType::undetermined_type());
-            }
-            if right_type.is_boolean() {
-                primitive_boolean_arc().clone()
-            } else {
-                right_type
-            }
+            logical_and_type(&left_type, &right_type)
         }
 
         ExpressionKind::LogicalNegation(operand, _) => {
             let operand_type =
                 infer_expression_type(operand, graph, computed_rule_types, resolved_types, spec);
-            if operand_type.vetoed() {
-                return Arc::new(LemmaType::veto_type());
-            }
-            if operand_type.is_undetermined() {
-                return Arc::new(LemmaType::undetermined_type());
-            }
-            primitive_boolean_arc().clone()
+            logical_not_type(&operand_type)
         }
 
         ExpressionKind::Comparison(left, _op, right) => {
@@ -3931,13 +3524,7 @@ fn infer_expression_type_uncached(
                 infer_expression_type(left, graph, computed_rule_types, resolved_types, spec);
             let right_type =
                 infer_expression_type(right, graph, computed_rule_types, resolved_types, spec);
-            if left_type.vetoed() || right_type.vetoed() {
-                return Arc::new(LemmaType::veto_type());
-            }
-            if left_type.is_undetermined() || right_type.is_undetermined() {
-                return Arc::new(LemmaType::undetermined_type());
-            }
-            primitive_boolean_arc().clone()
+            comparison_type(&left_type, &right_type)
         }
 
         ExpressionKind::Arithmetic(left, operator, right) => {
@@ -3945,30 +3532,12 @@ fn infer_expression_type_uncached(
                 infer_expression_type(left, graph, computed_rule_types, resolved_types, spec);
             let right_type =
                 infer_expression_type(right, graph, computed_rule_types, resolved_types, spec);
-            let mut result = compute_arithmetic_result_type(
-                Arc::clone(&left_type),
+            compute_arithmetic_result_type(
+                left_type,
                 operator,
-                Arc::clone(&right_type),
-            );
-            if result.is_anonymous_measure() {
-                if let Some(decomp) = result.measure_type_decomposition() {
-                    if !decomp.is_empty() {
-                        if let DecompositionMatch::Unique(lemma_type) =
-                            find_unique_measure_type_by_decomposition(resolved_types, spec, decomp)
-                        {
-                            result = lemma_type;
-                        }
-                    }
-                }
-            }
-            if matches!(operator, ArithmeticComputation::Divide)
-                && left_type.is_number()
-                && right_type.is_measure()
-                && result.is_anonymous_measure()
-            {
-                result = primitive_number_arc().clone();
-            }
-            result
+                right_type,
+                &arithmetic_scope(resolved_types, graph),
+            )
         }
 
         ExpressionKind::UnitConversion(source_expression, target) => {
@@ -3979,47 +3548,13 @@ fn infer_expression_type_uncached(
                 resolved_types,
                 spec,
             );
-            match target {
-                SemanticConversionTarget::Type(PrimitiveKind::Number) => {
-                    primitive_number_arc().clone()
-                }
-                SemanticConversionTarget::Type(PrimitiveKind::Text) => primitive_text_arc().clone(),
-                SemanticConversionTarget::Type(PrimitiveKind::Boolean) => {
-                    primitive_boolean_arc().clone()
-                }
-                SemanticConversionTarget::Type(kind)
-                    if source_type.matches_primitive_kind(*kind) =>
-                {
-                    source_type
-                }
-                SemanticConversionTarget::Unit {
-                    unit_name,
-                    owning_type,
-                } => Arc::new(
-                    owning_type
-                        .as_ref()
-                        .clone()
-                        .with_measure_binding_unit(unit_name.clone()),
-                ),
-                SemanticConversionTarget::Type(_) => Arc::new(LemmaType::undetermined_type()),
-            }
+            unit_conversion_type(&source_type, target)
         }
 
         ExpressionKind::MathematicalComputation(op, operand) => {
             let operand_type =
                 infer_expression_type(operand, graph, computed_rule_types, resolved_types, spec);
-            if operand_type.vetoed() {
-                return Arc::new(LemmaType::veto_type());
-            }
-            if operand_type.is_undetermined() {
-                return Arc::new(LemmaType::undetermined_type());
-            }
-            if crate::computation::mathematical_computation_preserves_measure_magnitude(op)
-                && operand_type.is_measure()
-            {
-                return operand_type;
-            }
-            primitive_number_arc().clone()
+            math_op_type(op, &operand_type, &arithmetic_scope(resolved_types, graph))
         }
 
         ExpressionKind::Veto(_) => Arc::new(LemmaType::veto_type()),
@@ -4027,7 +3562,7 @@ fn infer_expression_type_uncached(
         ExpressionKind::ResultIsVeto(operand) => {
             let _ =
                 infer_expression_type(operand, graph, computed_rule_types, resolved_types, spec);
-            primitive_boolean_arc().clone()
+            result_is_veto_type()
         }
 
         ExpressionKind::Now => primitive_date_arc().clone(),
@@ -4036,10 +3571,7 @@ fn infer_expression_type_uncached(
         | ExpressionKind::DateCalendar(_, _, date_expr) => {
             let date_type =
                 infer_expression_type(date_expr, graph, computed_rule_types, resolved_types, spec);
-            if date_type.vetoed() {
-                return Arc::new(LemmaType::veto_type());
-            }
-            primitive_boolean_arc().clone()
+            date_predicate_type(&date_type)
         }
 
         ExpressionKind::RangeContainment(value, range) => {
@@ -4075,10 +3607,7 @@ fn infer_expression_type_uncached(
                 resolved_types,
                 spec,
             );
-            if offset_type.vetoed() {
-                return Arc::new(LemmaType::veto_type());
-            }
-            primitive_date_range_arc().clone()
+            past_future_range_type(&offset_type)
         }
 
         ExpressionKind::Piecewise(arms) => {
@@ -4204,8 +3733,15 @@ fn check_logical_and_operands(
             ),
         )]);
     }
-    if right_type.is_boolean() {
-        return Ok(());
+    if !right_type.is_boolean() {
+        return Err(vec![engine_error_at_graph(
+            graph,
+            source,
+            format!(
+                "Logical AND requires boolean right operand, got {}",
+                right_type
+            ),
+        )]);
     }
     Ok(())
 }
@@ -5414,6 +4950,7 @@ fn check_expression(
                                 Arc::clone(&left_type),
                                 operator,
                                 Arc::clone(&inner_type),
+                                &arithmetic_scope(resolved_types, graph),
                             );
                             let combined_is_valid_conversion_source = combined_type.is_measure()
                                 && (combined_type.same_measure_family(target_type)
@@ -5801,7 +5338,7 @@ fn check_expression(
 
 /// Check all rule types in topological order, given precomputed inferred types.
 /// Validates:
-/// - Branch type consistency (all non-Veto branches must return the same primitive type)
+/// - Branch type consistency (all non-Veto branches must return the same value type)
 /// - Condition types (unless clause conditions must be boolean)
 /// - All sub-expressions via `check_expression`
 fn check_rule_types(
@@ -5851,6 +5388,7 @@ fn check_rule_types(
                         anonymous_rule_boundary_error(
                             rule_path,
                             spec,
+                            graph,
                             resolved_types,
                             decomp,
                             None,
@@ -5923,6 +5461,7 @@ fn check_rule_types(
                             anonymous_rule_boundary_error(
                                 rule_path,
                                 spec,
+                                graph,
                                 resolved_types,
                                 decomp,
                                 Some(branch_index),
@@ -5936,7 +5475,7 @@ fn check_rule_types(
                 if non_veto_type.is_none() {
                     non_veto_type = Some(result_type.as_ref().clone());
                 } else if let Some(ref existing_type) = non_veto_type {
-                    if !existing_type.has_same_base_type(result_type.as_ref()) {
+                    if !existing_type.same_value_type(result_type.as_ref()) {
                         let Some(rule_node) = graph.rules().get(rule_path) else {
                             unreachable!(
                                 "BUG: rule type validation referenced missing rule '{}'",
@@ -5965,7 +5504,7 @@ fn check_rule_types(
                         }
 
                         errors.push(Error::validation_with_context(
-                            format!("Type mismatch in rule '{}' in spec '{}' ({}): default branch returns {}, but unless clause {} returns {}. All branches must return the same primitive type.",
+                            format!("Type mismatch in rule '{}' in spec '{}' ({}): default branch returns {}, but unless clause {} returns {}. All branches must return the same value type (matching base kind and, for measures, dimensions).",
                             rule_path.rule,
                             spec.name,
                             location_parts.join(", "),
@@ -6027,24 +5566,10 @@ fn infer_rule_types(
             continue;
         }
 
-        let (_, default_result) = &branches[0];
-        let default_type =
-            infer_expression_type(default_result, graph, &computed_types, resolved_types, spec);
-
-        let mut non_veto_type: Option<Arc<LemmaType>> = None;
-        if !default_type.vetoed() && !default_type.is_undetermined() {
-            non_veto_type = Some(default_type);
-        }
-
-        for (_branch_index, (_condition, result)) in branches.iter().enumerate().skip(1) {
-            let result_type =
-                infer_expression_type(result, graph, &computed_types, resolved_types, spec);
-            if !result_type.vetoed() && !result_type.is_undetermined() && non_veto_type.is_none() {
-                non_veto_type = Some(result_type);
-            }
-        }
-
-        let rule_type = non_veto_type.unwrap_or_else(|| Arc::new(LemmaType::veto_type()));
+        let body_types = branches.iter().map(|(_condition, result)| {
+            infer_expression_type(result, graph, &computed_types, resolved_types, spec)
+        });
+        let rule_type = piecewise_type(body_types);
         computed_types.insert(rule_path.clone(), rule_type);
     }
 
@@ -6526,32 +6051,68 @@ fn refresh_named_range_specs(
         if let Some(ValueKind::Range(left, right)) =
             declared_suggestions.get_mut(type_name.as_str())
         {
-            let coerced_left = Graph::coerce_literal_to_schema_type(
+            let stamp_for_value = |value: &ValueKind| -> Arc<LemmaType> {
+                match value {
+                    ValueKind::Number(_) => Arc::clone(semantics::primitive_number_arc()),
+                    ValueKind::Text(_) => Arc::clone(semantics::primitive_text_arc()),
+                    ValueKind::Boolean(_) => Arc::clone(semantics::primitive_boolean_arc()),
+                    ValueKind::Date(_) => Arc::clone(semantics::primitive_date_arc()),
+                    ValueKind::Time(_) => Arc::clone(semantics::primitive_time_arc()),
+                    ValueKind::Ratio(_) => Arc::clone(semantics::primitive_ratio_arc()),
+                    ValueKind::Measure(_) => {
+                        Arc::new(LemmaType::primitive(TypeSpecification::measure()))
+                    }
+                    other => panic!(
+                        "BUG: named range suggestion endpoint has non-endpoint kind {other:?}"
+                    ),
+                }
+            };
+            let left_value = left.value.clone();
+            let right_value = right.value.clone();
+            let coerced_left = match Graph::coerce_literal_to_schema_type(
                 &TypedLiteral {
-                    value: left.value.clone(),
-                    lemma_type: Arc::clone(&endpoint_type),
+                    value: left_value.clone(),
+                    lemma_type: stamp_for_value(&left_value),
                 },
                 &endpoint_type,
-            )
-            .unwrap_or_else(|message| {
-                panic!(
-                    "BUG: coercing named range default left endpoint for '{}': {}",
-                    type_name, message
-                )
-            });
-            let coerced_right = Graph::coerce_literal_to_schema_type(
+            ) {
+                Ok(coerced) => coerced,
+                Err(message) => {
+                    errors.push(Error::validation_with_context(
+                        format!(
+                            "In spec '{}': named range default left endpoint for '{}': {message}",
+                            spec.name, type_name
+                        ),
+                        Some(def.source.clone()),
+                        None::<String>,
+                        Some(spec),
+                        None,
+                    ));
+                    continue;
+                }
+            };
+            let coerced_right = match Graph::coerce_literal_to_schema_type(
                 &TypedLiteral {
-                    value: right.value.clone(),
-                    lemma_type: Arc::clone(&endpoint_type),
+                    value: right_value.clone(),
+                    lemma_type: stamp_for_value(&right_value),
                 },
                 &endpoint_type,
-            )
-            .unwrap_or_else(|message| {
-                panic!(
-                    "BUG: coercing named range default right endpoint for '{}': {}",
-                    type_name, message
-                )
-            });
+            ) {
+                Ok(coerced) => coerced,
+                Err(message) => {
+                    errors.push(Error::validation_with_context(
+                        format!(
+                            "In spec '{}': named range default right endpoint for '{}': {message}",
+                            spec.name, type_name
+                        ),
+                        Some(def.source.clone()),
+                        None::<String>,
+                        Some(spec),
+                        None,
+                    ));
+                    continue;
+                }
+            };
             *declared_suggestions
                 .get_mut(type_name.as_str())
                 .expect("BUG: named range default removed while refreshing endpoints") =
@@ -8764,7 +8325,12 @@ rule r: i.x
                 .clone();
             let map = vec![(repository, units_arc, resolved)];
 
-            let unique = find_unique_measure_type_by_decomposition(&map, units_arc, &eur_decomp);
+            let unique = find_unique_measure_type_in_unit_index(
+                &find_types_by_spec(&map, units_arc)
+                    .expect("units in map")
+                    .unit_index,
+                &eur_decomp,
+            );
             match unique {
                 DecompositionMatch::Multiple(families) => {
                     assert_eq!(families.len(), 2);
@@ -9971,6 +9537,7 @@ rule r: i.x
         use super::super::*;
         use crate::engine::Context;
         use crate::parsing::parse;
+        use crate::planning::typing::range_span_type;
         use crate::ResourceLimits;
         use std::sync::Arc;
 
@@ -10101,7 +9668,12 @@ rule r: i.x
         #[test]
         fn unique_decomposition_carries_matching_arc() {
             let (map, worker_spec, decomp, alpha_torque) = worker_torque_fixture();
-            let unique = find_unique_measure_type_by_decomposition(&map, worker_spec, &decomp);
+            let unique = find_unique_measure_type_in_unit_index(
+                &find_types_by_spec(&map, worker_spec)
+                    .expect("worker in map")
+                    .unit_index,
+                &decomp,
+            );
             match unique {
                 DecompositionMatch::Unique(arc) => {
                     assert_eq!(*arc, *alpha_torque);
@@ -10120,7 +9692,12 @@ rule r: i.x
                 .2
                 .resolved = IndexMap::new();
 
-            let unique = find_unique_measure_type_by_decomposition(&map, worker_spec, &decomp);
+            let unique = find_unique_measure_type_in_unit_index(
+                &find_types_by_spec(&map, worker_spec)
+                    .expect("worker in map")
+                    .unit_index,
+                &decomp,
+            );
             match unique {
                 DecompositionMatch::Unique(arc) => {
                     assert_eq!(*arc, *alpha_torque);
@@ -10317,8 +9894,18 @@ rule r: i.x
         fn arithmetic_measure_range_plus_measure_yields_named_measure_span() {
             let weight_range = weight_measure_range_type();
             let gram = weight_measure_type();
-            let result =
-                compute_arithmetic_result_type(weight_range, &ArithmeticComputation::Add, gram);
+            let unit_index = UnitIndex::new();
+            let signature_index = crate::computation::arithmetic::SignatureIndex::new();
+            let scope = MeasureScope {
+                unit_index: &unit_index,
+                signature_index: &signature_index,
+            };
+            let result = compute_arithmetic_result_type(
+                weight_range,
+                &ArithmeticComputation::Add,
+                gram,
+                &scope,
+            );
             assert!(result.is_measure());
             assert!(!result.is_measure_range());
             assert_eq!(result.name.as_deref(), Some("weight"));
@@ -10329,10 +9916,17 @@ rule r: i.x
         fn arithmetic_measure_range_minus_measure_yields_named_measure_span() {
             let weight_range = weight_measure_range_type();
             let gram = weight_measure_type();
+            let unit_index = UnitIndex::new();
+            let signature_index = crate::computation::arithmetic::SignatureIndex::new();
+            let scope = MeasureScope {
+                unit_index: &unit_index,
+                signature_index: &signature_index,
+            };
             let result = compute_arithmetic_result_type(
                 weight_range,
                 &ArithmeticComputation::Subtract,
                 gram,
+                &scope,
             );
             assert!(result.is_measure());
             assert!(!result.is_measure_range());
@@ -10344,8 +9938,18 @@ rule r: i.x
         fn arithmetic_date_range_plus_duration_yields_duration_span_not_date_range() {
             let date_range = Arc::new(LemmaType::primitive(TypeSpecification::date_range()));
             let duration = duration_like_measure_type();
-            let result =
-                compute_arithmetic_result_type(date_range, &ArithmeticComputation::Add, duration);
+            let unit_index = UnitIndex::new();
+            let signature_index = crate::computation::arithmetic::SignatureIndex::new();
+            let scope = MeasureScope {
+                unit_index: &unit_index,
+                signature_index: &signature_index,
+            };
+            let result = compute_arithmetic_result_type(
+                date_range,
+                &ArithmeticComputation::Add,
+                duration,
+                &scope,
+            );
             assert!(result.is_duration_like_measure());
             assert!(!result.is_date_range());
             assert!(!result.is_date());
@@ -10355,8 +9959,18 @@ rule r: i.x
         fn arithmetic_date_range_plus_calendar_yields_date_range() {
             let date_range = Arc::new(LemmaType::primitive(TypeSpecification::date_range()));
             let calendar = calendar_like_measure_type();
-            let result =
-                compute_arithmetic_result_type(date_range, &ArithmeticComputation::Add, calendar);
+            let unit_index = UnitIndex::new();
+            let signature_index = crate::computation::arithmetic::SignatureIndex::new();
+            let scope = MeasureScope {
+                unit_index: &unit_index,
+                signature_index: &signature_index,
+            };
+            let result = compute_arithmetic_result_type(
+                date_range,
+                &ArithmeticComputation::Add,
+                calendar,
+                &scope,
+            );
             assert!(result.is_date_range());
         }
     }
@@ -10401,6 +10015,10 @@ pub struct ResolvedSpecTypes {
     /// Expression-scope units. One declarer per bare unit name; qualify with Type.unit or alias.Type.unit.
     /// Binding aliases never appear as index keys.
     pub unit_index: crate::planning::unit_index::UnitIndex,
+
+    /// Reverse index: canonical-form unit signature → (unit_name, owning type).
+    /// Built from [`Self::unit_index`] during resolve; cloned into the execution plan.
+    pub signature_index: crate::computation::arithmetic::SignatureIndex,
 }
 
 /// Intermediate type definition extracted from [`DataValue::Definition`] data.
@@ -10811,10 +10429,6 @@ impl<'a> TypeResolver<'a> {
             ));
         }
 
-        if let Err(error) = build_signature_index(&spec.name, &resolved_types.unit_index) {
-            errors.push(error);
-        }
-
         let (new_resolved, resolved_errors) = finalize_measure_magnitudes_in_resolved(
             std::mem::take(&mut resolved_types.resolved),
             &resolved_types.declared_suggestions,
@@ -10837,6 +10451,11 @@ impl<'a> TypeResolver<'a> {
             spec,
         );
         resolved_types.unit_index = new_unit_index;
+
+        match build_signature_index(&spec.name, &resolved_types.unit_index) {
+            Ok(index) => resolved_types.signature_index = index,
+            Err(error) => errors.push(error),
+        }
 
         if !resolved_errors.is_empty() || !unit_index_errors.is_empty() {
             errors.extend(resolved_errors);
@@ -11612,6 +11231,7 @@ impl<'a> TypeResolver<'a> {
             source_defaults: IndexMap::new(),
             source_fill_defaults: IndexMap::new(),
             unit_index,
+            signature_index: crate::computation::arithmetic::SignatureIndex::new(),
         })
     }
 
@@ -11865,21 +11485,36 @@ pub fn validate_type_specifications(
                     ),
                 ) {
                     (Ok(min_canonical), Ok(max_canonical)) => {
-                        if min_canonical > max_canonical {
-                            errors.push(Error::validation_with_context(
-                                format!(
-                                    "Type '{}' has invalid range: minimum {} {} is greater than maximum {} {}",
-                                    type_name,
-                                    min.0,
-                                    min.1,
-                                    max.0,
-                                    max.1
-                                ),
-                                Some(source.clone()),
-                                None::<String>,
-                                spec_context,
-                                None,
-                            ));
+                        match min_canonical.try_cmp(&max_canonical) {
+                            Ok(std::cmp::Ordering::Greater) => {
+                                errors.push(Error::validation_with_context(
+                                    format!(
+                                        "Type '{}' has invalid range: minimum {} {} is greater than maximum {} {}",
+                                        type_name,
+                                        min.0,
+                                        min.1,
+                                        max.0,
+                                        max.1
+                                    ),
+                                    Some(source.clone()),
+                                    None::<String>,
+                                    spec_context,
+                                    None,
+                                ));
+                            }
+                            Ok(std::cmp::Ordering::Less | std::cmp::Ordering::Equal) => {}
+                            Err(failure) => {
+                                errors.push(Error::validation_with_context(
+                                    format!(
+                                        "Type '{}' has invalid measure bound: range compare failed: {failure}",
+                                        type_name
+                                    ),
+                                    Some(source.clone()),
+                                    None::<String>,
+                                    spec_context,
+                                    None,
+                                ));
+                            }
                         }
                     }
                     (Err(message), _) | (_, Err(message)) => {
@@ -11980,17 +11615,32 @@ pub fn validate_type_specifications(
         } => {
             // Validate range consistency
             if let (Some(min), Some(max)) = (minimum, maximum) {
-                if min > max {
-                    errors.push(Error::validation_with_context(
-                        format!(
-                            "Type '{}' has invalid range: minimum {} is greater than maximum {}",
-                            type_name, min, max
-                        ),
-                        Some(source.clone()),
-                        None::<String>,
-                        spec_context,
-                        None,
-                    ));
+                match min.try_cmp(max) {
+                    Ok(std::cmp::Ordering::Greater) => {
+                        errors.push(Error::validation_with_context(
+                            format!(
+                                "Type '{}' has invalid range: minimum {} is greater than maximum {}",
+                                type_name, min, max
+                            ),
+                            Some(source.clone()),
+                            None::<String>,
+                            spec_context,
+                            None,
+                        ));
+                    }
+                    Ok(std::cmp::Ordering::Less | std::cmp::Ordering::Equal) => {}
+                    Err(failure) => {
+                        errors.push(Error::validation_with_context(
+                            format!(
+                                "Type '{}' has invalid range: bound compare failed: {failure}",
+                                type_name
+                            ),
+                            Some(source.clone()),
+                            None::<String>,
+                            spec_context,
+                            None,
+                        ));
+                    }
                 }
             }
 
@@ -12012,31 +11662,61 @@ pub fn validate_type_specifications(
 
             if let Some(ValueKind::Number(def)) = declared_default {
                 if let Some(min) = minimum {
-                    if *def < *min {
-                        errors.push(Error::validation_with_context(
-                            format!(
-                                "Type '{}' {default_label} value {} is less than minimum {}",
-                                type_name, def, min
-                            ),
-                            Some(source.clone()),
-                            None::<String>,
-                            spec_context,
-                            None,
-                        ));
+                    match def.try_cmp(min) {
+                        Ok(std::cmp::Ordering::Less) => {
+                            errors.push(Error::validation_with_context(
+                                format!(
+                                    "Type '{}' {default_label} value {} is less than minimum {}",
+                                    type_name, def, min
+                                ),
+                                Some(source.clone()),
+                                None::<String>,
+                                spec_context,
+                                None,
+                            ));
+                        }
+                        Ok(std::cmp::Ordering::Equal | std::cmp::Ordering::Greater) => {}
+                        Err(failure) => {
+                            errors.push(Error::validation_with_context(
+                                format!(
+                                    "Type '{}' {default_label} bound compare failed: {failure}",
+                                    type_name
+                                ),
+                                Some(source.clone()),
+                                None::<String>,
+                                spec_context,
+                                None,
+                            ));
+                        }
                     }
                 }
                 if let Some(max) = maximum {
-                    if *def > *max {
-                        errors.push(Error::validation_with_context(
-                            format!(
-                                "Type '{}' {default_label} value {} is greater than maximum {}",
-                                type_name, def, max
-                            ),
-                            Some(source.clone()),
-                            None::<String>,
-                            spec_context,
-                            None,
-                        ));
+                    match def.try_cmp(max) {
+                        Ok(std::cmp::Ordering::Greater) => {
+                            errors.push(Error::validation_with_context(
+                                format!(
+                                    "Type '{}' {default_label} value {} is greater than maximum {}",
+                                    type_name, def, max
+                                ),
+                                Some(source.clone()),
+                                None::<String>,
+                                spec_context,
+                                None,
+                            ));
+                        }
+                        Ok(std::cmp::Ordering::Less | std::cmp::Ordering::Equal) => {}
+                        Err(failure) => {
+                            errors.push(Error::validation_with_context(
+                                format!(
+                                    "Type '{}' {default_label} bound compare failed: {failure}",
+                                    type_name
+                                ),
+                                Some(source.clone()),
+                                None::<String>,
+                                spec_context,
+                                None,
+                            ));
+                        }
                     }
                 }
             }
@@ -12068,27 +11748,25 @@ pub fn validate_type_specifications(
 
             // Validate range consistency
             if let (Some(min), Some(max)) = (minimum, maximum) {
-                if min > max {
-                    errors.push(Error::validation_with_context(
-                        format!(
-                            "Type '{}' has invalid range: minimum {} is greater than maximum {}",
-                            type_name, min, max
-                        ),
-                        Some(source.clone()),
-                        None::<String>,
-                        spec_context,
-                        None,
-                    ));
-                }
-            }
-
-            if let Some(ValueKind::Ratio(def)) = declared_default {
-                if let Some(min) = minimum {
-                    if *def < *min {
+                match min.try_cmp(max) {
+                    Ok(std::cmp::Ordering::Greater) => {
                         errors.push(Error::validation_with_context(
                             format!(
-                                "Type '{}' {default_label} value {} is less than minimum {}",
-                                type_name, def, min
+                                "Type '{}' has invalid range: minimum {} is greater than maximum {}",
+                                type_name, min, max
+                            ),
+                            Some(source.clone()),
+                            None::<String>,
+                            spec_context,
+                            None,
+                        ));
+                    }
+                    Ok(std::cmp::Ordering::Less | std::cmp::Ordering::Equal) => {}
+                    Err(failure) => {
+                        errors.push(Error::validation_with_context(
+                            format!(
+                                "Type '{}' has invalid range: bound compare failed: {failure}",
+                                type_name
                             ),
                             Some(source.clone()),
                             None::<String>,
@@ -12097,18 +11775,65 @@ pub fn validate_type_specifications(
                         ));
                     }
                 }
+            }
+
+            if let Some(ValueKind::Ratio(def)) = declared_default {
+                if let Some(min) = minimum {
+                    match def.try_cmp(min) {
+                        Ok(std::cmp::Ordering::Less) => {
+                            errors.push(Error::validation_with_context(
+                                format!(
+                                    "Type '{}' {default_label} value {} is less than minimum {}",
+                                    type_name, def, min
+                                ),
+                                Some(source.clone()),
+                                None::<String>,
+                                spec_context,
+                                None,
+                            ));
+                        }
+                        Ok(std::cmp::Ordering::Equal | std::cmp::Ordering::Greater) => {}
+                        Err(failure) => {
+                            errors.push(Error::validation_with_context(
+                                format!(
+                                    "Type '{}' {default_label} bound compare failed: {failure}",
+                                    type_name
+                                ),
+                                Some(source.clone()),
+                                None::<String>,
+                                spec_context,
+                                None,
+                            ));
+                        }
+                    }
+                }
                 if let Some(max) = maximum {
-                    if *def > *max {
-                        errors.push(Error::validation_with_context(
-                            format!(
-                                "Type '{}' {default_label} value {} is greater than maximum {}",
-                                type_name, def, max
-                            ),
-                            Some(source.clone()),
-                            None::<String>,
-                            spec_context,
-                            None,
-                        ));
+                    match def.try_cmp(max) {
+                        Ok(std::cmp::Ordering::Greater) => {
+                            errors.push(Error::validation_with_context(
+                                format!(
+                                    "Type '{}' {default_label} value {} is greater than maximum {}",
+                                    type_name, def, max
+                                ),
+                                Some(source.clone()),
+                                None::<String>,
+                                spec_context,
+                                None,
+                            ));
+                        }
+                        Ok(std::cmp::Ordering::Less | std::cmp::Ordering::Equal) => {}
+                        Err(failure) => {
+                            errors.push(Error::validation_with_context(
+                                format!(
+                                    "Type '{}' {default_label} bound compare failed: {failure}",
+                                    type_name
+                                ),
+                                Some(source.clone()),
+                                None::<String>,
+                                spec_context,
+                                None,
+                            ));
+                        }
                     }
                 }
             }

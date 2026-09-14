@@ -456,7 +456,7 @@ defmodule LemmaTest do
       assert source =~ "trait duration"
     end
 
-    test "nil repository returns workspace source after load" do
+    test "nil repository returns default repository source after load" do
       {:ok, engine} = Lemma.new()
       :ok = Lemma.load(engine, %{"ws.lemma" => @simple_spec})
       assert {:ok, source} = Lemma.source(engine, nil, nil, nil)
@@ -641,6 +641,12 @@ defmodule LemmaTest do
       assert amount.type["kind"] == "number"
       assert amount.suggestion == %{"number" => "1"}
       assert amount.needed_by_rules == ["ok"]
+
+      ok = Map.fetch!(show.rules, "ok")
+      assert %Lemma.ShowRule{} = ok
+      assert ok.type["kind"] == "number"
+      assert ok.depends_on_rules == []
+      assert length(ok.branches) == 1
     end
 
     test "preserves semantics after formatting" do

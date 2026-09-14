@@ -83,7 +83,11 @@ fn show_rule_schema_includes_child_unit() {
     let engine = engine_with_parent_child_money();
     let now = DateTimeValue::now();
     let show = engine.show(None, "family_units", Some(&now)).expect("show");
-    let total_type = show.rules.get("total").expect("total rule schema");
+    let total_type = &show
+        .rules
+        .get("total")
+        .expect("total rule schema")
+        .lemma_type;
     let unit_names: Vec<&str> = total_type
         .measure_unit_names()
         .expect("measure rule")
@@ -191,7 +195,7 @@ rule need_parent: base_rate
 
     let now = DateTimeValue::now();
     let show = engine.show(None, "ratio_family", Some(&now)).expect("show");
-    let out_type = show.rules.get("out").expect("out rule schema");
+    let out_type = &show.rules.get("out").expect("out rule schema").lemma_type;
     let unit_names: Vec<&str> = out_type
         .ratio_unit_names()
         .expect("ratio rule")
@@ -279,7 +283,11 @@ rule total: 0 eur
     let show = engine
         .show(None, "grandchild_units", Some(&now))
         .expect("show");
-    let total_type = show.rules.get("total").expect("total rule schema");
+    let total_type = &show
+        .rules
+        .get("total")
+        .expect("total rule schema")
+        .lemma_type;
     let unit_names: Vec<&str> = total_type
         .measure_unit_names()
         .expect("measure rule")

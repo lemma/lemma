@@ -28,7 +28,7 @@ Input parsing and response decimal strings both enforce [`Decimal::MAX_SCALE`](h
 | Literals, JSON input, API input | Magnitude ±79,228,162,514,264,337,593,543,950,335 (~7.92×10²⁸); at most 28 decimal digits (`Decimal::MAX_SCALE`) |
 | Internal compute (ℚ) | Arbitrary precision; bounded by available memory (all BigInt allocation is fallible) |
 
-Intermediate values during evaluation may exceed the decimal range or use more precision than 28 digits. Internal computation never precision-fails. Only top-level rule results written into the response envelope are rounded to `Decimal::MAX_SCALE`. Magnitude overflow (`|value| > Decimal::MAX`) vetoes with `Calculated result exceeds decimal value limit`. That rounding applies when building the response envelope, not when storing in `rule_results` (which keeps exact ℚ values).
+Intermediate values during evaluation may exceed the decimal range or use more precision than 28 digits. Internal computation never precision-fails. Only top-level rule results written into the response envelope are rounded to `Decimal::MAX_SCALE`. Magnitude overflow (`|value| > Decimal::MAX`) vetoes with `Calculated result exceeds decimal value limit`. That rounding applies when building the response envelope, not when storing in `rule_values` (which keeps exact ℚ values).
 
 When an exact rational grows past what memory allows, evaluation vetoes with `out of memory` instead of crashing the process. This is resource exhaustion, not a decimal-scale failure.
 

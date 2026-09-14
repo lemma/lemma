@@ -142,11 +142,11 @@ impl fmt::Display for EffectiveDate {
 /// A Lemma repository header. Identity carrier; never owns specs.
 ///
 /// `name` includes the `@` prefix when present (e.g. `Some("@jack/finance")`).
-/// `None` for the workspace-global anonymous grouping. Identity (used by
+/// `None` for the default unnamed repository. Identity (used by
 /// `PartialEq`, `Eq`, `Hash`, and `Ord` for `BTreeMap` keying) is just `name`.
 /// `dependency`, `start_line` and `source_type` are metadata excluded from identity.
 ///
-/// `dependency` is the provenance guard: `None` for workspace-loaded repos,
+/// `dependency` is the provenance guard: `None` for locally loaded repos,
 /// `Some(id)` for repos introduced by a dependency. All specs in a repo must
 /// share the same `dependency` value — the engine rejects mismatches at load time.
 ///
@@ -154,9 +154,9 @@ impl fmt::Display for EffectiveDate {
 /// [`ParseResult`]; loaders set `dependency` when inserting dependency bundles.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct LemmaRepository {
-    /// Repository name, including `@` when present. `None` for anonymous repositories.
+    /// Repository name, including `@` when present. `None` for the default unnamed repository.
     pub name: Option<String>,
-    /// Dependency provenance: `None` for workspace repos, `Some(id)` for dependency repos.
+    /// Dependency provenance: `None` for locally loaded repos, `Some(id)` for dependency repos.
     /// Not part of identity — used as an isolation guard at load time.
     pub dependency: Option<String>,
     pub start_line: usize,

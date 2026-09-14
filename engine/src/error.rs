@@ -99,7 +99,7 @@ pub enum Error {
     /// A referenced repository is not present in the context (not loaded / not fetched).
     ///
     /// Produced during planning when a `uses @repository ...` reference names a repository
-    /// qualifier that has not been added to the workspace.
+    /// qualifier that has not been loaded.
     MissingRepository {
         details: Box<ErrorDetails>,
         /// Full repository qualifier as written (e.g. `"@iso/countries"`).

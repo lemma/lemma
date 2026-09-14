@@ -50,18 +50,30 @@ const showMinimal = showMinimalJson as {
   };
   rules: {
     ok: {
-      name: "amount";
-      kind: "number";
-      minimum: null;
-      maximum: null;
-      decimals: null;
-      help: string;
-      extends: {
-        kind: "custom";
-        parent: "number";
-        family: "amount";
-        defining_spec: { kind: "local" };
+      type: {
+        name: "amount";
+        kind: "number";
+        minimum: null;
+        maximum: null;
+        decimals: null;
+        help: string;
+        extends: {
+          kind: "custom";
+          parent: "number";
+          family: "amount";
+          defining_spec: { kind: "local" };
+        };
       };
+      branches: [
+        {
+          result: {
+            type: "literal";
+            number: "1";
+            display: "1";
+          };
+        }
+      ];
+      depends_on_rules: [];
     };
   };
   meta: {

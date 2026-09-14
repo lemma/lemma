@@ -214,6 +214,31 @@ public final class JsonReading {
   }
 
   /**
+   * Reads one JSON value as a generic Java object ({@link Map}, {@link List}, string, number,
+   * boolean, or {@code null}).
+   *
+   * @param p parser at the value
+   * @return parsed value
+   * @throws IOException if JSON IO fails
+   */
+  public static @Nullable Object readJsonValue(JsonParser p) throws IOException {
+    JsonToken token = p.currentToken();
+    if (token == null) {
+      throw new LemmaBugError("BUG: expected JSON value");
+    }
+    return switch (token) {
+      case START_OBJECT -> readMap(p, JsonReading::readJsonValue);
+      case START_ARRAY -> readList(p, JsonReading::readJsonValue);
+      case VALUE_STRING -> p.getText();
+      case VALUE_NUMBER_INT, VALUE_NUMBER_FLOAT -> new BigDecimal(p.getText());
+      case VALUE_TRUE -> Boolean.TRUE;
+      case VALUE_FALSE -> Boolean.FALSE;
+      case VALUE_NULL -> null;
+      default -> throw new LemmaBugError("BUG: unexpected token " + token + " for JSON value");
+    };
+  }
+
+  /**
    * Finds a string field value in a shallow JSON object.
    *
    * @param json JSON object text

@@ -16,7 +16,9 @@ pub mod graph;
 pub mod normalize;
 pub mod ordered_dispatch;
 pub mod semantics;
+pub mod show_expression;
 pub mod spec_set;
+pub mod typing;
 pub mod unit_family;
 pub mod unit_index;
 use crate::engine::Context;
@@ -32,7 +34,7 @@ use std::unreachable;
 
 /// Canonical identity of one temporal spec set: `(repository, spec name)`.
 ///
-/// `repository` is `None` for the workspace. Both components are canonicalized
+/// `repository` is `None` for the default unnamed repository. Both components are canonicalized
 /// exactly as [`PlanStore`] canonicalizes its own keys, so a key built here always
 /// addresses the same entry the plans were stored under.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -324,7 +326,7 @@ impl<'a> PlanView<'a> {
     }
 }
 
-/// Compiled plans keyed by repository name (`None` = workspace) then spec name.
+/// Compiled plans keyed by repository name (`None` = default unnamed repository) then spec name.
 ///
 /// Temporal slices per spec are a [`BTreeMap`] keyed by [`ExecutionPlan::effective`].
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -1222,7 +1224,7 @@ data x: 1
         SourceType::Path(Arc::new(PathBuf::from(name)))
     }
 
-    /// Build a context from one source text and return it with its workspace repository.
+    /// Build a context from one source text and return it with its default repository.
     fn context_from(source: &str) -> (Context, Arc<LemmaRepository>) {
         let specs = crate::parse(
             source,
@@ -1241,7 +1243,7 @@ data x: 1
         (context, workspace)
     }
 
-    /// Spec-set names the scope covers when `changed` names change, workspace only.
+    /// Spec-set names the scope covers when `changed` names change, default repository only.
     fn scope_names(source: &str, changed: &[&str]) -> std::collections::BTreeSet<String> {
         let (context, workspace) = context_from(source);
         let scope = ReplanScope::from_changed_sets(

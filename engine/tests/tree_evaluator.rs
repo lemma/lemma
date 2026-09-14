@@ -194,7 +194,10 @@ rule check_step3: step3 is veto
 }
 
 #[test]
-fn unless_skips_vetoed_condition_and_matches_is_veto_arm() {
+fn unless_is_veto_arm_last_wins_when_validated_vetoes() {
+    // Scan is last-unless-first. `is veto` is last so it is checked first and
+    // wins; the compare arm above is never evaluated (a vetoed compare would
+    // Propagate, not skip).
     let code = r#"
 spec unless_veto_cond
 data input: number
@@ -219,6 +222,34 @@ rule result: 0
         .run(None, "unless_veto_cond", Some(&now), ok, None, false)
         .expect("run");
     assert_eq!(rule_display(&resp, "result"), "100");
+}
+
+#[test]
+fn unless_compare_arm_last_propagates_veto_from_validated() {
+    // Reverse arm order: compare is last so it is scanned first. Vetoed
+    // condition Propagates — does not fall through to `is veto` or default.
+    let code = r#"
+spec unless_veto_prop
+data input: number
+rule validated: input
+  unless input > 1000 then veto "too large"
+rule result: 0
+  unless validated is veto then 0
+  unless validated > 50 then 100
+"#;
+    let engine = load_engine(code, "unless_veto_prop.lemma");
+    let now = DateTimeValue::now();
+    let mut large = HashMap::new();
+    large.insert("input".to_string(), "2000".to_string());
+    let resp = engine
+        .run(None, "unless_veto_prop", Some(&now), large, None, false)
+        .expect("run");
+    let result = resp.results.get("result").expect("result");
+    assert!(
+        result.vetoed,
+        "vetoed unless condition must Propagate, not fall through"
+    );
+    assert_eq!(result.veto_reason.as_deref(), Some("too large"));
 }
 
 #[test]

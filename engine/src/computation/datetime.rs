@@ -326,9 +326,22 @@ fn apply_calendar_to_datetime(
         .numer_to_i32()
         .ok_or_else(|| "Calendar offset too large".to_string())?;
 
-    let signed_months = if add { months_i32 } else { -months_i32 };
+    let signed_months = if add {
+        months_i32
+    } else {
+        months_i32
+            .checked_neg()
+            .ok_or_else(|| "Calendar offset too large".to_string())?
+    };
 
-    let total_months = dt.year() * 12 + (dt.month() as i32 - 1) + signed_months;
+    let base_months = dt
+        .year()
+        .checked_mul(12)
+        .and_then(|y| y.checked_add(dt.month() as i32 - 1))
+        .ok_or_else(|| "Calendar offset too large".to_string())?;
+    let total_months = base_months
+        .checked_add(signed_months)
+        .ok_or_else(|| "Calendar offset too large".to_string())?;
     let target_year = total_months.div_euclid(12);
     let target_month = (total_months.rem_euclid(12) + 1) as u32;
 

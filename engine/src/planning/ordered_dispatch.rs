@@ -21,6 +21,7 @@ use chrono::NaiveDateTime;
 
 use crate::computation::datetime::{semantic_datetime_to_chrono, semantic_time_to_chrono_datetime};
 use crate::computation::rational::{NumericFailure, RationalInteger};
+use crate::computation::VetoType;
 use crate::parsing::ast::PrimitiveKind;
 use crate::planning::semantics::{ComparisonComputation, LemmaType, LiteralValue, ValueKind};
 use serde::de::Visitor;
@@ -268,6 +269,30 @@ pub(crate) fn region_count(boundary_count: usize) -> usize {
     2 * boundary_count + 1
 }
 
+/// Paint shape of an exclusive `scrutinee is K` table: every interval region
+/// holds the default body (`regions[0]`), and no point region is itself a nested
+/// Piecewise / OrderedDispatch (`point_is_nested`).
+pub(crate) fn is_exclusive_point_table<T: Copy + PartialEq>(
+    regions: &[T],
+    point_is_nested: impl Fn(T) -> bool,
+) -> bool {
+    assert!(
+        !regions.is_empty(),
+        "BUG: empty OrderedDispatch region table"
+    );
+    let default = regions[0];
+    for (index, &body) in regions.iter().enumerate() {
+        if index % 2 == 0 {
+            if body != default {
+                return false;
+            }
+        } else if point_is_nested(body) {
+            return false;
+        }
+    }
+    true
+}
+
 /// Inclusive region index ranges in which `operator` against the breakpoint at
 /// `boundary_index` holds.
 ///
@@ -314,6 +339,27 @@ pub(crate) fn region_for_value(
     }
 }
 
+/// Region index for an evaluated, non-veto scrutinee value. The one decision
+/// procedure shared by value evaluation, explain's winner check and `missing_data`
+/// liveness. A calendar or rational failure is the veto the dispatch evaluates to.
+/// A value kind the fold excludes is a planning bug.
+pub(crate) fn region_of_scrutinee(
+    boundaries: &[DispatchKey],
+    value: &ValueKind,
+) -> Result<usize, VetoType> {
+    let probe = match dispatch_probe_of(value) {
+        DispatchProbeOutcome::Probe(probe) => probe,
+        DispatchProbeOutcome::CalendarFailure(message) => {
+            return Err(VetoType::computation(message));
+        }
+        DispatchProbeOutcome::Unsupported => panic!(
+            "BUG: OrderedDispatch scrutinee evaluated to {value:?}, a kind the fold excludes"
+        ),
+    };
+    region_for_value(boundaries, &probe)
+        .map_err(|failure| VetoType::computation(failure.to_string()))
+}
+
 /// Sorted, deduplicated breakpoints.
 ///
 /// Keys are always reduced rationals or plain values, so structural equality is
@@ -336,6 +382,55 @@ pub(crate) fn sorted_unique_boundaries(
             Ok(keys)
         }
     }
+}
+
+/// Region bodies for last-match-wins arm coverage, in O(n α(n)) region visits.
+///
+/// `arms` is earliest-first: each entry is `(operator, boundary_index, body)`.
+/// Later arms overwrite earlier ones. Uncovered regions keep `default_body`.
+///
+/// Uses a next-unpainted jump array (union-find with path compression) so each
+/// region is painted at most once, even when inequality / `is not` spans cover
+/// O(n) regions per arm.
+pub(crate) fn paint_dispatch_regions<T: Copy>(
+    boundary_count: usize,
+    default_body: T,
+    arms: &[(ComparisonComputation, usize, T)],
+) -> Vec<T> {
+    let n = region_count(boundary_count);
+    let mut regions = vec![default_body; n];
+    // `next[i] == i` means region i is unpainted; otherwise `next[i]` points at
+    // the next unpainted index. `next[n] = n` is the permanent sentinel.
+    let mut next: Vec<usize> = (0..=n).collect();
+
+    fn find(next: &mut [usize], mut index: usize) -> usize {
+        let mut root = index;
+        while next[root] != root {
+            root = next[root];
+        }
+        while index != root {
+            let parent = next[index];
+            next[index] = root;
+            index = parent;
+        }
+        root
+    }
+
+    for (operator, boundary_index, body) in arms.iter().rev() {
+        for (start, end) in regions_matching(operator, *boundary_index, boundary_count)
+            .into_iter()
+            .flatten()
+        {
+            let mut index = find(&mut next, start);
+            while index <= end {
+                regions[index] = *body;
+                let after = find(&mut next, index + 1);
+                next[index] = after;
+                index = after;
+            }
+        }
+    }
+    regions
 }
 
 #[cfg(test)]
@@ -505,6 +600,14 @@ mod tests {
     }
 
     #[test]
+    fn exclusive_point_table_requires_interval_default_and_flat_points() {
+        // Two breakpoints → regions [default, p0, default, p1, default].
+        assert!(is_exclusive_point_table(&[0, 1, 0, 2, 0], |_| false));
+        assert!(!is_exclusive_point_table(&[0, 1, 3, 2, 0], |_| false));
+        assert!(!is_exclusive_point_table(&[0, 1, 0, 2, 0], |body| body == 2));
+    }
+
+    #[test]
     #[should_panic(expected = "BUG: OrderedDispatch compared keys of different classes")]
     fn comparing_keys_of_different_classes_is_a_bug() {
         let _ = text_key("AD").try_compare(&rational_key(1).as_probe());
@@ -520,6 +623,58 @@ mod tests {
         let bytes = postcard::to_allocvec(&key).expect("serialize postcard");
         let restored: DispatchKey = postcard::from_bytes(&bytes).expect("deserialize postcard");
         assert_eq!(restored, key);
+    }
+
+    #[test]
+    fn paint_last_wins_matches_forward_overwrite_on_overlapping_spans() {
+        // Same scenario as the fold test: x > 5 then 1, x > 10 then 2.
+        // Regions: below5 | at5 | (5,10) | at10 | above10
+        let forward = {
+            let mut regions = vec![0u8; 5];
+            for (start, end) in regions_matching(&ComparisonComputation::GreaterThan, 0, 2)
+                .into_iter()
+                .flatten()
+            {
+                regions[start..=end].fill(1);
+            }
+            for (start, end) in regions_matching(&ComparisonComputation::GreaterThan, 1, 2)
+                .into_iter()
+                .flatten()
+            {
+                regions[start..=end].fill(2);
+            }
+            regions
+        };
+        let painted = paint_dispatch_regions(
+            2,
+            0u8,
+            &[
+                (ComparisonComputation::GreaterThan, 0, 1u8),
+                (ComparisonComputation::GreaterThan, 1, 2u8),
+            ],
+        );
+        assert_eq!(painted, forward);
+        assert_eq!(painted, vec![0, 0, 1, 1, 2]);
+    }
+
+    #[test]
+    fn paint_is_not_and_duplicate_keys_agree_with_forward_fill() {
+        let arms = [
+            (ComparisonComputation::IsNot, 0usize, 1u8),
+            (ComparisonComputation::Is, 0, 2u8),
+            (ComparisonComputation::Is, 1, 3u8),
+        ];
+        let boundary_count = 2;
+        let mut forward = vec![0u8; region_count(boundary_count)];
+        for (operator, boundary_index, body) in &arms {
+            for (start, end) in regions_matching(operator, *boundary_index, boundary_count)
+                .into_iter()
+                .flatten()
+            {
+                forward[start..=end].fill(*body);
+            }
+        }
+        assert_eq!(paint_dispatch_regions(boundary_count, 0u8, &arms), forward);
     }
 
     #[test]
@@ -545,7 +700,6 @@ mod tests {
     fn classify_dispatch_pairs_are_accepted_by_comparison_operation() {
         use crate::computation::comparison::comparison_operation;
         use crate::computation::operation_result::OperationResult;
-        use crate::computation::UnitResolutionContext;
         use crate::planning::semantics::LiteralValue;
 
         let cases: Vec<(LiteralValue, LiteralValue, ComparisonComputation)> = vec![
@@ -598,14 +752,7 @@ mod tests {
                     "text class only uses is / is not"
                 );
             }
-            match comparison_operation(
-                scrutinee,
-                scrutinee_type,
-                operator,
-                key,
-                scrutinee_type,
-                UnitResolutionContext::NamedMeasureOnly,
-            ) {
+            match comparison_operation(scrutinee, scrutinee_type, operator, key, scrutinee_type) {
                 OperationResult::Value(result) => match &result.value {
                     ValueKind::Boolean(_) => {}
                     other => panic!("expected boolean comparison result, got {other:?}"),

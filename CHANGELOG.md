@@ -2,6 +2,37 @@
 
 Releases cover the Lemma engine, `lemma` CLI, OpenAPI crate, LSP, SDKs and VS Code extension. They all follow the same version everywhere. The release version is `[workspace.package] version` in the root `Cargo.toml`. Git tags follow `lemma-v{version}` (for example `lemma-v0.8.20`); releases before the rename used `cli-v{version}`. Draft notes for the next version quickly by running `cargo changelog` to print `git diff` / `git log` since the latest release tag (`xtask` `versions-diff`). Tip: feed that into an LLM to create a summary for this changelog.
 
+## [0.9.10] - 2026-09-14
+
+Show rule graph on `Engine::show`, MCP Streamable HTTP, and evaluation that walks only live `rule_ref` (the 0.9.9 authored schedule is gone).
+
+### Added
+
+- **Show rule graph**: `Show.rules` is `ShowRule` with `type`, `branches` (default then each `unless`), and `depends_on_rules` (stored local planning topo). Follow `rule` leaves across `Show.rules` for the static decision graph; not an inlined mega-tree. SDKs, schema, and MCP/HTTP JSON follow.
+- **`lemma mcp --http`**: Streamable HTTP transport (MCP `2026-07-28`) on `POST /mcp` (default `127.0.0.1:8013`). Flags `--host`, `--port`, `--cors`. Stdio remains the default. JSON-only responses (no SSE). Separate from `lemma server` REST evaluate API.
+
+### Changed
+
+- **[breaking] `Show.rules`**: values are `ShowRule` objects, not bare `LemmaType`. Rule units live under `type` (e.g. `rules.total.type.units`).
+- **Evaluation walks only what the requested rule needs**: a rule runs when a `rule_ref` is visited. The 0.9.9 authored dependency schedule is gone. Dead `unless` arms, unused OrderedDispatch regions, and `and` short-circuit no longer force other rules. Requested-rule `missing_data` is for that walk only.
+- **OrderedDispatch for conjunctive LUTs**: `unless key is K and residual then body` chains (e.g. logistics `zone is Z and billable_lb >= L`) fold to a nested OrderedDispatch — outer point table on the shared `Is` key, inner tables on the residuals — so evaluation is binary search instead of a linear arm scan. Region painting is O(n α(n)); boundaries ship as `Arc<[DispatchKey]>`. Scrutinee typing uses the stamped NormalForm type, so determined expression scrutinees fold too.
+- **`--explain` last-wins causes**: unless narration lists later not-taken arms then the winner (matching evaluation). Exclusive `scrutinee is K` OrderedDispatch tables keep only the winning cause; on the default they attach the scrutinee and omit the `is not` dump. ASCII omits a Data child that only restates a `name is display` cause line (JSON keeps it). False `and` causes state the short-circuit deciding conjunct (flipped like a lone condition), not the authored `and` tagged `is false`. Exhaustive walks still visit rewrite pre-images and arithmetic siblings after a definitive veto; values are unchanged. `and` still short-circuits.
+- **One arithmetic typing scope per plan**: validation, NormalForm stamping, and evaluation share one measure scope (main spec unit index, imports merged) and the same promotion rules. MathOp (`ceil`/`floor`/`round`/`abs`) result types are planned, including named units for measure magnitude ops.
+- **Engine snapshots**: plan layout changed (Show rule graph cache, Sum/Product fold types). `from_snapshot` rejects bytes from other engine versions.
+
+### Removed
+
+- **`ExecutableRule.depends_on_rules`**: evaluation no longer ships an authored rule-dependency list on the plan (Show still exposes the planning list on `ShowRule`).
+- **`UnitResolutionContext`**: dead unit-resolution switch removed from the computation API.
+
+### Fixed
+
+- **`and` right operand must be boolean**: validation already required a boolean left; a non-boolean right slipped through and is now rejected, matching documented Logical AND.
+- **Rule reference as `and` left conjunct with unbound right**: no longer panics with `BUG: MissingData path … not in missing_data []`; `missing_data` matches the evaluator.
+- **Hex `hex.audit` in precommit**: vulnerable Hex deps fail the gate. `mint` 1.9.3 → 1.10.0, `ex_doc` 0.40.3 → 0.40.4.
+- **Nested `-> with` reference paths**: wrapping a spec that itself `uses` and binds data no longer panics at planning. Binding RHS targets keep ancestor spec names, matching the walk `add_data` already stored.
+- **`RationalInteger` compare OOM**: removed `Ord`/`PartialOrd`. Planning sorts and bound checks use `try_cmp` → `Error`; explain conversion-trace reorder after a successful span is `unreachable!` on compare failure. Named-range default refresh and measure recanonicalization push validation `Error` instead of panicking.
+
 ## [0.9.9] - 2026-09-05
 
 Sans-IO registries and SDK `install`, engine binary snapshot across Rust/npm/Maven/Hex, rule-embed evaluation boundaries, Java SDK sealed results and native cache, scoped replanning, unqualified imported types, and inline rational arithmetic.

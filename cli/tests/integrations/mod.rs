@@ -6,6 +6,7 @@ mod llms_txt;
 mod lsp;
 mod lsp_session;
 mod mcp;
+mod mcp_http;
 mod ordering;
 mod run;
 mod server;

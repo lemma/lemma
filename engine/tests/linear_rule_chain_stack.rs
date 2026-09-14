@@ -1,6 +1,6 @@
 //! Linear rule-chain stack safety: tip-only eval and deep load must not abort.
 //!
-//! Embeds are evaluation boundaries; `normal_form_depth` is iterative with embeds
+//! Rule references are evaluation boundaries; `normal_form_depth` is iterative with rule references
 //! as leaves. These tests pin success (correct values / successful load) on
 //! small stacks that previously SIGSEGV'd.
 

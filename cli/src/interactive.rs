@@ -124,34 +124,13 @@ fn select_spec(
     }
 
     if items.is_empty() {
-        anyhow::bail!("No specs found in workspace. Add .lemma files to get started.");
+        anyhow::bail!("No specs found. Add .lemma files to get started.");
     }
-
-    let needs_repo_qualifier = {
-        let mut names: Vec<&str> = items.iter().map(|(_, ls)| ls.name.as_str()).collect();
-        names.sort();
-        names.windows(2).any(|w| w[0] == w[1])
-    };
 
     let display_options: Vec<String> = items
         .iter()
-        .map(|(repo_name, ls)| {
-            let label = repo_name.as_deref().unwrap_or("(workspace)");
-            let rq = if needs_repo_qualifier {
-                Some(label)
-            } else {
-                cli_repository_qualifier
-            };
-            let (data_count, rules_count) = load_static_show(engine, rq, &ls.name, now)
-                .ok()
-                .map(|show| (show.data.len(), show.rules.len()))
-                .unwrap_or((0, 0));
-            format!(
-                "{} ({}) — {} data, {} rules",
-                ls.name, label, data_count, rules_count
-            )
-        })
-        .collect();
+        .map(|(repo_name, ls)| spec_picker_label(engine, repo_name.as_deref(), &ls.name, now))
+        .collect::<Result<Vec<_>>>()?;
 
     let selected = Select::new("Select a spec:", display_options.clone())
         .with_help_message("Use arrow keys to navigate, Enter to select")
@@ -168,12 +147,26 @@ fn select_spec(
         .nth(spec_index)
         .context("Failed to match selected spec")?;
 
-    let rq = if needs_repo_qualifier {
-        repo_name.or_else(|| Some("(workspace)".to_string()))
-    } else {
-        cli_repository_qualifier.map(String::from)
+    Ok((repo_name, ls.name))
+}
+
+fn spec_picker_label(
+    engine: &Engine,
+    repository: Option<&str>,
+    spec_name: &str,
+    now: &DateTimeValue,
+) -> Result<String> {
+    let show = load_static_show(engine, repository, spec_name, now)?;
+    let target = match repository {
+        None => spec_name.to_string(),
+        Some(repo) => format!("{repo} {spec_name}"),
     };
-    Ok((rq, ls.name))
+    Ok(format!(
+        "{} — {} data, {} rules",
+        target,
+        show.data.len(),
+        show.rules.len()
+    ))
 }
 
 fn select_rules(
@@ -182,8 +175,7 @@ fn select_rules(
     spec_name: &str,
     now: &DateTimeValue,
 ) -> Result<Option<Vec<String>>> {
-    let show = load_static_show(engine, repo, spec_name, now)
-        .context(format!("Spec '{}' not found", spec_name))?;
+    let show = load_static_show(engine, repo, spec_name, now)?;
     let rule_names: Vec<String> = show.rules.keys().cloned().collect();
 
     if rule_names.is_empty() {
@@ -220,7 +212,7 @@ fn prompt_data(
         trial.extend(collected.clone());
         let response = engine
             .run(repo, spec_name, Some(now), trial, rules_for_request, false)
-            .context(format!("Spec '{}' not found", spec_name))?;
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
 
         let next_name =
             next_prompt_name_from_results(response.results.values(), provided_data, &collected);
@@ -825,10 +817,98 @@ fn prompt_decimal_input(
 
 #[cfg(test)]
 mod tests {
-    use super::next_prompt_name_from_results;
+    use super::{
+        load_static_show, next_prompt_name_from_results, prompt_data, select_rules,
+        spec_picker_label,
+    };
     use lemma::{DateTimeValue, Engine, SourceType, VetoType};
     use std::collections::HashMap;
     use std::sync::Arc;
+
+    fn colliding_alpha2_engine() -> Engine {
+        let mut engine = Engine::new();
+        engine
+            .load([(
+                SourceType::Dependency("@iso/countries".to_string()),
+                "repo @iso/countries\nspec alpha2\ndata code: text\n".to_string(),
+            )])
+            .expect("dep");
+        engine
+            .load([(
+                SourceType::Path(Arc::new(std::path::PathBuf::from("alpha2.lemma"))),
+                "spec alpha2\ndata local: number\nrule out: local\n".to_string(),
+            )])
+            .expect("default repository");
+        engine
+    }
+
+    #[test]
+    fn picker_label_omits_repo_for_default_when_dep_shares_spec_name() {
+        let engine = colliding_alpha2_engine();
+        let now = DateTimeValue::now();
+        let label = spec_picker_label(&engine, None, "alpha2", &now).expect("default show");
+        assert_eq!(label, "alpha2 — 1 data, 1 rules");
+    }
+
+    #[test]
+    fn picker_label_uses_named_repo_when_spec_name_is_unique() {
+        let engine = Engine::new();
+        let now = DateTimeValue::now();
+        let show = load_static_show(&engine, Some("lemma"), "units", &now).expect("stdlib show");
+        assert!(show.rules.is_empty(), "units has no rules");
+        assert!(!show.data.is_empty(), "units exposes typedef slots");
+        let label = spec_picker_label(&engine, Some("lemma"), "units", &now).expect("label");
+        assert_eq!(
+            label,
+            format!("lemma units — {} data, 0 rules", show.data.len())
+        );
+        spec_picker_label(&engine, None, "units", &now)
+            .expect_err("unique named-repo spec must not look up in the default repository");
+    }
+
+    #[test]
+    fn empty_spec_is_selectable_and_runnable() {
+        let mut engine = Engine::new();
+        engine
+            .load([(
+                SourceType::Path(Arc::new(std::path::PathBuf::from("empty.lemma"))),
+                "spec empty_lib\n".to_string(),
+            )])
+            .expect("load");
+        let now = DateTimeValue::now();
+        let label = spec_picker_label(&engine, None, "empty_lib", &now).expect("show");
+        assert_eq!(label, "empty_lib — 0 data, 0 rules");
+        assert!(select_rules(&engine, None, "empty_lib", &now)
+            .expect("select")
+            .is_none());
+        prompt_data(&engine, None, "empty_lib", &None, &HashMap::new(), &now).expect("no prompts");
+        engine
+            .run(None, "empty_lib", Some(&now), HashMap::new(), None, false)
+            .expect("run empty spec");
+    }
+
+    #[test]
+    fn library_spec_with_data_and_no_rules_skips_rule_prompt() {
+        let engine = colliding_alpha2_engine();
+        let now = DateTimeValue::now();
+        let label =
+            spec_picker_label(&engine, Some("@iso/countries"), "alpha2", &now).expect("dep show");
+        assert_eq!(label, "@iso/countries alpha2 — 1 data, 0 rules");
+        assert!(
+            select_rules(&engine, Some("@iso/countries"), "alpha2", &now)
+                .expect("select")
+                .is_none()
+        );
+        prompt_data(
+            &engine,
+            Some("@iso/countries"),
+            "alpha2",
+            &None,
+            &HashMap::new(),
+            &now,
+        )
+        .expect("no prompts for zero-rule spec");
+    }
 
     #[test]
     fn label_for_data_input_matches_show_types() {

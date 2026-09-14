@@ -120,7 +120,7 @@ pub fn generate_openapi_effective(
         .iter()
         .find(|r| r.repository.is_none())
         .map(|r| r.specs.as_slice())
-        .expect("BUG: workspace repository must exist in list()");
+        .expect("BUG: default repository must exist in list()");
 
     let is_active = |ls: &ListedSpec| -> bool {
         let after_start = match &ls.effective_from {
@@ -255,7 +255,7 @@ fn index_path_item(engine: &Engine) -> Value {
                                     "properties": {
                                         "repository": {
                                             "type": ["string", "null"],
-                                            "description": "Repository name. Null for the workspace."
+                                            "description": "Repository name. Null for the default repository."
                                         },
                                         "specs": {
                                             "type": "array",

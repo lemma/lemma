@@ -1,7 +1,7 @@
 defmodule Lemma.MixProject do
   use Mix.Project
 
-  @version "0.9.9"
+  @version "0.9.10"
   @source_url "https://github.com/lemma/lemma"
 
   def project do
@@ -37,6 +37,7 @@ defmodule Lemma.MixProject do
       precommit: [
         "format --check-formatted",
         "deps.get --check-locked",
+        "hex.audit",
         "compile",
         "test.precommit"
       ],

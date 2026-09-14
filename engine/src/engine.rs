@@ -60,6 +60,8 @@ pub struct ListedSpec {
 }
 
 /// Repository group from [`Engine::list`].
+///
+/// [`Self::repository`] is absent for the default unnamed repository.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ResolvedRepository {
     #[serde(skip_serializing_if = "Option::is_none", default)]
@@ -91,7 +93,7 @@ impl Default for Context {
 }
 
 impl Context {
-    /// Empty workspace repository; specs are inserted via [`Self::insert_spec`].
+    /// Empty default repository; specs are inserted via [`Self::insert_spec`].
     pub fn new() -> Self {
         let workspace = Arc::new(LemmaRepository::new(None));
         let mut repositories = IndexMap::new();
@@ -102,9 +104,8 @@ impl Context {
         }
     }
 
-    /// Workspace-global grouping for every locally loaded spec. The single
-    /// namespace runtime APIs operate on (entry-point specs live here).
-    /// Stable identity across calls; `name = None`, `dependency = None`.
+    /// Default unnamed repository. Runtime APIs with `repository: None` use this.
+    /// Stable identity; `name = None`, `dependency = None`.
     #[must_use]
     pub fn workspace(&self) -> Arc<LemmaRepository> {
         Arc::clone(&self.workspace)
@@ -205,7 +206,7 @@ impl Context {
 
     /// Insert a spec under `repository`. Enforces two invariants:
     /// 1. Dependency isolation: all specs in a repo must share the same `dependency`
-    ///    provenance. A workspace repo cannot be merged with a dependency repo, and
+    ///    provenance. A locally loaded repo cannot be merged with a dependency repo, and
     ///    two different dependencies cannot contribute to the same repo name.
     /// 2. No duplicate `(repository, name, effective_from)` triples.
     pub fn insert_spec(
@@ -215,18 +216,21 @@ impl Context {
     ) -> Result<(), Vec<Error>> {
         if let Some((existing_repo, _)) = self.repositories.get_key_value(&repository) {
             if existing_repo.dependency != repository.dependency {
-                let repo_display = repository.name.as_deref().unwrap_or("(main)");
+                let repo_subject = match repository.name.as_deref() {
+                    Some(name) => format!("Repository '{name}'"),
+                    None => "The default repository".to_string(),
+                };
                 let existing_owner = match &existing_repo.dependency {
-                    None => "the workspace".to_string(),
+                    None => "a local source".to_string(),
                     Some(id) => format!("dependency '{id}'"),
                 };
                 let new_owner = match &repository.dependency {
-                    None => "the workspace".to_string(),
+                    None => "a local source".to_string(),
                     Some(id) => format!("dependency '{id}'"),
                 };
                 return Err(vec![Error::validation_with_context(
                     format!(
-                        "Repository '{repo_display}' was introduced by {existing_owner} but {new_owner} also declares it"
+                        "{repo_subject} was introduced by {existing_owner} but {new_owner} also declares it"
                     ),
                     None,
                     Some("Each dependency's repositories must be unique across all loaded sources"),
@@ -384,7 +388,7 @@ impl Engine {
     /// Load Lemma sources in one planning pass. Pairs are `(source_type, source_text)`.
     ///
     /// Provenance is derived solely from [`SourceType`]: [`SourceType::Path`] and
-    /// [`SourceType::Volatile`] are workspace-local; [`SourceType::Dependency`] tags
+    /// [`SourceType::Volatile`] are local; [`SourceType::Dependency`] tags
     /// repositories with that dependency id.
     pub fn load(
         &mut self,
@@ -453,7 +457,7 @@ impl Engine {
         })
     }
 
-    /// Every loaded repository in insertion order (workspace, embedded stdlib [`EMBEDDED_STDLIB_REPOSITORY`], dependencies).
+    /// Every loaded repository in insertion order (default unnamed repository, embedded stdlib [`EMBEDDED_STDLIB_REPOSITORY`], dependencies).
     ///
     /// Returns listed spec rows (metadata only, no AST, no source text).
     #[must_use]
@@ -581,22 +585,16 @@ impl Engine {
             .collect();
         data_entries.sort_by_key(|(depth, pos, _, _)| (*depth, *pos));
 
-        let rule_entries: Vec<(String, crate::planning::semantics::LemmaType)> = plan
+        let rule_entries: Vec<(String, crate::planning::show_expression::ShowRule)> = plan
             .rules
             .values()
             .filter(|rule| rule.path.segments.is_empty())
             .map(|rule| {
                 (
                     rule.name().to_string(),
-                    plan.show_rule_types
-                        .get(&rule.path)
-                        .cloned()
-                        .unwrap_or_else(|| {
-                            panic!(
-                                "BUG: show_rule_types missing entry for rule '{}'",
-                                rule.name()
-                            )
-                        }),
+                    plan.show_rules.get(&rule.path).cloned().unwrap_or_else(|| {
+                        panic!("BUG: show_rules missing entry for rule '{}'", rule.name())
+                    }),
                 )
             })
             .collect();
@@ -732,16 +730,13 @@ impl Engine {
         spec_name: &str,
         effective: &DateTimeValue,
     ) -> Error {
-        let repo_label = match &repository.name {
-            Some(n) => n.clone(),
-            None => "(workspace)".to_string(),
+        let message = match &repository.name {
+            Some(n) => {
+                format!("Spec '{spec_name}' not found in repository {n} at effective {effective}")
+            }
+            None => format!("Spec '{spec_name}' not found at effective {effective}"),
         };
-        Error::request_not_found(
-            format!(
-                "Spec '{spec_name}' not found in repository {repo_label} at effective {effective}",
-            ),
-            Some("Try `lemma list`"),
-        )
+        Error::request_not_found(message, Some("Try `lemma list`"))
     }
 
     /// Effective datetime for a request: `explicit` or now.
@@ -1069,10 +1064,14 @@ impl Engine {
                 if repository_arc.name.as_deref() != Some(required_canonical.as_str()) {
                     return Err(Errors {
                         errors: vec![Error::request(
-                            format!(
-                                "update repository '{required}' does not match staged repository '{}'",
-                                repository_arc.name.as_deref().unwrap_or("(workspace)")
-                            ),
+                            match repository_arc.name.as_deref() {
+                                Some(name) => format!(
+                                    "update repository '{required}' does not match staged repository '{name}'"
+                                ),
+                                None => format!(
+                                    "update repository '{required}' does not match the default repository"
+                                ),
+                            },
                             None::<String>,
                         )],
                         sources: sources.into_iter().collect(),
@@ -1249,7 +1248,7 @@ impl Engine {
 
     /// Active [`LemmaSpec`] slice for `name` at the resolved effective instant in `repository`.
     ///
-    /// When `repository` is `None`, uses the workspace. When `effective` is `None`, uses now.
+    /// When `repository` is `None`, uses the default unnamed repository. When `effective` is `None`, uses now.
     pub(crate) fn get_spec(
         &self,
         name: &str,

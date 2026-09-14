@@ -208,14 +208,14 @@ fn anonymous_dependency_bundle_does_not_collide_with_workspace_main() {
             path_source("workspace.lemma"),
             "spec workspace_only\ndata a: 1".to_string(),
         )])
-        .expect("workspace (main) must load");
+        .expect("default repository must load");
 
     engine
         .load([(
             SourceType::Dependency("@iso/countries".to_string()),
             "spec dep_spec\ndata b: 2\nrule r: b".to_string(),
         )])
-        .expect("dependency without `repo` uses dependency id as repository name; no (main) clash");
+        .expect("dependency without `repo` uses dependency id as repository name; no default-repo clash");
 
     let repos = engine.list();
     let dep_repo = repos
@@ -555,6 +555,6 @@ fn dependency_and_workspace_different_names_coexist() {
         .count();
     assert_eq!(
         finance_spec_count, 2,
-        "should have finance_spec in both billing (workspace) and @jack/finance (dependency)"
+        "should have finance_spec in both billing and @jack/finance"
     );
 }

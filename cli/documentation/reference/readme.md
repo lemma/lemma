@@ -204,7 +204,7 @@ So `balance / rate as month` parses as `balance / (rate as month)`, and `rate * 
 
 Specs are composed with `uses` and `  -> with` bindings under each import. There is no inheritance. For unpinned versus pinned imports, temporal slices, coverage, and interface checks, see [Composing specs](../learn/composing_specs.md).
 
-Write `uses spec_name` to import with an alias equal to the last path segment of the target name, or `uses alias: spec_name` for an explicit alias. Add an effective datetime after the target to pin that edge (`uses spec_name 2025-01-01`, or a bare year `YYYY` for that year's Jan 1 00:00). Versioning is temporal only: multiple rows of the same name with different `effective_from` datetimes.
+Write `uses spec_name` to import with an alias equal to the full target name, or `uses alias: spec_name` for an explicit alias. Add an effective datetime after the target to pin that edge (`uses spec_name 2025-01-01`, or a bare year `YYYY` for that year's Jan 1 00:00). Versioning is temporal only: multiple rows of the same name with different `effective_from` datetimes.
 
 ### Temporal versions
 

@@ -303,8 +303,7 @@ fn format_import_header(data: &LemmaData) -> String {
         unreachable!("BUG: format_import_header called on non-Import data");
     };
     let spec_name = &spec_ref.name;
-    let last_segment = spec_name.rsplit('/').next().unwrap_or(spec_name);
-    if alias == last_segment {
+    if alias == spec_name {
         format!("uses {}", spec_ref)
     } else {
         format!("uses {}: {}", alias, spec_ref)

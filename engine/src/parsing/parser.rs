@@ -438,11 +438,6 @@ impl Parser {
         Ok(spec)
     }
 
-    /// Parse a spec name: identifier segments separated by `/`, `-`, or `.`.
-    ///
-    /// Allows: `my_spec`, `contracts/employment/jack`, `nl.tax.brackets`.
-    /// The `@` prefix is not allowed in spec names — it is valid in
-    /// repository names (`repo @org/name`) and qualifiers (`uses @org/name`).
     fn parse_spec_name(&mut self) -> Result<(String, Span), Error> {
         if self.at(&TokenKind::At)? {
             let at_tok = self.next()?;
@@ -456,7 +451,7 @@ impl Parser {
         }
 
         let first = self.next()?;
-        if !first.kind.is_identifier_like() {
+        if !can_be_label(&first.kind) {
             return Err(self.error_at_token(
                 &first,
                 format!("Expected a spec name, found {}", first.kind),
@@ -470,7 +465,7 @@ impl Parser {
             if self.at(&TokenKind::Slash)? {
                 self.next()?;
                 let seg = self.next()?;
-                if !seg.kind.is_identifier_like() {
+                if !can_be_label(&seg.kind) {
                     return Err(self.error_at_token(
                         &seg,
                         format!(
@@ -485,7 +480,7 @@ impl Parser {
             } else if self.at(&TokenKind::Dot)? {
                 self.next()?;
                 let seg = self.next()?;
-                if !seg.kind.is_identifier_like() {
+                if !can_be_label(&seg.kind) {
                     return Err(self.error_at_token(
                         &seg,
                         format!(
@@ -501,7 +496,7 @@ impl Parser {
                 let minus_span = self.peek()?.span.clone();
                 self.next()?;
                 let peeked = self.peek()?;
-                if !peeked.kind.is_identifier_like() {
+                if !can_be_label(&peeked.kind) {
                     let span = self.span_covering(&start_span, &minus_span);
                     return Err(Error::parsing(
                         "Trailing '-' after spec name",
@@ -634,15 +629,16 @@ impl Parser {
             repository = Some(q);
             repository_span = Some(span);
         } else {
+            // Speculative first stitch: if another label follows, the first stitch is a
+            // repository qualifier (`uses accounting invoice`). Otherwise rewind and treat
+            // the stitch as the spec name (`uses finance/units`).
             let saved_state = self.lexer.clone();
-            if let Ok((potential_repository, span)) = self.parse_repository_qualifier() {
-                if let Ok(next_tok) = self.peek() {
-                    if next_tok.kind.is_identifier_like() {
-                        repository = Some(potential_repository);
-                        repository_span = Some(span);
-                    } else {
-                        self.lexer = saved_state;
-                    }
+            if let Ok((potential_name, span)) = self.parse_spec_name() {
+                if can_be_label(&self.peek()?.kind) {
+                    repository = Some(RepositoryQualifier {
+                        name: potential_name,
+                    });
+                    repository_span = Some(span);
                 } else {
                     self.lexer = saved_state;
                 }
@@ -1171,22 +1167,11 @@ impl Parser {
         }
     }
 
-    /// Parse a type arrow chain: [`ParentType`] (`alias.type` allowed) followed by `(-> command)*`.
+    /// Parse a type arrow chain: [`ParentType`] followed by `(-> command)*`.
     fn parse_type_arrow_chain(&mut self) -> Result<(ParentType, Option<Vec<Constraint>>), Error> {
-        let first = self.parse_leaf_parent_type()?;
-
-        let base = if let ParentType::Custom { name } = &first {
-            if self.at(&TokenKind::Dot)? {
-                self.next()?;
-                let inner = self.parse_leaf_parent_type()?;
-                ParentType::Qualified {
-                    spec_alias: name.clone(),
-                    inner: Box::new(inner),
-                }
-            } else {
-                first
-            }
-        } else {
+        let peek_kind = self.peek()?.kind.clone();
+        let base = if let Some(primitive) = token_kind_to_primitive(&peek_kind) {
+            let _ = self.next()?;
             if self.at(&TokenKind::Dot)? {
                 let dot_tok = self.peek()?.clone();
                 return Err(self.error_at_token_with_suggestion(
@@ -1195,7 +1180,27 @@ impl Parser {
                     "Use `data name: alias.typename` where `alias` is the `uses` import name and `typename` is the parent type.",
                 ));
             }
-            first
+            ParentType::Primitive { primitive }
+        } else {
+            let (name, _) = self.parse_spec_name()?;
+            if self.at(&TokenKind::Dot)? {
+                // Trailing `.` + primitive keyword (e.g. `finance.text`) — label stitch stopped.
+                self.next()?;
+                let inner = self.parse_leaf_parent_type()?;
+                ParentType::Qualified {
+                    spec_alias: name,
+                    inner: Box::new(inner),
+                }
+            } else if let Some((alias, type_name)) = name.rsplit_once('.') {
+                ParentType::Qualified {
+                    spec_alias: alias.to_string(),
+                    inner: Box::new(ParentType::Custom {
+                        name: type_name.to_string(),
+                    }),
+                }
+            } else {
+                ParentType::Custom { name }
+            }
         };
 
         let base = if self.at(&TokenKind::Identifier)? && self.peek()?.text == "range" {
@@ -2958,14 +2963,4 @@ fn is_comparison_operator(kind: &TokenKind) -> bool {
         kind,
         TokenKind::Gt | TokenKind::Lt | TokenKind::Gte | TokenKind::Lte | TokenKind::Is
     )
-}
-
-// Helper trait for TokenKind
-impl TokenKind {
-    fn is_identifier_like(&self) -> bool {
-        matches!(self, TokenKind::Identifier)
-            || can_be_label(self)
-            || is_boolean_keyword(self)
-            || is_math_function(self)
-    }
 }

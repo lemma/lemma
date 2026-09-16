@@ -801,11 +801,15 @@ pub fn is_math_function(kind: &TokenKind) -> bool {
 }
 
 /// Returns true if the token kind can start the body of a spec
-/// (data, rule, or meta definition).
+/// (`data`, `with`, `rule`, `meta`, or `uses`).
 pub fn is_spec_body_keyword(kind: &TokenKind) -> bool {
     matches!(
         kind,
-        TokenKind::Data | TokenKind::With | TokenKind::Rule | TokenKind::Meta
+        TokenKind::Data
+            | TokenKind::With
+            | TokenKind::Rule
+            | TokenKind::Meta
+            | TokenKind::Uses
     )
 }
 

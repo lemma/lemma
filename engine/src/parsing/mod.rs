@@ -1067,6 +1067,89 @@ uses a: spec_a"#;
     }
 
     #[test]
+    fn parse_qualified_type_with_slashed_opaque_spec_name() {
+        let input = r#"
+spec logistics/terms
+data incoterm_type: text
+
+spec logistics/shipping
+uses logistics/terms
+data incoterm: logistics/terms.incoterm_type
+"#;
+        let result = parse(
+            input,
+            crate::parsing::source::SourceType::Volatile,
+            &ResourceLimits::default(),
+        )
+        .unwrap()
+        .into_flattened_specs();
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0].name, "logistics/terms");
+        assert_eq!(result[1].name, "logistics/shipping");
+        assert_eq!(result[1].data[0].reference.name, "logistics/terms");
+        let import = match &result[1].data[0].value {
+            crate::parsing::ast::DataValue::Import { spec_ref, .. } => spec_ref,
+            other => panic!("expected Import, got: {other:?}"),
+        };
+        assert_eq!(import.name, "logistics/terms");
+        assert!(import.repository.is_none());
+        match &result[1].data[1].value {
+            crate::parsing::ast::DataValue::Definition {
+                base: Some(base), ..
+            } => {
+                assert_eq!(
+                    base,
+                    &crate::parsing::ast::ParentType::Qualified {
+                        spec_alias: "logistics/terms".into(),
+                        inner: Box::new(crate::parsing::ast::ParentType::Custom {
+                            name: "incoterm_type".into(),
+                        }),
+                    }
+                );
+            }
+            other => panic!("expected Definition with qualified base, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_uses_slashed_name_alias_is_full_opaque_name() {
+        let input = "spec consumer\nuses finance/units\ndata x: 1";
+        let result = parse(
+            input,
+            crate::parsing::source::SourceType::Volatile,
+            &ResourceLimits::default(),
+        )
+        .unwrap()
+        .into_flattened_specs();
+        assert_eq!(result[0].data[0].reference.name, "finance/units");
+        let sr = match &result[0].data[0].value {
+            crate::parsing::ast::DataValue::Import { spec_ref, .. } => spec_ref,
+            other => panic!("expected Import, got: {other:?}"),
+        };
+        assert_eq!(sr.name, "finance/units");
+        assert!(sr.repository.is_none());
+    }
+
+    #[test]
+    fn parse_uses_terms_is_spec_named_terms_not_sibling_of_logistics() {
+        let input = "spec logistics/shipping\nuses terms\ndata x: 1";
+        let result = parse(
+            input,
+            crate::parsing::source::SourceType::Volatile,
+            &ResourceLimits::default(),
+        )
+        .unwrap()
+        .into_flattened_specs();
+        assert_eq!(result[0].data[0].reference.name, "terms");
+        let sr = match &result[0].data[0].value {
+            crate::parsing::ast::DataValue::Import { spec_ref, .. } => spec_ref,
+            other => panic!("expected Import, got: {other:?}"),
+        };
+        assert_eq!(sr.name, "terms");
+        assert!(sr.repository.is_none());
+    }
+
+    #[test]
     fn parse_error_is_returned_for_garbage_input() {
         let result = parse(
             r#"

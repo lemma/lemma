@@ -701,6 +701,47 @@ rule r: dep.money
 }
 
 #[test]
+fn qualified_type_with_slashed_opaque_spec_name_resolves() {
+    let code = r#"
+spec logistics/terms
+data incoterm_type: text -> options "FOB" "CIF"
+
+spec logistics/shipping
+uses logistics/terms
+data incoterm: logistics/terms.incoterm_type
+rule label: incoterm
+"#;
+    let mut engine = Engine::new();
+    load_ok(&mut engine, code);
+    let result = run(
+        &engine,
+        "logistics/shipping",
+        HashMap::from([("incoterm".into(), "FOB".into())]),
+    )
+    .expect("run");
+    assert_eq!(rule_value(&result, "label"), "FOB");
+}
+
+#[test]
+fn uses_bare_terms_does_not_resolve_to_logistics_terms() {
+    let code = r#"
+spec logistics/terms
+data incoterm_type: text
+
+spec logistics/shipping
+uses terms
+data incoterm: terms.incoterm_type
+rule label: incoterm
+"#;
+    let mut engine = Engine::new();
+    let joined = load_err_joined(&mut engine, code);
+    assert!(
+        joined.contains("terms"),
+        "bare `uses terms` must look for spec `terms`, not `logistics/terms`, got: {joined}"
+    );
+}
+
+#[test]
 fn show_exposes_default_help_for_each_primitive() {
     let code = r#"
 spec help_defaults

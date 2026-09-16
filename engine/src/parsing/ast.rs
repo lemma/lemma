@@ -250,11 +250,7 @@ impl fmt::Display for RepositoryQualifier {
 
 /// A Lemma spec containing data and rules.
 ///
-/// `name` is always the bare spec set name (no `@`, no dots, no slashes). The
-/// owning repository — and, transitively, whether the spec is loaded from a registry
-/// bundle — is preserved through the structural relationship in
-/// [`crate::engine::Context`], not via fields on this structure.
-///
+/// Owning repository is carried by [`crate::engine::Context`], not fields here.
 /// Context identity is `(repository, name, EffectiveDate)` or `std::ptr::eq` on a
 /// Context-owned row — not [`PartialEq`]. [`PartialEq`] is full AST equality
 /// (including statement [`Source`] spans) for [`crate::Engine::update`] skip only.
@@ -593,7 +589,6 @@ pub enum MathematicalComputation {
 
 /// A spec reference written in source.
 ///
-/// `name` is the bare spec name (no `@`, no dots, no slashes).
 /// [`SpecRef::repository`] is `None` for same-repository references, or
 /// `Some(RepositoryQualifier)` when a repository qualifier was written before the spec name.
 /// `effective` carries an optional explicit pin written next to the spec name.

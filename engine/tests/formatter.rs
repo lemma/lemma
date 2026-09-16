@@ -339,6 +339,32 @@ fn round_trip_qualified_type_import_registry_with_effective_on_uses() {
     );
 }
 
+#[test]
+fn round_trip_slashed_opaque_spec_name_uses_full_alias() {
+    let source = r#"
+spec finance/units
+data money: measure -> unit eur: 1
+
+spec consumer
+uses finance/units
+data fee: finance/units.money
+"#;
+    let formatted = format_source(source, lemma::SourceType::Volatile).unwrap();
+    assert!(
+        formatted.contains("uses finance/units") && !formatted.contains("uses units:"),
+        "implicit alias is the full opaque name, got:\n{formatted}"
+    );
+    assert!(
+        formatted.contains("finance/units.money"),
+        "qualified type must keep opaque alias, got:\n{formatted}"
+    );
+    let reformatted = format_source(&formatted, lemma::SourceType::Volatile).unwrap();
+    assert_eq!(
+        formatted, reformatted,
+        "slashed opaque uses + qualified type is not idempotent"
+    );
+}
+
 // =============================================================================
 // `repo` declaration formatting
 // =============================================================================

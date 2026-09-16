@@ -35,7 +35,7 @@ rule bonus_points: membership.monthly_bonus_points
 ```
 
 - `uses membership: premium_membership` binds alias `membership` to Spec `premium_membership`.
-- `uses premium_membership` uses an implicit alias: last path segment of the target name.
+- `uses premium_membership` uses an implicit alias equal to the full target name.
 - `membership.discount_rate` reads Data from the imported Spec.
 - `membership.monthly_bonus_points` uses a Rule from the imported Spec.
 
@@ -57,7 +57,7 @@ uses employee: base_employee
 rule manager_bonus: employee.salary * 0.15
 ```
 
-`uses alias: target` imports a Spec under an explicit alias; a bare `uses target` defaults the alias to the last path segment. Read Data and Rules as `alias.field` or `alias.rule_name`.
+`uses alias: target` imports a Spec under an explicit alias; a bare `uses target` defaults the alias to the full target name. Read Data and Rules as `alias.field` or `alias.rule_name`.
 
 ## Setting Data on an import (`uses` block)
 

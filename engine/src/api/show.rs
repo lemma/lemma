@@ -14,13 +14,35 @@ use crate::planning::execution_plan::{
     ShowExpression as DomainShowExpression, ShowRule as DomainShowRule,
     ShowVersion as DomainShowVersion,
 };
+use crate::planning::semantics::PathSegment as DomainPathSegment;
+use crate::result_value::type_scoped_result_value_from_literal;
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
+
+/// One `uses` hop on a Show data or rule path.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PathSegment {
+    pub uses: String,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub repository: Option<String>,
+    pub spec: String,
+}
+
+impl From<&DomainPathSegment> for PathSegment {
+    fn from(segment: &DomainPathSegment) -> Self {
+        Self {
+            uses: segment.uses.clone(),
+            repository: segment.repository.clone(),
+            spec: segment.spec.clone(),
+        }
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ShowData {
     #[serde(rename = "type")]
     pub lemma_type: LemmaType,
+    pub path: Vec<PathSegment>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub fill: Option<RuleResultValue>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
@@ -32,6 +54,7 @@ impl From<&DomainShowData> for ShowData {
     fn from(data: &DomainShowData) -> Self {
         Self {
             lemma_type: LemmaType::from(&data.lemma_type),
+            path: data.path.iter().map(PathSegment::from).collect(),
             fill: data.fill.as_ref().map(RuleResultValue::from),
             suggestion: data.suggestion.as_ref().map(RuleResultValue::from),
             needed_by_rules: data.needed_by_rules.clone(),
@@ -147,9 +170,21 @@ pub enum ShowExpression {
 impl From<&DomainShowExpression> for ShowExpression {
     fn from(expression: &DomainShowExpression) -> Self {
         match expression {
-            DomainShowExpression::Literal(value) => Self::Literal {
-                value: Box::new(RuleResultValue::from(value.as_ref())),
-            },
+            DomainShowExpression::Literal(typed) => {
+                let domain_value = type_scoped_result_value_from_literal(
+                    &typed.to_literal(),
+                    typed.lemma_type.as_ref(),
+                )
+                .unwrap_or_else(|failure| {
+                    panic!(
+                        "BUG: show branch literal failed type_scoped_result_value_from_literal: {}",
+                        crate::result_value::rule_result_value_failure_message(failure)
+                    )
+                });
+                Self::Literal {
+                    value: Box::new(RuleResultValue::from(&domain_value)),
+                }
+            }
             DomainShowExpression::Data { name } => Self::Data { name: name.clone() },
             DomainShowExpression::Rule { name } => Self::Rule { name: name.clone() },
             DomainShowExpression::And { left, right } => Self::And {
@@ -233,6 +268,7 @@ impl From<&DomainShowBranch> for ShowBranch {
 pub struct ShowRule {
     #[serde(rename = "type")]
     pub lemma_type: LemmaType,
+    pub path: Vec<PathSegment>,
     pub branches: Vec<ShowBranch>,
     pub depends_on_rules: Vec<String>,
 }
@@ -241,6 +277,7 @@ impl From<&DomainShowRule> for ShowRule {
     fn from(rule: &DomainShowRule) -> Self {
         Self {
             lemma_type: LemmaType::from(&rule.lemma_type),
+            path: rule.path.iter().map(PathSegment::from).collect(),
             branches: rule.branches.iter().map(ShowBranch::from).collect(),
             depends_on_rules: rule.depends_on_rules.clone(),
         }
@@ -249,6 +286,8 @@ impl From<&DomainShowRule> for ShowRule {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Show {
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub repository: Option<String>,
     pub spec: String,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub commentary: Option<String>,
@@ -269,6 +308,7 @@ pub struct Show {
 impl From<&DomainShow> for Show {
     fn from(show: &DomainShow) -> Self {
         Self {
+            repository: show.repository.clone(),
             spec: show.spec.clone(),
             commentary: show.commentary.clone(),
             effective_from: show.effective_from.clone(),

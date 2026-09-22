@@ -11,7 +11,7 @@ fn rule_value(result: &lemma::Response, rule_name: &str) -> String {
     if rr.vetoed {
         return format!("VETO({})", rr.veto_reason.as_deref().unwrap_or("Vetoed"));
     }
-    rr.display().expect("display").to_string()
+    rr.result().expect("result").to_string()
 }
 
 fn load_err_joined(engine_res: Result<(), lemma::Errors>) -> String {
@@ -93,7 +93,7 @@ rule answer: lic.slot
 
     let now = DateTimeValue::now();
     let mut data = HashMap::new();
-    data.insert("lw.other".to_string(), "99".to_string());
+    data.insert("lw.other".to_string(), "99".into());
     let result = engine
         .run(None, "top", Some(&now), data, None, false)
         .expect("should run");
@@ -267,7 +267,7 @@ rule r: i.limited
 
     let now = DateTimeValue::now();
     let mut data = HashMap::new();
-    data.insert("src.v".to_string(), "10".to_string());
+    data.insert("src.v".to_string(), "10".into());
     let resp = engine
         .run(None, "outer", Some(&now), data, None, false)
         .expect("run must complete with veto, not Error");
@@ -275,7 +275,7 @@ rule r: i.limited
     assert!(
         rr.vetoed,
         "expected max-constraint veto; got {:?}",
-        rr.display()
+        rr.result()
     );
     let s = rr.veto_reason.as_deref().expect("veto reason");
     assert!(
@@ -305,7 +305,7 @@ rule r: person
 
     let now = DateTimeValue::now();
     let mut data = HashMap::new();
-    data.insert("person".to_string(), "30".to_string());
+    data.insert("person".to_string(), "30".into());
     let result = engine
         .run(None, "s", Some(&now), data, None, false)
         .expect("evaluates; `person` is typed 'age' and uses supplied value");
@@ -338,7 +338,7 @@ rule r: i.slot
 
     let now = DateTimeValue::now();
     let mut data = HashMap::new();
-    data.insert("src".to_string(), "123".to_string());
+    data.insert("src".to_string(), "123".into());
     let result = engine
         .run(None, "outer", Some(&now), data, None, false)
         .expect("evaluates");

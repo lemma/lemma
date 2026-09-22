@@ -349,6 +349,10 @@ fn build_get_show_response() -> Value {
         "type": "object",
         "required": ["spec", "data", "rules", "meta", "start_line"],
         "properties": {
+            "repository": {
+                "type": "string",
+                "description": "Interned repository name. Omitted for the unnamed workspace."
+            },
             "spec": {
                 "type": "string",
                 "description": "Spec name"
@@ -374,12 +378,12 @@ fn build_get_show_response() -> Value {
             },
             "data": {
                 "type": "object",
-                "description": "Inputs: types, filled values, and suggestions",
+                "description": "Inputs: types, path identity, filled values, and suggestions",
                 "additionalProperties": true
             },
             "rules": {
                 "type": "object",
-                "description": "Rules and their result types",
+                "description": "This spec's rule graph (local plus reachable imports)",
                 "additionalProperties": true
             },
             "meta": {
@@ -419,7 +423,7 @@ fn build_rule_result_schema() -> Value {
                 "type": "boolean",
                 "description": "True when the rule has no value"
             },
-            "display": {
+            "result": {
                 "type": "string",
                 "description": "Formatted value when not vetoed"
             },
@@ -564,7 +568,12 @@ fn build_spec_openapi_artifacts(
     explain: bool,
 ) -> SpecOpenApiArtifacts {
     let data = collect_input_data_from_show(show);
-    let rule_names: Vec<String> = show.rules.keys().cloned().collect();
+    let rule_names: Vec<String> = show
+        .rules
+        .iter()
+        .filter(|(_, rule)| rule.path.is_empty())
+        .map(|(name, _)| name.clone())
+        .collect();
     let (
         get_show_component_name,
         evaluate_response_schema_name,

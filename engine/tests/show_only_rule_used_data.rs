@@ -269,7 +269,7 @@ rule r: i.slot
             .get("src.x0")
             .expect("src.x0 must appear in outer show catalog")
             .needed_by_rules,
-        vec!["r".to_string()],
-        "outer needed_by_rules must union target rule's set through with-bound rule_ref"
+        vec!["r".to_string(), "src.computed".to_string()],
+        "outer needed_by_rules must include reachable consumers (local + imported)"
     );
 }

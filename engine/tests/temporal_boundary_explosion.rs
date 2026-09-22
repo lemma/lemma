@@ -48,7 +48,7 @@ rule out: s.v
         assert!(r.is_ok(), "month {month}: {:?}", r.err());
         let resp = r.unwrap();
         let rule = resp.results.get("out").expect("out");
-        let v = rule.display().expect("display").to_string();
+        let v = rule.result().expect("result").to_string();
         assert_eq!(v.to_string(), "1", "month {month}");
     }
 }

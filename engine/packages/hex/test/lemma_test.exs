@@ -515,14 +515,14 @@ defmodule LemmaTest do
       results = response["results"]
       assert is_map(results)
       total = results["total"]
-      assert total["display"] == "50"
+      assert total["result"] == "50"
       assert total["number"] == "50"
       refute Map.has_key?(total, "missing_data")
 
       typed = Lemma.Response.from_map(response)
       assert %Lemma.Response{spec: "pricing"} = typed
 
-      assert %Lemma.RuleResult{display: "50", number: "50", vetoed: false} =
+      assert %Lemma.RuleResult{result: "50", number: "50", vetoed: false} =
                Map.fetch!(typed.results, "total")
     end
 
@@ -546,7 +546,7 @@ defmodule LemmaTest do
         Lemma.run(engine, %{spec: "pricing"}, %{data: %{"quantity" => "10"}})
 
       results = response["results"]
-      assert results["discount"]["display"] == "5"
+      assert results["discount"]["result"] == "5"
       assert results["discount"]["number"] == "5"
     end
 
@@ -555,7 +555,7 @@ defmodule LemmaTest do
       :ok = Lemma.load(engine, %{"s.lemma" => "spec simple\ndata x: 1\nrule y: x + 1"})
       {:ok, response} = Lemma.run(engine, %{spec: "simple"})
       results = response["results"]
-      assert results["y"]["display"] == "2"
+      assert results["y"]["result"] == "2"
       assert results["y"]["number"] == "2"
     end
 
@@ -639,12 +639,14 @@ defmodule LemmaTest do
       amount = Map.fetch!(show.data, "amount")
       assert %Lemma.ShowData{} = amount
       assert amount.type["kind"] == "number"
+      assert amount.path == []
       assert amount.suggestion == %{"number" => "1"}
       assert amount.needed_by_rules == ["ok"]
 
       ok = Map.fetch!(show.rules, "ok")
       assert %Lemma.ShowRule{} = ok
       assert ok.type["kind"] == "number"
+      assert ok.path == []
       assert ok.depends_on_rules == []
       assert length(ok.branches) == 1
     end

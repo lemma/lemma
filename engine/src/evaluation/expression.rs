@@ -8,11 +8,13 @@ use crate::computation::measure_math::{
     mathematical_computation_preserves_measure_magnitude, measure_magnitude_math,
 };
 use crate::computation::{OperationResult, VetoType};
-use crate::planning::semantics::{LemmaType, LiteralValue, MathematicalComputation, ValueKind};
+use crate::planning::semantics::{
+    BoundValueKind, LemmaType, LiteralValue, MathematicalComputation, ValueKind,
+};
 
 pub(crate) fn evaluate_mathematical_operator(
     op: &MathematicalComputation,
-    value: &LiteralValue,
+    value: &BoundValueKind,
     lemma_type: &Arc<LemmaType>,
 ) -> OperationResult {
     use crate::computation::decimal_math::{decimal_acos, decimal_asin, decimal_atan};

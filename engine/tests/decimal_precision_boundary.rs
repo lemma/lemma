@@ -1,6 +1,7 @@
 use lemma::{DateTimeValue, Engine, SourceType};
 use rust_decimal::Decimal;
 use std::collections::HashMap;
+use std::str::FromStr;
 
 fn load(engine: &mut Engine, code: &str) {
     engine
@@ -46,13 +47,8 @@ rule third: 1 / 3
     let result = rule_result(&response, "third");
     assert!(!result.vetoed);
     assert_eq!(
-        result
-            .value
-            .as_ref()
-            .expect("rule result value")
-            .number
-            .as_deref(),
-        Some("0.3333333333333333333333333333")
+        result.result.as_ref().expect("rule result value").number,
+        Some(Decimal::from_str("0.3333333333333333333333333333").expect("valid decimal"))
     );
 }
 
@@ -71,13 +67,8 @@ rule dust: 1 / (10 ^ 30)
     let result = rule_result(&response, "dust");
     assert!(!result.vetoed);
     assert_eq!(
-        result
-            .value
-            .as_ref()
-            .expect("rule result value")
-            .number
-            .as_deref(),
-        Some("0")
+        result.result.as_ref().expect("rule result value").number,
+        Some(Decimal::ZERO)
     );
 }
 
@@ -143,12 +134,8 @@ rule safe: huge / two
     let safe = rule_result(&response, "safe");
     assert!(!safe.vetoed);
     assert_eq!(
-        safe.value
-            .as_ref()
-            .expect("rule result value")
-            .number
-            .as_deref(),
-        Some(max.as_str())
+        safe.result.as_ref().expect("rule result value").number,
+        Some(Decimal::from_str(&max).expect("max decimal"))
     );
 }
 
@@ -169,7 +156,7 @@ rule r: money
     let response = run(
         &engine,
         "weight",
-        HashMap::from([("money".to_string(), "1000 eur".to_string())]),
+        HashMap::from([("money".to_string(), "1000 eur".into())]),
         false,
     );
     let result = rule_result(&response, "r");
@@ -195,7 +182,7 @@ rule r: price
     let rejected = run(
         &engine,
         "price_check",
-        HashMap::from([("price".to_string(), "1.234".to_string())]),
+        HashMap::from([("price".to_string(), "1.234".into())]),
         false,
     );
     let result = rule_result(&rejected, "r");
@@ -220,19 +207,14 @@ rule r: price
     let accepted = run(
         &engine,
         "price_check",
-        HashMap::from([("price".to_string(), "1.23".to_string())]),
+        HashMap::from([("price".to_string(), "1.23".into())]),
         false,
     );
     let result = rule_result(&accepted, "r");
     assert!(!result.vetoed);
     assert_eq!(
-        result
-            .value
-            .as_ref()
-            .expect("rule result value")
-            .number
-            .as_deref(),
-        Some("1.23")
+        result.result.as_ref().expect("rule result value").number,
+        Some(Decimal::from_str("1.23").expect("1.23"))
     );
 }
 
@@ -251,7 +233,7 @@ rule r: cost
     let rejected = run(
         &engine,
         "delivery",
-        HashMap::from([("cost".to_string(), "1.234 eur".to_string())]),
+        HashMap::from([("cost".to_string(), "1.234 eur".into())]),
         false,
     );
     let result = rule_result(&rejected, "r");
@@ -269,17 +251,20 @@ rule r: cost
     let accepted = run(
         &engine,
         "delivery",
-        HashMap::from([("cost".to_string(), "1.23 eur".to_string())]),
+        HashMap::from([("cost".to_string(), "1.23 eur".into())]),
         false,
     );
     let result = rule_result(&accepted, "r");
     assert!(!result.vetoed);
     let measure = result
-        .value
+        .result
         .as_ref()
         .expect("rule result value")
         .measure
         .as_ref()
         .expect("measure map");
-    assert_eq!(measure.get("eur"), Some(&"1.23".to_string()));
+    assert_eq!(
+        measure.get("eur").copied(),
+        Some(Decimal::from_str("1.23").expect("1.23"))
+    );
 }

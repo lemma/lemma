@@ -9,7 +9,7 @@ defmodule Lemma.RuleResult do
 
   @type t :: %__MODULE__{
           vetoed: boolean(),
-          display: String.t() | nil,
+          result: String.t() | nil,
           veto_reason: String.t() | nil,
           rule_type: String.t(),
           measure: %{optional(String.t()) => String.t()} | nil,
@@ -28,7 +28,7 @@ defmodule Lemma.RuleResult do
   @enforce_keys [:vetoed, :rule_type]
   defstruct [
     :vetoed,
-    :display,
+    :result,
     :veto_reason,
     :rule_type,
     :measure,
@@ -53,7 +53,7 @@ defmodule Lemma.RuleResult do
   def from_map(map) when is_map(map) do
     %__MODULE__{
       vetoed: Map.fetch!(map, "vetoed"),
-      display: Map.get(map, "display"),
+      result: Map.get(map, "result"),
       veto_reason: Map.get(map, "veto_reason"),
       rule_type: Map.fetch!(map, "rule_type"),
       measure: Map.get(map, "measure"),

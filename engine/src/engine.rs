@@ -559,8 +559,8 @@ impl Engine {
                                     .get_index(rule_position as usize)
                                     .expect("BUG: needed_by_rules position out of plan.rules range")
                                     .1
-                                    .name()
-                                    .to_string()
+                                    .path
+                                    .input_key()
                             })
                             .collect()
                     },
@@ -573,11 +573,30 @@ impl Engine {
                 (
                     path.segments.len(),
                     data.source().span.start,
-                    input_key,
+                    input_key.clone(),
                     ShowData {
-                        lemma_type,
-                        fill: display.and_then(|d| d.fill.clone()),
-                        suggestion: display.and_then(|d| d.suggestion.clone()),
+                        lemma_type: lemma_type.clone(),
+                        path: path.segments.clone(),
+                        fill: display.and_then(|d| {
+                            d.fill.as_ref().map(|bound| {
+                                crate::planning::execution_plan::show_bound_result_value(
+                                    bound,
+                                    &lemma_type,
+                                    &input_key,
+                                    crate::planning::execution_plan::ShowBoundRole::Fill,
+                                )
+                            })
+                        }),
+                        suggestion: display.and_then(|d| {
+                            d.suggestion.as_ref().map(|bound| {
+                                crate::planning::execution_plan::show_bound_result_value(
+                                    bound,
+                                    &lemma_type,
+                                    &input_key,
+                                    crate::planning::execution_plan::ShowBoundRole::Suggestion,
+                                )
+                            })
+                        }),
                         needed_by_rules: used_by,
                     },
                 )
@@ -586,20 +605,28 @@ impl Engine {
         data_entries.sort_by_key(|(depth, pos, _, _)| (*depth, *pos));
 
         let rule_entries: Vec<(String, crate::planning::show_expression::ShowRule)> = plan
-            .rules
-            .values()
-            .filter(|rule| rule.path.segments.is_empty())
-            .map(|rule| {
-                (
-                    rule.name().to_string(),
-                    plan.show_rules.get(&rule.path).cloned().unwrap_or_else(|| {
-                        panic!("BUG: show_rules missing entry for rule '{}'", rule.name())
-                    }),
-                )
-            })
+            .show_rules
+            .iter()
+            .map(|(path, rule)| (path.input_key(), rule.clone()))
             .collect();
 
+        let show_repository = match repository {
+            None => None,
+            Some(q) => {
+                let repo = self
+                    .context
+                    .find_repository(q)
+                    .expect("BUG: get_plan succeeded so that repository must be loaded");
+                Some(
+                    repo.name
+                        .clone()
+                        .expect("BUG: named repository cannot have name None"),
+                )
+            }
+        };
+
         Ok(Show {
+            repository: show_repository,
             spec: plan.spec_name.clone(),
             commentary: plan.commentary.clone(),
             effective_from: plan.effective_from.clone(),
@@ -659,7 +686,7 @@ impl Engine {
                 )
             })?;
 
-        let response_rules = plan.validated_response_rule_names(rules)?;
+        let response_rules = plan.validated_response_rule_paths(rules)?;
         let data_values: HashMap<String, RunDataValue> = data
             .into_iter()
             .map(|(key, value)| (key, RunDataValue::string(value)))
@@ -1592,14 +1619,14 @@ mod tests {
             .values()
             .find(|r| r.rule.name == "sum")
             .unwrap();
-        assert_eq!(sum_result.display().expect("display").to_string(), "15");
+        assert_eq!(sum_result.result().expect("result").to_string(), "15");
 
         let product_result = response
             .results
             .values()
             .find(|r| r.rule.name == "product")
             .unwrap();
-        assert_eq!(product_result.display().expect("display").to_string(), "50");
+        assert_eq!(product_result.result().expect("result").to_string(), "50");
     }
 
     #[test]
@@ -1628,8 +1655,8 @@ mod tests {
                 .values()
                 .next()
                 .unwrap()
-                .display()
-                .expect("display"),
+                .result()
+                .expect("result"),
             "200"
         );
     }
@@ -1659,7 +1686,7 @@ mod tests {
                 .values()
                 .next()
                 .unwrap()
-                .value
+                .result
                 .as_ref()
                 .unwrap()
                 .boolean,
@@ -1693,8 +1720,8 @@ mod tests {
                 .values()
                 .next()
                 .unwrap()
-                .display()
-                .expect("display"),
+                .result()
+                .expect("result"),
             "10"
         );
     }
@@ -1744,14 +1771,14 @@ mod tests {
             .run(None, "spec1", Some(&now), HashMap::new(), None, false)
             .unwrap();
         assert_eq!(
-            response1.results[0].display().expect("display").to_string(),
+            response1.results[0].result().expect("result").to_string(),
             "20"
         );
         let response2 = engine
             .run(None, "spec2", Some(&now), HashMap::new(), None, false)
             .unwrap();
         assert_eq!(
-            response2.results[0].display().expect("display").to_string(),
+            response2.results[0].result().expect("result").to_string(),
             "15"
         );
     }
@@ -1889,7 +1916,7 @@ mod tests {
 
         // But the value should be correct (dependencies were computed)
         let total = response.results.values().next().unwrap();
-        assert_eq!(total.display().expect("display").to_string(), "220");
+        assert_eq!(total.result().expect("result").to_string(), "220");
     }
 
     // -------------------------------------------------------------------
@@ -1928,7 +1955,7 @@ rule value: external.quantity"#
             .results
             .get("value")
             .expect("rule 'value' should exist");
-        assert_eq!(value_result.display().expect("display").to_string(), "42");
+        assert_eq!(value_result.result().expect("result").to_string(), "42");
     }
 
     #[test]
@@ -1978,7 +2005,7 @@ rule doubled: price * 2"#
             .expect("evaluate should succeed");
 
         let doubled = response.results.get("doubled").expect("doubled rule");
-        assert_eq!(doubled.display().expect("display").to_string(), "200");
+        assert_eq!(doubled.result().expect("result").to_string(), "200");
     }
 
     #[test]
@@ -2052,24 +2079,24 @@ rule formatted: helper_value + 0"#
                 .results
                 .get("helper_value")
                 .expect("helper_value")
-                .display()
-                .expect("display"),
+                .result()
+                .expect("result"),
             "42"
         );
         let line = response
             .results
             .get("line_total")
             .expect("line_total")
-            .display()
-            .expect("display");
+            .result()
+            .expect("result");
         assert_eq!(line, "10");
         assert_eq!(
             response
                 .results
                 .get("formatted")
                 .expect("formatted")
-                .display()
-                .expect("display"),
+                .result()
+                .expect("result"),
             "42"
         );
     }
@@ -2430,7 +2457,7 @@ rule total: helper.value + price"#
             .run(None, "t", Some(&now), HashMap::new(), None, false)
             .expect("run origin");
         assert_eq!(
-            response.results.get("r").and_then(|r| r.display()),
+            response.results.get("r").and_then(|r| r.result()),
             Some("9")
         );
     }
@@ -2753,7 +2780,7 @@ rule total: helper.value + price"#
             )
             .expect("origin consumer still runs against non-dirty dep version");
         assert_eq!(
-            response.results.get("out").and_then(|r| r.display()),
+            response.results.get("out").and_then(|r| r.result()),
             Some("1")
         );
         let after_breakpoint = date(2025, 7, 1);
@@ -2768,7 +2795,7 @@ rule total: helper.value + price"#
             )
             .expect("later consumer runs against dirty dep version");
         assert_eq!(
-            response.results.get("out").and_then(|r| r.display()),
+            response.results.get("out").and_then(|r| r.result()),
             Some("9")
         );
     }

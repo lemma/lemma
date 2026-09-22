@@ -5,6 +5,7 @@
 //! and cross-spec composition (ingredient → batch → order pipeline).
 
 use lemma::{DateTimeValue, Engine, SourceType};
+use rust_decimal::Decimal;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::str::FromStr;
@@ -18,7 +19,7 @@ fn run(engine: &Engine, spec: &str, data: &[(&str, &str)]) -> lemma::Response {
     let now = DateTimeValue::now();
     let data_map: HashMap<String, String> = data
         .iter()
-        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .map(|(k, v)| (k.to_string(), (*v).to_string()))
         .collect();
     engine
         .run(None, spec, Some(&now), data_map, None, false)
@@ -29,7 +30,7 @@ fn run_at(engine: &Engine, spec: &str, data: &[(&str, &str)], effective: &str) -
     let dt = DateTimeValue::from_str(effective).unwrap();
     let data_map: HashMap<String, String> = data
         .iter()
-        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .map(|(k, v)| (k.to_string(), (*v).to_string()))
         .collect();
     engine
         .run(None, spec, Some(&dt), data_map, None, false)
@@ -45,14 +46,14 @@ fn result<'a>(resp: &'a lemma::Response, rule: &str) -> &'a lemma::RuleResult {
 
 fn display(resp: &lemma::Response, rule: &str) -> String {
     result(resp, rule)
-        .display()
+        .result()
         .unwrap_or_else(|| panic!("rule '{}' has no display", rule))
         .to_string()
 }
 
-fn quantity_unit(resp: &lemma::Response, rule: &str, unit: &str) -> String {
-    result(resp, rule)
-        .value
+fn quantity_unit(resp: &lemma::Response, rule: &str, unit: &str) -> Decimal {
+    *result(resp, rule)
+        .result
         .as_ref()
         .expect("rule result value")
         .measure
@@ -60,7 +61,6 @@ fn quantity_unit(resp: &lemma::Response, rule: &str, unit: &str) -> String {
         .unwrap_or_else(|| panic!("rule '{}' is not a measure", rule))
         .get(unit)
         .unwrap_or_else(|| panic!("rule '{}' has no unit '{}'", rule, unit))
-        .clone()
 }
 
 fn vetoed(resp: &lemma::Response, rule: &str) -> bool {
@@ -1047,7 +1047,11 @@ rule sugar_chain: sugar as kilogram as number
     );
 
     let kg = quantity_unit(&resp, "sugar_kg", "kilogram");
-    assert_eq!(kg, "0.8", "measure map still has all units");
+    assert_eq!(
+        kg,
+        Decimal::from_str("0.8").expect("0.8"),
+        "measure map still has all units"
+    );
 
     let n = display(&resp, "sugar_chain");
     assert_eq!(n, "0.8", "as kilogram as number = 0.8");

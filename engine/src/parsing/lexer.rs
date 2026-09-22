@@ -805,11 +805,7 @@ pub fn is_math_function(kind: &TokenKind) -> bool {
 pub fn is_spec_body_keyword(kind: &TokenKind) -> bool {
     matches!(
         kind,
-        TokenKind::Data
-            | TokenKind::With
-            | TokenKind::Rule
-            | TokenKind::Meta
-            | TokenKind::Uses
+        TokenKind::Data | TokenKind::With | TokenKind::Rule | TokenKind::Meta | TokenKind::Uses
     )
 }
 

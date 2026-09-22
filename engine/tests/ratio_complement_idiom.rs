@@ -35,7 +35,7 @@ fn eval_with_data(code: &str, spec: &str, rule: &str, data: HashMap<String, Stri
         "rule '{}' vetoed: {:?}",
         rule, result.veto_reason
     );
-    result.display().expect("display").to_string()
+    result.result().expect("result").to_string()
 }
 
 fn expect_plan_error(code: &str, fragment: &str) {

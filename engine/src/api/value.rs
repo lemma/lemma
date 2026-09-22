@@ -1,6 +1,5 @@
 //! ValueKind / LiteralValue / RuleResultValue JSON shapes.
 
-use crate::literals::rational_to_serialized_str;
 use crate::planning::semantics::{
     LiteralValue as DomainLiteralValue, SemanticDateTime, SemanticTime,
     ValueKind as DomainValueKind,
@@ -9,19 +8,20 @@ use crate::result_value::{
     CalendarResult as DomainCalendarResult, RangeResult as DomainRangeResult,
     RuleResultValue as DomainRuleResultValue,
 };
+use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 /// Externally tagged value payload matching today's `ValueKind` Serialize shape.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ValueKind {
-    Number(String),
+    Number(Decimal),
     Measure {
-        value: String,
+        value: Decimal,
     },
     Ratio {
-        value: String,
+        value: Decimal,
     },
     Text(String),
     Date(SemanticDateTime),
@@ -37,16 +37,19 @@ impl From<&DomainValueKind> for ValueKind {
     fn from(value: &DomainValueKind) -> Self {
         match value {
             DomainValueKind::Number(rational) => Self::Number(
-                rational_to_serialized_str(rational)
-                    .expect("BUG: planned bound must serialize to decimal string"),
+                rational
+                    .try_to_decimal()
+                    .expect("BUG: planned number must convert to decimal"),
             ),
             DomainValueKind::Measure(rational) => Self::Measure {
-                value: rational_to_serialized_str(rational)
-                    .expect("BUG: planned bound must serialize to decimal string"),
+                value: rational
+                    .try_to_decimal()
+                    .expect("BUG: planned measure must convert to decimal"),
             },
             DomainValueKind::Ratio(rational) => Self::Ratio {
-                value: rational_to_serialized_str(rational)
-                    .expect("BUG: planned bound must serialize to decimal string"),
+                value: rational
+                    .try_to_decimal()
+                    .expect("BUG: planned ratio must convert to decimal"),
             },
             DomainValueKind::Text(text) => Self::Text(text.clone()),
             DomainValueKind::Date(date) => Self::Date(date.clone()),
@@ -60,7 +63,7 @@ impl From<&DomainValueKind> for ValueKind {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LiteralValue {
     pub value: ValueKind,
 }
@@ -75,14 +78,14 @@ impl From<&DomainLiteralValue> for LiteralValue {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CalendarResult {
-    pub value: String,
+    pub value: Decimal,
     pub unit: String,
 }
 
 impl From<&DomainCalendarResult> for CalendarResult {
     fn from(calendar: &DomainCalendarResult) -> Self {
         Self {
-            value: calendar.value.clone(),
+            value: calendar.value,
             unit: calendar.unit.clone(),
         }
     }
@@ -106,13 +109,13 @@ impl From<&DomainRangeResult> for RangeResult {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct RuleResultValue {
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub display: Option<String>,
+    pub result: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub measure: Option<BTreeMap<String, String>>,
+    pub measure: Option<BTreeMap<String, Decimal>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub ratio: Option<BTreeMap<String, String>>,
+    pub ratio: Option<BTreeMap<String, Decimal>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub number: Option<String>,
+    pub number: Option<Decimal>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub boolean: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -130,10 +133,10 @@ pub struct RuleResultValue {
 impl From<&DomainRuleResultValue> for RuleResultValue {
     fn from(value: &DomainRuleResultValue) -> Self {
         Self {
-            display: value.display.clone(),
+            result: value.result.clone(),
             measure: value.measure.clone(),
             ratio: value.ratio.clone(),
-            number: value.number.clone(),
+            number: value.number,
             boolean: value.boolean,
             text: value.text.clone(),
             date: value.date.clone(),

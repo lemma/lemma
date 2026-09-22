@@ -73,8 +73,8 @@ fn snapshot_round_trip_preserves_list_show_run() {
         .expect("show checkout");
     let show_json_before = serde_json::to_value(api::Show::from(&show_before)).expect("show json");
     let mut data = HashMap::new();
-    data.insert("qty".to_string(), "2".to_string());
-    data.insert("unit_price".to_string(), "10 eur".to_string());
+    data.insert("qty".to_string(), "2".into());
+    data.insert("unit_price".to_string(), "10 eur".into());
     let run_before = engine
         .run(
             None,

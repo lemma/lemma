@@ -4,6 +4,7 @@ use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use wasm_bindgen::prelude::*;
+use wasm_bindgen::JsCast;
 
 #[wasm_bindgen(js_name = Engine)]
 pub struct WasmEngine {
@@ -70,13 +71,16 @@ impl WasmEngine {
     /// Accepts an options object: `{ spec, repository?, effective?, data?, rules?, explain? }`.
     #[wasm_bindgen(js_name = run)]
     pub fn run(&self, options: JsValue) -> Result<JsValue, JsValue> {
+        let data_js = js_sys::Reflect::get(&options, &JsValue::from_str("data"))
+            .unwrap_or(JsValue::UNDEFINED);
+
         let opts: RunOptions = serde_wasm_bindgen::from_value(options)
             .map_err(|e| js_err(format!("invalid run options: {e}")))?;
 
         let effective_dt =
             crate::resolve_effective(opts.effective.as_deref()).map_err(|e| error_to_js(&e))?;
 
-        let data = parse_run_data(&opts.data).map_err(js_err)?;
+        let data = parse_run_data_js(&data_js).map_err(js_err)?;
 
         let repo = opts
             .repository
@@ -261,13 +265,105 @@ struct RunOptions {
     spec: String,
     repository: Option<String>,
     effective: Option<String>,
-    data: Option<serde_json::Value>,
     rules: Option<serde_json::Value>,
     explain: Option<bool>,
 }
 
-fn parse_run_data(data: &Option<serde_json::Value>) -> Result<HashMap<String, String>, String> {
-    crate::parse_run_data_object(data)
+/// Convert npm `data` object to overlay strings for [`Engine::run`].
+///
+/// Reads the plain JS object directly so `bigint` and digit strings reach Rust
+/// without `serde_json::Value` (which cannot hold BigInt above `u64`).
+fn parse_run_data_js(data: &JsValue) -> Result<HashMap<String, String>, String> {
+    if data.is_undefined() || data.is_null() {
+        return Ok(HashMap::new());
+    }
+    if js_sys::Array::is_array(data) {
+        return Err("data must be a plain object".to_string());
+    }
+    let obj = data
+        .dyn_ref::<js_sys::Object>()
+        .ok_or_else(|| "data must be a plain object".to_string())?;
+    let entries = js_sys::Object::entries(obj);
+    let mut out = HashMap::with_capacity(entries.length() as usize);
+    for entry in entries.iter() {
+        let pair = js_sys::Array::from(&entry);
+        let key = pair
+            .get(0)
+            .as_string()
+            .ok_or_else(|| "data keys must be strings".to_string())?;
+        let value = pair.get(1);
+        out.insert(key.clone(), run_data_overlay_string_from_js(&key, &value)?);
+    }
+    Ok(out)
+}
+
+fn js_magnitude_to_decimal_string(value: &JsValue) -> Result<String, String> {
+    if let Some(s) = value.as_string() {
+        return Ok(s);
+    }
+    if value.is_bigint() {
+        let bigint = js_sys::BigInt::new(value).map_err(|e| js_value_message(&e))?;
+        let digits = bigint
+            .to_string(10)
+            .map_err(|e| format!("bigint toString failed: {e:?}"))?;
+        return Ok(String::from(digits));
+    }
+    if js_sys::Number::is_safe_integer(value) {
+        let n = value.unchecked_into_f64() as i64;
+        return Ok(n.to_string());
+    }
+    if value.as_f64().is_some() {
+        return Err("decimal values must be passed as strings to preserve exactness".to_string());
+    }
+    Err("data magnitude must be a string, bigint, or safe integer".to_string())
+}
+
+fn run_data_overlay_string_from_js(key: &str, value: &JsValue) -> Result<String, String> {
+    if let Some(s) = value.as_string() {
+        return Ok(s);
+    }
+    if let Some(b) = value.as_bool() {
+        return Ok(b.to_string());
+    }
+    if value.is_bigint() || js_sys::Number::is_safe_integer(value) {
+        return js_magnitude_to_decimal_string(value);
+    }
+    if value.as_f64().is_some() {
+        return Err("decimal values must be passed as strings to preserve exactness".to_string());
+    }
+    if value.is_null() || value.is_undefined() {
+        return Err("data value must not be null".to_string());
+    }
+    if js_sys::Array::is_array(value) {
+        return Err("data value must not be an array".to_string());
+    }
+    let obj = value.dyn_ref::<js_sys::Object>().ok_or_else(|| {
+        "data value must be a string, boolean, bigint, safe integer, or unit map".to_string()
+    })?;
+    let entries = js_sys::Object::entries(obj);
+    if entries.length() == 0 {
+        return Err("data value object must not be empty".to_string());
+    }
+    let has_value = js_sys::Reflect::has(obj, &JsValue::from_str("value")).unwrap_or(false);
+    let has_unit = js_sys::Reflect::has(obj, &JsValue::from_str("unit")).unwrap_or(false);
+    if entries.length() == 2 && has_value && has_unit {
+        return Err(
+            "the {value, unit} object shape is not supported; use a unit map like {\"eur\": \"84\"}"
+                .to_string(),
+        );
+    }
+    if entries.length() != 1 {
+        return Err(format!(
+            "data value '{key}' must be a convenience string for run"
+        ));
+    }
+    let pair = js_sys::Array::from(&entries.get(0));
+    let unit = pair
+        .get(0)
+        .as_string()
+        .ok_or_else(|| "data value object must be a unit map with string magnitudes".to_string())?;
+    let mag_text = js_magnitude_to_decimal_string(&pair.get(1))?;
+    Ok(format!("{mag_text} {unit}"))
 }
 
 /// Same JSON as CLI/HTTP.

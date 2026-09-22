@@ -101,6 +101,11 @@ fn magnitude_overflow_intermediate_stored_exactly_explain_result_not_vetoed() {
         !explanation.result.vetoed(),
         "rule_results must store the exact computed value; RuleResultValue conversion applies only at response output"
     );
+    assert_eq!(
+        serde_json::to_value(explanation).unwrap()["result"].as_str(),
+        Some("Calculated result exceeds decimal value limit"),
+        "explanation result must be the same computation veto text as the response"
+    );
 }
 
 #[test]
@@ -135,12 +140,8 @@ fn magnitude_overflow_boundary_full_eval_huge_vetoes_safe_succeeds() {
         "safe must build RuleResultValue at response output even when huge exceeds magnitude limit"
     );
     assert_eq!(
-        safe.value
-            .as_ref()
-            .expect("rule result value")
-            .number
-            .as_deref(),
-        Some(max_decimal_string().as_str())
+        safe.result.as_ref().expect("rule result value").number,
+        Some(Decimal::MAX.normalize())
     );
 }
 
@@ -167,15 +168,7 @@ fn magnitude_overflow_boundary_targeted_safe_succeeds() {
     let safe = response.results.get("safe").expect("safe");
     assert!(!safe.vetoed);
     assert_eq!(
-        safe.value
-            .as_ref()
-            .expect("rule result value")
-            .number
-            .as_deref(),
-        Some(max_decimal_string().as_str())
+        safe.result.as_ref().expect("rule result value").number,
+        Some(Decimal::MAX.normalize())
     );
-}
-
-fn max_decimal_string() -> String {
-    Decimal::MAX.normalize().to_string()
 }

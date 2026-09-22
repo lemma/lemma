@@ -30,7 +30,7 @@ rule total: p.amount
     );
     let now = DateTimeValue::now();
     let mut data = HashMap::new();
-    data.insert("p".to_string(), "42".to_string());
+    data.insert("p".to_string(), "42".into());
     let response = engine
         .run(None, "outer", Some(&now), data, None, false)
         .expect("import alias ignored; run completes");
@@ -56,7 +56,7 @@ rule r: age
     );
     let now = DateTimeValue::now();
     let mut data = HashMap::new();
-    data.insert("agge".to_string(), "1".to_string());
+    data.insert("agge".to_string(), "1".into());
     let response = engine
         .run(None, "s", Some(&now), data, None, false)
         .expect("typo ignored; run completes");
@@ -86,14 +86,14 @@ rule r: age
     );
     let now = DateTimeValue::now();
     let mut data = HashMap::new();
-    data.insert("age".to_string(), "1".to_string());
-    data.insert("agge".to_string(), "2".to_string());
+    data.insert("age".to_string(), "1".into());
+    data.insert("agge".to_string(), "2".into());
     let response = engine
         .run(None, "s", Some(&now), data, None, false)
         .expect("run");
     let r = response.results.get("r").expect("r");
     assert!(!r.vetoed, "age bound");
-    assert_eq!(r.display(), Some("1"));
+    assert_eq!(r.result(), Some("1"));
 }
 
 #[test]
@@ -109,8 +109,8 @@ rule r: age
     );
     let now = DateTimeValue::now();
     let mut data = HashMap::new();
-    data.insert("Age".to_string(), "1".to_string());
-    data.insert("age".to_string(), "2".to_string());
+    data.insert("Age".to_string(), "1".into());
+    data.insert("age".to_string(), "2".into());
     let err = engine
         .run(None, "s", Some(&now), data, None, false)
         .expect_err("duplicate canonical keys");
@@ -133,8 +133,8 @@ rule uses_y: y * 2
     );
     let now = DateTimeValue::now();
     let mut data = HashMap::new();
-    data.insert("x".to_string(), "42".to_string());
-    data.insert("y".to_string(), "3".to_string());
+    data.insert("x".to_string(), "42".into());
+    data.insert("y".to_string(), "3".into());
     let response = engine
         .run(None, "s", Some(&now), data, None, false)
         .expect("constraint failure must not abort run");
@@ -147,7 +147,7 @@ rule uses_y: y * 2
     );
     let uses_y = response.results.get("uses_y").expect("uses_y");
     assert!(!uses_y.vetoed);
-    assert_eq!(uses_y.display(), Some("6"));
+    assert_eq!(uses_y.result(), Some("6"));
 }
 
 #[test]
@@ -163,7 +163,7 @@ rule r: age
     );
     let now = DateTimeValue::now();
     let mut data = HashMap::new();
-    data.insert("age".to_string(), "thirty".to_string());
+    data.insert("age".to_string(), "thirty".into());
     let response = engine
         .run(None, "s", Some(&now), data, None, false)
         .expect("parse failure completes with veto");
@@ -195,7 +195,7 @@ rule r: age
         reason.contains("Missing data") && reason.contains("age"),
         "got: {reason}"
     );
-    assert_ne!(r.display(), Some("18"));
+    assert_ne!(r.result(), Some("18"));
 }
 
 #[test]
@@ -211,7 +211,7 @@ rule r: age
     );
     let now = DateTimeValue::now();
     let mut data = HashMap::new();
-    data.insert("agge".to_string(), "99".to_string());
+    data.insert("agge".to_string(), "99".into());
     let response = engine
         .run(None, "s", Some(&now), data, None, false)
         .expect("typo ignored; run completes");
@@ -241,7 +241,7 @@ rule r: age
     );
     let now = DateTimeValue::now();
     let mut data = HashMap::new();
-    data.insert("Agge".to_string(), "1".to_string());
+    data.insert("Agge".to_string(), "1".into());
     let response = engine
         .run(None, "s", Some(&now), data, None, false)
         .expect("typo ignored; run completes");

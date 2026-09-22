@@ -27,7 +27,7 @@ fn run_decimal(code: &str, spec: &str, rule: &str) -> Decimal {
         rule_result.veto_reason
     );
     let display = rule_result
-        .display()
+        .result()
         .expect("authoritative display")
         .to_string();
     display.parse().unwrap_or_else(|_| {

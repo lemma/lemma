@@ -25,7 +25,7 @@ fn utc_noon() -> DateTimeValue {
 
 fn assert_rule_value(response: &lemma::Response, rule: &str, expected: &str) {
     let result = response.results.get(rule).expect("rule");
-    let val = result.display().expect("display").to_string();
+    let val = result.result().expect("result").to_string();
     assert_eq!(val.to_string(), expected);
 }
 

@@ -14,12 +14,12 @@ import org.jspecify.annotations.Nullable;
  */
 public sealed interface RuleResultValue {
   /**
-   * Engine display string when present.
+   * Engine result string when present.
    *
-   * @return display or null
+   * @return result or null
    */
   @Nullable
-  String display();
+  String result();
 
   /**
    * Calendar value (measure whose unit is a calendar unit).
@@ -35,7 +35,7 @@ public sealed interface RuleResultValue {
      * @return parsed value
      * @throws IOException if JSON IO fails
      */
-    static CalendarResult read(JsonParser p) throws IOException {
+    public static CalendarResult read(JsonParser p) throws IOException {
       JsonReading.expectStartObject(p, "CalendarResult");
       BigDecimal value = null;
       String unit = null;
@@ -63,76 +63,76 @@ public sealed interface RuleResultValue {
    */
   sealed interface Endpoint {
     /**
-     * Engine display string when present.
+     * Engine result string when present.
      *
-     * @return display or null
+     * @return result or null
      */
     @Nullable
-    String display();
+    String result();
 
     /**
      * Number endpoint.
      *
-     * @param display display or null
+     * @param result display or null
      * @param number magnitude
      */
-    record Number(@Nullable String display, BigDecimal number) implements Endpoint {}
+    record Number(@Nullable String result, BigDecimal number) implements Endpoint {}
 
     /**
      * Text endpoint.
      *
-     * @param display display or null
+     * @param result display or null
      * @param text text value
      */
-    record Text(@Nullable String display, String text) implements Endpoint {}
+    record Text(@Nullable String result, String text) implements Endpoint {}
 
     /**
      * Boolean endpoint.
      *
-     * @param display display or null
+     * @param result display or null
      * @param booleanValue boolean value
      */
-    record BooleanValue(@Nullable String display, boolean booleanValue) implements Endpoint {}
+    record BooleanValue(@Nullable String result, boolean booleanValue) implements Endpoint {}
 
     /**
      * Date endpoint.
      *
-     * @param display display or null
+     * @param result display or null
      * @param date calendar date
      */
-    record Date(@Nullable String display, LocalDate date) implements Endpoint {}
+    record Date(@Nullable String result, LocalDate date) implements Endpoint {}
 
     /**
      * Time endpoint.
      *
-     * @param display display or null
+     * @param result display or null
      * @param time time of day
      */
-    record Time(@Nullable String display, LocalTime time) implements Endpoint {}
+    record Time(@Nullable String result, LocalTime time) implements Endpoint {}
 
     /**
      * Measure endpoint.
      *
-     * @param display display or null
+     * @param result display or null
      * @param measure unit map
      */
-    record Measure(@Nullable String display, Map<String, BigDecimal> measure) implements Endpoint {}
+    record Measure(@Nullable String result, Map<String, BigDecimal> measure) implements Endpoint {}
 
     /**
      * Ratio endpoint.
      *
-     * @param display display or null
+     * @param result display or null
      * @param ratio unit map
      */
-    record Ratio(@Nullable String display, Map<String, BigDecimal> ratio) implements Endpoint {}
+    record Ratio(@Nullable String result, Map<String, BigDecimal> ratio) implements Endpoint {}
 
     /**
      * Calendar endpoint.
      *
-     * @param display display or null
+     * @param result display or null
      * @param calendar calendar value
      */
-    record Calendar(@Nullable String display, CalendarResult calendar) implements Endpoint {}
+    record Calendar(@Nullable String result, CalendarResult calendar) implements Endpoint {}
 
     /**
      * Parses JSON.
@@ -143,7 +143,7 @@ public sealed interface RuleResultValue {
      */
     static Endpoint read(JsonParser p) throws IOException {
       JsonReading.expectStartObject(p, "RuleResultValueEndpoint");
-      String display = null;
+      String result = null;
       Map<String, BigDecimal> measure = null;
       Map<String, BigDecimal> ratio = null;
       BigDecimal number = null;
@@ -156,7 +156,7 @@ public sealed interface RuleResultValue {
         String field = p.currentName();
         p.nextToken();
         switch (field) {
-          case "display" -> display = JsonReading.readString(p);
+          case "result" -> result = JsonReading.readString(p);
           case "measure" -> measure = JsonReading.readMap(p, JsonReading::readDecimal);
           case "ratio" -> ratio = JsonReading.readMap(p, JsonReading::readDecimal);
           case "number" -> number = JsonReading.readDecimal(p);
@@ -169,28 +169,28 @@ public sealed interface RuleResultValue {
         }
       }
       if (number != null) {
-        return new Number(display, number);
+        return new Number(result, number);
       }
       if (text != null) {
-        return new Text(display, text);
+        return new Text(result, text);
       }
       if (booleanValue != null) {
-        return new BooleanValue(display, booleanValue);
+        return new BooleanValue(result, booleanValue);
       }
       if (date != null) {
-        return new Date(display, date);
+        return new Date(result, date);
       }
       if (time != null) {
-        return new Time(display, time);
+        return new Time(result, time);
       }
       if (measure != null) {
-        return new Measure(display, measure);
+        return new Measure(result, measure);
       }
       if (ratio != null) {
-        return new Ratio(display, ratio);
+        return new Ratio(result, ratio);
       }
       if (calendar != null) {
-        return new Calendar(display, calendar);
+        return new Calendar(result, calendar);
       }
       throw new LemmaBugError("BUG: RuleResultValueEndpoint has no typed value field");
     }
@@ -210,7 +210,7 @@ public sealed interface RuleResultValue {
      * @return parsed value
      * @throws IOException if JSON IO fails
      */
-    static RangeResult read(JsonParser p) throws IOException {
+    public static RangeResult read(JsonParser p) throws IOException {
       JsonReading.expectStartObject(p, "RangeResult");
       Endpoint from = null;
       Endpoint to = null;
@@ -236,75 +236,82 @@ public sealed interface RuleResultValue {
   /**
    * Number value.
    *
-   * @param display display or null
+   * @param result display or null
    * @param number magnitude
    */
-  record Number(@Nullable String display, BigDecimal number) implements RuleResultValue {}
+  record Number(@Nullable String result, BigDecimal number) implements RuleResultValue {}
 
   /**
    * Text value.
    *
-   * @param display display or null
+   * @param result display or null
    * @param text text value
    */
-  record Text(@Nullable String display, String text) implements RuleResultValue {}
+  record Text(@Nullable String result, String text) implements RuleResultValue {}
 
   /**
    * Boolean value.
    *
-   * @param display display or null
+   * @param result display or null
    * @param booleanValue boolean value
    */
-  record BooleanValue(@Nullable String display, boolean booleanValue) implements RuleResultValue {}
+  record BooleanValue(@Nullable String result, boolean booleanValue) implements RuleResultValue {}
 
   /**
    * Date value.
    *
-   * @param display display or null
+   * @param result display or null
    * @param date calendar date
    */
-  record Date(@Nullable String display, LocalDate date) implements RuleResultValue {}
+  record Date(@Nullable String result, LocalDate date) implements RuleResultValue {}
 
   /**
    * Time value.
    *
-   * @param display display or null
+   * @param result display or null
    * @param time time of day
    */
-  record Time(@Nullable String display, LocalTime time) implements RuleResultValue {}
+  record Time(@Nullable String result, LocalTime time) implements RuleResultValue {}
 
   /**
    * Measure value.
    *
-   * @param display display or null
+   * @param result display or null
    * @param measure unit map
    */
-  record Measure(@Nullable String display, Map<String, BigDecimal> measure)
+  record Measure(@Nullable String result, Map<String, BigDecimal> measure)
       implements RuleResultValue {}
 
   /**
    * Ratio value.
    *
-   * @param display display or null
+   * @param result display or null
    * @param ratio unit map
    */
-  record Ratio(@Nullable String display, Map<String, BigDecimal> ratio) implements RuleResultValue {}
+  record Ratio(@Nullable String result, Map<String, BigDecimal> ratio) implements RuleResultValue {}
 
   /**
    * Calendar value.
    *
-   * @param display display or null
+   * @param result display or null
    * @param calendar calendar value
    */
-  record Calendar(@Nullable String display, CalendarResult calendar) implements RuleResultValue {}
+  record Calendar(@Nullable String result, CalendarResult calendar) implements RuleResultValue {}
 
   /**
    * Range value.
    *
-   * @param display display or null
+   * @param result display or null
    * @param range endpoints
    */
-  record Range(@Nullable String display, RangeResult range) implements RuleResultValue {}
+  record Range(@Nullable String result, RangeResult range) implements RuleResultValue {}
+
+  /**
+   * One-liner only (explanation veto text; no typed magnitude map).
+   *
+   * @param result one-liner
+   */
+  record ResultOnly(@Nullable String result) implements RuleResultValue {}
 
   /**
    * Parses JSON.
@@ -315,7 +322,7 @@ public sealed interface RuleResultValue {
    */
   static RuleResultValue read(JsonParser p) throws IOException {
     JsonReading.expectStartObject(p, "RuleResultValue");
-    String display = null;
+    String result = null;
     Map<String, BigDecimal> measure = null;
     Map<String, BigDecimal> ratio = null;
     BigDecimal number = null;
@@ -329,7 +336,7 @@ public sealed interface RuleResultValue {
       String field = p.currentName();
       p.nextToken();
       switch (field) {
-        case "display" -> display = JsonReading.readString(p);
+        case "result" -> result = JsonReading.readString(p);
         case "measure" -> measure = JsonReading.readMap(p, JsonReading::readDecimal);
         case "ratio" -> ratio = JsonReading.readMap(p, JsonReading::readDecimal);
         case "number" -> number = JsonReading.readDecimal(p);
@@ -343,31 +350,31 @@ public sealed interface RuleResultValue {
       }
     }
     if (number != null) {
-      return new Number(display, number);
+      return new Number(result, number);
     }
     if (text != null) {
-      return new Text(display, text);
+      return new Text(result, text);
     }
     if (booleanValue != null) {
-      return new BooleanValue(display, booleanValue);
+      return new BooleanValue(result, booleanValue);
     }
     if (date != null) {
-      return new Date(display, date);
+      return new Date(result, date);
     }
     if (time != null) {
-      return new Time(display, time);
+      return new Time(result, time);
     }
     if (measure != null) {
-      return new Measure(display, measure);
+      return new Measure(result, measure);
     }
     if (ratio != null) {
-      return new Ratio(display, ratio);
+      return new Ratio(result, ratio);
     }
     if (calendar != null) {
-      return new Calendar(display, calendar);
+      return new Calendar(result, calendar);
     }
     if (range != null) {
-      return new Range(display, range);
+      return new Range(result, range);
     }
     throw new LemmaBugError("BUG: RuleResultValue has no typed value field");
   }

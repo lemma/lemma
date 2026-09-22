@@ -47,7 +47,7 @@ rule other: unrelated * 2
 
     let now = DateTimeValue::now();
     let mut inputs = HashMap::new();
-    inputs.insert("threshold".to_string(), "4".to_string());
+    inputs.insert("threshold".to_string(), "4".into());
     let response = engine
         .run(
             None,
@@ -88,7 +88,7 @@ rule main: supplied + missing
 
     let now = DateTimeValue::now();
     let mut inputs = HashMap::new();
-    inputs.insert("supplied".to_string(), "4".to_string());
+    inputs.insert("supplied".to_string(), "4".into());
     let response = engine
         .run(None, "demo", Some(&now), inputs, None, false)
         .expect("evaluation must succeed");
@@ -211,7 +211,7 @@ rule main: prefilled + suggested + required
     assert!(suggested
         .suggestion
         .as_ref()
-        .is_some_and(|s| s.number.as_deref() == Some("5")));
+        .is_some_and(|s| s.number == Some(rust_decimal::Decimal::from(5))));
     assert!(suggested.fill.is_none());
 
     let main = response.results.get("main").expect("main rule");
@@ -235,7 +235,7 @@ rule main: amount * 2
 
     let now = DateTimeValue::now();
     let mut inputs = HashMap::new();
-    inputs.insert("amount".to_string(), "-5".to_string());
+    inputs.insert("amount".to_string(), "-5".into());
     let response = engine
         .run(None, "demo", Some(&now), inputs, None, false)
         .expect("evaluation must succeed");
@@ -262,7 +262,7 @@ fn missing_data_prunes_dead_branch_after_unless_discriminator() {
 
     let now = DateTimeValue::now();
     let mut inputs = HashMap::new();
-    inputs.insert("mode".to_string(), "simple".to_string());
+    inputs.insert("mode".to_string(), "simple".into());
     let response = engine
         .run(
             None,
@@ -289,7 +289,7 @@ fn missing_data_prunes_simple_branch_when_mode_is_complex() {
 
     let now = DateTimeValue::now();
     let mut inputs = HashMap::new();
-    inputs.insert("mode".to_string(), "complex".to_string());
+    inputs.insert("mode".to_string(), "complex".into());
     let response = engine
         .run(
             None,
@@ -358,7 +358,7 @@ rule main: n
     assert!(show_n
         .suggestion
         .as_ref()
-        .is_some_and(|s| s.number.as_deref() == Some("42")));
+        .is_some_and(|s| s.number == Some(rust_decimal::Decimal::from(42))));
 
     let response = engine
         .run(None, "demo", Some(&now), HashMap::new(), None, false)

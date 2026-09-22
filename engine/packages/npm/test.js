@@ -385,9 +385,11 @@ rule r: 1
       assert(Object.keys(show.rules).includes('double'));
       const x = show.data.x;
       assert(x && typeof x === 'object' && !Array.isArray(x), 'ShowData is a named object');
+      assert(Array.isArray(x.path) && x.path.length === 0, 'local ShowData.path is []');
       assert(x.type && typeof x.type.kind === 'string', 'type carries `kind` discriminator');
       const doubleRule = show.rules.double;
       assert(doubleRule.type && typeof doubleRule.type.kind === 'string', 'ShowRule nests type');
+      assert(Array.isArray(doubleRule.path) && doubleRule.path.length === 0, 'local ShowRule.path is []');
       assert(Array.isArray(doubleRule.branches) && doubleRule.branches.length >= 1);
       assert(Array.isArray(doubleRule.depends_on_rules));
     });
@@ -462,6 +464,36 @@ rule doubled: n * 2`,
         null
       );
       assert(ruleNumber(r.results.double_number) === 100);
+    });
+
+    // Decimal::MAX.normalize() — same digits as cli/documentation/learn/precision.md
+    const DECIMAL_MAX = '79228162514264337593543950335';
+    const largeIntSource = `spec large_int
+data y: number
+rule z: y`;
+
+    await run('run data y as Decimal::MAX string', () => {
+      const fresh = new Engine();
+      fresh.load({ 'large_int.lemma': largeIntSource });
+      const r = runEx(fresh, 'large_int', null, { y: DECIMAL_MAX }, null);
+      assertResponseShape(r, 'large_int');
+      assert(r.results.z.vetoed === false, 'z must not veto');
+      assert(
+        r.results.z.number === DECIMAL_MAX,
+        `z.number want ${DECIMAL_MAX}, got ${r.results.z.number}`
+      );
+    });
+
+    await run('run data y as Decimal::MAX bigint', () => {
+      const fresh = new Engine();
+      fresh.load({ 'large_int.lemma': largeIntSource });
+      const r = runEx(fresh, 'large_int', null, { y: BigInt(DECIMAL_MAX) }, null);
+      assertResponseShape(r, 'large_int');
+      assert(r.results.z.vetoed === false, 'z must not veto');
+      assert(
+        r.results.z.number === DECIMAL_MAX,
+        `z.number want ${DECIMAL_MAX}, got ${r.results.z.number}`
+      );
     });
 
     await run('load parse errors as EngineError array', () => {

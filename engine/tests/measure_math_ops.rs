@@ -47,7 +47,7 @@ fn eval_display(code: &str, spec: &str, rule: &str, data: HashMap<String, String
         );
     }
     result
-        .display()
+        .result()
         .expect("rule must have display value")
         .to_string()
 }

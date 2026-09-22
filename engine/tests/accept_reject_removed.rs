@@ -56,11 +56,11 @@ rule reject: accept
 
     let now = DateTimeValue::now();
     let mut data = HashMap::new();
-    data.insert("accept".to_string(), "1".to_string());
+    data.insert("accept".to_string(), "1".into());
     let response = engine
         .run(None, "test", Some(&now), data, None, false)
         .expect("run");
     let reject = response.results.get("reject").expect("reject rule");
     assert!(!reject.vetoed);
-    assert_eq!(reject.display(), Some("1"));
+    assert_eq!(reject.result(), Some("1"));
 }

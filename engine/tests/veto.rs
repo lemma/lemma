@@ -100,7 +100,7 @@ rule is_adult: age >= 18
     assert!(!rule_result.vetoed);
     assert_eq!(
         rule_result
-            .value
+            .result
             .as_ref()
             .expect("rule result value")
             .boolean,
@@ -251,7 +251,7 @@ rule can_drive: age >= 16
     assert!(!rule_result.vetoed);
     assert_eq!(
         rule_result
-            .value
+            .result
             .as_ref()
             .expect("rule result value")
             .boolean,
@@ -562,7 +562,7 @@ rule double_value: value * 2
     assert!(!check_negative.vetoed);
     assert_eq!(
         check_negative
-            .value
+            .result
             .as_ref()
             .expect("rule result value")
             .boolean,
@@ -575,7 +575,7 @@ rule double_value: value * 2
         .find(|r| r.rule.name == "double_value")
         .unwrap();
     assert_eq!(
-        double_value.display().expect("display").to_string(),
+        double_value.result().expect("result").to_string(),
         LiteralValue::number_from_decimal(Decimal::from_str("-20.0").unwrap()).to_string(),
     );
 }

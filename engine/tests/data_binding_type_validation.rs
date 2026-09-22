@@ -22,7 +22,7 @@ fn assert_run_completes_with_veto_on_rule(
     assert!(
         rule.vetoed,
         "rule '{rule_name}' must veto on invalid override, got {:?}",
-        rule.display()
+        rule.result()
     );
     if !reason_contains.is_empty() {
         let reason = rule.veto_reason.as_deref().expect("veto reason");
@@ -47,7 +47,7 @@ rule doubled: age * 2
         .unwrap();
 
     let mut data = HashMap::new();
-    data.insert("age".to_string(), "twenty".to_string());
+    data.insert("age".to_string(), "twenty".into());
 
     let now = DateTimeValue::now();
     let result = engine.run(None, "test", Some(&now), data, None, true);
@@ -72,9 +72,9 @@ rule flagged: active
         .unwrap();
 
     let mut data = HashMap::new();
-    data.insert("price".to_string(), "expensive".to_string());
-    data.insert("quantity".to_string(), "5".to_string());
-    data.insert("active".to_string(), "true".to_string());
+    data.insert("price".to_string(), "expensive".into());
+    data.insert("quantity".to_string(), "5".into());
+    data.insert("active".to_string(), "true".into());
 
     let now = DateTimeValue::now();
     assert_run_completes_with_veto_on_rule(
@@ -84,9 +84,9 @@ rule flagged: active
     );
 
     let mut data = HashMap::new();
-    data.insert("price".to_string(), "100".to_string());
-    data.insert("quantity".to_string(), "five".to_string());
-    data.insert("active".to_string(), "true".to_string());
+    data.insert("price".to_string(), "100".into());
+    data.insert("quantity".to_string(), "five".into());
+    data.insert("active".to_string(), "true".into());
 
     assert_run_completes_with_veto_on_rule(
         engine.run(None, "test", Some(&now), data, None, true),
@@ -95,9 +95,9 @@ rule flagged: active
     );
 
     let mut data = HashMap::new();
-    data.insert("price".to_string(), "100".to_string());
-    data.insert("quantity".to_string(), "5".to_string());
-    data.insert("active".to_string(), "maybe".to_string());
+    data.insert("price".to_string(), "100".into());
+    data.insert("quantity".to_string(), "5".into());
+    data.insert("active".to_string(), "maybe".into());
 
     assert_run_completes_with_veto_on_rule(
         engine.run(None, "test", Some(&now), data, None, true),
@@ -106,14 +106,14 @@ rule flagged: active
     );
 
     let mut data = HashMap::new();
-    data.insert("price".to_string(), "100".to_string());
-    data.insert("quantity".to_string(), "5".to_string());
-    data.insert("active".to_string(), "true".to_string());
+    data.insert("price".to_string(), "100".into());
+    data.insert("quantity".to_string(), "5".into());
+    data.insert("active".to_string(), "true".into());
     let response = engine
         .run(None, "test", Some(&now), data, None, true)
         .expect("valid data must evaluate");
     let total = response.results.get("total").expect("total rule");
-    assert_eq!(total.display(), Some("500"));
+    assert_eq!(total.result(), Some("500"));
 }
 
 #[test]
@@ -130,7 +130,7 @@ rule total: base_price * 1.2
         .unwrap();
 
     let mut data = HashMap::new();
-    data.insert("base_price".to_string(), "sixty".to_string());
+    data.insert("base_price".to_string(), "sixty".into());
 
     let now = DateTimeValue::now();
     assert_run_completes_with_veto_on_rule(
@@ -140,12 +140,12 @@ rule total: base_price * 1.2
     );
 
     let mut data = HashMap::new();
-    data.insert("base_price".to_string(), "60".to_string());
+    data.insert("base_price".to_string(), "60".into());
     let response = engine
         .run(None, "test", Some(&now), data, None, true)
         .expect("valid base_price must evaluate");
     let total = response.results.get("total").expect("total rule");
-    let display = total.display().expect("display");
+    let display = total.result().expect("result");
     assert!(display.starts_with("72"), "60 * 1.2 = 72, got {}", display);
 }
 
@@ -163,15 +163,15 @@ rule total: price * 1.1
         .unwrap();
 
     let mut data = HashMap::new();
-    data.insert("price".to_string(), "100".to_string());
-    data.insert("unknown_data".to_string(), "42".to_string());
+    data.insert("price".to_string(), "100".into());
+    data.insert("unknown_data".to_string(), "42".into());
 
     let now = DateTimeValue::now();
     let response = engine
         .run(None, "test", Some(&now), data, None, true)
         .expect("unknown keys must not abort evaluation");
     let total = response.results.get("total").expect("total rule");
-    assert_eq!(total.display(), Some("110"));
+    assert_eq!(total.result(), Some("110"));
 }
 
 /// Matrix: primitive × applicable constraint × violating user value.
@@ -198,7 +198,7 @@ rule r: p
         .unwrap();
 
     let mut data = HashMap::new();
-    data.insert("p".to_string(), "5%".to_string());
+    data.insert("p".to_string(), "5%".into());
 
     let now = DateTimeValue::now();
     assert_run_completes_with_veto_on_rule(
@@ -234,7 +234,7 @@ rule r: p
         .unwrap();
 
     let mut data = HashMap::new();
-    data.insert("p".to_string(), "5%".to_string());
+    data.insert("p".to_string(), "5%".into());
 
     let now = DateTimeValue::now();
     let resp = engine
@@ -247,7 +247,7 @@ rule r: p
         .as_ref()
         .expect("explanation")
         .result
-        .value()
+        .literal_value()
         .expect("value");
     match &lit.value {
         ValueKind::Ratio(n) => {
@@ -283,7 +283,7 @@ rule r: p
         .unwrap();
 
     let mut data = HashMap::new();
-    data.insert("p".to_string(), "90%".to_string());
+    data.insert("p".to_string(), "90%".into());
 
     let now = DateTimeValue::now();
     assert_run_completes_with_veto_on_rule(
@@ -320,7 +320,7 @@ rule r: d
     }
 
     let mut data = HashMap::new();
-    data.insert("d".to_string(), "12 hour".to_string());
+    data.insert("d".to_string(), "12 hour".into());
 
     let now = DateTimeValue::now();
     assert_run_completes_with_veto_on_rule(
@@ -354,7 +354,7 @@ rule r: when
     }
 
     let mut data = HashMap::new();
-    data.insert("when".to_string(), "2023-06-15".to_string());
+    data.insert("when".to_string(), "2023-06-15".into());
 
     let now = DateTimeValue::now();
     assert_run_completes_with_veto_on_rule(
@@ -381,7 +381,7 @@ rule r: n
         .unwrap();
 
     let mut data = HashMap::new();
-    data.insert("n".to_string(), "3.14159".to_string());
+    data.insert("n".to_string(), "3.14159".into());
 
     let now = DateTimeValue::now();
     assert_run_completes_with_veto_on_rule(
@@ -407,7 +407,7 @@ rule r: msg
         .unwrap();
 
     let mut data = HashMap::new();
-    data.insert("msg".to_string(), "exact".to_string());
+    data.insert("msg".to_string(), "exact".into());
 
     let now = DateTimeValue::now();
     let resp = engine
@@ -416,7 +416,7 @@ rule r: msg
     let rr = resp.results.get("r").expect("rule 'r'");
     assert!(!rr.vetoed, "expected value, got veto: {:?}", rr.veto_reason);
     assert_eq!(
-        rr.value
+        rr.result
             .as_ref()
             .expect("rule result value")
             .text
@@ -485,7 +485,7 @@ rule r: price
 
     let mut data = HashMap::new();
     // `meter` is not a unit of `money`.
-    data.insert("price".to_string(), "100 meter".to_string());
+    data.insert("price".to_string(), "100 meter".into());
 
     let now = DateTimeValue::now();
     assert_run_completes_with_veto_on_rule(
@@ -514,7 +514,7 @@ rule span: bridge_height
         .unwrap();
 
     let mut data = HashMap::new();
-    data.insert("bridge_height".to_string(), "4 mete".to_string());
+    data.insert("bridge_height".to_string(), "4 mete".into());
 
     let now = DateTimeValue::now();
     assert_run_completes_with_veto_on_rule(

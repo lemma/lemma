@@ -256,7 +256,7 @@ fn response_effective_remains_display_string() {
             None,
             "solo",
             Some(&effective),
-            HashMap::from([("amount".to_string(), "1".to_string())]),
+            HashMap::from([("amount".to_string(), "1".into())]),
             None,
             false,
         )
@@ -287,7 +287,7 @@ fn date_granularity_absent_from_api() {
             None,
             "policy",
             Some(&effective),
-            HashMap::from([("amount".to_string(), "1".to_string())]),
+            HashMap::from([("amount".to_string(), "1".into())]),
             None,
             false,
         )

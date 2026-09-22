@@ -87,6 +87,10 @@ pub fn combine_decompositions(
 /// Combine two symbolic unit signatures (sorted-by-unit-name, no-zero-exponent vectors)
 /// under multiplication or division. The result is in canonical form: sorted by unit name
 /// ascending, no zero exponents.
+///
+/// Planning resolves measure products via decompositions; this remains the pinned algebra
+/// for signature-index tests.
+#[cfg(test)]
 pub fn combine_signatures(
     left: &[(String, i32)],
     right: &[(String, i32)],
@@ -1656,7 +1660,7 @@ impl TypeSpecification {
     /// `decimals` on the same declaration are rejected by the caller seen-set before this
     /// runs. A child typedef may override an inherited suggest, fill, or bound with one
     /// command of that kind. Measure scalars stay raw until unit factors are resolved;
-    /// callers convert via [`value_kind_from_raw_suggestion`].
+    /// callers convert via [`bound_value_kind_from_raw_suggestion`].
     pub fn apply_constraint(
         &mut self,
         type_name: &str,
@@ -2023,8 +2027,8 @@ impl TypeSpecification {
                         SuggestionExpectation::Ratio,
                         None,
                     )?;
-                    let default = match lit {
-                        crate::literals::Value::NumberWithUnit(_, _) => {
+                    match lit {
+                        crate::literals::Value::NumberWithUnit(_, unit_name) => {
                             let element_spec = TypeSpecification::Ratio {
                                 decimals: *decimals,
                                 minimum: minimum.clone(),
@@ -2032,7 +2036,12 @@ impl TypeSpecification {
                                 units: units.clone(),
                                 help: help.clone(),
                             };
-                            parser_value_to_value_kind(lit, &element_spec)?
+                            let value = parser_value_to_value_kind(lit, &element_spec)?;
+                            sync_ratio_suggestion_units(units, &value)?;
+                            *target = Some(RawSuggestion::UnitBound {
+                                value,
+                                unit_name: unit_name.clone(),
+                            });
                         }
                         other => {
                             return Err(format!(
@@ -2040,9 +2049,7 @@ impl TypeSpecification {
                                 value_kind_name(other)
                             ));
                         }
-                    };
-                    sync_ratio_suggestion_units(units, &default)?;
-                    *target = Some(RawSuggestion::Value(default));
+                    }
                 }
                 _ => {
                     return Err(format!(
@@ -2143,10 +2150,20 @@ impl TypeSpecification {
                                 .to_string(),
                         );
                     }
-                    *target = Some(RawSuggestion::Value(ValueKind::Range(
-                        Box::new(left.to_literal()),
-                        Box::new(right.to_literal()),
-                    )));
+                    let value =
+                        ValueKind::Range(Box::new(left.to_literal()), Box::new(right.to_literal()));
+                    *target = match (
+                        left.lemma_type.measure_binding_unit.as_ref(),
+                        right.lemma_type.measure_binding_unit.as_ref(),
+                    ) {
+                        (Some(left_unit), Some(right_unit)) if left_unit == right_unit => {
+                            Some(RawSuggestion::UnitBound {
+                                value,
+                                unit_name: left_unit.clone(),
+                            })
+                        }
+                        _ => Some(RawSuggestion::Value(value)),
+                    };
                 }
                 _ => {
                     return Err(format!(
@@ -2944,19 +2961,79 @@ impl FromStr for SemanticDateTime {
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum RawSuggestion {
     Value(ValueKind),
+    /// Measure suggest/fill: magnitude in the written unit (canonicalized later).
     Measure {
         magnitude: RationalInteger,
         unit_name: String,
     },
+    /// Ratio (or other) suggest/fill that already holds a canonical [`ValueKind`]
+    /// plus the written unit name for display binding.
+    UnitBound {
+        value: ValueKind,
+        unit_name: String,
+    },
 }
 
-pub fn value_kind_from_raw_suggestion(
+/// Canonical suggestion/fill value plus the written measure unit when one was declared.
+///
+/// `measure_binding_unit` is the unit from `-> suggest 100 inr` / `-> fill 5 eur`; Show
+/// display stamps it so the one-liner matches the written unit, not the type's first unit.
+/// Shared via [`Arc`] so value-table clones bump a refcount instead of allocating.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct BoundValueKind {
+    pub value: ValueKind,
+    pub measure_binding_unit: Option<Arc<str>>,
+}
+
+impl BoundValueKind {
+    pub fn unbound(value: ValueKind) -> Self {
+        Self {
+            value,
+            measure_binding_unit: None,
+        }
+    }
+
+    pub fn with_binding(value: ValueKind, measure_binding_unit: Option<Arc<str>>) -> Self {
+        Self {
+            value,
+            measure_binding_unit,
+        }
+    }
+
+    pub fn to_literal(&self) -> LiteralValue {
+        LiteralValue {
+            value: self.value.clone(),
+        }
+    }
+
+    /// Written-unit agreement for ± on same-family measure/ratio: equal keep; one Some keep that;
+    /// conflict → left wins.
+    #[must_use]
+    pub fn agree_or_left_binding(
+        left: Option<&Arc<str>>,
+        right: Option<&Arc<str>>,
+    ) -> Option<Arc<str>> {
+        match (left, right) {
+            (Some(a), Some(b)) if a.as_ref() == b.as_ref() => Some(Arc::clone(a)),
+            (Some(a), Some(_)) => Some(Arc::clone(a)),
+            (Some(a), None) => Some(Arc::clone(a)),
+            (None, Some(b)) => Some(Arc::clone(b)),
+            (None, None) => None,
+        }
+    }
+}
+
+pub fn bound_value_kind_from_raw_suggestion(
     raw: RawSuggestion,
     specifications: &TypeSpecification,
     type_name: &str,
-) -> Result<ValueKind, String> {
+) -> Result<BoundValueKind, String> {
     match raw {
-        RawSuggestion::Value(vk) => Ok(vk),
+        RawSuggestion::Value(vk) => Ok(BoundValueKind::unbound(vk)),
+        RawSuggestion::UnitBound { value, unit_name } => Ok(BoundValueKind {
+            value,
+            measure_binding_unit: Some(Arc::from(unit_name)),
+        }),
         RawSuggestion::Measure {
             magnitude,
             unit_name,
@@ -2969,8 +3046,67 @@ pub fn value_kind_from_raw_suggestion(
             let canonical = measure_declared_bound_to_canonical(
                 &magnitude, &unit_name, units, type_name, "suggest",
             )?;
-            Ok(ValueKind::Measure(canonical))
+            Ok(BoundValueKind {
+                value: ValueKind::Measure(canonical),
+                measure_binding_unit: Some(Arc::from(unit_name)),
+            })
         }
+    }
+}
+
+/// Display one-liner unit: `as` / schema > settled > fill > suggest > none (first declared).
+#[must_use]
+pub fn display_binding_unit(
+    schema: &LemmaType,
+    settled: Option<&BoundValueKind>,
+    fill: Option<&BoundValueKind>,
+    suggestion: Option<&BoundValueKind>,
+) -> Option<String> {
+    if let Some(unit) = schema.measure_binding_unit.clone() {
+        return Some(unit);
+    }
+    if let Some(unit) = settled.and_then(|bound| bound.measure_binding_unit.as_ref()) {
+        return Some(unit.to_string());
+    }
+    if let Some(unit) = fill.and_then(|bound| bound.measure_binding_unit.as_ref()) {
+        return Some(unit.to_string());
+    }
+    suggestion
+        .and_then(|bound| bound.measure_binding_unit.as_ref())
+        .map(|unit| unit.to_string())
+}
+
+/// Schema type stamped with [`display_binding_unit`] when a binding wins.
+///
+/// Clones only when the winning unit differs from what `schema` already carries.
+#[must_use]
+pub fn lemma_type_with_display_binding(
+    schema: &LemmaType,
+    settled: Option<&BoundValueKind>,
+    fill: Option<&BoundValueKind>,
+    suggestion: Option<&BoundValueKind>,
+) -> LemmaType {
+    match display_binding_unit(schema, settled, fill, suggestion) {
+        Some(unit) if schema.measure_binding_unit.as_deref() != Some(unit.as_str()) => {
+            schema.clone().with_measure_binding_unit(unit)
+        }
+        Some(_) | None => schema.clone(),
+    }
+}
+
+/// Like [`lemma_type_with_display_binding`] but reuses `schema` when no override.
+#[must_use]
+pub fn lemma_type_arc_with_display_binding(
+    schema: &Arc<LemmaType>,
+    settled: Option<&BoundValueKind>,
+    fill: Option<&BoundValueKind>,
+    suggestion: Option<&BoundValueKind>,
+) -> Arc<LemmaType> {
+    match display_binding_unit(schema.as_ref(), settled, fill, suggestion) {
+        Some(unit) if schema.measure_binding_unit.as_deref() != Some(unit.as_str()) => {
+            Arc::new(schema.as_ref().clone().with_measure_binding_unit(unit))
+        }
+        Some(_) | None => Arc::clone(schema),
     }
 }
 
@@ -3086,12 +3222,17 @@ impl fmt::Display for ValueKind {
 /// A single segment in a resolved path traversal
 ///
 /// Used in both DataPath and RulePath for cross-spec traversal.
-/// Each segment contains a data name that resolves to another spec.
+/// Each segment contains a `uses` alias, the resolved target repository name
+/// (`repository`; `None` = unnamed workspace), and the resolved target spec
+/// name (`spec`).
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct PathSegment {
-    /// The data name in this segment
-    pub data: String,
-    /// The spec this data references (resolved during planning)
+    /// The `uses` alias for this hop (binding key component).
+    pub uses: String,
+    /// Target repository name from `Arc<LemmaRepository>.name` at resolve.
+    /// `None` is the unnamed workspace. Always encoded for postcard (no skip).
+    pub repository: Option<String>,
+    /// The spec this hop resolves to (resolved during planning)
     pub spec: String,
 }
 
@@ -3121,11 +3262,11 @@ impl DataPath {
     }
 
     /// Dot-separated key used for matching user-provided data values (e.g. `"order.payment_method"`).
-    /// Unlike `Display`, this omits the resolved spec name.
+    /// Same string as [`Display`]: alias hops only, no repository or spec names.
     pub fn input_key(&self) -> String {
         let mut s = String::new();
         for segment in &self.segments {
-            s.push_str(&segment.data);
+            s.push_str(&segment.uses);
             s.push('.');
         }
         s.push_str(&self.data);
@@ -3148,6 +3289,21 @@ impl RulePath {
     /// Create a rule path from segments and rule name.
     pub fn new(segments: Vec<PathSegment>, rule: String) -> Self {
         Self { segments, rule }
+    }
+
+    /// Dot-separated key for Show/run (`alias.rule`), twin of [`DataPath::input_key`].
+    /// Same string as [`Display`]: alias hops only, no repository or spec names.
+    pub fn input_key(&self) -> String {
+        if self.segments.is_empty() {
+            return self.rule.clone();
+        }
+        let mut s = String::new();
+        for segment in &self.segments {
+            s.push_str(&segment.uses);
+            s.push('.');
+        }
+        s.push_str(&self.rule);
+        s
     }
 }
 
@@ -3760,36 +3916,36 @@ impl LemmaType {
         }
     }
 
-    /// Convert a rational magnitude to a decimal string for API output.
+    /// Convert a rational magnitude to an API [`Decimal`] (28-scale boundary).
     ///
     /// Applies this type's `decimal_places` when set. Returns [`NumericFailure::Overflow`]
     /// when |magnitude| > Decimal::MAX (callers map this to a decimal-limit Veto).
-    pub fn try_rational_as_decimal_string(
+    pub fn try_rational_as_decimal(
         &self,
         magnitude: &crate::computation::rational::RationalInteger,
-    ) -> Result<String, crate::computation::rational::NumericFailure> {
+    ) -> Result<rust_decimal::Decimal, crate::computation::rational::NumericFailure> {
         let decimal = magnitude.try_to_decimal()?;
         Ok(format_decimal_for_api(decimal, self.decimal_places()))
     }
 
-    /// Convert a canonical measure magnitude in the named declared unit to an API decimal string.
+    /// Convert a canonical measure magnitude in the named declared unit to an API [`Decimal`].
     pub fn try_measure_canonical_as_decimal_in_unit(
         &self,
         canonical_magnitude: &crate::computation::rational::RationalInteger,
         unit_name: &str,
-    ) -> Result<String, crate::computation::rational::NumericFailure> {
+    ) -> Result<rust_decimal::Decimal, crate::computation::rational::NumericFailure> {
         use crate::computation::rational::checked_div;
         let unit_factor = self.measure_unit_factor(unit_name);
         let magnitude_in_unit = checked_div(canonical_magnitude, unit_factor)?;
-        self.try_rational_as_decimal_string(&magnitude_in_unit)
+        self.try_rational_as_decimal(&magnitude_in_unit)
     }
 
-    /// Convert a canonical ratio magnitude in the named declared unit to an API decimal string.
+    /// Convert a canonical ratio magnitude in the named declared unit to an API [`Decimal`].
     pub fn try_ratio_canonical_as_decimal_in_unit(
         &self,
         canonical_magnitude: &crate::computation::rational::RationalInteger,
         unit_name: &str,
-    ) -> Result<String, crate::computation::rational::NumericFailure> {
+    ) -> Result<rust_decimal::Decimal, crate::computation::rational::NumericFailure> {
         use crate::computation::rational::checked_mul;
         let units = match &self.specifications {
             TypeSpecification::Ratio { units, .. } => units,
@@ -3811,7 +3967,7 @@ impl LemmaType {
                 )
             });
         let magnitude_in_unit = checked_mul(canonical_magnitude, &ratio_unit.value)?;
-        self.try_rational_as_decimal_string(&magnitude_in_unit)
+        self.try_rational_as_decimal(&magnitude_in_unit)
     }
 
     /// Get an example value string for this type, suitable for UI help text
@@ -4056,13 +4212,13 @@ impl LemmaType {
         }
     }
 
-    /// Convert a measure literal to decimal strings in the given unit names.
+    /// Convert a measure literal to API [`Decimal`]s in the given unit names.
     pub(crate) fn measure_literal_unit_map(
         &self,
         literal: &LiteralValue,
         unit_names: &[&str],
         factor_source: UnitFactorSource<'_>,
-    ) -> Result<BTreeMap<String, String>, LiteralUnitMapFailure> {
+    ) -> Result<BTreeMap<String, rust_decimal::Decimal>, LiteralUnitMapFailure> {
         use crate::computation::rational::checked_div;
 
         let ValueKind::Measure(magnitude) = &literal.value else {
@@ -4073,21 +4229,21 @@ impl LemmaType {
             let unit_factor = factor_source.measure_unit_factor(unit_name);
             let magnitude_in_unit = checked_div(magnitude, unit_factor)
                 .map_err(LiteralUnitMapFailure::UnitConversion)?;
-            let decimal_string = self
-                .try_rational_as_decimal_string(&magnitude_in_unit)
+            let decimal = self
+                .try_rational_as_decimal(&magnitude_in_unit)
                 .map_err(LiteralUnitMapFailure::Commit)?;
-            map.insert(unit_name.to_string(), decimal_string);
+            map.insert(unit_name.to_string(), decimal);
         }
         Ok(map)
     }
 
-    /// Convert a ratio literal to decimal strings in the given unit names.
+    /// Convert a ratio literal to API [`Decimal`]s in the given unit names.
     pub(crate) fn ratio_literal_unit_map(
         &self,
         literal: &LiteralValue,
         unit_names: &[&str],
         factor_source: UnitFactorSource<'_>,
-    ) -> Result<BTreeMap<String, String>, LiteralUnitMapFailure> {
+    ) -> Result<BTreeMap<String, rust_decimal::Decimal>, LiteralUnitMapFailure> {
         use crate::computation::rational::checked_mul;
 
         let ratio_api_type = match &self.specifications {
@@ -4120,10 +4276,10 @@ impl LemmaType {
             let unit_factor = factor_source.ratio_unit_factor(unit_name);
             let magnitude_in_unit = checked_mul(canonical, unit_factor)
                 .map_err(LiteralUnitMapFailure::UnitConversion)?;
-            let decimal_string = ratio_api_type
-                .try_rational_as_decimal_string(&magnitude_in_unit)
+            let decimal = ratio_api_type
+                .try_rational_as_decimal(&magnitude_in_unit)
                 .map_err(LiteralUnitMapFailure::Commit)?;
-            map.insert(unit_name.to_string(), decimal_string);
+            map.insert(unit_name.to_string(), decimal);
         }
         Ok(map)
     }
@@ -4461,16 +4617,16 @@ impl LiteralValue {
         self.value.structural_byte_size()
     }
 
-    /// Magnitude string for decimal input prompts.
+    /// Magnitude for decimal input prompts (API [`Decimal`]; format at call site).
     #[must_use]
     pub fn magnitude_suggestion_for_decimal_prompt(
         &self,
         lemma_type: &LemmaType,
-    ) -> Option<String> {
+    ) -> Option<rust_decimal::Decimal> {
         match &self.value {
             ValueKind::Number(n) => Some(
                 lemma_type
-                    .try_rational_as_decimal_string(n)
+                    .try_rational_as_decimal(n)
                     .expect("BUG: stored number literal must convert to decimal for prompt"),
             ),
             ValueKind::Measure(n) => {
@@ -4492,7 +4648,7 @@ impl LiteralValue {
                             .expect("BUG: stored ratio literal must convert to decimal for prompt"),
                     )
                 } else {
-                    Some(lemma_type.try_rational_as_decimal_string(n).expect(
+                    Some(lemma_type.try_rational_as_decimal(n).expect(
                         "BUG: stored bare ratio literal must convert to decimal for prompt",
                     ))
                 }
@@ -4503,7 +4659,10 @@ impl LiteralValue {
 
     /// Per-unit magnitudes when this literal is a measure with declared units.
     #[must_use]
-    pub fn measure_units(&self, lemma_type: &LemmaType) -> Option<BTreeMap<String, String>> {
+    pub fn measure_units(
+        &self,
+        lemma_type: &LemmaType,
+    ) -> Option<BTreeMap<String, rust_decimal::Decimal>> {
         if !matches!(self.value, ValueKind::Measure(_)) {
             return None;
         }
@@ -4518,7 +4677,10 @@ impl LiteralValue {
 
     /// Per-unit magnitudes when this literal is a ratio with declared units.
     #[must_use]
-    pub fn ratio_units(&self, lemma_type: &LemmaType) -> Option<BTreeMap<String, String>> {
+    pub fn ratio_units(
+        &self,
+        lemma_type: &LemmaType,
+    ) -> Option<BTreeMap<String, rust_decimal::Decimal>> {
         if !matches!(self.value, ValueKind::Ratio(_)) {
             return None;
         }
@@ -4540,12 +4702,16 @@ impl LiteralValue {
 
     /// Magnitude in a declared unit when this literal is measure or ratio.
     #[must_use]
-    pub fn magnitude_in_unit(&self, lemma_type: &LemmaType, unit: &str) -> Option<String> {
+    pub fn magnitude_in_unit(
+        &self,
+        lemma_type: &LemmaType,
+        unit: &str,
+    ) -> Option<rust_decimal::Decimal> {
         self.measure_units(lemma_type)
-            .and_then(|map| map.get(unit).cloned())
+            .and_then(|map| map.get(unit).copied())
             .or_else(|| {
                 self.ratio_units(lemma_type)
-                    .and_then(|map| map.get(unit).cloned())
+                    .and_then(|map| map.get(unit).copied())
             })
     }
 
@@ -4855,8 +5021,8 @@ pub enum DataDefinition {
     /// The evaluator never commits a suggestion — unbound stays MissingData.
     TypeDeclaration {
         resolved_type: Arc<LemmaType>,
-        declared_suggestion: Option<ValueKind>,
-        declared_fill: Option<ValueKind>,
+        declared_suggestion: Option<BoundValueKind>,
+        declared_fill: Option<BoundValueKind>,
         source: Source,
     },
     /// Import (`uses`): alias for another spec; nested members are flattened onto the plan.
@@ -4889,8 +5055,8 @@ pub enum DataDefinition {
         target: ReferenceTarget,
         resolved_type: Arc<LemmaType>,
         local_constraints: Option<Vec<Constraint>>,
-        local_suggestion: Option<ValueKind>,
-        local_fill: Option<ValueKind>,
+        local_suggestion: Option<BoundValueKind>,
+        local_fill: Option<BoundValueKind>,
         source: Source,
     },
 }
@@ -4898,10 +5064,15 @@ pub enum DataDefinition {
 impl DataDefinition {
     /// Declared lemma type for value, type-declaration, and reference data; `None` for imports.
     pub fn lemma_type(&self) -> Option<&LemmaType> {
+        self.resolved_type_arc().map(|arc| arc.as_ref())
+    }
+
+    /// Shared [`Arc`] for the declared type; `None` for imports.
+    pub fn resolved_type_arc(&self) -> Option<&Arc<LemmaType>> {
         match self {
-            DataDefinition::Value { resolved_type, .. } => Some(resolved_type.as_ref()),
-            DataDefinition::TypeDeclaration { resolved_type, .. } => Some(resolved_type.as_ref()),
-            DataDefinition::Reference { resolved_type, .. } => Some(resolved_type.as_ref()),
+            DataDefinition::Value { resolved_type, .. } => Some(resolved_type),
+            DataDefinition::TypeDeclaration { resolved_type, .. } => Some(resolved_type),
+            DataDefinition::Reference { resolved_type, .. } => Some(resolved_type),
             DataDefinition::Import { .. } => None,
         }
     }
@@ -4921,41 +5092,52 @@ impl DataDefinition {
             DataDefinition::TypeDeclaration {
                 declared_fill: Some(dv),
                 ..
-            } => Some(LiteralValue { value: dv.clone() }),
+            } => Some(dv.to_literal()),
             DataDefinition::Reference {
                 local_fill: Some(dv),
                 resolved_type: _,
                 ..
-            } => Some(LiteralValue { value: dv.clone() }),
+            } => Some(dv.to_literal()),
             DataDefinition::TypeDeclaration { .. }
             | DataDefinition::Import { .. }
             | DataDefinition::Reference { .. } => None,
         }
     }
 
-    /// Suggestion from `-> suggest ...` on a type declaration or reference.
+    /// Fill value with optional written measure unit binding (Show display).
+    pub(crate) fn bound_fill(&self) -> Option<&BoundValueKind> {
+        match self {
+            DataDefinition::TypeDeclaration {
+                declared_fill: Some(dv),
+                ..
+            }
+            | DataDefinition::Reference {
+                local_fill: Some(dv),
+                ..
+            } => Some(dv),
+            DataDefinition::Value { .. }
+            | DataDefinition::TypeDeclaration { .. }
+            | DataDefinition::Reference { .. }
+            | DataDefinition::Import { .. } => None,
+        }
+    }
+
+    /// Suggestion with optional written measure unit binding (Show display).
     /// Surfaces in [`crate::planning::execution_plan::ShowData::suggestion`] for
     /// show/response/UI; the evaluator never commits it — unbound stays MissingData.
-    pub fn suggestion(&self) -> Option<LiteralValue> {
+    pub(crate) fn bound_suggestion(&self) -> Option<&BoundValueKind> {
         match self {
             DataDefinition::TypeDeclaration {
                 declared_suggestion: Some(dv),
                 ..
-            } => Some(LiteralValue { value: dv.clone() }),
-            DataDefinition::Reference {
-                resolved_type: _,
-                local_suggestion: Some(dv),
-                ..
-            } => Some(LiteralValue { value: dv.clone() }),
-            DataDefinition::Value { .. }
-            | DataDefinition::TypeDeclaration {
-                declared_suggestion: None,
-                ..
             }
             | DataDefinition::Reference {
-                local_suggestion: None,
+                local_suggestion: Some(dv),
                 ..
-            }
+            } => Some(dv),
+            DataDefinition::Value { .. }
+            | DataDefinition::TypeDeclaration { .. }
+            | DataDefinition::Reference { .. }
             | DataDefinition::Import { .. } => None,
         }
     }
@@ -5338,25 +5520,22 @@ pub fn type_spec_for_primitive(kind: PrimitiveKind) -> TypeSpecification {
 
 impl fmt::Display for PathSegment {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{} → {}", self.data, self.spec)
+        match &self.repository {
+            Some(repository) => write!(f, "{} → {} {}", self.uses, repository, self.spec),
+            None => write!(f, "{} → {}", self.uses, self.spec),
+        }
     }
 }
 
 impl fmt::Display for DataPath {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        for segment in &self.segments {
-            write!(f, "{}.", segment)?;
-        }
-        write!(f, "{}", self.data)
+        write!(f, "{}", self.input_key())
     }
 }
 
 impl fmt::Display for RulePath {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        for segment in &self.segments {
-            write!(f, "{}.", segment)?;
-        }
-        write!(f, "{}", self.rule)
+        write!(f, "{}", self.input_key())
     }
 }
 
@@ -5366,28 +5545,23 @@ impl fmt::Display for LemmaType {
     }
 }
 
-fn decimal_places_in_display_value(decimal: &rust_decimal::Decimal) -> u32 {
-    if decimal.is_integer() {
-        return 0;
-    }
-    decimal.fract().normalize().scale()
-}
-
 pub(crate) fn format_decimal_for_api(
     decimal: rust_decimal::Decimal,
     decimal_places: Option<u8>,
-) -> String {
+) -> rust_decimal::Decimal {
     match decimal_places {
         Some(decimal_places) => {
-            let rounded = decimal.round_dp(u32::from(decimal_places));
-            format!("{:.prec$}", rounded, prec = decimal_places as usize)
+            let places = u32::from(decimal_places);
+            let mut rounded = decimal.round_dp(places);
+            rounded.rescale(places);
+            rounded
         }
         None => {
             let normalized = decimal.normalize();
             if normalized.fract().is_zero() {
-                normalized.trunc().to_string()
+                normalized.trunc()
             } else {
-                normalized.to_string()
+                normalized
             }
         }
     }
@@ -5422,80 +5596,32 @@ fn format_measure_canonical_for_display(
     lemma_type: &LemmaType,
     signature: &[(String, i32)],
 ) -> String {
-    use crate::computation::rational::{checked_div, rational_new};
-    use rust_decimal::Decimal;
+    use crate::computation::rational::checked_div;
 
     let decimals = lemma_type.decimal_places();
 
     if let TypeSpecification::Measure { units, .. } = &lemma_type.specifications {
         if !units.is_empty() {
-            if let [(sig_unit, 1)] = signature {
-                if let Some(unit) = units.iter().find(|u| u.name == *sig_unit) {
-                    // Prefer the bound unit when one was set; otherwise fall through to the
-                    // human-friendly unit picker among declared units.
-                    if lemma_type.measure_binding_unit.is_some() || units.len() == 1 {
-                        let in_unit = checked_div(canonical, &unit.factor)
-                            .expect("BUG: de-canonicalization for measure display must not fail");
-                        let formatted = format_rational_for_human_display(&in_unit, decimals);
-                        return format!("{} {}", formatted, unit.name);
-                    }
-                }
-            }
-
-            struct UnitDisplayCandidate {
-                unit_name: String,
-                decimal_places: u32,
-                under_1000: bool,
-                decimal_abs: Option<Decimal>,
-                formatted: String,
-            }
-
-            let thousand = rational_new(1000, 1);
-            let mut candidates: Vec<UnitDisplayCandidate> = Vec::with_capacity(units.len());
-            for unit in units.iter() {
-                let in_unit = checked_div(canonical, &unit.factor)
-                    .expect("BUG: de-canonicalization for measure display must not fail");
-                let formatted = format_rational_for_human_display(&in_unit, decimals);
-                let decimal_abs = in_unit.try_to_decimal().ok().map(|decimal| decimal.abs());
-                let decimal_places = decimal_abs
-                    .as_ref()
-                    .map(decimal_places_in_display_value)
-                    .unwrap_or(u32::MAX);
-                let under_1000 = in_unit
-                    .try_cmp(&thousand)
-                    .ok()
-                    .is_some_and(|ordering| ordering == std::cmp::Ordering::Less);
-                candidates.push(UnitDisplayCandidate {
-                    unit_name: unit.name.clone(),
-                    decimal_places,
-                    under_1000,
-                    decimal_abs,
-                    formatted,
-                });
-            }
-
-            let pool: Vec<&UnitDisplayCandidate> = {
-                let under: Vec<_> = candidates.iter().filter(|c| c.under_1000).collect();
-                if under.is_empty() {
-                    candidates.iter().collect()
-                } else {
-                    under
-                }
+            // Binding (`as` / suggest / fill) must name a declared unit; otherwise first declared.
+            let unit = match lemma_type.measure_binding_unit.as_deref() {
+                Some(binding) => units
+                    .iter()
+                    .find(|unit| unit.name == binding)
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "BUG: measure display binding '{binding}' is not a declared unit on type {}",
+                            lemma_type.name()
+                        )
+                    }),
+                None => units
+                    .iter()
+                    .next()
+                    .expect("BUG: measure type with non-empty units must have a first unit"),
             };
-            let best = pool
-                .iter()
-                .min_by(|left, right| {
-                    left.decimal_places
-                        .cmp(&right.decimal_places)
-                        .then_with(|| match (left.decimal_abs, right.decimal_abs) {
-                            (Some(left_abs), Some(right_abs)) => left_abs.cmp(&right_abs),
-                            (Some(_), None) => std::cmp::Ordering::Less,
-                            (None, Some(_)) => std::cmp::Ordering::Greater,
-                            (None, None) => std::cmp::Ordering::Equal,
-                        })
-                })
-                .expect("BUG: measure type must have at least one declared unit");
-            return format!("{} {}", best.formatted, best.unit_name);
+            let in_unit = checked_div(canonical, &unit.factor)
+                .expect("BUG: de-canonicalization for measure display must not fail");
+            let formatted = format_rational_for_human_display(&in_unit, decimals);
+            return format!("{} {}", formatted, unit.name);
         }
     }
 
@@ -5627,6 +5753,69 @@ pub(crate) mod tests {
             );
             assert_eq!(help, default_help_for_primitive(kind));
         }
+    }
+
+    #[test]
+    fn data_path_and_rule_path_display_are_input_key() {
+        let implicit = PathSegment {
+            uses: "bag".to_string(),
+            repository: None,
+            spec: "bag".to_string(),
+        };
+        let explicit = PathSegment {
+            uses: "bag".to_string(),
+            repository: None,
+            spec: "nut_bag".to_string(),
+        };
+        let named_repo = PathSegment {
+            uses: "calc".to_string(),
+            repository: Some("alpha".to_string()),
+            spec: "pricing".to_string(),
+        };
+
+        assert_eq!(
+            DataPath::new(vec![implicit.clone()], "weight".to_string()).to_string(),
+            "bag.weight"
+        );
+        assert_eq!(
+            DataPath::new(vec![explicit.clone()], "weight".to_string()).to_string(),
+            "bag.weight"
+        );
+        assert_eq!(
+            DataPath::new(vec![named_repo.clone()], "price".to_string()).to_string(),
+            "calc.price"
+        );
+        assert_eq!(
+            RulePath::new(vec![implicit], "cost".to_string()).to_string(),
+            "bag.cost"
+        );
+        assert_eq!(
+            RulePath::new(vec![explicit], "cost".to_string()).to_string(),
+            "bag.cost"
+        );
+        assert_eq!(
+            RulePath::new(vec![named_repo], "price".to_string()).to_string(),
+            "calc.price"
+        );
+
+        assert_eq!(
+            PathSegment {
+                uses: "bag".to_string(),
+                repository: None,
+                spec: "nut_bag".to_string(),
+            }
+            .to_string(),
+            "bag → nut_bag"
+        );
+        assert_eq!(
+            PathSegment {
+                uses: "calc".to_string(),
+                repository: Some("alpha".to_string()),
+                spec: "pricing".to_string(),
+            }
+            .to_string(),
+            "calc → alpha pricing"
+        );
     }
 
     #[test]

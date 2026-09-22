@@ -105,17 +105,22 @@ fn show_rules_follow_topological_not_alphabetical_order() {
 }
 
 #[test]
-fn response_results_follow_same_order_as_show_rules() {
+fn response_results_follow_same_order_as_local_show_rules() {
     let engine = load(RULE_TOPO_SPEC, "topo.lemma");
     let now = DateTimeValue::now();
     let show = engine.show(None, "topo", Some(&now)).expect("show");
-    let show_keys: Vec<_> = show.rules.keys().cloned().collect();
+    let show_keys: Vec<_> = show
+        .rules
+        .iter()
+        .filter(|(_, rule)| rule.path.is_empty())
+        .map(|(name, _)| name.clone())
+        .collect();
     let response = engine
         .run(
             None,
             "topo",
             Some(&now),
-            HashMap::from([("n".to_string(), "1".to_string())]),
+            HashMap::from([("n".to_string(), "1".into())]),
             None,
             false,
         )
@@ -132,12 +137,12 @@ fn load_errors_preserve_source_order() {
     let mut engine = Engine::new();
     let err = engine
         .load([
-            (path_source("zebra.lemma"), "this is not lemma".to_string()),
+            (path_source("zebra.lemma"), "this is not lemma".into()),
             (
                 path_source("yankee.lemma"),
                 "spec ok\nrule r: 1\n".to_string(),
             ),
-            (path_source("xray.lemma"), "also not lemma".to_string()),
+            (path_source("xray.lemma"), "also not lemma".into()),
         ])
         .expect_err("two sources must fail parse");
     let attrs: Vec<_> = err
@@ -171,11 +176,11 @@ rule r: a
     let engine = load(SPEC, "multi.lemma");
     let now = DateTimeValue::now();
     let data = HashMap::from([
-        ("a".to_string(), "bad".to_string()),
-        ("b".to_string(), "1".to_string()),
-        ("c".to_string(), "bad".to_string()),
-        ("d".to_string(), "2".to_string()),
-        ("e".to_string(), "bad".to_string()),
+        ("a".to_string(), "bad".into()),
+        ("b".to_string(), "1".into()),
+        ("c".to_string(), "bad".into()),
+        ("d".to_string(), "2".into()),
+        ("e".to_string(), "bad".into()),
     ]);
     let response = engine
         .run(None, "multi", Some(&now), data, None, false)
@@ -184,7 +189,7 @@ rule r: a
     assert!(
         rule_result.vetoed,
         "rule 'r' must veto when its only dependency 'a' has an invalid override, got {:?}",
-        rule_result.display()
+        rule_result.result()
     );
     let reason = rule_result
         .veto_reason

@@ -443,7 +443,8 @@ pub mod http {
                     lemma::RunDataValue::Boolean(b) => b.to_string(),
                     lemma::RunDataValue::MeasureMap(map) | lemma::RunDataValue::RatioMap(map) => {
                         if map.len() == 1 {
-                            let (unit, magnitude) = map.into_iter().next().expect("BUG: map len checked");
+                            let (unit, magnitude) =
+                                map.into_iter().next().expect("BUG: map len checked");
                             format!("{magnitude} {unit}")
                         } else {
                             return Err((
@@ -534,10 +535,13 @@ pub mod http {
                         )
                     })?;
                 map.into_iter()
-                    .filter(|(_, v)| !v.is_null())
-                    .map(|(k, v)| {
-                        crate::data_json::json_value_to_run_data_value(v).map(|input| (k, input))
-                    })
+                    .filter_map(
+                        |(k, v)| match crate::data_json::json_value_to_run_data_value(v) {
+                            Ok(None) => None,
+                            Ok(Some(input)) => Some(Ok((k, input))),
+                            Err(e) => Some(Err(e)),
+                        },
+                    )
                     .collect::<Result<_, _>>()
                     .map_err(|e| (StatusCode::BAD_REQUEST, Json(ErrorResponse { error: e })))?
             }

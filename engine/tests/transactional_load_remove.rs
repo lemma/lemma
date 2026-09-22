@@ -152,7 +152,7 @@ rule out: value
         .results
         .get("total")
         .expect("total rule")
-        .display()
+        .result()
         .expect("total display");
     assert_eq!(total, "20", "consumer must see updated dep value");
 }
@@ -208,8 +208,8 @@ rule out: value + missing.x
         .run(None, "consumer", Some(&now), HashMap::new(), None, false)
         .expect("consumer still runs after failed update");
     assert_eq!(
-        before.results.get("total").and_then(|r| r.display()),
-        after.results.get("total").and_then(|r| r.display()),
+        before.results.get("total").and_then(|r| r.result()),
+        after.results.get("total").and_then(|r| r.result()),
         "old dep value must be restored"
     );
 }

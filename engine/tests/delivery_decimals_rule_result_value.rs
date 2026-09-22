@@ -1,5 +1,7 @@
 use lemma::{DateTimeValue, Engine, SourceType};
+use rust_decimal::Decimal;
 use std::collections::HashMap;
+use std::str::FromStr;
 
 #[test]
 fn delivery_cost_converts_unit_with_show_decimals() {
@@ -43,7 +45,7 @@ rule delivery_cost: 0.26 eur_per_km * distance
             None,
             "delivery",
             Some(&effective),
-            HashMap::from([("distance".to_string(), "12 kilometer".to_string())]),
+            HashMap::from([("distance".to_string(), "12 kilometer".into())]),
             None,
             false,
         )
@@ -56,12 +58,18 @@ rule delivery_cost: 0.26 eur_per_km * distance
 
     assert!(!delivery_cost.vetoed);
     let measure = delivery_cost
-        .value
+        .result
         .as_ref()
         .expect("rule result value")
         .measure
         .as_ref()
         .expect("measure map on delivery_cost");
-    assert_eq!(measure.get("eur"), Some(&"3.12".to_string()));
-    assert_eq!(measure.get("usd"), Some(&"3.71".to_string()));
+    assert_eq!(
+        measure.get("eur").copied(),
+        Some(Decimal::from_str("3.12").expect("3.12"))
+    );
+    assert_eq!(
+        measure.get("usd").copied(),
+        Some(Decimal::from_str("3.71").expect("3.71"))
+    );
 }

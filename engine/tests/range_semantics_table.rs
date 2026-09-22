@@ -1,4 +1,5 @@
 use lemma::{DateGranularity, DateTimeValue, Engine, LiteralValue, TimezoneValue, ValueKind};
+use rust_decimal::Decimal;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -55,7 +56,7 @@ fn eval_literal(code: &str, spec_name: &str, rule_name: &str) -> LiteralValue {
         .as_ref()
         .expect("explanation")
         .result
-        .value()
+        .literal_value()
         .expect("BUG: non-vetoed rule missing value")
         .clone()
 }
@@ -80,12 +81,12 @@ fn eval_rule(code: &str, spec_name: &str, rule_name: &str) -> String {
         .results
         .get(rule_name)
         .unwrap_or_else(|| panic!("Rule '{}' not found", rule_name))
-        .display()
-        .expect("display")
+        .result()
+        .expect("result")
         .to_string()
 }
 
-fn eval_rule_measure_unit(code: &str, spec_name: &str, rule_name: &str, unit: &str) -> String {
+fn eval_rule_measure_unit(code: &str, spec_name: &str, rule_name: &str, unit: &str) -> Decimal {
     let mut engine = Engine::new();
     engine
         .load([(source(), code.to_string())])
@@ -112,11 +113,11 @@ fn eval_rule_measure_unit(code: &str, spec_name: &str, rule_name: &str, unit: &s
             rule.veto_reason.as_deref().unwrap_or("Vetoed")
         );
     }
-    rule.value
+    *rule
+        .result
         .as_ref()
         .and_then(|v| v.measure.as_ref())
         .and_then(|m| m.get(unit))
-        .cloned()
         .unwrap_or_else(|| panic!("measure map missing unit '{unit}' for rule '{rule_name}'"))
 }
 
@@ -277,19 +278,19 @@ rule minus: (3 kilogram...5 kilogram) - 2 kilogram
 rule rminus: 5 kilogram - (3 kilogram...5 kilogram)"#;
     assert_eq!(
         eval_rule_measure_unit(code, "test", "plus", "kilogram"),
-        "4"
+        Decimal::from(4)
     );
     assert_eq!(
         eval_rule_measure_unit(code, "test", "rplus", "kilogram"),
-        "4"
+        Decimal::from(4)
     );
     assert_eq!(
         eval_rule_measure_unit(code, "test", "minus", "kilogram"),
-        "0"
+        Decimal::from(0)
     );
     assert_eq!(
         eval_rule_measure_unit(code, "test", "rminus", "kilogram"),
-        "3"
+        Decimal::from(3)
     );
 }
 

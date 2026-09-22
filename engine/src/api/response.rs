@@ -43,7 +43,7 @@ pub struct RuleResult {
     pub veto_reason: Option<String>,
     pub rule_type: String,
     #[serde(flatten)]
-    pub value: Option<RuleResultValue>,
+    pub result: Option<RuleResultValue>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub explanation: Option<Explanation>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -56,7 +56,7 @@ impl From<&DomainRuleResult> for RuleResult {
             vetoed: result.vetoed,
             veto_reason: result.veto_reason.clone(),
             rule_type: result.rule_type.clone(),
-            value: result.value.as_ref().map(RuleResultValue::from),
+            result: result.result.as_ref().map(RuleResultValue::from),
             explanation: result.explanation.clone(),
             missing_data: result.missing_data().to_vec(),
         }

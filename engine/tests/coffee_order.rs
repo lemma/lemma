@@ -107,10 +107,10 @@ fn test_coffee_order_espresso_small_no_loyalty() {
     let now = DateTimeValue::now();
 
     let data_values = HashMap::from([
-        ("coffee".to_string(), "espresso".to_string()),
-        ("size".to_string(), "small".to_string()),
-        ("number_of_cups".to_string(), "2".to_string()),
-        ("has_loyalty_card".to_string(), "false".to_string()),
+        ("coffee".to_string(), "espresso".into()),
+        ("size".to_string(), "small".into()),
+        ("number_of_cups".to_string(), "2".into()),
+        ("has_loyalty_card".to_string(), "false".into()),
     ]);
     let response = engine
         .run(None, "coffee_order", Some(&now), data_values, None, true)
@@ -128,13 +128,13 @@ fn test_coffee_order_espresso_small_no_loyalty() {
         .as_ref()
         .expect("explanation")
         .result
-        .value()
+        .literal_value()
         .expect("base_price should have value");
     // base_price should be Measure with unit "eur"
     match &base_price_value.value {
         lemma::ValueKind::Measure(n) => {
             let unit = base_price
-                .value
+                .result
                 .as_ref()
                 .and_then(|v| v.measure.as_ref())
                 .and_then(|m| m.keys().next().map(|s| s.as_str()))
@@ -173,7 +173,7 @@ fn test_coffee_order_espresso_small_no_loyalty() {
         .as_ref()
         .expect("explanation")
         .result
-        .value()
+        .literal_value()
         .expect("size_multiplier should have value");
     // size_multiplier should be Number (no unit)
     match &multiplier_value.value {
@@ -205,13 +205,13 @@ fn test_coffee_order_espresso_small_no_loyalty() {
         .as_ref()
         .expect("explanation")
         .result
-        .value()
+        .literal_value()
         .expect("price_per_cup should have value");
     // price_per_cup should be Measure with unit "eur" (inherited from base_price)
     match &cup_price.value {
         lemma::ValueKind::Measure(n) => {
             let unit = price_per_cup
-                .value
+                .result
                 .as_ref()
                 .and_then(|v| v.measure.as_ref())
                 .and_then(|m| m.keys().next().map(|s| s.as_str()))
@@ -251,13 +251,13 @@ fn test_coffee_order_espresso_small_no_loyalty() {
         .as_ref()
         .expect("explanation")
         .result
-        .value()
+        .literal_value()
         .expect("subtotal should have value");
     // subtotal should be Measure with unit "eur" (inherited from price_per_cup)
     let subtotal_num = match &subtotal_value.value {
         lemma::ValueKind::Measure(n) => {
             let unit = subtotal
-                .value
+                .result
                 .as_ref()
                 .and_then(|v| v.measure.as_ref())
                 .and_then(|m| m.keys().next().map(|s| s.as_str()))
@@ -297,7 +297,7 @@ fn test_coffee_order_espresso_small_no_loyalty() {
         .as_ref()
         .expect("explanation")
         .result
-        .value()
+        .literal_value()
         .expect("loyalty_discount should have value");
     // loyalty_discount: false = 0.0 (should be Number, not Ratio when 0.0)
     match &discount.value {
@@ -325,7 +325,7 @@ fn test_coffee_order_espresso_small_no_loyalty() {
         .expect("total rule not found");
 
     let total_eur = total
-        .value
+        .result
         .as_ref()
         .and_then(|v| v.measure.as_ref())
         .and_then(|m| m.get("eur"))
@@ -335,7 +335,7 @@ fn test_coffee_order_espresso_small_no_loyalty() {
         .values()
         .find(|r| r.rule.name == "subtotal")
         .expect("subtotal rule not found")
-        .value
+        .result
         .as_ref()
         .and_then(|v| v.measure.as_ref())
         .and_then(|m| m.get("eur"))
@@ -352,10 +352,10 @@ fn test_coffee_order_latte_large_with_loyalty() {
     let now = DateTimeValue::now();
 
     let data_values = HashMap::from([
-        ("coffee".to_string(), "latte".to_string()),
-        ("size".to_string(), "large".to_string()),
-        ("number_of_cups".to_string(), "3".to_string()),
-        ("has_loyalty_card".to_string(), "true".to_string()),
+        ("coffee".to_string(), "latte".into()),
+        ("size".to_string(), "large".into()),
+        ("number_of_cups".to_string(), "3".into()),
+        ("has_loyalty_card".to_string(), "true".into()),
     ]);
     let response = engine
         .run(None, "coffee_order", Some(&now), data_values, None, true)
@@ -373,13 +373,13 @@ fn test_coffee_order_latte_large_with_loyalty() {
         .as_ref()
         .expect("explanation")
         .result
-        .value()
+        .literal_value()
         .expect("base_price should have value");
     // base_price should be Measure with unit "eur"
     match &base_price_value.value {
         lemma::ValueKind::Measure(n) => {
             let unit = base_price
-                .value
+                .result
                 .as_ref()
                 .and_then(|v| v.measure.as_ref())
                 .and_then(|m| m.keys().next().map(|s| s.as_str()))
@@ -418,7 +418,7 @@ fn test_coffee_order_latte_large_with_loyalty() {
         .as_ref()
         .expect("explanation")
         .result
-        .value()
+        .literal_value()
         .expect("size_multiplier should have value");
     // size_multiplier should be Number (no unit)
     match &multiplier_value.value {
@@ -451,7 +451,7 @@ fn test_coffee_order_latte_large_with_loyalty() {
         .as_ref()
         .expect("explanation")
         .result
-        .value()
+        .literal_value()
         .expect("loyalty_discount should have value");
     // loyalty_discount should be Number (since 0.10 is written as number, not percentage)
     match &discount.value {
@@ -489,21 +489,21 @@ fn test_coffee_order_latte_large_with_loyalty() {
         .as_ref()
         .expect("explanation")
         .result
-        .value()
+        .literal_value()
         .expect("subtotal should have value");
     total
         .explanation
         .as_ref()
         .expect("explanation")
         .result
-        .value()
+        .literal_value()
         .expect("total should have value");
 
     // subtotal should be Measure with unit "eur" (inherited from price_per_cup)
     let subtotal_num = match &subtotal_value.value {
         lemma::ValueKind::Measure(n) => {
             let unit = subtotal
-                .value
+                .result
                 .as_ref()
                 .and_then(|v| v.measure.as_ref())
                 .and_then(|m| m.keys().next().map(|s| s.as_str()))
@@ -532,7 +532,7 @@ fn test_coffee_order_latte_large_with_loyalty() {
     );
 
     let total_eur = total
-        .value
+        .result
         .as_ref()
         .and_then(|v| v.measure.as_ref())
         .and_then(|m| m.get("eur"))
@@ -540,7 +540,8 @@ fn test_coffee_order_latte_large_with_loyalty() {
     // discount_amount = 12.60 * 0.10 = 1.26
     // total = 12.60 - 1.26 = 11.34
     assert_eq!(
-        total_eur, "11.34",
+        *total_eur,
+        decimal_lit("11.34"),
         "total should be exactly 11.34 (12.60 - 1.26)"
     );
 }
@@ -555,7 +556,7 @@ fn test_coffee_order_ordered_priority() {
     let expected_values = ["1", "2", "3"];
 
     for (priority, expected) in priorities.iter().zip(expected_values.iter()) {
-        let data_values = HashMap::from([("priority".to_string(), priority.to_string())]);
+        let data_values = HashMap::from([("priority".to_string(), (*priority).to_string())]);
         let response = engine
             .run(None, "coffee_order", Some(&now), data_values, None, true)
             .expect("Evaluation failed");
@@ -567,12 +568,12 @@ fn test_coffee_order_ordered_priority() {
             .expect("ordered_priority rule not found");
 
         assert_eq!(
-            ordered_priority.display().expect("display").to_string(),
+            ordered_priority.result().expect("result").to_string(),
             *expected,
             "priority '{}' should map to {}, got: {}",
             priority,
             expected,
-            ordered_priority.display().unwrap_or("")
+            ordered_priority.result().unwrap_or("")
         );
     }
 }
@@ -585,9 +586,9 @@ fn test_coffee_order_invalid_size_veto() {
     // Size "extra large" is defined in the inline type constraint, but size_multiplier
     // only handles small/medium/large, so it should veto
     let data_values = HashMap::from([
-        ("coffee".to_string(), "espresso".to_string()),
-        ("size".to_string(), "extra large".to_string()),
-        ("number_of_cups".to_string(), "1".to_string()),
+        ("coffee".to_string(), "espresso".into()),
+        ("size".to_string(), "extra large".into()),
+        ("number_of_cups".to_string(), "1".into()),
     ]);
     let response = engine
         .run(None, "coffee_order", Some(&now), data_values, None, true)

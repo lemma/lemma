@@ -7,15 +7,15 @@ use crate::parsing::ast::{
 use crate::parsing::source::Source;
 use crate::planning::discovery;
 use crate::planning::semantics::{
-    self, calendar_decomposition, canonicalize_signature, conversion_target_to_semantic,
-    duration_decomposition, number_with_unit_to_value_kind, parser_value_to_value_kind,
-    primitive_boolean_arc, primitive_date_arc, primitive_number_arc, primitive_ratio_arc,
-    primitive_text_arc, primitive_time_arc, range_type_specification_from_endpoints,
-    value_kind_from_raw_suggestion, value_kind_matches_spec, value_to_semantic,
-    ArithmeticComputation, BaseMeasureVector, ComparisonComputation, DataDefinition, DataPath,
-    Expression, ExpressionKind, LemmaType, LiteralValue, PathSegment, RawSuggestion, ReferenceEnd,
-    ReferenceTarget, RulePath, SemanticConversionTarget, TypeDefiningSpec, TypeExtends,
-    TypeSpecification, TypedLiteral, ValueKind,
+    self, bound_value_kind_from_raw_suggestion, calendar_decomposition, canonicalize_signature,
+    conversion_target_to_semantic, duration_decomposition, number_with_unit_to_value_kind,
+    parser_value_to_value_kind, primitive_boolean_arc, primitive_date_arc, primitive_number_arc,
+    primitive_ratio_arc, primitive_text_arc, primitive_time_arc,
+    range_type_specification_from_endpoints, value_kind_matches_spec, value_to_semantic,
+    ArithmeticComputation, BaseMeasureVector, BoundValueKind, ComparisonComputation,
+    DataDefinition, DataPath, Expression, ExpressionKind, LemmaType, LiteralValue, PathSegment,
+    RawSuggestion, ReferenceEnd, ReferenceTarget, RulePath, SemanticConversionTarget,
+    TypeDefiningSpec, TypeExtends, TypeSpecification, TypedLiteral, ValueKind,
 };
 use crate::planning::typing::{
     comparison_type, date_predicate_type, logical_and_type, logical_not_type, math_op_type,
@@ -156,13 +156,13 @@ impl<'a> Graph<'a> {
             target: ReferenceTarget,
             resolved_type: Arc<LemmaType>,
             local_constraints: Option<Vec<Constraint>>,
-            local_suggestion: Option<ValueKind>,
-            local_fill: Option<ValueKind>,
+            local_suggestion: Option<BoundValueKind>,
+            local_fill: Option<BoundValueKind>,
         }
 
         let mut schema: HashMap<DataPath, Arc<LemmaType>> = HashMap::new();
-        let mut declared_suggestions: HashMap<DataPath, ValueKind> = HashMap::new();
-        let mut declared_fills: HashMap<DataPath, ValueKind> = HashMap::new();
+        let mut declared_suggestions: HashMap<DataPath, BoundValueKind> = HashMap::new();
+        let mut declared_fills: HashMap<DataPath, BoundValueKind> = HashMap::new();
         let mut values: HashMap<DataPath, LiteralValue> = HashMap::new();
         let mut value_sources: HashMap<DataPath, Source> = HashMap::new();
         let mut import_targets: HashMap<DataPath, String> = HashMap::new();
@@ -556,7 +556,7 @@ impl<'a> Graph<'a> {
             let captured_suggestion = match raw_suggestion {
                 None => None,
                 Some(raw) => {
-                    match value_kind_from_raw_suggestion(
+                    match bound_value_kind_from_raw_suggestion(
                         raw,
                         &merged.specifications,
                         &merged.name(),
@@ -572,7 +572,7 @@ impl<'a> Graph<'a> {
             let captured_fill = match raw_fill {
                 None => None,
                 Some(raw) => {
-                    match value_kind_from_raw_suggestion(
+                    match bound_value_kind_from_raw_suggestion(
                         raw,
                         &merged.specifications,
                         &merged.name(),
@@ -687,7 +687,7 @@ impl<'a> Graph<'a> {
                 let captured_suggestion = match raw_suggestion {
                     None => None,
                     Some(raw) => {
-                        match value_kind_from_raw_suggestion(
+                        match bound_value_kind_from_raw_suggestion(
                             raw,
                             &merged.specifications,
                             &merged.name(),
@@ -703,7 +703,7 @@ impl<'a> Graph<'a> {
                 let captured_fill = match raw_fill {
                     None => None,
                     Some(raw) => {
-                        match value_kind_from_raw_suggestion(
+                        match bound_value_kind_from_raw_suggestion(
                             raw,
                             &merged.specifications,
                             &merged.name(),
@@ -773,7 +773,7 @@ impl<'a> Graph<'a> {
             let captured_suggestion = match raw_suggestion {
                 None => None,
                 Some(raw) => {
-                    match value_kind_from_raw_suggestion(
+                    match bound_value_kind_from_raw_suggestion(
                         raw,
                         &merged.specifications,
                         &merged.name(),
@@ -789,7 +789,7 @@ impl<'a> Graph<'a> {
             let captured_fill = match raw_fill {
                 None => None,
                 Some(raw) => {
-                    match value_kind_from_raw_suggestion(
+                    match bound_value_kind_from_raw_suggestion(
                         raw,
                         &merged.specifications,
                         &merged.name(),
@@ -1158,8 +1158,8 @@ type ImportedTypeMatch<'a> = (
 type RuleReferenceUpdate = (
     DataPath,
     Arc<LemmaType>,
-    Option<ValueKind>,
-    Option<ValueKind>,
+    Option<BoundValueKind>,
+    Option<BoundValueKind>,
 );
 
 /// Ok payload of [`GraphBuilder::build`]: data, rules, soft errors, resolved types.
@@ -2093,7 +2093,7 @@ impl<'a> GraphBuilder<'a> {
 
                 let mut binding_key: Vec<String> = current_segments
                     .iter()
-                    .map(|segment| segment.data.clone())
+                    .map(|segment| segment.uses.clone())
                     .collect();
                 binding_key.extend(binding_reference.segments.iter().cloned());
                 binding_key.push(binding_reference.name.clone());
@@ -2183,10 +2183,10 @@ impl<'a> GraphBuilder<'a> {
             return;
         }
 
-        // Build the binding key for this data: segment data names + data name
+        // Build the binding key for this data: segment uses aliases + data name
         let binding_key: Vec<String> = current_segments
             .iter()
-            .map(|s| s.data.clone())
+            .map(|s| s.uses.clone())
             .chain(std::iter::once(data.reference.name.clone()))
             .collect();
 
@@ -2279,19 +2279,23 @@ impl<'a> GraphBuilder<'a> {
                 if is_generic_measure_range {
                     let measure_endpoint_suggest = matches!(
                         &declared_suggestion,
-                        Some(ValueKind::Range(left, right))
-                            if matches!(
-                                (&left.value, &right.value),
-                                (ValueKind::Measure(_), ValueKind::Measure(_))
-                            )
+                        Some(BoundValueKind {
+                            value: ValueKind::Range(left, right),
+                            ..
+                        }) if matches!(
+                            (&left.value, &right.value),
+                            (ValueKind::Measure(_), ValueKind::Measure(_))
+                        )
                     );
                     let measure_endpoint_fill = matches!(
                         &declared_fill,
-                        Some(ValueKind::Range(left, right))
-                            if matches!(
-                                (&left.value, &right.value),
-                                (ValueKind::Measure(_), ValueKind::Measure(_))
-                            )
+                        Some(BoundValueKind {
+                            value: ValueKind::Range(left, right),
+                            ..
+                        }) if matches!(
+                            (&left.value, &right.value),
+                            (ValueKind::Measure(_), ValueKind::Measure(_))
+                        )
                     );
                     if measure_endpoint_suggest || measure_endpoint_fill {
                         self.errors.push(self.engine_error(
@@ -2448,10 +2452,9 @@ impl<'a> GraphBuilder<'a> {
                     if unit == right_unit =>
                 {
                     match self.resolve_unit_ref(current_spec, unit) {
-                        Ok((_, lt)) => {
-                            let endpoint = Arc::new(
-                                lt.as_ref().clone().with_measure_binding_unit(unit.clone()),
-                            );
+                        Ok((bare, lt)) => {
+                            let endpoint =
+                                Arc::new(lt.as_ref().clone().with_measure_binding_unit(bare));
                             let specs = range_type_specification_from_endpoints(
                                 endpoint.as_ref(),
                                 endpoint.as_ref(),
@@ -2503,12 +2506,15 @@ impl<'a> GraphBuilder<'a> {
         let schema_type = declared_schema_type.unwrap_or_else(|| inferred_type.clone());
         let lemma_type = match (value, &semantic_value) {
             (Value::NumberWithUnit(_, unit), ValueKind::Measure(_) | ValueKind::Ratio(_)) => {
-                Arc::new(
-                    schema_type
-                        .as_ref()
-                        .clone()
-                        .with_measure_binding_unit(unit.clone()),
-                )
+                let bare = match self.resolve_unit_ref(current_spec, unit) {
+                    Ok((bare, _)) => bare,
+                    Err(message) => {
+                        self.errors
+                            .push(self.engine_error(message, &effective_source));
+                        return;
+                    }
+                };
+                Arc::new(schema_type.as_ref().clone().with_measure_binding_unit(bare))
             }
             _ => schema_type,
         };
@@ -2595,22 +2601,21 @@ impl<'a> GraphBuilder<'a> {
                 let context_repository =
                     discovery::lookup_owning_repository(self.context, spec_context)
                         .unwrap_or_else(|| Arc::clone(&self.main_repository));
-                let arc = match self.resolve_spec_ref(
+                let (repo, arc) = match self.resolve_spec_ref(
                     spec_ref,
                     effective,
                     spec_context,
                     &context_repository,
                 ) {
-                    Ok((_, a)) => a,
+                    Ok(pair) => pair,
                     Err(e) => {
                         self.errors.push(e);
                         return None;
                     }
                 };
-                spec_context = arc;
-
                 path_segments.push(PathSegment {
-                    data: segment.clone(),
+                    uses: segment.clone(),
+                    repository: repo.name.clone(),
                     spec: arc.name.clone(),
                 });
                 current_data_map = arc
@@ -2619,6 +2624,7 @@ impl<'a> GraphBuilder<'a> {
                     .map(|f| (f.reference.name.clone(), f.clone()))
                     .collect();
                 last_arc = Some(arc);
+                spec_context = arc;
             } else {
                 self.errors.push(self.engine_error(
                     format!("Data '{}' is not a spec reference", segment),
@@ -2746,7 +2752,7 @@ impl<'a> GraphBuilder<'a> {
         }
 
         let current_segment_names: Vec<String> =
-            current_segments.iter().map(|s| s.data.clone()).collect();
+            current_segments.iter().map(|s| s.uses.clone()).collect();
 
         // Step 2: Build data bindings declared in this spec (for passing to referenced specs)
         let this_spec_bindings = match self.build_data_bindings(spec, &current_segments, effective)
@@ -2820,12 +2826,13 @@ impl<'a> GraphBuilder<'a> {
                 );
                 let mut nested_segments = current_segments.clone();
                 nested_segments.push(PathSegment {
-                    data: data.reference.name.clone(),
+                    uses: data.reference.name.clone(),
+                    repository: nested_repo.name.clone(),
                     spec: nested_arc.name.clone(),
                 });
 
                 let nested_segment_names: Vec<String> =
-                    nested_segments.iter().map(|s| s.data.clone()).collect();
+                    nested_segments.iter().map(|s| s.uses.clone()).collect();
                 let mut combined_bindings = effective_bindings.clone();
                 for (key, value_and_source) in &data_bindings {
                     if key.len() > nested_segment_names.len()
@@ -3226,9 +3233,9 @@ impl<'a> GraphBuilder<'a> {
                     Value::Text(_) => primitive_text_arc().clone(),
                     Value::Number(_) => primitive_number_arc().clone(),
                     Value::NumberWithUnit(_, unit) => match self.resolve_unit_ref(ctx.spec, unit) {
-                        Ok((_, lt)) => match &semantic_value {
+                        Ok((bare, lt)) => match &semantic_value {
                             ValueKind::Measure(_) | ValueKind::Ratio(_) => {
-                                Arc::new(lt.as_ref().clone().with_measure_binding_unit(unit.clone()))
+                                Arc::new(lt.as_ref().clone().with_measure_binding_unit(bare))
                             }
                             _ => lt,
                         },
@@ -3245,9 +3252,9 @@ impl<'a> GraphBuilder<'a> {
                             Value::NumberWithUnit(_, unit),
                             Value::NumberWithUnit(_, right_unit),
                         ) if unit == right_unit => match self.resolve_unit_ref(ctx.spec, unit) {
-                            Ok((_, lt)) => {
+                            Ok((bare, lt)) => {
                                 let endpoint = Arc::new(
-                                    lt.as_ref().clone().with_measure_binding_unit(unit.clone()),
+                                    lt.as_ref().clone().with_measure_binding_unit(bare),
                                 );
                                 let specs = range_type_specification_from_endpoints(
                                     endpoint.as_ref(),
@@ -5952,7 +5959,7 @@ fn refresh_named_range_specs(
     spec: &LemmaSpec,
     data_defs: &HashMap<String, DataTypeDef>,
     resolved: &mut TypeMap,
-    declared_suggestions: &mut IndexMap<String, ValueKind>,
+    declared_suggestions: &mut IndexMap<String, BoundValueKind>,
     already_resolved: &ResolvedTypesMap<'_>,
     at: &EffectiveDate,
 ) -> Vec<Error> {
@@ -6048,8 +6055,10 @@ fn refresh_named_range_specs(
         updated.specifications = range_spec;
         *lemma_type = Arc::new(updated);
 
-        if let Some(ValueKind::Range(left, right)) =
-            declared_suggestions.get_mut(type_name.as_str())
+        if let Some(BoundValueKind {
+            value: ValueKind::Range(left, right),
+            ..
+        }) = declared_suggestions.get_mut(type_name.as_str())
         {
             let stamp_for_value = |value: &ValueKind| -> Arc<LemmaType> {
                 match value {
@@ -6113,13 +6122,20 @@ fn refresh_named_range_specs(
                     continue;
                 }
             };
+            let binding = declared_suggestions
+                .get(type_name.as_str())
+                .map(|bound| bound.measure_binding_unit.clone())
+                .unwrap_or(None);
             *declared_suggestions
                 .get_mut(type_name.as_str())
                 .expect("BUG: named range default removed while refreshing endpoints") =
-                ValueKind::Range(
-                    Box::new(coerced_left.to_literal()),
-                    Box::new(coerced_right.to_literal()),
-                );
+                BoundValueKind {
+                    value: ValueKind::Range(
+                        Box::new(coerced_left.to_literal()),
+                        Box::new(coerced_right.to_literal()),
+                    ),
+                    measure_binding_unit: binding,
+                };
         }
     }
     errors
@@ -6130,8 +6146,8 @@ fn apply_deferred_named_range_constraints(
     spec: &LemmaSpec,
     data_defs: &HashMap<String, DataTypeDef>,
     resolved: &mut TypeMap,
-    declared_suggestions: &mut IndexMap<String, ValueKind>,
-    declared_fills: &mut IndexMap<String, ValueKind>,
+    declared_suggestions: &mut IndexMap<String, BoundValueKind>,
+    declared_fills: &mut IndexMap<String, BoundValueKind>,
     type_sources: &HashMap<String, Source>,
 ) -> Vec<Error> {
     let mut errors = Vec::new();
@@ -6161,7 +6177,7 @@ fn apply_deferred_named_range_constraints(
                 updated.specifications = updated_specs;
                 let updated_arc = Arc::new(updated);
                 if let Some(raw) = declared_suggestion {
-                    match value_kind_from_raw_suggestion(
+                    match bound_value_kind_from_raw_suggestion(
                         raw,
                         &updated_arc.specifications,
                         type_name.as_str(),
@@ -6185,7 +6201,7 @@ fn apply_deferred_named_range_constraints(
                     }
                 }
                 if let Some(raw) = declared_fill {
-                    match value_kind_from_raw_suggestion(
+                    match bound_value_kind_from_raw_suggestion(
                         raw,
                         &updated_arc.specifications,
                         type_name.as_str(),
@@ -6500,7 +6516,7 @@ fn resolve_measure_decompositions(
 /// or an error message (the type is dropped on failure).
 fn finalize_lemma_measure_magnitudes(
     lemma_type: LemmaType,
-    declared_suggestion: Option<&ValueKind>,
+    declared_suggestion: Option<&BoundValueKind>,
     type_name: &str,
 ) -> Result<LemmaType, String> {
     let LemmaType {
@@ -6511,7 +6527,7 @@ fn finalize_lemma_measure_magnitudes(
     } = lemma_type;
     semantics::finalize_measure_unit_constraint_magnitudes(
         &mut specifications,
-        declared_suggestion,
+        declared_suggestion.map(|bound| &bound.value),
         type_name,
     )?;
     Ok(LemmaType {
@@ -6524,7 +6540,7 @@ fn finalize_lemma_measure_magnitudes(
 
 fn finalize_measure_magnitudes_in_resolved(
     resolved: IndexMap<String, Arc<LemmaType>>,
-    declared_suggestions: &IndexMap<String, ValueKind>,
+    declared_suggestions: &IndexMap<String, BoundValueKind>,
     type_sources: &HashMap<String, Source>,
     spec_name: &str,
     spec: &LemmaSpec,
@@ -6567,7 +6583,7 @@ fn finalize_measure_magnitudes_in_resolved(
 
 fn finalize_measure_magnitudes_in_unit_index(
     unit_index: UnitIndex,
-    declared_suggestions: &IndexMap<String, ValueKind>,
+    declared_suggestions: &IndexMap<String, BoundValueKind>,
     type_sources: &HashMap<String, Source>,
     all_data_types: &[(&LemmaSpec, HashMap<String, DataTypeDef>)],
     spec: &LemmaSpec,
@@ -7537,7 +7553,8 @@ rule result: m.x"#;
         let graph = build_graph(consumer, &specs).unwrap();
         let data_path = DataPath {
             segments: vec![PathSegment {
-                data: "m".to_string(),
+                uses: "m".to_string(),
+                repository: None,
                 spec: "myspec".to_string(),
             }],
             data: "x".to_string(),
@@ -7609,7 +7626,8 @@ rule r: i.x
 
         let nested_path = DataPath {
             segments: vec![PathSegment {
-                data: "i".to_string(),
+                uses: "i".to_string(),
+                repository: None,
                 spec: "inner".to_string(),
             }],
             data: "x".to_string(),
@@ -8101,7 +8119,7 @@ rule r: i.x
                 .declared_suggestions
                 .get("percentage")
                 .expect("declared default must be tracked for percentage");
-            match declared {
+            match &declared.value {
                 ValueKind::Ratio(v) => {
                     assert_eq!(v, &rational_new(1, 2));
                 }
@@ -9003,7 +9021,7 @@ rule r: i.x
                 decimals: None,
                 help: String::new(),
             };
-            let default = ValueKind::Number(rational_new(5, 1));
+            let default = BoundValueKind::unbound(ValueKind::Number(rational_new(5, 1)));
 
             let src = test_source();
             let errors = validate_type_specifications(
@@ -9029,7 +9047,7 @@ rule r: i.x
                 decimals: None,
                 help: String::new(),
             };
-            let default = ValueKind::Number(rational_new(150, 1));
+            let default = BoundValueKind::unbound(ValueKind::Number(rational_new(150, 1)));
 
             let src = test_source();
             let errors = validate_type_specifications(
@@ -9055,7 +9073,7 @@ rule r: i.x
                 decimals: None,
                 help: String::new(),
             };
-            let default = ValueKind::Number(rational_new(50, 1));
+            let default = BoundValueKind::unbound(ValueKind::Number(rational_new(50, 1)));
 
             let src = test_source();
             let errors = validate_type_specifications(
@@ -9109,7 +9127,7 @@ rule r: i.x
                 options: vec!["red".to_string(), "blue".to_string()],
                 help: String::new(),
             };
-            let default = ValueKind::Text("green".to_string());
+            let default = BoundValueKind::unbound(ValueKind::Text("green".to_string()));
 
             let src = test_source();
             let errors = validate_type_specifications(
@@ -9992,13 +10010,13 @@ pub struct ResolvedSpecTypes {
     /// Only present for types that declared a `-> suggest ...` constraint anywhere
     /// in their extension chain; the inner-most `-> suggest` wins. Defaults live
     /// outside [`TypeSpecification`] so the type itself stays free of binding data.
-    /// Populated after [`value_kind_from_raw_suggestion`] (post-decomposition).
-    pub declared_suggestions: IndexMap<String, ValueKind>,
+    /// Populated after [`bound_value_kind_from_raw_suggestion`] (post-decomposition).
+    pub declared_suggestions: IndexMap<String, BoundValueKind>,
 
     /// Declared fill per named type (e.g. `type rate: ratio -> fill 50%`).
     /// Only present for types that declared a `-> fill ...` constraint anywhere
     /// in their extension chain; the inner-most `-> fill` wins.
-    pub declared_fills: IndexMap<String, ValueKind>,
+    pub declared_fills: IndexMap<String, BoundValueKind>,
 
     /// Defaults captured during type resolution, before measure unit factors are final.
     pub(crate) raw_suggestions: Vec<(String, RawSuggestion)>,
@@ -10006,7 +10024,7 @@ pub struct ResolvedSpecTypes {
     /// Raw fills captured during type resolution, before measure unit factors are final.
     pub(crate) raw_fills: Vec<(String, RawSuggestion)>,
 
-    /// Raw defaults retained after [`value_kind_from_raw_suggestion`] for cross-spec parent lookup during later specs.
+    /// Raw defaults retained after [`bound_value_kind_from_raw_suggestion`] for cross-spec parent lookup during later specs.
     pub(crate) source_defaults: IndexMap<String, RawSuggestion>,
 
     /// Raw fills retained for cross-spec parent lookup during later specs.
@@ -10333,7 +10351,8 @@ impl<'a> TypeResolver<'a> {
                 .resolved
                 .get(&type_name)
                 .expect("BUG: raw default for type not in resolved");
-            match value_kind_from_raw_suggestion(raw, &lemma_type.specifications, &type_name) {
+            match bound_value_kind_from_raw_suggestion(raw, &lemma_type.specifications, &type_name)
+            {
                 Ok(value_kind) => {
                     resolved_types
                         .declared_suggestions
@@ -10360,7 +10379,8 @@ impl<'a> TypeResolver<'a> {
                 .resolved
                 .get(&type_name)
                 .expect("BUG: raw fill for type not in resolved");
-            match value_kind_from_raw_suggestion(raw, &lemma_type.specifications, &type_name) {
+            match bound_value_kind_from_raw_suggestion(raw, &lemma_type.specifications, &type_name)
+            {
                 Ok(value_kind) => {
                     resolved_types.declared_fills.insert(type_name, value_kind);
                 }
@@ -10385,7 +10405,8 @@ impl<'a> TypeResolver<'a> {
                 .resolved
                 .get(&type_name)
                 .expect("BUG: raw fill for type not in resolved");
-            match value_kind_from_raw_suggestion(raw, &lemma_type.specifications, &type_name) {
+            match bound_value_kind_from_raw_suggestion(raw, &lemma_type.specifications, &type_name)
+            {
                 Ok(value_kind) => {
                     resolved_types.declared_fills.insert(type_name, value_kind);
                 }
@@ -10562,7 +10583,7 @@ impl<'a> TypeResolver<'a> {
             if let Some(default_kind) = resolved_types.declared_suggestions.get(type_name.as_str())
             {
                 let lit = TypedLiteral {
-                    value: default_kind.clone(),
+                    value: default_kind.value.clone(),
                     lemma_type: Arc::clone(lemma_type),
                 };
                 if let Err(message) = crate::planning::execution_plan::validate_value_against_type(
@@ -10581,7 +10602,7 @@ impl<'a> TypeResolver<'a> {
             }
             if let Some(default_kind) = resolved_types.declared_fills.get(type_name.as_str()) {
                 let lit = TypedLiteral {
-                    value: default_kind.clone(),
+                    value: default_kind.value.clone(),
                     lemma_type: Arc::clone(lemma_type),
                 };
                 if let Err(message) = crate::planning::execution_plan::validate_value_against_type(
@@ -11449,7 +11470,7 @@ impl<'a> TypeResolver<'a> {
 /// Returns a vector of errors (empty if valid).
 pub fn validate_type_specifications(
     specs: &TypeSpecification,
-    declared_default: Option<&ValueKind>,
+    declared_default: Option<&BoundValueKind>,
     default_label: &str,
     type_name: &str,
     source: &Source,
@@ -11457,6 +11478,7 @@ pub fn validate_type_specifications(
     unit_index: &UnitIndex,
 ) -> Vec<Error> {
     let mut errors = Vec::new();
+    let declared_default = declared_default.map(|bound| &bound.value);
 
     match specs {
         TypeSpecification::Measure {

@@ -20,7 +20,7 @@ fn date(y: i32, m: u32, d: u32) -> DateTimeValue {
 
 fn assert_rule_value(response: &lemma::Response, rule: &str, expected: &str) {
     let result = response.results.get(rule).expect("rule in results");
-    let val = result.display().expect("display").to_string();
+    let val = result.result().expect("result").to_string();
     assert_eq!(val.to_string(), expected, "rule {rule}");
 }
 

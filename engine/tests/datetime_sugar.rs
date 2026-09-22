@@ -34,7 +34,7 @@ fn eval_rule_date(
         .as_ref()
         .expect("explanation")
         .result
-        .value()
+        .literal_value()
         .unwrap()
         .clone()
 }
@@ -972,7 +972,7 @@ rule was_recent: event_date in past 7 day
         .unwrap();
     let effective = make_effective(2026, 3, 7, 12, 0, 0);
     let mut data = HashMap::new();
-    data.insert("event_date".to_string(), "2026-03-05".to_string());
+    data.insert("event_date".to_string(), "2026-03-05".into());
     assert!(eval_rule_bool(
         &engine,
         "test",
@@ -996,7 +996,7 @@ rule was_recent: event_date in past 7 day
         .unwrap();
     let effective = make_effective(2026, 3, 7, 12, 0, 0);
     let mut data = HashMap::new();
-    data.insert("event_date".to_string(), "2026-01-01".to_string());
+    data.insert("event_date".to_string(), "2026-01-01".into());
     assert!(!eval_rule_bool(
         &engine,
         "test",

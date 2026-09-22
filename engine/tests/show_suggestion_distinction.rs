@@ -45,7 +45,7 @@ fn run_plan_does_not_commit_typedecl_suggestion() {
     );
 
     let mut supplied = HashMap::new();
-    supplied.insert("n".to_string(), "42".to_string());
+    supplied.insert("n".to_string(), "42".into());
     let response = engine
         .run(None, "s", Some(&now), supplied, None, false)
         .expect("response with n supplied");
@@ -60,7 +60,7 @@ fn run_plan_does_not_commit_typedecl_suggestion() {
     );
     let rule = response.results.get("r").expect("rule r");
     assert!(!rule.vetoed, "rule r must succeed once n is supplied");
-    assert_eq!(rule.display(), Some("42"));
+    assert_eq!(rule.result(), Some("42"));
 }
 
 #[test]
@@ -93,12 +93,12 @@ fn show_shows_suggestion_not_prefilled_without_overlay() {
     );
     let suggestion = entry.suggestion.expect("show must expose suggestion");
     assert_eq!(
-        suggestion.number.as_deref(),
-        Some("42"),
+        suggestion.number,
+        Some(rust_decimal::Decimal::from(42)),
         "suggestion magnitude must be the declared 42"
     );
     assert_eq!(
-        suggestion.display.as_deref(),
+        suggestion.result.as_deref(),
         Some("42"),
         "suggestion must carry engine-rendered display from LiteralValue::display_value"
     );
@@ -140,8 +140,8 @@ rule r: a.r
         "literal with must surface as fill"
     );
     assert_eq!(
-        template_x.fill.as_ref().and_then(|v| v.number.as_deref()),
-        Some("2"),
+        template_x.fill.as_ref().and_then(|v| v.number),
+        Some(rust_decimal::Decimal::from(2)),
         "literal with fills magnitude 2"
     );
     assert!(

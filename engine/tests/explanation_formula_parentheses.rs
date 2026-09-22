@@ -75,7 +75,7 @@ rule out: q * (p + l / tput)
     );
     let response = run_out(&engine, HashMap::new());
     assert_eq!(
-        response.results.get("out").expect("out").display(),
+        response.results.get("out").expect("out").result(),
         Some("695.8")
     );
     let explanation = out_explanation(&response);

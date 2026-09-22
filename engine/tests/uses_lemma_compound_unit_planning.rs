@@ -340,12 +340,12 @@ rule converted: f as gram_kmh2
         .expect("rule 'converted' not found");
     assert_eq!(
         result
-            .value
+            .result
             .as_ref()
             .and_then(|v| v.measure.as_ref())
             .and_then(|m| m.get("gram_kmh2"))
-            .map(String::as_str),
-        Some("12960000000")
+            .copied(),
+        Some(rust_decimal::Decimal::from(12960000000i64))
     );
 }
 

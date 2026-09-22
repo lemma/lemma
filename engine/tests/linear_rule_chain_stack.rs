@@ -8,7 +8,6 @@ use lemma::{DateTimeValue, Engine, SourceType};
 use rust_decimal::Decimal;
 use std::collections::HashMap;
 use std::fmt::Write;
-use std::str::FromStr;
 
 const ONE_MIB: usize = 1024 * 1024;
 
@@ -34,23 +33,20 @@ fn load_deep(n: usize) -> Engine {
 
 fn x0_zero() -> HashMap<String, String> {
     let mut data = HashMap::new();
-    data.insert("x0".to_string(), "0".to_string());
+    data.insert("x0".to_string(), "0".into());
     data
 }
 
 fn rule_number(response: &lemma::Response, rule: &str) -> Decimal {
     let result = response.get(rule).unwrap_or_else(|_| panic!("rule {rule}"));
     assert!(!result.vetoed, "rule {rule} vetoed");
-    Decimal::from_str(
-        result
-            .value
-            .as_ref()
-            .expect("rule result value")
-            .number
-            .as_ref()
-            .expect("number payload"),
-    )
-    .expect("decimal")
+    *result
+        .result
+        .as_ref()
+        .expect("rule result value")
+        .number
+        .as_ref()
+        .expect("number payload")
 }
 
 fn run_tip(engine: &Engine, tip: &str, explain: bool) -> lemma::Response {

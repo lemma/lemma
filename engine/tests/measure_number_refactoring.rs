@@ -16,7 +16,7 @@ fn rule_value_str(response: &Response, name: &str) -> String {
         "rule '{name}' must not veto, got {:?}",
         r.veto_reason
     );
-    r.display().expect("display").to_string()
+    r.result().expect("result").to_string()
 }
 
 #[test]
@@ -41,8 +41,8 @@ rule quotient: price1 / price2"#;
         .expect("Should parse");
 
     let mut data = HashMap::new();
-    data.insert("price1".to_string(), "10 eur".to_string());
-    data.insert("price2".to_string(), "5 eur".to_string());
+    data.insert("price1".to_string(), "10 eur".into());
+    data.insert("price2".to_string(), "5 eur".into());
 
     let now = DateTimeValue::now();
     let response = engine
@@ -57,14 +57,14 @@ rule quotient: price1 / price2"#;
             .as_ref()
             .expect("explanation")
             .result
-            .value()
+            .literal_value()
             .unwrap_or_else(|| panic!("{name} must produce a value"));
         assert!(
             matches!(v.value, lemma::ValueKind::Measure(_)),
             "{name} result must stay in measure money type"
         );
         assert!(
-            r.value
+            r.result
                 .as_ref()
                 .and_then(|val| val.measure.as_ref())
                 .is_some(),
@@ -80,7 +80,7 @@ rule quotient: price1 / price2"#;
             .as_ref()
             .expect("explanation")
             .result
-            .value()
+            .literal_value()
             .unwrap_or_else(|| panic!("{name} must produce a value"));
         assert!(
             matches!(v.value, lemma::ValueKind::Number(_)),
@@ -91,8 +91,8 @@ rule quotient: price1 / price2"#;
         .results
         .get("total")
         .unwrap()
-        .display()
-        .expect("display")
+        .result()
+        .expect("result")
         .to_string();
     assert!(
         total_s.contains("15") && total_s.to_lowercase().contains("eur"),
@@ -102,8 +102,8 @@ rule quotient: price1 / price2"#;
         .results
         .get("difference")
         .unwrap()
-        .display()
-        .expect("display")
+        .result()
+        .expect("result")
         .to_string();
     assert!(
         diff_s.contains("5") && diff_s.to_lowercase().contains("eur"),
@@ -113,8 +113,8 @@ rule quotient: price1 / price2"#;
         .results
         .get("quotient")
         .unwrap()
-        .display()
-        .expect("display")
+        .result()
+        .expect("result")
         .to_string();
     assert!(
         quot_s.contains("2"),
@@ -141,8 +141,8 @@ rule divided: price / multiplier"#;
         .expect("Should parse");
 
     let mut data = HashMap::new();
-    data.insert("price".to_string(), "10 eur".to_string());
-    data.insert("multiplier".to_string(), "2".to_string());
+    data.insert("price".to_string(), "10 eur".into());
+    data.insert("multiplier".to_string(), "2".into());
 
     let now = DateTimeValue::now();
     let response = engine
@@ -180,8 +180,8 @@ rule divided: multiplier / price"#;
         .expect("Should parse");
 
     let mut data = HashMap::new();
-    data.insert("multiplier".to_string(), "2".to_string());
-    data.insert("price".to_string(), "10 eur".to_string());
+    data.insert("multiplier".to_string(), "2".into());
+    data.insert("price".to_string(), "10 eur".into());
 
     let now = DateTimeValue::now();
     let response = engine
@@ -215,8 +215,8 @@ rule result: ratio_value * multiplier"#;
         .expect("Should parse");
 
     let mut data = HashMap::new();
-    data.insert("ratio_value".to_string(), "50%".to_string());
-    data.insert("multiplier".to_string(), "2".to_string());
+    data.insert("ratio_value".to_string(), "50%".into());
+    data.insert("multiplier".to_string(), "2".into());
 
     let now = DateTimeValue::now();
     let response = engine
@@ -245,8 +245,8 @@ rule result: ratio_value * price"#;
         .expect("Should parse");
 
     let mut data = HashMap::new();
-    data.insert("ratio_value".to_string(), "50%".to_string());
-    data.insert("price".to_string(), "10 eur".to_string());
+    data.insert("ratio_value".to_string(), "50%".into());
+    data.insert("price".to_string(), "10 eur".into());
 
     let now = DateTimeValue::now();
     let response = engine
@@ -278,8 +278,8 @@ rule result: price * ratio_value"#;
         .expect("Should parse");
 
     let mut data = HashMap::new();
-    data.insert("price".to_string(), "10 eur".to_string());
-    data.insert("ratio_value".to_string(), "50%".to_string());
+    data.insert("price".to_string(), "10 eur".into());
+    data.insert("ratio_value".to_string(), "50%".into());
 
     let now = DateTimeValue::now();
     let response = engine
@@ -312,8 +312,8 @@ rule is_equal: price1 is price2"#;
         .expect("Should parse");
 
     let mut data = HashMap::new();
-    data.insert("price1".to_string(), "10 eur".to_string());
-    data.insert("price2".to_string(), "5 eur".to_string());
+    data.insert("price1".to_string(), "10 eur".into());
+    data.insert("price2".to_string(), "5 eur".into());
 
     let now = DateTimeValue::now();
     let response = engine
@@ -349,9 +349,9 @@ rule power: a ^ 2"#;
         .expect("Should parse");
 
     let mut data = HashMap::new();
-    data.insert("a".to_string(), "10 eur".to_string());
-    data.insert("b".to_string(), "3 eur".to_string());
-    data.insert("divisor".to_string(), "3".to_string());
+    data.insert("a".to_string(), "10 eur".into());
+    data.insert("b".to_string(), "3 eur".into());
+    data.insert("divisor".to_string(), "3".into());
 
     let now = DateTimeValue::now();
     let response = engine
@@ -426,8 +426,8 @@ rule power: a ^ b"#;
         .expect("Should parse");
 
     let mut data = HashMap::new();
-    data.insert("a".to_string(), "10".to_string());
-    data.insert("b".to_string(), "3".to_string());
+    data.insert("a".to_string(), "10".into());
+    data.insert("b".to_string(), "3".into());
 
     let now = DateTimeValue::now();
     let response = engine
@@ -468,10 +468,10 @@ rule total: with_tax * quantity"#;
         .expect("Should parse");
 
     let mut data = HashMap::new();
-    data.insert("base_price".to_string(), "100 eur".to_string());
-    data.insert("discount_ratio".to_string(), "90%".to_string());
-    data.insert("tax_multiplier".to_string(), "1.2".to_string());
-    data.insert("quantity".to_string(), "5".to_string());
+    data.insert("base_price".to_string(), "100 eur".into());
+    data.insert("discount_ratio".to_string(), "90%".into());
+    data.insert("tax_multiplier".to_string(), "1.2".into());
+    data.insert("quantity".to_string(), "5".into());
 
     let now = DateTimeValue::now();
     let response = engine
@@ -515,8 +515,8 @@ rule result: measure_value * number_value"#;
         .expect("Should parse");
 
     let mut data = HashMap::new();
-    data.insert("measure_value".to_string(), "10 eur".to_string());
-    data.insert("number_value".to_string(), "2".to_string());
+    data.insert("measure_value".to_string(), "10 eur".into());
+    data.insert("number_value".to_string(), "2".into());
 
     let now = DateTimeValue::now();
     let response = engine

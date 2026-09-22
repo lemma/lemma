@@ -51,12 +51,12 @@ fn assert_rule_value(response: &lemma::Response, rule: &str, expected: &str) {
         );
     }
     assert_eq!(
-        result.display(),
+        result.result(),
         Some(expected),
         "rule '{}': expected {}, got {:?}",
         rule,
         expected,
-        result.display()
+        result.result()
     );
 }
 
@@ -189,7 +189,7 @@ rule doubled: price * 2
             None,
             "shop",
             Some(&effective),
-            HashMap::from([("price".to_string(), "10.00 usd".to_string())]),
+            HashMap::from([("price".to_string(), "10.00 usd".into())]),
             None,
             false,
         )
@@ -514,7 +514,7 @@ rule doubled: price * 2
             None,
             "shop",
             Some(&effective),
-            HashMap::from([("price".to_string(), "10.00 usd".to_string())]),
+            HashMap::from([("price".to_string(), "10.00 usd".into())]),
             None,
             false,
         )

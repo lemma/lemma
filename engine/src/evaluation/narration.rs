@@ -15,10 +15,13 @@ use crate::evaluation::branch_semantics::{
     condition_outcome, piecewise_decision, BranchOutcome, PiecewiseDecision,
 };
 use crate::evaluation::conversion_trace::build_conversion_steps;
-use crate::evaluation::explanations::{format_operation_result, Explanation};
+use crate::evaluation::explanations::{
+    explanation_result_value, format_operation_result, Explanation,
+};
 use crate::evaluation::expression::resolve_data_path_value;
 use crate::evaluation::tree::borrow_value;
 use crate::evaluation::EvaluationContext;
+use crate::parsing::ast::ArithmeticComputation;
 use crate::planning::execution_plan::{
     resolve_nested_dispatch_body, ExecutableRule, ExecutionPlan,
 };
@@ -38,11 +41,12 @@ struct Narrated {
     as_operand: Option<ExplanationNode>,
 }
 
-/// Operands listed under a Rule / Compose from the cell's as_operand shape.
+/// Rule children from the cell's as_operand shape. Empty-operand Compose
+/// (bare literal) yields no children; operation Compose stays intact.
 fn operands_of(as_operand: &Option<ExplanationNode>) -> Vec<ExplanationNode> {
     match as_operand {
-        Some(ExplanationNode::Compose { operands, .. }) => operands.clone(),
-        Some(other) => vec![other.clone()],
+        Some(ExplanationNode::Compose { operands, .. }) if operands.is_empty() => Vec::new(),
+        Some(node) => vec![node.clone()],
         None => Vec::new(),
     }
 }
@@ -59,10 +63,11 @@ pub(crate) fn narrate_rule(
     let result_type = ctx.rule_result_type(plan, rule);
     let node = ExplanationNode::Rule {
         name: rule.path.clone(),
-        result: Some(format_operation_result(
+        result: explanation_result_value(
             ctx.rule_value(plan, &rule.path),
             result_type.as_ref(),
-        )),
+            &plan.family_units,
+        ),
         body: narrated.body,
         causes: narrated.causes,
         children: operands_of(&narrated.as_operand),
@@ -73,6 +78,7 @@ pub(crate) fn narrate_rule(
 /// Root [`Explanation`] for a requested rule, from its narrated Rule node.
 pub(crate) fn explanation_for(
     rule: &ExecutableRule,
+    plan: &ExecutionPlan,
     ctx: &EvaluationContext,
     rule_value: &OperationResult,
     rule_result_type: Arc<LemmaType>,
@@ -93,6 +99,7 @@ pub(crate) fn explanation_for(
         name: rule.path.clone(),
         result: rule_value.clone(),
         result_type: rule_result_type,
+        family_units: Arc::clone(&plan.family_units),
         body: body.clone(),
         causes: causes.clone(),
         children: children.clone(),
@@ -135,7 +142,7 @@ fn narrate(id: NormalFormId, plan: &ExecutionPlan, ctx: &EvaluationContext) -> N
     if let Some(path) = &cell.rule_ref {
         let node = rule_node(path, ctx).clone();
         return Narrated {
-            body: path.rule.clone(),
+            body: path.input_key(),
             causes: Vec::new(),
             as_operand: Some(node),
         };
@@ -194,6 +201,7 @@ fn apply_exclusive_point_causes(
             narrated.as_operand = match narrated.as_operand.take() {
                 Some(ExplanationNode::Veto { message }) => Some(ExplanationNode::Compose {
                     expression: narrated.body.clone(),
+                    operator: None,
                     operands: vec![scrutinee_node, ExplanationNode::Veto { message }],
                 }),
                 Some(ExplanationNode::Compose { operands, .. }) if operands.is_empty() => {
@@ -201,6 +209,7 @@ fn apply_exclusive_point_causes(
                 }
                 Some(other) => Some(ExplanationNode::Compose {
                     expression: narrated.body.clone(),
+                    operator: None,
                     operands: vec![scrutinee_node, other],
                 }),
                 None => Some(scrutinee_node),
@@ -224,6 +233,7 @@ fn narrate_shape(id: NormalFormId, plan: &ExecutionPlan, ctx: &EvaluationContext
                 causes: Vec::new(),
                 as_operand: Some(ExplanationNode::Compose {
                     expression,
+                    operator: None,
                     operands: Vec::new(),
                 }),
             }
@@ -297,10 +307,10 @@ fn narrate_shape(id: NormalFormId, plan: &ExecutionPlan, ctx: &EvaluationContext
                         _ => None,
                     };
                     let steps = build_conversion_steps(
-                        borrow_value(&source, "conversion source"),
+                        &borrow_value(&source, "conversion source").to_literal(),
                         plan.result_type(*inner),
                         target,
-                        result_literal,
+                        &result_literal.to_literal(),
                         plan.result_type(id),
                         data_ref,
                     );
@@ -329,7 +339,7 @@ fn narrate_shape(id: NormalFormId, plan: &ExecutionPlan, ctx: &EvaluationContext
                     as_operand: body.as_operand,
                 }
             }
-            PiecewiseNarration::Veto(narrated) => narrated,
+            PiecewiseNarration::Veto(narrated) => *narrated,
         },
         NormalFormKind::OrderedDispatch { .. } => {
             unreachable!("BUG: OrderedDispatch always carries its Piecewise pre-image as origin")
@@ -339,6 +349,8 @@ fn narrate_shape(id: NormalFormId, plan: &ExecutionPlan, ctx: &EvaluationContext
 
 /// Compose node over the operands the walk visited: expression text from the
 /// plan, operands from each child's narration (including bare literals for JSON).
+/// Arithmetic cells stamp [`ArithmeticComputation`] on the node; other kinds leave
+/// `operator` unset.
 fn compose(
     id: NormalFormId,
     operands: &[NormalFormId],
@@ -346,6 +358,7 @@ fn compose(
     ctx: &EvaluationContext,
 ) -> Narrated {
     let expression = explanation_display(plan.normal_forms.as_slice(), id);
+    let operator = arithmetic_operator_of(&plan.normal_form(id).kind);
     let operands: Vec<ExplanationNode> = operands
         .iter()
         .filter_map(|operand| narrate(*operand, plan, ctx).as_operand)
@@ -355,21 +368,30 @@ fn compose(
         causes: Vec::new(),
         as_operand: Some(ExplanationNode::Compose {
             expression,
+            operator,
             operands,
         }),
+    }
+}
+
+fn arithmetic_operator_of(kind: &NormalFormKind) -> Option<ArithmeticComputation> {
+    match kind {
+        NormalFormKind::Sum(_) => Some(ArithmeticComputation::Add),
+        NormalFormKind::Product(_) => Some(ArithmeticComputation::Multiply),
+        NormalFormKind::Subtract(_, _) => Some(ArithmeticComputation::Subtract),
+        NormalFormKind::Divide(_, _) => Some(ArithmeticComputation::Divide),
+        NormalFormKind::Power(_, _) => Some(ArithmeticComputation::Power),
+        NormalFormKind::Modulo(_, _) => Some(ArithmeticComputation::Modulo),
+        _ => None,
     }
 }
 
 fn data_node(path: &DataPath, plan: &ExecutionPlan, ctx: &EvaluationContext) -> ExplanationNode {
     let result = resolve_data_path_value(path, plan, ctx);
     let data_type = ctx.data_display_type(plan, path);
-    let display = match &result {
-        OperationResult::Value(value) => value.display_value_with_type(data_type.as_ref()),
-        OperationResult::Veto(_) => format_operation_result(&result, data_type.as_ref()),
-    };
     ExplanationNode::Data {
         name: path.clone(),
-        display,
+        result: explanation_result_value(&result, data_type.as_ref(), &plan.family_units),
     }
 }
 
@@ -381,7 +403,7 @@ enum PiecewiseNarration {
         winner_body: NormalFormId,
     },
     /// A condition vetoed: the veto is the value and the whole narration.
-    Veto(Narrated),
+    Veto(Box<Narrated>),
 }
 
 /// One cause builder for every Piecewise record: the live arms of a Piecewise
@@ -411,11 +433,11 @@ fn piecewise_causes(
                     plan.result_type(condition).as_ref(),
                 )),
             };
-            return PiecewiseNarration::Veto(Narrated {
+            return PiecewiseNarration::Veto(Box::new(Narrated {
                 body: explanation_display(plan.normal_forms.as_slice(), condition),
                 causes: Vec::new(),
                 as_operand: Some(node),
-            });
+            }));
         }
     };
     let mut causes = Vec::new();
@@ -612,11 +634,11 @@ fn condition_statement(
         }
         NormalFormKind::Not(inner) => condition_statement(*inner, !held, plan),
         NormalFormKind::Leaf(LeafKind::DataPath(path)) => (
-            format!(
-                "{} is {}",
-                path.input_key(),
-                if held { "true" } else { "false" }
-            ),
+            if held {
+                path.input_key()
+            } else {
+                format!("{} is false", path.input_key())
+            },
             "true".to_string(),
         ),
         NormalFormKind::Leaf(LeafKind::Literal(literal))

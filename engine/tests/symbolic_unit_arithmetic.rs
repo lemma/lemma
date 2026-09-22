@@ -21,9 +21,36 @@ fn eval_str(code: &str, spec_name: &str, rule_name: &str) -> String {
         .results
         .get(rule_name)
         .unwrap_or_else(|| panic!("rule '{}' missing", rule_name))
-        .display()
-        .expect("display")
+        .result()
+        .expect("result")
         .to_string()
+}
+
+fn eval_measure_in_unit(
+    code: &str,
+    spec_name: &str,
+    rule_name: &str,
+    unit: &str,
+) -> rust_decimal::Decimal {
+    let mut engine = Engine::new();
+    engine
+        .load([(source(), code.to_string())])
+        .expect("spec must load");
+    let response = engine
+        .run(None, spec_name, None, HashMap::new(), None, true)
+        .expect("spec must evaluate");
+    let rule = response
+        .results
+        .get(rule_name)
+        .unwrap_or_else(|| panic!("rule '{rule_name}' missing"));
+    let measure = rule
+        .result
+        .as_ref()
+        .and_then(|v| v.measure.as_ref())
+        .unwrap_or_else(|| panic!("rule '{rule_name}' has no measure map"));
+    *measure
+        .get(unit)
+        .unwrap_or_else(|| panic!("measure map missing unit '{unit}' for '{rule_name}'"))
 }
 
 fn eval_decimal(code: &str, spec_name: &str, rule_name: &str) -> rust_decimal::Decimal {
@@ -38,7 +65,7 @@ fn eval_decimal(code: &str, spec_name: &str, rule_name: &str) -> rust_decimal::D
         .results
         .get(rule_name)
         .unwrap_or_else(|| panic!("rule '{}' missing", rule_name));
-    if let Some(measure) = rule.value.as_ref().and_then(|v| v.measure.as_ref()) {
+    if let Some(measure) = rule.result.as_ref().and_then(|v| v.measure.as_ref()) {
         let unit = rule
             .rule
             .rule_type
@@ -46,7 +73,7 @@ fn eval_decimal(code: &str, spec_name: &str, rule_name: &str) -> rust_decimal::D
             .clone()
             .filter(|u| measure.contains_key(u))
             .or_else(|| {
-                rule.display().and_then(|display| {
+                rule.result().and_then(|display| {
                     let lower = display.to_lowercase();
                     measure
                         .keys()
@@ -56,26 +83,19 @@ fn eval_decimal(code: &str, spec_name: &str, rule_name: &str) -> rust_decimal::D
             })
             .or_else(|| measure.keys().next().cloned())
             .unwrap_or_else(|| panic!("BUG: measure map empty for rule '{rule_name}'"));
-        return measure
+        return *measure
             .get(&unit)
-            .unwrap_or_else(|| panic!("measure map missing unit '{unit}'"))
-            .parse()
-            .unwrap_or_else(|error| {
-                panic!("invalid decimal in measure map for '{unit}': {error}")
-            });
+            .unwrap_or_else(|| panic!("measure map missing unit '{unit}'"));
     }
-    if let Some(calendar) = rule.value.as_ref().and_then(|v| v.calendar.as_ref()) {
-        return calendar
-            .value
-            .parse()
-            .unwrap_or_else(|error| panic!("invalid decimal in calendar result: {error}"));
+    if let Some(calendar) = rule.result.as_ref().and_then(|v| v.calendar.as_ref()) {
+        return calendar.value;
     }
     let value = rule
         .explanation
         .as_ref()
         .expect("explanation")
         .result
-        .value()
+        .literal_value()
         .expect("rule must return a value");
     match &value.value {
         ValueKind::Number(n) => lemma::ValueKind::Number(n.clone())
@@ -133,6 +153,11 @@ rule pay: hourly_rate * hours_worked"#;
     assert!(
         displayed.to_lowercase().contains("eur"),
         "expected unit 'eur' in display, got: {}",
+        displayed
+    );
+    assert!(
+        !displayed.to_lowercase().contains("eur_per_hour"),
+        "Measure×Measure product binding is None: display result type eur, not left eur_per_hour, got: {}",
         displayed
     );
 }
@@ -672,9 +697,9 @@ rule deadline: veto "Everything is fine: no deadline"
   unless burn_rate - revenue > 0 eur_month
     then (balance / (burn_rate - revenue)) as month"#;
     let mut data = HashMap::new();
-    data.insert("balance".to_string(), "120000 eur".to_string());
-    data.insert("burn_rate".to_string(), "10000 eur_month".to_string());
-    data.insert("revenue".to_string(), "2000 eur_month".to_string());
+    data.insert("balance".to_string(), "120000 eur".into());
+    data.insert("burn_rate".to_string(), "10000 eur_month".into());
+    data.insert("revenue".to_string(), "2000 eur_month".into());
     let mut engine = Engine::new();
     engine
         .load([(source(), code.to_string())])
@@ -693,7 +718,7 @@ rule deadline: veto "Everything is fine: no deadline"
         .as_ref()
         .expect("explanation")
         .result
-        .value()
+        .literal_value()
         .expect("deadline value");
     let decimal = match &value.value {
         ValueKind::Measure(n) => lemma::ValueKind::Number(n.clone())
@@ -798,12 +823,13 @@ rule total_production_cost: total_direct_cost + indirect_overhead_cost
 rule manufacturing_cost_per_ce: (total_production_cost / batch_size_ce)"#;
 
     assert_loads(code);
-    // packaging_duration = 100 ce / 5 ce_per_minute = 20 minute
-    let duration_decimal = eval_decimal(code, "manufacturing", "packaging_duration");
+    // packaging_duration = 100 ce / 5 ce_per_minute = 20 minute (canonical seconds on display)
+    let duration_decimal =
+        eval_measure_in_unit(code, "manufacturing", "packaging_duration", "minute");
     assert_eq!(
         duration_decimal,
         rust_decimal::Decimal::from(20),
-        "packaging_duration must be 20, got {}",
+        "packaging_duration must be 20 minute, got {}",
         duration_decimal
     );
     // total_production_cost: 5 + 60 + 10 + 400/60 + 15% overhead = 1127/12 eur exactly
@@ -874,13 +900,17 @@ data batch_size_ce: 100 ce
 data speed: 5 ce_per_minute
 rule packaging_duration: batch_size_ce / speed"#;
     let displayed = eval_str(code, "packaging", "packaging_duration");
-    let decimal = eval_decimal(code, "packaging", "packaging_duration");
+    let decimal = eval_measure_in_unit(code, "packaging", "packaging_duration", "minute");
     assert!(
-        displayed.to_lowercase().contains("minute"),
-        "expected 'minute' in display, got: {}",
+        displayed.to_lowercase().contains("second"),
+        "unbound duration displays first written unit, got: {}",
         displayed
     );
-    assert_eq!(decimal, rust_decimal::Decimal::from(20), "expected 20");
+    assert_eq!(
+        decimal,
+        rust_decimal::Decimal::from(20),
+        "expected 20 minute"
+    );
 }
 
 #[test]
@@ -943,7 +973,8 @@ data packaging_speed: 5 ce_per_minute
 data labor_rate_hr: 60 eur_per_hour
 rule packaging_duration: batch_size_ce / packaging_speed
 rule direct_labor_cost: (labor_rate_hr * packaging_duration)"#;
-    let duration_decimal = eval_decimal(code, "manufacturing", "packaging_duration");
+    let duration_decimal =
+        eval_measure_in_unit(code, "manufacturing", "packaging_duration", "minute");
     assert_eq!(
         duration_decimal,
         rust_decimal::Decimal::from(20),

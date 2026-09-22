@@ -10,7 +10,6 @@ use lemma::Engine;
 use rust_decimal::Decimal;
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::str::FromStr;
 use std::sync::Arc;
 
 fn source() -> lemma::SourceType {
@@ -36,7 +35,7 @@ fn eval_rule(code: &str, spec_name: &str, rule_name: &str) -> String {
             rule_name, result.veto_reason
         );
     }
-    result.display().expect("display").to_string()
+    result.result().expect("result").to_string()
 }
 
 fn eval_rule_measure_unit(code: &str, spec_name: &str, rule_name: &str, unit: &str) -> Decimal {
@@ -58,22 +57,19 @@ fn eval_rule_measure_unit(code: &str, spec_name: &str, rule_name: &str, unit: &s
             rule_name, result.veto_reason
         );
     }
-    let value = result.value.as_ref().expect("rule result value");
+    let value = result.result.as_ref().expect("rule result value");
     if let Some(calendar) = &value.calendar {
         assert_eq!(
             calendar.unit, unit,
             "expected calendar unit '{unit}', got '{}'",
             calendar.unit
         );
-        return Decimal::from_str(&calendar.value).expect("calendar value decimal");
+        return calendar.value;
     }
     let measure = value.measure.as_ref().expect("measure map");
-    Decimal::from_str(
-        measure
-            .get(unit)
-            .unwrap_or_else(|| panic!("measure map missing unit '{unit}'")),
-    )
-    .expect("measure map decimal")
+    *measure
+        .get(unit)
+        .unwrap_or_else(|| panic!("measure map missing unit '{unit}'"))
 }
 
 fn expect_plan_error(code: &str, expected_fragment: &str) {
@@ -428,8 +424,8 @@ rule runway_months: (balance / burn_rate) as month"#;
         .results
         .get("runway_months")
         .expect("runway_months rule")
-        .display()
-        .expect("display")
+        .result()
+        .expect("result")
         .to_string();
     assert!(
         display.contains("15"),

@@ -9,7 +9,7 @@ fn assert_rule_number(rule: &lemma::RuleResult, expected: rust_decimal::Decimal)
         .as_ref()
         .expect("explanation")
         .result
-        .value()
+        .literal_value()
         .expect("value");
     if let lemma::ValueKind::Number(n) = &lit.value {
         assert_eq!(
@@ -91,13 +91,13 @@ rule is_odd: (value % 2) is 1
 
     let is_even = response.results.get("is_even").unwrap();
     assert_eq!(
-        is_even.value.as_ref().expect("rule result value").boolean,
+        is_even.result.as_ref().expect("rule result value").boolean,
         Some(false)
     );
 
     let is_odd = response.results.get("is_odd").unwrap();
     assert_eq!(
-        is_odd.value.as_ref().expect("rule result value").boolean,
+        is_odd.result.as_ref().expect("rule result value").boolean,
         Some(true)
     );
 }

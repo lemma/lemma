@@ -24,12 +24,6 @@ pub type BaseMeasureVector = BTreeMap<String, i32>;
 // Unit tables for Measure and Ratio types
 // -----------------------------------------------------------------------------
 
-pub fn rational_to_serialized_str(rational: &RationalInteger) -> Result<String, String> {
-    rational
-        .try_to_decimal_string()
-        .map_err(|failure| failure.to_string())
-}
-
 pub fn rational_from_parsed_decimal(decimal: Decimal) -> Result<RationalInteger, String> {
     rational::decimal_to_rational(decimal).map_err(|failure| failure.to_string())
 }
@@ -687,19 +681,21 @@ impl fmt::Display for DateTimeValue {
     }
 }
 
-/// Serde for [`Decimal`] as a decimal string (postcard-safe; matches JSON API DecimalString).
-pub mod decimal_string_serde {
+/// Postcard / in-process serde for [`Decimal`]: mantissa + scale (no strings, no floats).
+///
+/// JSON API types in `lemma::api` use `serde-with-str` instead. Do not put this on
+/// JSON-facing DTOs.
+pub mod decimal_binary_serde {
     use rust_decimal::Decimal;
-    use serde::{Deserialize, Deserializer, Serializer};
-    use std::str::FromStr;
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
     pub fn serialize<S: Serializer>(value: &Decimal, serializer: S) -> Result<S::Ok, S::Error> {
-        serializer.serialize_str(&value.normalize().to_string())
+        (value.mantissa(), value.scale()).serialize(serializer)
     }
 
     pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Decimal, D::Error> {
-        let text = String::deserialize(deserializer)?;
-        Decimal::from_str(text.trim()).map_err(serde::de::Error::custom)
+        let (mantissa, scale) = <(i128, u32)>::deserialize(deserializer)?;
+        Decimal::try_from_i128_with_scale(mantissa, scale).map_err(serde::de::Error::custom)
     }
 }
 
@@ -710,8 +706,8 @@ pub mod decimal_string_serde {
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Value {
-    Number(#[serde(with = "decimal_string_serde")] Decimal),
-    NumberWithUnit(#[serde(with = "decimal_string_serde")] Decimal, String),
+    Number(#[serde(with = "decimal_binary_serde")] Decimal),
+    NumberWithUnit(#[serde(with = "decimal_binary_serde")] Decimal, String),
     Text(String),
     Date(DateTimeValue),
     Time(TimeValue),

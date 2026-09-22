@@ -176,7 +176,12 @@ fn select_rules(
     now: &DateTimeValue,
 ) -> Result<Option<Vec<String>>> {
     let show = load_static_show(engine, repo, spec_name, now)?;
-    let rule_names: Vec<String> = show.rules.keys().cloned().collect();
+    let rule_names: Vec<String> = show
+        .rules
+        .iter()
+        .filter(|(_, rule)| rule.path.is_empty())
+        .map(|(name, _)| name.clone())
+        .collect();
 
     if rule_names.is_empty() {
         return Ok(None);
@@ -276,12 +281,12 @@ fn next_prompt_name_from_results<'a>(
     collected: &HashMap<String, String>,
 ) -> Option<String> {
     let mut next = None;
-    let mut any_awaiting = false;
+    let mut any_missing_data = false;
     for result in results {
-        if !result.awaits_missing_data() {
+        if !result.is_missing_data() {
             continue;
         }
-        any_awaiting = true;
+        any_missing_data = true;
         if let Some(name) = result
             .missing_data()
             .iter()
@@ -292,8 +297,8 @@ fn next_prompt_name_from_results<'a>(
             }
         }
     }
-    if any_awaiting && next.is_none() {
-        panic!("BUG: MissingData awaits but no unbound key left to prompt");
+    if any_missing_data && next.is_none() {
+        panic!("BUG: MissingData veto but no unbound key left to prompt");
     }
     next
 }
@@ -659,8 +664,9 @@ fn prompt_measure_data(
     });
 
     if units.is_empty() {
-        let default_str =
-            suggestion.and_then(|lit| lit.magnitude_suggestion_for_decimal_prompt(lemma_type));
+        let default_str = suggestion
+            .and_then(|lit| lit.magnitude_suggestion_for_decimal_prompt(lemma_type))
+            .map(|decimal| decimal.to_string());
         return prompt_decimal_input(prompt_title, default_str.as_deref(), constraints, "7.65");
     }
 
@@ -680,7 +686,9 @@ fn prompt_measure_data(
             .context(format!("Failed to get unit for {}", data_name))?
     };
 
-    let numeric_default = suggestion.and_then(|lit| lit.magnitude_in_unit(lemma_type, &unit));
+    let numeric_default = suggestion
+        .and_then(|lit| lit.magnitude_in_unit(lemma_type, &unit))
+        .map(|decimal| decimal.to_string());
 
     let value_constraints = NumericConstraints {
         help: if constraints.help.is_empty() {
@@ -728,7 +736,8 @@ fn prompt_ratio_data(
         suggestion.and_then(|lit| lit.magnitude_suggestion_for_decimal_prompt(lemma_type))
     } else {
         suggestion.and_then(|lit| lit.magnitude_in_unit(lemma_type, &selected_unit))
-    };
+    }
+    .map(|decimal| decimal.to_string());
 
     let value = prompt_decimal_input(
         prompt_title,
@@ -951,7 +960,7 @@ rule use_gender: gender
     }
 
     #[test]
-    fn awaits_missing_data_only_for_missing_data_veto() {
+    fn is_missing_data_only_for_missing_data_veto() {
         let mut engine = Engine::new();
         engine
             .load([(
@@ -972,16 +981,12 @@ rule premium: base * extra
 
         let missing = run(&engine, "demo", HashMap::new(), Some(&["need".to_string()]));
         assert!(
-            missing
-                .results
-                .get("need")
-                .expect("need")
-                .awaits_missing_data(),
+            missing.results.get("need").expect("need").is_missing_data(),
             "MissingData veto must stay open for prompts"
         );
 
         let mut age_high = HashMap::new();
-        age_high.insert("age".to_string(), "80".to_string());
+        age_high.insert("age".to_string(), "80".into());
         let user = run(&engine, "demo", age_high, Some(&["base".to_string()]));
         let base = user.results.get("base").expect("base");
         assert!(
@@ -993,7 +998,7 @@ rule premium: base * extra
             base.veto_detail
         );
         assert!(
-            !base.awaits_missing_data(),
+            !base.is_missing_data(),
             "UserDefined veto must be settled for prompts"
         );
 
@@ -1011,7 +1016,7 @@ rule premium: (1 / denom) * extra
             )])
             .expect("load");
         let mut data = HashMap::new();
-        data.insert("denom".to_string(), "0".to_string());
+        data.insert("denom".to_string(), "0".into());
         let settled = run(&engine2, "demo2", data, Some(&["premium".to_string()]));
         let premium = settled.results.get("premium").expect("premium");
         assert!(
@@ -1023,7 +1028,7 @@ rule premium: (1 / denom) * extra
             premium.veto_detail
         );
         assert!(
-            !premium.awaits_missing_data(),
+            !premium.is_missing_data(),
             "Computation veto must be settled for prompts"
         );
     }
@@ -1050,7 +1055,7 @@ rule premium: (1 / denom) * loading
             .expect("load");
 
         let mut data = HashMap::new();
-        data.insert("denom".to_string(), "0".to_string());
+        data.insert("denom".to_string(), "0".into());
         let response = run(&engine, "demo", data, Some(&["premium".to_string()]));
         let premium = response.results.get("premium").expect("premium");
         assert!(
@@ -1099,7 +1104,7 @@ rule other: need
             .expect("load");
 
         let mut data = HashMap::new();
-        data.insert("denom".to_string(), "0".to_string());
+        data.insert("denom".to_string(), "0".into());
         let response = run(
             &engine,
             "demo",
@@ -1108,7 +1113,7 @@ rule other: need
         );
 
         let premium = response.results.get("premium").expect("premium");
-        assert!(!premium.awaits_missing_data());
+        assert!(!premium.is_missing_data());
         assert!(
             premium.missing_data().is_empty(),
             "settled premium must clear missing_data: {:?}",
@@ -1116,7 +1121,7 @@ rule other: need
         );
 
         let other = response.results.get("other").expect("other");
-        assert!(other.awaits_missing_data());
+        assert!(other.is_missing_data());
         assert_eq!(other.missing_data(), vec!["need".to_string()]);
 
         let empty = HashMap::new();
@@ -1128,8 +1133,8 @@ rule other: need
     }
 
     #[test]
-    #[should_panic(expected = "BUG: MissingData awaits but no unbound key left to prompt")]
-    fn next_prompt_panics_when_awaiting_but_all_keys_already_provided() {
+    #[should_panic(expected = "BUG: MissingData veto but no unbound key left to prompt")]
+    fn next_prompt_panics_when_missing_data_but_all_keys_already_provided() {
         let mut engine = Engine::new();
         engine
             .load([(
@@ -1150,11 +1155,11 @@ rule other: need
             Some(&["other".to_string()]),
         );
         let other = response.results.get("other").expect("other");
-        assert!(other.awaits_missing_data());
+        assert!(other.is_missing_data());
         assert_eq!(other.missing_data(), vec!["need".to_string()]);
 
         let mut provided = HashMap::new();
-        provided.insert("need".to_string(), "42".to_string());
+        provided.insert("need".to_string(), "42".into());
         let collected = HashMap::new();
         next_prompt_name_from_results(std::slice::from_ref(other), &provided, &collected);
     }

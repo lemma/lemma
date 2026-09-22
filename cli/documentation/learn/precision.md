@@ -65,21 +65,30 @@ All API surfaces enforce a uniform rule for numeric data inputs:
 
 | Input type | Accepted? | Rationale |
 |-----------|-----------|-----------|
-| Integer (native number) | Yes | Exact on all surfaces |
+| Integer within `Number.MAX_SAFE_INTEGER` (native number) | Yes | Exact IEEE 754 integer |
+| Integer larger than that (npm) | Digit **string** or **`bigint`** | JS `Number` cannot hold them exactly |
+| Integer (JSON / HTTP / Hex `i64`) | Yes when the wire type can represent it | Same digits as a string otherwise |
 | Decimal / float (native number) | **Rejected** | IEEE 754 f64 cannot represent most decimals exactly |
 | String `"0.1"`, `"99.50"` | Yes | Parsed as exact decimal → ℚ |
 
-This applies identically to the JavaScript/TypeScript (npm) API, the HTTP/JSON API, the Elixir NIF, and the Java / Kotlin package (`BigDecimal`). Non-integer numeric values are rejected with `"decimal values must be passed as strings to preserve exactness"` (JS/HTTP/Elixir). Rust callers using `Engine::run` directly are unaffected (they already provide string magnitudes). Java callers pass `BigDecimal` or decimal strings through `RunRequest.data(...)`, never `double`/`float` for domain decimals.
+Non-integer numeric values are rejected with `"decimal values must be passed as strings to preserve exactness"` (JS/HTTP/Elixir). Rust callers using `Engine::run` directly are unaffected (they already provide string magnitudes). Java callers pass `BigDecimal` or decimal strings through `RunRequest.data(...)`, never `double`/`float` for domain decimals.
 
 ## Clients (JavaScript / HTTP / Java / Kotlin)
 
-**Sending data:** pass decimal values as strings, integers may be native numbers:
+**Sending data:** decimals as strings. On npm, large integers as digit strings or `bigint`; small integers may be numbers when `Number.isSafeInteger`:
 
 ```javascript
-engine.run({ spec: 'pricing', data: { quantity: 42, rate: '0.075' } });
+engine.run({
+  spec: 'pricing',
+  data: {
+    quantity: 42,
+    rate: '0.075',
+    account_id: '79228162514264337593543950335', // or 79228162514264337593543950335n
+  },
+});
 ```
 
-HTTP/JSON uses the same rule (integers as numbers, decimals as strings in the request body). On Java / Kotlin, pass `BigDecimal` or decimal strings in `RunRequest.data(...)`: see [Java / Kotlin](../tools/java.md).
+HTTP/JSON accepts integers that fit JSON number semantics; decimals as strings. On Java / Kotlin, pass `BigDecimal` or decimal strings in `RunRequest.data(...)`: see [Java / Kotlin](../tools/java.md).
 
 **Reading results:** parse numeric fields as decimal strings, not floats:
 

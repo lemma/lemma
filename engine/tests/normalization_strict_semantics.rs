@@ -21,7 +21,7 @@ fn run(engine: &Engine, spec: &str, inputs: &[(&str, &str)]) -> lemma::Response 
     let now = DateTimeValue::now();
     let data: HashMap<String, String> = inputs
         .iter()
-        .map(|(name, value)| (name.to_string(), value.to_string()))
+        .map(|(name, value)| (name.to_string(), (*value).to_string()))
         .collect();
     engine
         .run(None, spec, Some(&now), data, None, false)
@@ -59,7 +59,7 @@ rule r: x * 0
     let supplied = run(&engine, "strict_multiply", &[("x", "7")]);
     let result = rule_result(&supplied, "r");
     assert!(!result.vetoed);
-    assert_eq!(result.display(), Some("0"));
+    assert_eq!(result.result(), Some("0"));
 }
 
 #[test]
@@ -77,7 +77,7 @@ rule r: price * 0
     let result = rule_result(&response, "r");
     assert!(!result.vetoed);
     assert_eq!(
-        result.display(),
+        result.result(),
         Some("0 eur"),
         "the runtime multiply must keep the measure's unit"
     );
@@ -103,7 +103,7 @@ rule r: rate * 0
     let response = run(&engine, "folded_measure_multiply", &[]);
     let result = rule_result(&response, "r");
     assert!(!result.vetoed);
-    assert_eq!(result.display(), Some("0 eur"));
+    assert_eq!(result.result(), Some("0 eur"));
 }
 
 #[test]
@@ -147,7 +147,7 @@ rule r: flag and (1 > 2)
     let supplied = run(&engine, "strict_and", &[("flag", "yes")]);
     let result = rule_result(&supplied, "r");
     assert!(!result.vetoed);
-    assert_eq!(result.display(), Some("false"));
+    assert_eq!(result.result(), Some("false"));
 }
 
 #[test]
@@ -192,7 +192,7 @@ rule r: x ^ 0
     let supplied = run(&engine, "strict_power_zero", &[("x", "9")]);
     let result = rule_result(&supplied, "r");
     assert!(!result.vetoed);
-    assert_eq!(result.display(), Some("1"));
+    assert_eq!(result.result(), Some("1"));
 }
 
 #[test]
@@ -218,7 +218,7 @@ fn self_doubling_rule_chain_shares_graph_cells() {
     let response = run(&engine, "doubling", &[("input", "1")]);
     let result = rule_result(&response, &format!("r{n}"));
     assert!(!result.vetoed);
-    assert_eq!(result.display(), Some("false"));
+    assert_eq!(result.result(), Some("false"));
     // Regression guard only (not a microbench). Pre-DAG-collect walks blew past
     // this at much smaller n (~18s at n=12).
     assert!(

@@ -168,8 +168,8 @@ fn main() {
                 .as_ref()
                 .expect("BUG: outputs bench requires explain: true");
             let normalized = match &explanation.result {
-                OperationResult::Value(literal) => {
-                    normalize_literal(literal, explanation.result_type.as_ref())
+                OperationResult::Value(bound) => {
+                    normalize_literal(&bound.to_literal(), explanation.result_type.as_ref())
                 }
                 OperationResult::Veto(veto) => normalize_veto(veto),
             };

@@ -31,7 +31,7 @@ rule with_spaces: not  (  x  )
     let not_x_rule = response.results.get("not_x").unwrap();
     assert_eq!(
         not_x_rule
-            .value
+            .result
             .as_ref()
             .expect("rule result value")
             .boolean,
@@ -39,15 +39,15 @@ rule with_spaces: not  (  x  )
     );
 
     let sqrt_rule = response.results.get("sqrt_num").unwrap();
-    assert_eq!(sqrt_rule.display(), Some("4"));
+    assert_eq!(sqrt_rule.result(), Some("4"));
 
     let sin_rule = response.results.get("sin_zero").unwrap();
-    assert_eq!(sin_rule.display(), Some("0"));
+    assert_eq!(sin_rule.result(), Some("0"));
 
     let combined_rule = response.results.get("combined").unwrap();
     assert_eq!(
         combined_rule
-            .value
+            .result
             .as_ref()
             .expect("rule result value")
             .boolean,
@@ -78,7 +78,7 @@ rule reject: false
             .results
             .get("reject")
             .unwrap()
-            .value
+            .result
             .as_ref()
             .expect("rule result value")
             .boolean,
@@ -221,17 +221,14 @@ uses lemma units
     let b = engine_b
         .run(None, "s", Some(&now), HashMap::new(), None, false)
         .expect("run b");
-    assert_eq!(
-        a.results.get("doubled").and_then(|r| r.display()),
-        Some("4")
-    );
+    assert_eq!(a.results.get("doubled").and_then(|r| r.result()), Some("4"));
     assert_eq!(
         a.results
             .get("doubled")
-            .and_then(|r| r.display().map(str::to_string)),
+            .and_then(|r| r.result().map(str::to_string)),
         b.results
             .get("doubled")
-            .and_then(|r| r.display().map(str::to_string))
+            .and_then(|r| r.result().map(str::to_string))
     );
     let show_a = engine_a.show(None, "s", Some(&now)).expect("show a");
     let show_b = engine_b.show(None, "s", Some(&now)).expect("show b");
@@ -264,10 +261,10 @@ rule r: n * 2
     assert_eq!(
         a.results
             .get("r")
-            .and_then(|r| r.display().map(str::to_string)),
+            .and_then(|r| r.result().map(str::to_string)),
         b.results
             .get("r")
-            .and_then(|r| r.display().map(str::to_string))
+            .and_then(|r| r.result().map(str::to_string))
     );
-    assert_eq!(a.results.get("r").and_then(|r| r.display()), Some("6"));
+    assert_eq!(a.results.get("r").and_then(|r| r.result()), Some("6"));
 }

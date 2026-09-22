@@ -73,11 +73,11 @@ fn missing_data_empty_when_all_datas_provided() {
     let now = DateTimeValue::now();
 
     let mut data = HashMap::new();
-    data.insert("product".to_string(), "latte".to_string());
-    data.insert("size".to_string(), "medium".to_string());
-    data.insert("number_of_cups".to_string(), "1".to_string());
-    data.insert("has_loyalty_card".to_string(), "false".to_string());
-    data.insert("age".to_string(), "30".to_string());
+    data.insert("product".to_string(), "latte".into());
+    data.insert("size".to_string(), "medium".into());
+    data.insert("number_of_cups".to_string(), "1".into());
+    data.insert("has_loyalty_card".to_string(), "false".into());
+    data.insert("age".to_string(), "30".into());
 
     let response = engine
         .run(None, "coffee_order", Some(&now), data, None, false)
@@ -117,8 +117,8 @@ fn missing_data_includes_product_when_no_inputs() {
 
     let base_price = rule_by_name(&response, "base_price");
     assert!(
-        base_price.awaits_missing_data(),
-        "base_price must await MissingData when product is unbound: {:?}",
+        base_price.is_missing_data(),
+        "base_price must be MissingData when product is unbound: {:?}",
         base_price.veto_reason
     );
     assert_eq!(
@@ -214,7 +214,7 @@ rule gross_annual: gross * periods_per_year
 
     let now = DateTimeValue::now();
     let mut data = HashMap::new();
-    data.insert("gross".to_string(), "5000".to_string());
+    data.insert("gross".to_string(), "5000".into());
     let response = engine
         .run(None, "payroll", Some(&now), data, None, false)
         .expect("run");
@@ -226,9 +226,9 @@ rule gross_annual: gross * periods_per_year
         "gross_annual must veto when periods_per_year lacks pay_period (must not assume 12)"
     );
     assert!(
-        gross_annual.display().is_none(),
+        gross_annual.result().is_none(),
         "gross_annual must not produce a numeric value, got {:?}",
-        gross_annual.display()
+        gross_annual.result()
     );
 }
 
@@ -245,7 +245,7 @@ fn net_salary_per_period_outputs_veto_when_pay_period_missing() {
 
     let effective = effective_2026();
     let mut data = HashMap::new();
-    data.insert("gross_salary".to_string(), "5000 eur".to_string());
+    data.insert("gross_salary".to_string(), "5000 eur".into());
     let response = engine
         .run(None, "net_salary", Some(&effective), data, None, false)
         .expect("run");
@@ -259,9 +259,9 @@ fn net_salary_per_period_outputs_veto_when_pay_period_missing() {
             "rule '{name}' must veto when periods_per_year is missing pay_period"
         );
         assert!(
-            rr.display().is_none(),
+            rr.result().is_none(),
             "rule '{name}' must not emit a per-period amount without pay_period, got {:?}",
-            rr.display()
+            rr.result()
         );
     }
 }

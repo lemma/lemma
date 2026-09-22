@@ -391,3 +391,74 @@ fn linear_chain_node_budget_treats_rule_refs_as_leaves() {
         "tip of a 50-rule chain must fit in budget 3 (Sum(rule_ref, 1) = 3 cells; rule references are leaves)"
     );
 }
+
+#[test]
+fn flatten_sum_of_three_data_paths_has_three_children_and_no_origin() {
+    let plan = plan_from_code(
+        r#"
+spec t
+data a: number
+data b: number
+data c: number
+rule out: a + b + c
+"#,
+    );
+    let root = rule_root(&plan, "out");
+    assert!(
+        root.origin.is_none(),
+        "associative flatten is not a semantic rewrite; origin must be None, got {:?}",
+        root.origin
+    );
+    let NormalFormKind::Sum(children) = &root.kind else {
+        panic!("root must be Sum, got {:?}", root.kind);
+    };
+    assert_eq!(children.len(), 3, "n-ary sum children, got {:?}", root.kind);
+    for child in children {
+        assert!(
+            matches!(
+                plan.normal_form(*child).kind,
+                NormalFormKind::Leaf(LeafKind::DataPath(_))
+            ),
+            "summand must be a data path, got {:?}",
+            plan.normal_form(*child).kind
+        );
+    }
+}
+
+#[test]
+fn flatten_product_of_three_data_paths_has_three_children_and_no_origin() {
+    let plan = plan_from_code(
+        r#"
+spec t
+data a: number
+data b: number
+data c: number
+rule out: a * b * c
+"#,
+    );
+    let root = rule_root(&plan, "out");
+    assert!(
+        root.origin.is_none(),
+        "associative flatten is not a semantic rewrite; origin must be None, got {:?}",
+        root.origin
+    );
+    let NormalFormKind::Product(children) = &root.kind else {
+        panic!("root must be Product, got {:?}", root.kind);
+    };
+    assert_eq!(
+        children.len(),
+        3,
+        "n-ary product children, got {:?}",
+        root.kind
+    );
+    for child in children {
+        assert!(
+            matches!(
+                plan.normal_form(*child).kind,
+                NormalFormKind::Leaf(LeafKind::DataPath(_))
+            ),
+            "factor must be a data path, got {:?}",
+            plan.normal_form(*child).kind
+        );
+    }
+}

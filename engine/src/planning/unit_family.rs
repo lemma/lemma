@@ -15,7 +15,7 @@ use std::sync::Arc;
 /// Precomputed units for one measure or ratio family in expression scope.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct FamilyUnitEntry {
-    pub family_bare_names: Vec<String>,
+    pub family_bare_names: Arc<[String]>,
     pub merged_measure_units: Option<MeasureUnits>,
     pub merged_ratio_units: Option<RatioUnits>,
 }
@@ -84,20 +84,29 @@ impl FamilyUnitCatalog {
     }
 
     /// Ordered bare unit names for rule-result maps: anchor declared units first, then family bares.
+    ///
+    /// Returns a shared [`Arc`] when the type's declared units are empty or identical to the
+    /// family's precomputed list (the common percent/money paths).
     #[must_use]
-    pub(crate) fn ordered_bare_names_for_type(&self, lemma_type: &LemmaType) -> Vec<String> {
+    pub(crate) fn ordered_bare_names_for_type(&self, lemma_type: &LemmaType) -> Arc<[String]> {
         let Some(entry) = self.entry_for_type(lemma_type) else {
-            return declared_bare_names_only(lemma_type);
+            return Arc::from(declared_bare_names_only(lemma_type));
         };
         let mut names = Vec::new();
         let mut seen = BTreeSet::new();
         append_declared_unit_names(lemma_type, &mut names, &mut seen);
-        for bare in &entry.family_bare_names {
+        if names.is_empty() {
+            return Arc::clone(&entry.family_bare_names);
+        }
+        if names.as_slice() == entry.family_bare_names.as_ref() {
+            return Arc::clone(&entry.family_bare_names);
+        }
+        for bare in entry.family_bare_names.iter() {
             if seen.insert(bare.clone()) {
                 names.push(bare.clone());
             }
         }
-        names
+        Arc::from(names)
     }
 
     /// `rule_type` with family-merged unit metadata for Show rule schemas.
@@ -189,15 +198,25 @@ fn build_family_entry(unit_index: &UnitIndex, family: &str) -> FamilyUnitEntry {
     let merged_measure_units = merged_measure_units_for_family(unit_index, family, &type_by_name);
     let merged_ratio_units = merged_ratio_units_for_family(unit_index, family, &type_by_name);
 
-    let family_bare_names = merged_measure_units
+    let family_bare_names: Arc<[String]> = merged_measure_units
         .as_ref()
-        .map(|units| units.iter().map(|unit| unit.name.clone()).collect())
-        .or_else(|| {
-            merged_ratio_units
-                .as_ref()
-                .map(|units| units.iter().map(|unit| unit.name.clone()).collect())
+        .map(|units| {
+            units
+                .iter()
+                .map(|unit| unit.name.clone())
+                .collect::<Vec<_>>()
+                .into()
         })
-        .unwrap_or_default();
+        .or_else(|| {
+            merged_ratio_units.as_ref().map(|units| {
+                units
+                    .iter()
+                    .map(|unit| unit.name.clone())
+                    .collect::<Vec<_>>()
+                    .into()
+            })
+        })
+        .unwrap_or_else(|| Arc::from([]));
 
     FamilyUnitEntry {
         family_bare_names,
@@ -388,7 +407,10 @@ mod tests {
 
         let catalog = FamilyUnitCatalog::build(&index);
         let names = catalog.ordered_bare_names_for_type(money.as_ref());
-        assert_eq!(names, vec!["eur", "usd", "gbp"]);
+        assert_eq!(
+            names.as_ref(),
+            &["eur".to_string(), "usd".to_string(), "gbp".to_string()][..]
+        );
         let show_type = catalog.rule_type_for_show(money.as_ref());
         let show_units: Vec<&str> = show_type
             .measure_unit_names()
@@ -461,6 +483,9 @@ mod tests {
             .as_ref()
             .expect("merged ratio units");
         assert!(merged.get("percent").is_ok());
-        assert_eq!(entry.family_bare_names, vec!["percent"]);
+        assert_eq!(
+            entry.family_bare_names.as_ref(),
+            &["percent".to_string()][..]
+        );
     }
 }

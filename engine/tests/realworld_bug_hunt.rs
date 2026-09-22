@@ -13,7 +13,7 @@ fn run_spec(engine: &Engine, spec: &str, data: &[(&str, &str)]) -> lemma::Respon
     let now = DateTimeValue::now();
     let data_map: HashMap<String, String> = data
         .iter()
-        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .map(|(k, v)| (k.to_string(), (*v).to_string()))
         .collect();
     engine
         .run(None, spec, Some(&now), data_map, None, false)
@@ -26,7 +26,7 @@ fn rule_display(response: &lemma::Response, rule_name: &str) -> String {
         .values()
         .find(|r| r.rule.name == rule_name)
         .unwrap_or_else(|| panic!("rule '{}' not found", rule_name))
-        .display()
+        .result()
         .unwrap_or_else(|| panic!("rule '{}' has no display", rule_name))
         .to_string()
 }

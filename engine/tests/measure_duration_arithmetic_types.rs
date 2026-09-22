@@ -40,7 +40,7 @@ fn eval(engine: &Engine, spec: &str, rule: &str, data: HashMap<String, String>) 
             result.veto_reason.as_deref().unwrap_or("Vetoed")
         );
     }
-    result.display().expect("display").to_string()
+    result.result().expect("result").to_string()
 }
 
 // ═══════════════════════════════════════════════════════════════════

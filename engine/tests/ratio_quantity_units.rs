@@ -14,13 +14,13 @@ fn decimal_lit(s: &str) -> Decimal {
     Decimal::from_str(s).expect("BUG: test decimal literal must parse")
 }
 
-fn rule_literal(rule: &lemma::RuleResult) -> &lemma::LiteralValue {
+fn rule_literal(rule: &lemma::RuleResult) -> lemma::LiteralValue {
     assert!(!rule.vetoed, "unexpected veto: {:?}", rule.veto_reason);
     rule.explanation
         .as_ref()
         .expect("explanation")
         .result
-        .value()
+        .literal_value()
         .expect("value")
 }
 
@@ -72,11 +72,11 @@ rule is_above_30: savings_ratio > 30%
     let above_20 = response.results.get("is_above_20").expect("is_above_20");
     let above_30 = response.results.get("is_above_30").expect("is_above_30");
     assert_eq!(
-        above_20.value.as_ref().expect("rule result value").boolean,
+        above_20.result.as_ref().expect("rule result value").boolean,
         Some(true)
     );
     assert_eq!(
-        above_30.value.as_ref().expect("rule result value").boolean,
+        above_30.result.as_ref().expect("rule result value").boolean,
         Some(false)
     );
 }
@@ -105,7 +105,7 @@ rule tier: "low"
         .unwrap();
     let tier = response.results.get("tier").expect("tier");
     assert_eq!(
-        tier.value
+        tier.result
             .as_ref()
             .expect("rule result value")
             .text
@@ -161,7 +161,7 @@ rule above_20_permille: as_permille > 20 permille
 
     let above = response.results.get("above_20_permille").expect("above");
     assert_eq!(
-        above.value.as_ref().expect("rule result value").boolean,
+        above.result.as_ref().expect("rule result value").boolean,
         Some(true)
     );
 }
@@ -282,7 +282,7 @@ rule compared: plus_five > 25%
         panic!("plus_five must be Ratio");
     }
     assert_eq!(
-        compared.value.as_ref().expect("rule result value").boolean,
+        compared.result.as_ref().expect("rule result value").boolean,
         Some(true)
     );
 }
@@ -326,7 +326,7 @@ rule share_above_20: share_pct > 20%
                 Decimal::from(200)
             );
             let measure = as_eur
-                .value
+                .result
                 .as_ref()
                 .and_then(|v| v.measure.as_ref())
                 .expect("measure map");
@@ -356,7 +356,7 @@ rule share_above_20: share_pct > 20%
     }
     assert_eq!(
         share_above_20
-            .value
+            .result
             .as_ref()
             .expect("rule result value")
             .boolean,

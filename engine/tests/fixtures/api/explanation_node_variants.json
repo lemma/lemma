@@ -2,10 +2,18 @@
   "type": "rule",
   "name": "total",
   "result": "125.00 eur",
+  "measure": {
+    "eur": "125.00"
+  },
   "body": "subtotal + fee",
-  "causes": [{ "condition": "is_member is true", "value": "true" }],
+  "causes": [{ "condition": "is_member", "value": "true" }],
   "children": [
-    { "type": "data", "name": "subtotal", "display": "100.00 eur" },
+    {
+      "type": "data",
+      "name": "subtotal",
+      "result": "100.00 eur",
+      "measure": { "eur": "100.00" }
+    },
     { "type": "data_unused", "name": "discount" },
     {
       "type": "conversion",
@@ -15,10 +23,18 @@
         { "role": "rule", "text": "1 usd is 0.91 eur" },
         { "role": "outcome", "text": "24.57 eur" }
       ],
-      "operands": [{ "type": "data", "name": "fee_usd", "display": "27.00 usd" }]
+      "operands": [
+        {
+          "type": "data",
+          "name": "fee_usd",
+          "result": "27.00 usd",
+          "measure": { "usd": "27.00" }
+        }
+      ]
     },
     {
       "type": "compose",
+      "operator": "multiply",
       "expression": "surcharge * multiplier",
       "operands": [{ "type": "veto", "message": "surcharge unavailable" }]
     }

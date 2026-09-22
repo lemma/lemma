@@ -5,8 +5,10 @@ use crate::planning::semantics::{
     DataDefinition, DataPath, LemmaType, LiteralValue, Source, TypeSpecification, TypedLiteral,
     ValueKind,
 };
+use crate::planning::unit_index::UnitIndex;
 use crate::Error;
 use crate::ResourceLimits;
+use indexmap::IndexMap;
 use rust_decimal::Decimal;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::str::FromStr;
@@ -18,8 +20,8 @@ pub enum RunDataValue {
     /// Raw string, parsed against the target type's specification by [`parse_value_from_string`].
     String(String),
     Boolean(bool),
-    MeasureMap(BTreeMap<String, String>),
-    RatioMap(BTreeMap<String, String>),
+    MeasureMap(BTreeMap<String, Decimal>),
+    RatioMap(BTreeMap<String, Decimal>),
 }
 
 impl RunDataValue {
@@ -36,14 +38,31 @@ impl RunDataValue {
     }
 }
 
+impl From<String> for RunDataValue {
+    fn from(value: String) -> Self {
+        Self::String(value)
+    }
+}
+
+impl From<&str> for RunDataValue {
+    fn from(value: &str) -> Self {
+        Self::String(value.to_string())
+    }
+}
+
 /// Parse one JSON value into a [`RunDataValue`] (SDK / MCP / WASM wire shape).
-pub fn run_data_value_from_json_value(value: serde_json::Value) -> Result<RunDataValue, String> {
+///
+/// JSON `null` means omit: returns `Ok(None)`.
+pub fn run_data_value_from_json_value(
+    value: serde_json::Value,
+) -> Result<Option<RunDataValue>, String> {
     match value {
-        serde_json::Value::String(s) => Ok(RunDataValue::String(s)),
-        serde_json::Value::Bool(b) => Ok(RunDataValue::Boolean(b)),
+        serde_json::Value::Null => Ok(None),
+        serde_json::Value::String(s) => Ok(Some(RunDataValue::String(s))),
+        serde_json::Value::Bool(b) => Ok(Some(RunDataValue::Boolean(b))),
         serde_json::Value::Number(n) => {
             if n.is_i64() || n.is_u64() {
-                Ok(RunDataValue::String(n.to_string()))
+                Ok(Some(RunDataValue::String(n.to_string())))
             } else {
                 Err("decimal values must be passed as strings to preserve exactness".to_string())
             }
@@ -59,22 +78,17 @@ pub fn run_data_value_from_json_value(value: serde_json::Value) -> Result<RunDat
                 );
             }
             if obj.values().all(|v| v.is_string()) {
-                let map: BTreeMap<String, String> = obj
-                    .into_iter()
-                    .map(|(k, v)| {
-                        (
-                            k,
-                            v.as_str()
-                                .expect("BUG: object values checked as strings")
-                                .to_string(),
-                        )
-                    })
-                    .collect();
-                return Ok(RunDataValue::MeasureMap(map));
+                let mut map = BTreeMap::new();
+                for (k, v) in obj {
+                    let text = v.as_str().expect("BUG: object values checked as strings");
+                    let decimal = Decimal::from_str(text.trim())
+                        .map_err(|error| format!("invalid decimal '{text}': {error}"))?;
+                    map.insert(k, decimal);
+                }
+                return Ok(Some(RunDataValue::MeasureMap(map)));
             }
             Err("data value object must be a unit map with string magnitudes".to_string())
         }
-        serde_json::Value::Null => Err("data value must not be null".to_string()),
         serde_json::Value::Array(_) => Err("data value must not be an array".to_string()),
     }
 }
@@ -83,6 +97,7 @@ pub fn run_data_value_from_json_value(value: serde_json::Value) -> Result<RunDat
 ///
 /// Single-entry unit maps become convenience strings (`"84 eur"`). Multi-key maps
 /// are rejected until `Engine::run` accepts typed [`RunDataValue`] directly.
+/// JSON `null` field values are omitted (same as unbound).
 pub fn parse_run_data_object(
     data: &Option<serde_json::Value>,
 ) -> Result<HashMap<String, String>, String> {
@@ -95,10 +110,9 @@ pub fn parse_run_data_object(
     let map: HashMap<String, serde_json::Value> = serde_json::from_value(value.clone())
         .map_err(|e| format!("data must be a plain object: {e}"))?;
     map.into_iter()
-        .filter(|(_, v)| !v.is_null())
-        .map(|(k, v)| {
-            let input = run_data_value_from_json_value(v)?;
-            match input {
+        .filter_map(|(k, v)| match run_data_value_from_json_value(v) {
+            Ok(None) => None,
+            Ok(Some(input)) => Some(match input {
                 RunDataValue::String(s) => Ok((k, s)),
                 RunDataValue::Boolean(b) => Ok((k, b.to_string())),
                 RunDataValue::MeasureMap(m) | RunDataValue::RatioMap(m) => {
@@ -111,7 +125,8 @@ pub fn parse_run_data_object(
                         ))
                     }
                 }
-            }
+            }),
+            Err(e) => Some(Err(e)),
         })
         .collect()
 }
@@ -152,6 +167,8 @@ pub fn parse_data_value(
     input: &RunDataValue,
     lemma_type: &Arc<LemmaType>,
     source: &Source,
+    unit_index: &UnitIndex,
+    named_types: &IndexMap<String, Arc<LemmaType>>,
 ) -> Result<TypedLiteral, Error> {
     let to_err = |msg: String| Error::validation(msg, Some(source.clone()), None::<String>);
     let type_spec = &lemma_type.specifications;
@@ -160,7 +177,13 @@ pub fn parse_data_value(
         (RunDataValue::String(s), _) => {
             let parsed = parse_value_from_string(s, type_spec, source)?;
             let kind = parser_value_to_value_kind(&parsed, type_spec).map_err(to_err)?;
-            let binding = binding_unit_from_parser_value(&parsed);
+            let binding = match binding_unit_from_parser_value(&parsed) {
+                Some(written) => Some(
+                    resolve_passed_unit(&written, lemma_type.as_ref(), unit_index, named_types)
+                        .map_err(to_err)?,
+                ),
+                None => None,
+            };
             (kind, binding)
         }
         (RunDataValue::Boolean(b), TypeSpecification::Boolean { .. }) => {
@@ -173,26 +196,18 @@ pub fn parse_data_value(
             )));
         }
         (RunDataValue::MeasureMap(map), TypeSpecification::Measure { .. }) => {
-            let kind = measure_from_unit_map(map, lemma_type.as_ref()).map_err(to_err)?;
-            let binding = (map.len() == 1).then(|| {
-                map.keys()
-                    .next()
-                    .expect("BUG: map len checked == 1")
-                    .clone()
-            });
+            let (kind, binding) =
+                measure_from_unit_map(map, lemma_type.as_ref(), unit_index, named_types)
+                    .map_err(to_err)?;
             (kind, binding)
         }
         (
             RunDataValue::MeasureMap(map) | RunDataValue::RatioMap(map),
             TypeSpecification::Ratio { .. },
         ) => {
-            let kind = ratio_from_unit_map(map, lemma_type.as_ref()).map_err(to_err)?;
-            let binding = (map.len() == 1).then(|| {
-                map.keys()
-                    .next()
-                    .expect("BUG: map len checked == 1")
-                    .clone()
-            });
+            let (kind, binding) =
+                ratio_from_unit_map(map, lemma_type.as_ref(), unit_index, named_types)
+                    .map_err(to_err)?;
             (kind, binding)
         }
         (RunDataValue::MeasureMap(_), _) => {
@@ -235,10 +250,63 @@ fn binding_unit_from_parser_value(value: &crate::parsing::ast::Value) -> Option<
     }
 }
 
-fn measure_from_unit_map(
-    map: &BTreeMap<String, String>,
+/// Resolve a unit the caller actually wrote to a bare declared name.
+///
+/// Qualified paths go through [`UnitIndex::resolve_with_named_types`]. Bare names
+/// accepted only when this data type (or range element) declares that exact name.
+/// Never invents a unit the caller did not pass.
+fn resolve_passed_unit(
+    written: &str,
     lemma_type: &LemmaType,
-) -> Result<ValueKind, String> {
+    unit_index: &UnitIndex,
+    named_types: &IndexMap<String, Arc<LemmaType>>,
+) -> Result<String, String> {
+    match unit_index.resolve_with_named_types(written, named_types) {
+        Ok((bare, _)) => {
+            if unit_name_declared_on_type(lemma_type, &bare)
+                || range_element_declares_unit(lemma_type, &bare)
+            {
+                Ok(bare)
+            } else {
+                Err(format!(
+                    "Unit '{written}' resolves to '{bare}', which is not declared on type {}",
+                    lemma_type.name()
+                ))
+            }
+        }
+        Err(index_err) => {
+            if unit_name_declared_on_type(lemma_type, written)
+                || range_element_declares_unit(lemma_type, written)
+            {
+                Ok(written.to_string())
+            } else {
+                Err(index_err)
+            }
+        }
+    }
+}
+
+fn range_element_declares_unit(lemma_type: &LemmaType, unit_name: &str) -> bool {
+    let Some(element) = lemma_type.specifications.element_from_range() else {
+        return false;
+    };
+    unit_name_declared_on_type(&LemmaType::primitive(element), unit_name)
+}
+
+fn unit_name_declared_on_type(lemma_type: &LemmaType, unit_name: &str) -> bool {
+    match &lemma_type.specifications {
+        TypeSpecification::Measure { units, .. } => units.get(unit_name).is_ok(),
+        TypeSpecification::Ratio { units, .. } => units.get(unit_name).is_ok(),
+        _ => false,
+    }
+}
+
+fn measure_from_unit_map(
+    map: &BTreeMap<String, Decimal>,
+    lemma_type: &LemmaType,
+    unit_index: &UnitIndex,
+    named_types: &IndexMap<String, Arc<LemmaType>>,
+) -> Result<(ValueKind, Option<String>), String> {
     if map.is_empty() {
         return Err("measure input map must contain at least one unit key".to_string());
     }
@@ -250,12 +318,13 @@ fn measure_from_unit_map(
     }
 
     let mut kinds: Vec<ValueKind> = Vec::with_capacity(map.len());
-    for (unit_name, mag_str) in map {
-        let magnitude = Decimal::from_str(mag_str.trim())
-            .map_err(|error| format!("invalid decimal '{mag_str}': {error}"))?;
+    let mut resolved_keys: Vec<String> = Vec::with_capacity(map.len());
+    for (unit_name, magnitude) in map {
+        let bare = resolve_passed_unit(unit_name, lemma_type, unit_index, named_types)?;
         kinds.push(number_with_unit_to_value_kind(
-            magnitude, unit_name, lemma_type,
+            *magnitude, &bare, lemma_type,
         )?);
+        resolved_keys.push(bare);
     }
 
     let first = kinds.first().expect("BUG: map non-empty");
@@ -272,13 +341,21 @@ fn measure_from_unit_map(
             );
         }
     }
-    Ok(first.clone())
+    let binding = (resolved_keys.len() == 1).then(|| {
+        resolved_keys
+            .into_iter()
+            .next()
+            .expect("BUG: single resolved key")
+    });
+    Ok((first.clone(), binding))
 }
 
 fn ratio_from_unit_map(
-    map: &BTreeMap<String, String>,
+    map: &BTreeMap<String, Decimal>,
     lemma_type: &LemmaType,
-) -> Result<ValueKind, String> {
+    unit_index: &UnitIndex,
+    named_types: &IndexMap<String, Arc<LemmaType>>,
+) -> Result<(ValueKind, Option<String>), String> {
     if map.is_empty() {
         return Err("ratio input map must contain at least one unit key".to_string());
     }
@@ -288,12 +365,13 @@ fn ratio_from_unit_map(
     }
 
     let mut kinds: Vec<ValueKind> = Vec::with_capacity(map.len());
-    for (unit_name, mag_str) in map {
-        let magnitude = Decimal::from_str(mag_str.trim())
-            .map_err(|error| format!("invalid decimal '{mag_str}': {error}"))?;
+    let mut resolved_keys: Vec<String> = Vec::with_capacity(map.len());
+    for (unit_name, magnitude) in map {
+        let bare = resolve_passed_unit(unit_name, lemma_type, unit_index, named_types)?;
         kinds.push(number_with_unit_to_value_kind(
-            magnitude, unit_name, lemma_type,
+            *magnitude, &bare, lemma_type,
         )?);
+        resolved_keys.push(bare);
     }
 
     let first = kinds.first().expect("BUG: map non-empty");
@@ -310,7 +388,13 @@ fn ratio_from_unit_map(
             );
         }
     }
-    Ok(ValueKind::Ratio(first_canonical.clone()))
+    let binding = (resolved_keys.len() == 1).then(|| {
+        resolved_keys
+            .into_iter()
+            .next()
+            .expect("BUG: single resolved key")
+    });
+    Ok((ValueKind::Ratio(first_canonical.clone()), binding))
 }
 
 /// User-provided data values resolved against a plan's type declarations.
@@ -322,8 +406,6 @@ fn ratio_from_unit_map(
 pub struct RunData {
     /// Caller bindings: successful literals or Veto (bad override) per Data.
     pub bindings: HashMap<DataPath, OperationResult>,
-    /// Schema type stamped with the unit supplied in a successful overlay (display/veto).
-    pub overlay_types: HashMap<DataPath, Arc<LemmaType>>,
     /// Input keys that did not match any plan Data (including Import aliases).
     pub ignored_unknown: Vec<String>,
 }
@@ -384,7 +466,13 @@ impl RunData {
                 continue;
             }
 
-            let typed = match parse_data_value(&raw_value, &type_arc, data_source) {
+            let typed = match parse_data_value(
+                &raw_value,
+                &type_arc,
+                data_source,
+                plan.expression_unit_index(),
+                &plan.resolved_types.resolved,
+            ) {
                 Ok(value) => value,
                 Err(error) => {
                     run_data.bindings.insert(
@@ -425,14 +513,16 @@ impl RunData {
                 continue;
             }
 
-            if typed.lemma_type.measure_binding_unit.is_some() {
-                run_data
-                    .overlay_types
-                    .insert(data_path.clone(), Arc::clone(&typed.lemma_type));
-            }
             run_data.bindings.insert(
                 data_path.clone(),
-                OperationResult::from_literal(literal_value),
+                OperationResult::from_bound(crate::planning::semantics::BoundValueKind {
+                    value: typed.value.clone(),
+                    measure_binding_unit: typed
+                        .lemma_type
+                        .measure_binding_unit
+                        .as_deref()
+                        .map(std::sync::Arc::from),
+                }),
             );
         }
 
@@ -527,8 +617,14 @@ mod tests {
     #[test]
     fn string_input_parsed_against_type() {
         let ty = primitive_number_arc();
-        let lit =
-            parse_data_value(&RunDataValue::String("42".to_string()), ty, &dummy_source()).unwrap();
+        let lit = parse_data_value(
+            &RunDataValue::String("42".to_string()),
+            ty,
+            &dummy_source(),
+            &UnitIndex::new(),
+            &IndexMap::new(),
+        )
+        .unwrap();
         assert!(matches!(lit.value, ValueKind::Number(_)));
     }
 
@@ -536,9 +632,16 @@ mod tests {
     fn measure_map_agreeing_units_canonicalize() {
         let ty = mass_measure_type();
         let mut map = BTreeMap::new();
-        map.insert("kilogram".to_string(), "2".to_string());
-        map.insert("gram".to_string(), "2000".to_string());
-        let lit = parse_data_value(&RunDataValue::MeasureMap(map), &ty, &dummy_source()).unwrap();
+        map.insert("kilogram".to_string(), Decimal::from(2));
+        map.insert("gram".to_string(), Decimal::from(2000));
+        let lit = parse_data_value(
+            &RunDataValue::MeasureMap(map),
+            &ty,
+            &dummy_source(),
+            &UnitIndex::new(),
+            &IndexMap::new(),
+        )
+        .unwrap();
         let ValueKind::Measure(magnitude) = &lit.value else {
             panic!("expected measure");
         };
@@ -552,10 +655,16 @@ mod tests {
     fn measure_map_disagreeing_units_rejected() {
         let ty = mass_measure_type();
         let mut map = BTreeMap::new();
-        map.insert("kilogram".to_string(), "2".to_string());
-        map.insert("gram".to_string(), "3000".to_string());
-        let err =
-            parse_data_value(&RunDataValue::MeasureMap(map), &ty, &dummy_source()).unwrap_err();
+        map.insert("kilogram".to_string(), Decimal::from(2));
+        map.insert("gram".to_string(), Decimal::from(3000));
+        let err = parse_data_value(
+            &RunDataValue::MeasureMap(map),
+            &ty,
+            &dummy_source(),
+            &UnitIndex::new(),
+            &IndexMap::new(),
+        )
+        .unwrap_err();
         assert!(err.message().contains("disagree"));
     }
 
@@ -563,9 +672,16 @@ mod tests {
     fn ratio_map_percent_and_fraction_agree() {
         let ty = ratio_with_percent_type();
         let mut map = BTreeMap::new();
-        map.insert("percent".to_string(), "10".to_string());
-        map.insert("fraction".to_string(), "0.1".to_string());
-        let lit = parse_data_value(&RunDataValue::RatioMap(map), &ty, &dummy_source()).unwrap();
+        map.insert("percent".to_string(), Decimal::from(10));
+        map.insert("fraction".to_string(), Decimal::new(1, 1));
+        let lit = parse_data_value(
+            &RunDataValue::RatioMap(map),
+            &ty,
+            &dummy_source(),
+            &UnitIndex::new(),
+            &IndexMap::new(),
+        )
+        .unwrap();
         let ValueKind::Ratio(canonical) = &lit.value else {
             panic!("expected ratio");
         };
@@ -574,5 +690,26 @@ mod tests {
             decimal_to_rational(Decimal::new(1, 1)).expect("canonical")
         );
         assert!(ty.ratio_primary_unit().is_some());
+    }
+
+    #[test]
+    fn run_data_value_from_json_null_is_omitted() {
+        assert_eq!(
+            run_data_value_from_json_value(serde_json::Value::Null).expect("null is omit"),
+            None
+        );
+    }
+
+    #[test]
+    fn parse_run_data_object_null_field_is_omitted() {
+        let only_null = Some(serde_json::json!({ "x": null }));
+        let empty = parse_run_data_object(&only_null).expect("null field omits");
+        assert!(empty.is_empty(), "got: {empty:?}");
+
+        let mixed = Some(serde_json::json!({ "x": null, "y": "1" }));
+        let map = parse_run_data_object(&mixed).expect("null field omits");
+        assert_eq!(map.len(), 1);
+        assert_eq!(map.get("y").map(String::as_str), Some("1"));
+        assert!(!map.contains_key("x"));
     }
 }

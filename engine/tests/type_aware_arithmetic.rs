@@ -30,7 +30,7 @@ fn assert_display(response: &lemma::Response, rule: &str, expected: &str) {
             result.veto_reason.as_deref().unwrap_or("Vetoed")
         );
     }
-    assert_eq!(result.display().expect("display").to_string(), expected);
+    assert_eq!(result.result().expect("result").to_string(), expected);
 }
 
 #[test]

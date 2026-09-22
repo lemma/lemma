@@ -975,7 +975,7 @@
       "additionalProperties": false,
       "description": "RuleResultValue fields without `range` — a range endpoint must never itself be a range.",
       "properties": {
-        "display": {
+        "result": {
           "type": "string"
         },
         "measure": {
@@ -1029,9 +1029,9 @@
     "RuleResultValue": {
       "type": "object",
       "additionalProperties": false,
-      "description": "API value shared by RuleResult (flattened), ShowData.fill, and ShowData.suggestion. When present: always `display`, plus exactly one typed field for a non-range value; `range` is set instead for a range value.",
+      "description": "API value shared by RuleResult (flattened), ShowData.fill/suggestion, and explanation Rule/Data nodes (flattened). When present: always `result`, plus exactly one typed field for a non-range value; `range` is set instead for a range value.",
       "properties": {
-        "display": {
+        "result": {
           "type": "string"
         },
         "measure": {
@@ -1069,16 +1069,44 @@
         }
       }
     },
+    "PathSegment": {
+      "type": "object",
+      "required": [
+        "uses",
+        "spec"
+      ],
+      "additionalProperties": false,
+      "description": "One uses hop on a Show data or rule path. uses is the alias; repository is omitted for the unnamed workspace; spec is the resolved target name.",
+      "properties": {
+        "uses": {
+          "type": "string"
+        },
+        "repository": {
+          "type": "string"
+        },
+        "spec": {
+          "type": "string"
+        }
+      }
+    },
     "ShowData": {
       "type": "object",
       "required": [
         "type",
+        "path",
         "needed_by_rules"
       ],
       "additionalProperties": false,
       "properties": {
         "type": {
           "$ref": "#/$defs/LemmaType"
+        },
+        "path": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/PathSegment"
+          },
+          "description": "Import hops to this slot. Empty means this spec."
         },
         "fill": {
           "$ref": "#/$defs/RuleResultValue"
@@ -1091,7 +1119,7 @@
           "items": {
             "type": "string"
           },
-          "description": "Local rule names that transitively need this data after normalize. Empty = reuse catalog only (not an eval intake key for this spec)."
+          "description": "Show.rules keys that transitively need this data after normalize. Empty = reuse catalog only (not an eval intake key for this spec)."
         }
       }
     },
@@ -1179,7 +1207,7 @@
             "type": {
               "const": "literal"
             },
-            "display": {
+            "result": {
               "type": "string"
             },
             "measure": {
@@ -1592,14 +1620,22 @@
       "type": "object",
       "required": [
         "type",
+        "path",
         "branches",
         "depends_on_rules"
       ],
       "additionalProperties": false,
-      "description": "Local rule on Show: result type, authored default/unless branches, stored planning depends_on_rules.",
+      "description": "Rule on Show: result type, import path ([] = this spec), authored default/unless branches, and depends_on_rules (Show.rules keys).",
       "properties": {
         "type": {
           "$ref": "#/$defs/LemmaType"
+        },
+        "path": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/PathSegment"
+          },
+          "description": "Import hops to this rule. Empty means this spec."
         },
         "branches": {
           "type": "array",
@@ -1612,7 +1648,7 @@
           "items": {
             "type": "string"
           },
-          "description": "Local rule names this rule depends on (planning topo). Always present."
+          "description": "Show.rules keys this rule depends on (planning topo). Always present."
         }
       }
     },
@@ -1774,8 +1810,12 @@
         "meta"
       ],
       "additionalProperties": false,
-      "description": "Result of Engine::show: declared promptable data catalog (needed_by_rules empty = reuse-only), local rule graph (ShowRule with type, branches, depends_on_rules), and resolved temporal window.",
+      "description": "Result of Engine::show: declared promptable data catalog (needed_by_rules empty = reuse-only), this spec's rule graph (local rules plus reachable imports as ShowRule with type, path, branches, depends_on_rules), and resolved temporal window.",
       "properties": {
+        "repository": {
+          "type": "string",
+          "description": "Interned repository name. Omitted for the unnamed workspace."
+        },
         "spec": {
           "type": "string"
         },
@@ -1838,7 +1878,7 @@
       "additionalProperties": false,
       "description": "Result of evaluating one rule. RuleResultValue fields are flattened directly onto this object (no `value` wrapper key) when the rule is not vetoed.",
       "properties": {
-        "display": {
+        "result": {
           "type": "string"
         },
         "measure": {
@@ -2222,16 +2262,49 @@
         "body"
       ],
       "additionalProperties": false,
+      "description": "Rule explanation node. RuleResultValue fields are flattened (result plus typed measure/ratio/… maps).",
       "properties": {
+        "result": {
+          "type": "string"
+        },
+        "measure": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/DecimalString"
+          }
+        },
+        "ratio": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/DecimalString"
+          }
+        },
+        "number": {
+          "$ref": "#/$defs/DecimalString"
+        },
+        "boolean": {
+          "type": "boolean"
+        },
+        "text": {
+          "type": "string"
+        },
+        "date": {
+          "type": "string"
+        },
+        "time": {
+          "type": "string"
+        },
+        "calendar": {
+          "$ref": "#/$defs/CalendarResult"
+        },
+        "range": {
+          "$ref": "#/$defs/RangeResult"
+        },
         "type": {
           "const": "rule"
         },
         "name": {
           "type": "string"
-        },
-        "result": {
-          "type": "string",
-          "description": "Display string for this rule's result."
         },
         "body": {
           "type": "string"
@@ -2265,6 +2338,17 @@
         "expression": {
           "type": "string"
         },
+        "operator": {
+          "type": "string",
+          "enum": [
+            "add",
+            "subtract",
+            "multiply",
+            "divide",
+            "modulo",
+            "power"
+          ]
+        },
         "operands": {
           "type": "array",
           "items": {
@@ -2278,17 +2362,51 @@
       "required": [
         "type",
         "name",
-        "display"
+        "result"
       ],
       "additionalProperties": false,
+      "description": "Bound data narration. RuleResultValue fields are flattened (result plus typed measure/ratio/… maps).",
       "properties": {
+        "result": {
+          "type": "string"
+        },
+        "measure": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/DecimalString"
+          }
+        },
+        "ratio": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/DecimalString"
+          }
+        },
+        "number": {
+          "$ref": "#/$defs/DecimalString"
+        },
+        "boolean": {
+          "type": "boolean"
+        },
+        "text": {
+          "type": "string"
+        },
+        "date": {
+          "type": "string"
+        },
+        "time": {
+          "type": "string"
+        },
+        "calendar": {
+          "$ref": "#/$defs/CalendarResult"
+        },
+        "range": {
+          "$ref": "#/$defs/RangeResult"
+        },
         "type": {
           "const": "data"
         },
         "name": {
-          "type": "string"
-        },
-        "display": {
           "type": "string"
         }
       }

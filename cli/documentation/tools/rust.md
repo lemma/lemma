@@ -47,7 +47,7 @@ let response = engine.run(
 
 for (rule_name, rule_result) in &response.results {
     if !rule_result.vetoed {
-        println!("{rule_name}: {}", rule_result.display().unwrap_or(""));
+        println!("{rule_name}: {}", rule_result.result().unwrap_or(""));
     }
 }
 ```
@@ -99,9 +99,9 @@ let response = engine.run(
 
 ## Show vs run discovery
 
-`Engine::show` returns the static planning catalog: every declared promptable data slot, plus local rules as `ShowRule` (`type`, `branches`, `depends_on_rules`). Empty `needed_by_rules` means offered for reuse (`data x: alias.slot`), not needed by this spec's remaining rules.
+`Engine::show` returns the static planning catalog: every declared promptable data slot (with `path` for import identity), plus this spec's rule graph as `ShowRule` (`type`, `path`, `branches`, `depends_on_rules` as `input_key` — local plus reachable imports). Empty `needed_by_rules` means offered for reuse (`data x: alias.slot`), not needed by this spec's remaining rules. Default `run` evaluates empty-path rules; pass any Show key (e.g. `src.computed`) to target a reachable import.
 
-For requirements on a partial run, call `run` and inspect each rule's `missing_data` (`string[]` input keys in evaluation / decision-tree order; first key is the next fact the live tree needs). Types, filled literals, and `-> suggest` hints are on `Engine::show` (`Show.data` values are `ShowData`) only. Bound inputs (caller run bindings or spec-filled values) are omitted from `missing_data`; suggestions do not bind until supplied in `run`'s data. Non-veto rule results flatten `RuleResultValue` onto each result (`display()` / typed fields). Pass `explain: true` as the last `run` argument to attach per-rule explanation trees ([api.v1.json](../../../engine/schemas/api.v1.json)).
+For requirements on a partial run, call `run` and inspect each rule's `missing_data` (`string[]` input keys in evaluation / decision-tree order; first key is the next fact the live tree needs). Types, filled literals, and `-> suggest` hints are on `Engine::show` (`Show.data` values are `ShowData`) only. Bound inputs (caller run bindings or spec-filled values) are omitted from `missing_data`; suggestions do not bind until supplied in `run`'s data. Non-veto rule results flatten `RuleResultValue` onto each result (`result()` / typed fields). Pass `explain: true` as the last `run` argument to attach per-rule explanation trees ([api.v1.json](../../../engine/schemas/api.v1.json)).
 
 ```rust
 let response = engine.run(
@@ -163,7 +163,7 @@ fn load_and_run(path: &Path) -> Result<(), Box<dyn std::error::Error>> {
     let now = DateTimeValue::now();
     let response = engine.run(None, "shipping", Some(&now), values, None, false)?;
 
-    println!("{}", response.results["rate"].display().unwrap_or(""));
+    println!("{}", response.results["rate"].result().unwrap_or(""));
     Ok(())
 }
 ```

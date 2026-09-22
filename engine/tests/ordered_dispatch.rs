@@ -37,7 +37,7 @@ fn rule<'a>(response: &'a Response, name: &str) -> &'a RuleResult {
 
 fn display(response: &Response, name: &str) -> String {
     rule(response, name)
-        .display()
+        .result()
         .map(|d| d.to_string())
         .unwrap_or_else(|| {
             panic!(
@@ -492,8 +492,9 @@ fn exclusive_point_lookup_mid_hit_states_only_the_winner() {
         explanation.causes[0].children.iter().any(|child| {
             matches!(
                 child,
-                lemma::ExplanationNode::Data { name, display }
-                    if name.input_key() == "code" && display == "DE"
+                lemma::ExplanationNode::Data { name, result }
+                    if name.input_key() == "code"
+                        && result.result.as_deref() == Some("DE")
             )
         }),
         "structured cause keeps the Data child, got {:?}",
@@ -545,16 +546,18 @@ fn exclusive_point_lookup_default_attaches_scrutinee_without_is_not_dump() {
         explanation.children.iter().any(|child| {
             matches!(
                 child,
-                lemma::ExplanationNode::Data { name, display }
-                    if name.input_key() == "code" && display == "FR"
+                lemma::ExplanationNode::Data { name, result }
+                    if name.input_key() == "code"
+                        && result.result.as_deref() == Some("FR")
             ) || matches!(
                 child,
                 lemma::ExplanationNode::Compose { operands, .. }
                     if operands.iter().any(|op| {
                         matches!(
                             op,
-                            lemma::ExplanationNode::Data { name, display }
-                                if name.input_key() == "code" && display == "FR"
+                            lemma::ExplanationNode::Data { name, result }
+                                if name.input_key() == "code"
+                                    && result.result.as_deref() == Some("FR")
                         )
                     })
             )

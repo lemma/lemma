@@ -75,7 +75,7 @@ pub fn list_tools() -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: "show",
-            description: "Return JSON Show for a spec: declared data catalog (types, constraints, suggestions, units, help; empty needed_by_rules = reuse-only) and local rule graph (ShowRule: type, branches, depends_on_rules). Call once after list. Static catalog — not a required-input list, not a questionnaire, not something to re-call between run/ask turns. Human intake: call guide (default = evaluate guide); bind only missing_data keys, not reuse-only slots.",
+            description: "Return JSON Show for a spec: declared data catalog (types, constraints, suggestions, units, help, path; empty needed_by_rules = reuse-only) and this spec's rule graph (local plus reachable imports as ShowRule: type, path, branches, depends_on_rules). Call once after list. Static catalog — not a required-input list, not a questionnaire, not something to re-call between run/ask turns. Human intake: call guide (default = evaluate guide); bind only missing_data keys, not reuse-only slots.",
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {

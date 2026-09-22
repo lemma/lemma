@@ -73,7 +73,7 @@ fn targeted_eval_one_rule_explain_false() {
     assert_eq!(response.results.len(), 1);
     let grand_total = response.results.get("grand_total").expect("grand_total");
     assert!(!grand_total.vetoed);
-    assert!(grand_total.display().is_some());
+    assert!(grand_total.result().is_some());
     assert!(!response.results.contains_key("is_high_value"));
 }
 
@@ -182,5 +182,5 @@ rule rate: 23 percent
         .expect("run");
     let rate = response.results.get("rate").expect("rate key canonical");
     assert_eq!(rate.rule.name, "rate");
-    assert_eq!(rate.display(), Some("23%"));
+    assert_eq!(rate.result(), Some("23%"));
 }

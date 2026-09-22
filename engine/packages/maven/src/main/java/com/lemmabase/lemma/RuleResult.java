@@ -44,7 +44,7 @@ public sealed interface RuleResult {
       implements RuleResult {}
 
   /**
-   * Rule still waits on unbound inputs.
+   * Rule result is a MissingData veto; {@code missingData} lists unbound keys.
    *
    * @param missingData unbound data keys in evaluation order
    * @param ruleType rule type
@@ -59,13 +59,13 @@ public sealed interface RuleResult {
   /**
    * Number result.
    *
-   * @param display engine display string
+   * @param result engine display string
    * @param number magnitude
    * @param ruleType rule type
    * @param explanation explanation or null
    */
   record Number(
-      String display,
+      String result,
       BigDecimal number,
       String ruleType,
       ExplanationNode.@Nullable Rule explanation)
@@ -74,13 +74,13 @@ public sealed interface RuleResult {
   /**
    * Text result.
    *
-   * @param display engine display string
+   * @param result engine display string
    * @param text text value
    * @param ruleType rule type
    * @param explanation explanation or null
    */
   record Text(
-      String display,
+      String result,
       String text,
       String ruleType,
       ExplanationNode.@Nullable Rule explanation)
@@ -89,13 +89,13 @@ public sealed interface RuleResult {
   /**
    * Boolean result.
    *
-   * @param display engine display string
+   * @param result engine display string
    * @param booleanValue boolean value
    * @param ruleType rule type
    * @param explanation explanation or null
    */
   record BooleanValue(
-      String display,
+      String result,
       boolean booleanValue,
       String ruleType,
       ExplanationNode.@Nullable Rule explanation)
@@ -104,13 +104,13 @@ public sealed interface RuleResult {
   /**
    * Date result.
    *
-   * @param display engine display string
+   * @param result engine display string
    * @param date calendar date
    * @param ruleType rule type
    * @param explanation explanation or null
    */
   record Date(
-      String display,
+      String result,
       LocalDate date,
       String ruleType,
       ExplanationNode.@Nullable Rule explanation)
@@ -119,13 +119,13 @@ public sealed interface RuleResult {
   /**
    * Time result.
    *
-   * @param display engine display string
+   * @param result engine display string
    * @param time time of day
    * @param ruleType rule type
    * @param explanation explanation or null
    */
   record Time(
-      String display,
+      String result,
       LocalTime time,
       String ruleType,
       ExplanationNode.@Nullable Rule explanation)
@@ -134,13 +134,13 @@ public sealed interface RuleResult {
   /**
    * Measure result (unit name to magnitude).
    *
-   * @param display engine display string
+   * @param result engine display string
    * @param measure unit map
    * @param ruleType rule type
    * @param explanation explanation or null
    */
   record Measure(
-      String display,
+      String result,
       Map<String, BigDecimal> measure,
       String ruleType,
       ExplanationNode.@Nullable Rule explanation)
@@ -149,13 +149,13 @@ public sealed interface RuleResult {
   /**
    * Ratio result (unit name to magnitude).
    *
-   * @param display engine display string
+   * @param result engine display string
    * @param ratio unit map
    * @param ruleType rule type
    * @param explanation explanation or null
    */
   record Ratio(
-      String display,
+      String result,
       Map<String, BigDecimal> ratio,
       String ruleType,
       ExplanationNode.@Nullable Rule explanation)
@@ -164,13 +164,13 @@ public sealed interface RuleResult {
   /**
    * Calendar measure result.
    *
-   * @param display engine display string
+   * @param result engine display string
    * @param calendar calendar value
    * @param ruleType rule type
    * @param explanation explanation or null
    */
   record Calendar(
-      String display,
+      String result,
       RuleResultValue.CalendarResult calendar,
       String ruleType,
       ExplanationNode.@Nullable Rule explanation)
@@ -179,13 +179,13 @@ public sealed interface RuleResult {
   /**
    * Range result.
    *
-   * @param display engine display string
+   * @param result engine display string
    * @param range endpoints
    * @param ruleType rule type
    * @param explanation explanation or null
    */
   record Range(
-      String display,
+      String result,
       RuleResultValue.RangeResult range,
       String ruleType,
       ExplanationNode.@Nullable Rule explanation)
@@ -200,7 +200,7 @@ public sealed interface RuleResult {
    */
   static RuleResult read(JsonParser p) throws IOException {
     JsonReading.expectStartObject(p, "RuleResult");
-    String display = null;
+    String result = null;
     Map<String, BigDecimal> measure = null;
     Map<String, BigDecimal> ratio = null;
     BigDecimal number = null;
@@ -219,7 +219,7 @@ public sealed interface RuleResult {
       String field = p.currentName();
       p.nextToken();
       switch (field) {
-        case "display" -> display = JsonReading.readString(p);
+        case "result" -> result = JsonReading.readString(p);
         case "measure" -> measure = JsonReading.readMap(p, JsonReading::readDecimal);
         case "ratio" -> ratio = JsonReading.readMap(p, JsonReading::readDecimal);
         case "number" -> number = JsonReading.readDecimal(p);
@@ -249,35 +249,35 @@ public sealed interface RuleResult {
     if (vetoed) {
       return new Veto(vetoReason, ruleType, explanation);
     }
-    if (display == null) {
-      JsonReading.missingRequired("display", "RuleResult");
+    if (result == null) {
+      JsonReading.missingRequired("result", "RuleResult");
     }
     if (number != null) {
-      return new Number(display, number, ruleType, explanation);
+      return new Number(result, number, ruleType, explanation);
     }
     if (text != null) {
-      return new Text(display, text, ruleType, explanation);
+      return new Text(result, text, ruleType, explanation);
     }
     if (booleanValue != null) {
-      return new BooleanValue(display, booleanValue, ruleType, explanation);
+      return new BooleanValue(result, booleanValue, ruleType, explanation);
     }
     if (date != null) {
-      return new Date(display, date, ruleType, explanation);
+      return new Date(result, date, ruleType, explanation);
     }
     if (time != null) {
-      return new Time(display, time, ruleType, explanation);
+      return new Time(result, time, ruleType, explanation);
     }
     if (measure != null) {
-      return new Measure(display, measure, ruleType, explanation);
+      return new Measure(result, measure, ruleType, explanation);
     }
     if (ratio != null) {
-      return new Ratio(display, ratio, ruleType, explanation);
+      return new Ratio(result, ratio, ruleType, explanation);
     }
     if (calendar != null) {
-      return new Calendar(display, calendar, ruleType, explanation);
+      return new Calendar(result, calendar, ruleType, explanation);
     }
     if (range != null) {
-      return new Range(display, range, ruleType, explanation);
+      return new Range(result, range, ruleType, explanation);
     }
     throw new LemmaBugError("BUG: non-veto RuleResult has no typed value field");
   }

@@ -10,7 +10,6 @@ use crate::parsing::ast::{
 use crate::planning::semantics::{
     Expression, ExpressionKind, SemanticConversionTarget, TypedLiteral,
 };
-use crate::result_value::{type_scoped_result_value_from_literal, RuleResultValue};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 
@@ -26,8 +25,10 @@ pub struct ShowBranch {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ShowRule {
     pub lemma_type: crate::planning::semantics::LemmaType,
+    /// Import hops to this rule (`[]` = this spec). Same shape as [`ShowData::path`].
+    pub path: Vec<crate::planning::semantics::PathSegment>,
     pub branches: Vec<ShowBranch>,
-    /// Local rule names this rule depends on (planning topo). Always present.
+    /// Show.rules keys this rule depends on (planning topo). Always present.
     pub depends_on_rules: Vec<String>,
 }
 
@@ -40,9 +41,12 @@ pub enum ShowConversionTarget {
 }
 
 /// Resolved expression tree for Show branches (`tag = "type"` on the API mirror).
+///
+/// Literals stay [`TypedLiteral`] (postcard-safe ℚ). [`RuleResultValue`] is built at the
+/// JSON/`lemma::api` boundary only.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ShowExpression {
-    Literal(Box<RuleResultValue>),
+    Literal(Box<TypedLiteral>),
     Data {
         name: String,
     },
@@ -106,52 +110,48 @@ pub enum ShowExpression {
 
 /// Project a resolved planning expression into the Show tree.
 ///
-/// `local_rule_names` are local `RulePath.rule` values present on the plan. A local
-/// `rule` leaf missing from that set is a bug.
+/// `show_keys` are `RulePath::input_key` values for reachable Show rules. A
+/// `rule` leaf whose key is missing from that set is a bug.
 pub fn show_expression_from(
     expression: &Expression,
-    local_rule_names: &HashSet<String>,
+    show_keys: &HashSet<String>,
 ) -> ShowExpression {
     match &expression.kind {
-        ExpressionKind::Literal(typed) => ShowExpression::Literal(Box::new(literal_to_show(typed))),
+        ExpressionKind::Literal(typed) => ShowExpression::Literal(Box::new(typed.as_ref().clone())),
         ExpressionKind::DataPath(path) => ShowExpression::Data {
             name: path.input_key(),
         },
         ExpressionKind::RulePath(path) => {
-            if path.segments.is_empty() && !local_rule_names.contains(&path.rule) {
-                panic!(
-                    "BUG: local rule leaf '{}' not in plan local rules",
-                    path.rule
-                );
+            let key = path.input_key();
+            if !show_keys.contains(&key) {
+                panic!("BUG: rule leaf '{key}' not in Show.rules keys");
             }
-            ShowExpression::Rule {
-                name: path.to_string(),
-            }
+            ShowExpression::Rule { name: key }
         }
         ExpressionKind::LogicalAnd(left, right) => ShowExpression::And {
-            left: Box::new(show_expression_from(left, local_rule_names)),
-            right: Box::new(show_expression_from(right, local_rule_names)),
+            left: Box::new(show_expression_from(left, show_keys)),
+            right: Box::new(show_expression_from(right, show_keys)),
         },
         ExpressionKind::LogicalNegation(operand, _) => ShowExpression::Not {
-            operand: Box::new(show_expression_from(operand, local_rule_names)),
+            operand: Box::new(show_expression_from(operand, show_keys)),
         },
         ExpressionKind::Arithmetic(left, op, right) => ShowExpression::Arithmetic {
             op: op.clone(),
-            left: Box::new(show_expression_from(left, local_rule_names)),
-            right: Box::new(show_expression_from(right, local_rule_names)),
+            left: Box::new(show_expression_from(left, show_keys)),
+            right: Box::new(show_expression_from(right, show_keys)),
         },
         ExpressionKind::Comparison(left, op, right) => ShowExpression::Comparison {
             op: op.clone(),
-            left: Box::new(show_expression_from(left, local_rule_names)),
-            right: Box::new(show_expression_from(right, local_rule_names)),
+            left: Box::new(show_expression_from(left, show_keys)),
+            right: Box::new(show_expression_from(right, show_keys)),
         },
         ExpressionKind::UnitConversion(operand, target) => ShowExpression::UnitConversion {
-            operand: Box::new(show_expression_from(operand, local_rule_names)),
+            operand: Box::new(show_expression_from(operand, show_keys)),
             target: conversion_target_from(target),
         },
         ExpressionKind::MathematicalComputation(op, operand) => ShowExpression::Math {
             op: op.clone(),
-            operand: Box::new(show_expression_from(operand, local_rule_names)),
+            operand: Box::new(show_expression_from(operand, show_keys)),
         },
         ExpressionKind::Veto(VetoExpression { message }) => ShowExpression::Veto {
             message: message.clone(),
@@ -159,27 +159,27 @@ pub fn show_expression_from(
         ExpressionKind::Now => ShowExpression::Now,
         ExpressionKind::DateRelative(kind, operand) => ShowExpression::DateRelative {
             kind: *kind,
-            operand: Box::new(show_expression_from(operand, local_rule_names)),
+            operand: Box::new(show_expression_from(operand, show_keys)),
         },
         ExpressionKind::DateCalendar(kind, unit, operand) => ShowExpression::DateCalendar {
             kind: *kind,
             unit: *unit,
-            operand: Box::new(show_expression_from(operand, local_rule_names)),
+            operand: Box::new(show_expression_from(operand, show_keys)),
         },
         ExpressionKind::RangeLiteral(from, to) => ShowExpression::RangeLiteral {
-            from: Box::new(show_expression_from(from, local_rule_names)),
-            to: Box::new(show_expression_from(to, local_rule_names)),
+            from: Box::new(show_expression_from(from, show_keys)),
+            to: Box::new(show_expression_from(to, show_keys)),
         },
         ExpressionKind::PastFutureRange(kind, operand) => ShowExpression::PastFutureRange {
             kind: *kind,
-            operand: Box::new(show_expression_from(operand, local_rule_names)),
+            operand: Box::new(show_expression_from(operand, show_keys)),
         },
         ExpressionKind::RangeContainment(value, range) => ShowExpression::RangeContainment {
-            value: Box::new(show_expression_from(value, local_rule_names)),
-            range: Box::new(show_expression_from(range, local_rule_names)),
+            value: Box::new(show_expression_from(value, show_keys)),
+            range: Box::new(show_expression_from(range, show_keys)),
         },
         ExpressionKind::ResultIsVeto(operand) => ShowExpression::IsVeto {
-            operand: Box::new(show_expression_from(operand, local_rule_names)),
+            operand: Box::new(show_expression_from(operand, show_keys)),
         },
         ExpressionKind::Piecewise(_) => {
             panic!("BUG: piecewise inside a rule branch")
@@ -190,48 +190,33 @@ pub fn show_expression_from(
 /// Project `RuleNode.branches` into Show arms (default first, no synthetic true).
 pub fn show_branches_from(
     branches: &[(Option<Expression>, Expression)],
-    local_rule_names: &HashSet<String>,
+    show_keys: &HashSet<String>,
 ) -> Vec<ShowBranch> {
     branches
         .iter()
         .map(|(condition, result)| ShowBranch {
             condition: condition
                 .as_ref()
-                .map(|expression| show_expression_from(expression, local_rule_names)),
-            result: show_expression_from(result, local_rule_names),
+                .map(|expression| show_expression_from(expression, show_keys)),
+            result: show_expression_from(result, show_keys),
         })
         .collect()
 }
 
-/// Local names from `RuleNode.depends_on_rules` (BTreeSet order). Imported paths omitted.
+/// Project `RuleNode.depends_on_rules` to Show.rules keys (BTreeSet order).
 pub fn project_depends_on_rules(
     deps: &std::collections::BTreeSet<crate::planning::semantics::RulePath>,
-    local_rule_names: &HashSet<String>,
+    show_keys: &HashSet<String>,
 ) -> Vec<String> {
     let mut out = Vec::new();
     for path in deps {
-        if !path.segments.is_empty() {
-            continue;
+        let key = path.input_key();
+        if !show_keys.contains(&key) {
+            panic!("BUG: depends_on_rules entry '{key}' missing from Show.rules keys");
         }
-        if !local_rule_names.contains(&path.rule) {
-            panic!(
-                "BUG: local depends_on_rules entry '{}' missing from plan local rules",
-                path.rule
-            );
-        }
-        out.push(path.rule.clone());
+        out.push(key);
     }
     out
-}
-
-fn literal_to_show(typed: &TypedLiteral) -> RuleResultValue {
-    type_scoped_result_value_from_literal(&typed.to_literal(), typed.lemma_type.as_ref())
-        .unwrap_or_else(|failure| {
-            panic!(
-                "BUG: show branch literal failed type_scoped_result_value_from_literal: {}",
-                crate::result_value::rule_result_value_failure_message(failure)
-            )
-        })
 }
 
 fn conversion_target_from(target: &SemanticConversionTarget) -> ShowConversionTarget {

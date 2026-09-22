@@ -119,7 +119,7 @@ A pre-wired Monaco adapter ships at `@lemmabase/lemma-engine/monaco`.
 | `list()` | Slim catalog: `ResolvedRepository[]` with `repository` and temporal `specs` rows. Always includes embedded `lemma` / `spec units`. |
 | `show(repo, name, effective?)` | Spec interface + temporal window; `repo` null for the default repository. |
 | `source(repo, spec?, effective?)` | Canonical Lemma source text. Omit `spec` for whole repository. |
-| `run({ spec, repository?, effective?, data?, rules?, explain? })` | Evaluate. Omit `rules` for all rules; pass a non-empty array to scope. `[]` errors. Returns a `Response`. `explain: true` adds per-rule explanation trees. |
+| `run({ spec, repository?, effective?, data?, rules?, explain? })` | Evaluate. `data` magnitudes: digit string or `bigint` (exact); `number` only when `Number.isSafeInteger`; decimals as strings. Omit `rules` for all rules; pass a non-empty array to scope. `[]` errors. Returns a `Response`. `explain: true` adds per-rule explanation trees. |
 | `remove(repo, name, effective?)` | Remove a temporal spec slice. |
 | `update(repo, code, attribute?)` | Upsert identities from `code`; Path/Dependency prune siblings with that label. |
 | `limits()` | Resource limits for this engine. |

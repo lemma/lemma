@@ -823,7 +823,7 @@ mod tests {
             .results
             .get(rule_name)
             .expect("rule must be in results")
-            .display()
+            .result()
             .expect("rule must have a display value")
             .to_string()
     }

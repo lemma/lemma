@@ -37,10 +37,10 @@ fn load_recipe(engine: &mut Engine) {
 fn full_coffee_data(product: &str) -> HashMap<String, String> {
     HashMap::from([
         ("product".to_string(), product.to_string()),
-        ("size".to_string(), "medium".to_string()),
-        ("number_of_cups".to_string(), "1".to_string()),
-        ("has_loyalty_card".to_string(), "false".to_string()),
-        ("age".to_string(), "30".to_string()),
+        ("size".to_string(), "medium".into()),
+        ("number_of_cups".to_string(), "1".into()),
+        ("has_loyalty_card".to_string(), "false".into()),
+        ("age".to_string(), "30".into()),
     ])
 }
 
@@ -86,7 +86,7 @@ fn below_minimum_number_override_completes_with_veto_not_validation_error() {
 
     let now = DateTimeValue::now();
     let mut data = full_coffee_data("latte");
-    data.insert("age".to_string(), "-5".to_string());
+    data.insert("age".to_string(), "-5".into());
 
     let response = assert_run_completes_with_veto_not_validation_error(
         engine.run(None, "coffee_order", Some(&now), data, None, false),
@@ -97,7 +97,7 @@ fn below_minimum_number_override_completes_with_veto_not_validation_error() {
     assert!(
         age_discount.vetoed,
         "below-minimum age must veto age_discount, got {:?}",
-        age_discount.display()
+        age_discount.result()
     );
     let reason = age_discount.veto_reason.as_deref().expect("veto reason");
     assert!(
@@ -120,7 +120,7 @@ rule doubled: age * 2
 
     let now = DateTimeValue::now();
     let mut data = HashMap::new();
-    data.insert("age".to_string(), "twenty".to_string());
+    data.insert("age".to_string(), "twenty".into());
 
     let response = assert_run_completes_with_veto_not_validation_error(
         engine.run(None, "s", Some(&now), data, None, false),
@@ -199,7 +199,7 @@ rule doubled: age * 2
 
     let now = DateTimeValue::now();
     let mut data = HashMap::new();
-    data.insert("age".to_string(), "   ".to_string());
+    data.insert("age".to_string(), "   ".into());
 
     let response = assert_run_completes_with_veto_not_validation_error(
         engine.run(None, "s", Some(&now), data, None, false),
@@ -225,9 +225,9 @@ fn below_minimum_typedecl_override_completes_with_veto_not_validation_error() {
 
     let now = DateTimeValue::now();
     let data = HashMap::from([
-        ("desired_servings".to_string(), "0".to_string()),
-        ("original_servings".to_string(), "4".to_string()),
-        ("recipe_name".to_string(), "chocolate_cake".to_string()),
+        ("desired_servings".to_string(), "0".into()),
+        ("original_servings".to_string(), "4".into()),
+        ("recipe_name".to_string(), "chocolate_cake".into()),
     ]);
 
     let response = assert_run_completes_with_veto_not_validation_error(
@@ -242,7 +242,7 @@ fn below_minimum_typedecl_override_completes_with_veto_not_validation_error() {
     assert!(
         scaling_factor.vetoed,
         "below-minimum desired_servings must veto scaling_factor, got {:?}",
-        scaling_factor.display()
+        scaling_factor.result()
     );
     let reason = scaling_factor.veto_reason.as_deref().expect("veto reason");
     assert!(
@@ -265,7 +265,7 @@ rule flag: active
 
     let now = DateTimeValue::now();
     let mut data = HashMap::new();
-    data.insert("active".to_string(), "maybe".to_string());
+    data.insert("active".to_string(), "maybe".into());
 
     let response = assert_run_completes_with_veto_not_validation_error(
         engine.run(None, "s", Some(&now), data, None, false),

@@ -71,7 +71,7 @@ fn alpha2_analog_199_branches_compiles_and_evaluates() {
         .expect("plan at latest slice");
 
     let mut data = std::collections::HashMap::new();
-    data.insert("code".to_string(), "C042".to_string());
+    data.insert("code".to_string(), "C042".into());
     let response = engine
         .run(
             None,
@@ -84,12 +84,12 @@ fn alpha2_analog_199_branches_compiles_and_evaluates() {
         .expect("evaluate base code");
     let result = response.results.get("name").expect("name rule");
     assert_eq!(
-        result.display().map(|d| d.to_string()),
+        result.result().map(|d| d.to_string()),
         Some("Name 042".to_string())
     );
 
     let mut data = std::collections::HashMap::new();
-    data.insert("code".to_string(), "L17".to_string());
+    data.insert("code".to_string(), "L17".into());
     let response = engine
         .run(
             None,
@@ -102,7 +102,7 @@ fn alpha2_analog_199_branches_compiles_and_evaluates() {
         .expect("evaluate layer code");
     let result = response.results.get("name").expect("name rule");
     assert_eq!(
-        result.display().map(|d| d.to_string()),
+        result.result().map(|d| d.to_string()),
         Some("Layer 17".to_string())
     );
 }
@@ -121,7 +121,7 @@ fn alpha2_analog_explanation_states_evaluated_conditions() {
     let effective = date(2025, 1, 1);
 
     let mut data = std::collections::HashMap::new();
-    data.insert("code".to_string(), "L17".to_string());
+    data.insert("code".to_string(), "L17".into());
     let response = engine
         .run(
             None,
@@ -155,7 +155,7 @@ fn alpha2_analog_explanation_states_evaluated_conditions() {
     );
 
     let mut data = std::collections::HashMap::new();
-    data.insert("code".to_string(), "C042".to_string());
+    data.insert("code".to_string(), "C042".into());
     let response = engine
         .run(
             None,
@@ -183,16 +183,18 @@ fn alpha2_analog_explanation_states_evaluated_conditions() {
         explanation.children.iter().any(|child| {
             matches!(
                 child,
-                lemma::ExplanationNode::Data { name, display }
-                    if name.input_key() == "code" && display == "C042"
+                lemma::ExplanationNode::Data { name, result }
+                    if name.input_key() == "code"
+                        && result.result.as_deref() == Some("C042")
             ) || matches!(
                 child,
                 lemma::ExplanationNode::Compose { operands, .. }
                     if operands.iter().any(|op| {
                         matches!(
                             op,
-                            lemma::ExplanationNode::Data { name, display }
-                                if name.input_key() == "code" && display == "C042"
+                            lemma::ExplanationNode::Data { name, result }
+                                if name.input_key() == "code"
+                                    && result.result.as_deref() == Some("C042")
                         )
                     })
             )

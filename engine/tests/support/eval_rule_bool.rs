@@ -27,7 +27,7 @@ pub fn eval_rule_bool(
         );
     }
     rule_result
-        .value
+        .result
         .as_ref()
         .expect("rule result value")
         .boolean

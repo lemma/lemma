@@ -1264,7 +1264,7 @@ fn explanation_display_inner(forms: &[NormalForm], id: NormalFormId) -> String {
         return explanation_display_inner(forms, origin);
     }
     if let Some(path) = &nf.rule_ref {
-        return path.rule.clone();
+        return path.input_key();
     }
     match &nf.kind {
         NormalFormKind::Leaf(LeafKind::Literal(lit)) => {

@@ -23,7 +23,10 @@ use crate::planning::semantics::{
 };
 use std::sync::Arc;
 
-pub(crate) fn borrow_value<'a>(result: &'a OperationResult, operand: &str) -> &'a LiteralValue {
+pub(crate) fn borrow_value<'a>(
+    result: &'a OperationResult,
+    operand: &str,
+) -> &'a crate::planning::semantics::BoundValueKind {
     match result {
         OperationResult::Value(v) => v,
         OperationResult::Veto(_) => panic!("BUG: {operand} passed veto check but has no value"),
@@ -198,10 +201,10 @@ fn eval_kind(
         NormalFormKind::Comparison(left, op, right) => {
             evaluate_binary(*left, *right, plan, ctx, |left_result, right_result| {
                 comparison_operation(
-                    borrow_value(left_result, "left operand"),
+                    &borrow_value(left_result, "left operand").value,
                     plan.result_type(*left),
                     op,
-                    borrow_value(right_result, "right operand"),
+                    &borrow_value(right_result, "right operand").value,
                     plan.result_type(*right),
                 )
             })
@@ -214,10 +217,10 @@ fn eval_kind(
             }
             let false_lit = OperationResult::from_literal(LiteralValue::from_bool(false));
             Ok(comparison_operation(
-                borrow_value(&value, "not operand"),
+                &borrow_value(&value, "not operand").value,
                 plan.result_type(*inner),
                 &ComparisonComputation::Is,
-                borrow_value(&false_lit, "not operand"),
+                &borrow_value(&false_lit, "not operand").value,
                 crate::planning::semantics::primitive_boolean_arc(),
             ))
         }
@@ -277,8 +280,8 @@ fn eval_kind(
         NormalFormKind::RangeLiteral(left, right) => {
             evaluate_binary(*left, *right, plan, ctx, |left_result, right_result| {
                 OperationResult::from_literal(LiteralValue::range(
-                    borrow_value(left_result, "left endpoint").clone(),
-                    borrow_value(right_result, "right endpoint").clone(),
+                    borrow_value(left_result, "left endpoint").to_literal(),
+                    borrow_value(right_result, "right endpoint").to_literal(),
                 ))
             })
         }
@@ -289,7 +292,7 @@ fn eval_kind(
             }
             Ok(crate::computation::datetime::evaluate_past_future_range(
                 kind,
-                borrow_value(&value, "offset operand"),
+                &borrow_value(&value, "offset operand").to_literal(),
                 plan.result_type(*inner),
                 now_date(ctx),
             ))
@@ -306,10 +309,10 @@ fn eval_kind(
                             .map(|element| Arc::new(LemmaType::primitive(element)))
                             .expect("BUG: range containment requires a range result type");
                         crate::computation::range::check_containment(
-                            borrow_value(value_result, "value operand"),
+                            &borrow_value(value_result, "value operand").value,
                             plan.result_type(*value),
-                            range_left.as_ref(),
-                            range_right.as_ref(),
+                            &range_left.value,
+                            &range_right.value,
                             &endpoint_type,
                         )
                     }

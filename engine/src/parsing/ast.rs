@@ -686,9 +686,9 @@ pub struct UnitFactor {
 ///   factor references contribute; it defaults to `1` when omitted.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum UnitArg {
-    Factor(#[serde(with = "crate::literals::decimal_string_serde")] Decimal),
+    Factor(#[serde(with = "crate::literals::decimal_binary_serde")] Decimal),
     Expr(
-        #[serde(with = "crate::literals::decimal_string_serde")] Decimal,
+        #[serde(with = "crate::literals::decimal_binary_serde")] Decimal,
         Vec<UnitFactor>,
     ),
 }

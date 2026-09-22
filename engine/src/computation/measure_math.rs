@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use crate::computation::operation_result::{OperationResult, VetoType};
-use crate::planning::semantics::{LemmaType, LiteralValue, MathematicalComputation, ValueKind};
+use crate::planning::semantics::{BoundValueKind, LemmaType, MathematicalComputation, ValueKind};
 
 pub fn mathematical_computation_preserves_measure_magnitude(op: &MathematicalComputation) -> bool {
     matches!(
@@ -28,7 +28,7 @@ fn apply_decimal_magnitude_op(
 
 pub fn measure_magnitude_math(
     op: &MathematicalComputation,
-    value: &LiteralValue,
+    value: &BoundValueKind,
     lemma_type: &Arc<LemmaType>,
 ) -> OperationResult {
     debug_assert!(mathematical_computation_preserves_measure_magnitude(op));
@@ -84,11 +84,10 @@ pub fn measure_magnitude_math(
             }
         };
 
-    OperationResult::from_literal(LiteralValue::measure_with_bound_unit(
-        new_canonical,
-        unit_name,
-        Arc::clone(lemma_type),
-    ))
+    OperationResult::from_bound(BoundValueKind {
+        value: ValueKind::Measure(new_canonical),
+        measure_binding_unit: value.measure_binding_unit.clone(),
+    })
 }
 
 #[cfg(test)]
@@ -103,7 +102,7 @@ mod tests {
         decomp.insert("meter".to_string(), 1);
         decomp.insert("second".to_string(), -1);
         let lemma_type = Arc::new(LemmaType::anonymous_for_decomposition(decomp));
-        let value = LiteralValue::measure(rational_new(100, 1));
+        let value = BoundValueKind::unbound(ValueKind::Measure(rational_new(100, 1)));
         let result = measure_magnitude_math(&MathematicalComputation::Ceil, &value, &lemma_type);
         assert!(
             result.vetoed(),

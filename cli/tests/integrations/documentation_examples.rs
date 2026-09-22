@@ -38,9 +38,8 @@ fn get_rule_value(
         .as_ref()
         .expect("explanation")
         .result
-        .value()
-        .expect("value")
-        .clone();
+        .literal_value()
+        .expect("value");
     (value, Arc::clone(&rule_result.rule.rule_type))
 }
 
@@ -104,11 +103,11 @@ fn test_01_coffee_order() {
     let engine = load_specs_folder_examples();
 
     let mut data = HashMap::new();
-    data.insert("product".to_string(), "latte".to_string());
-    data.insert("size".to_string(), "large".to_string());
-    data.insert("number_of_cups".to_string(), "2".to_string());
-    data.insert("has_loyalty_card".to_string(), "true".to_string());
-    data.insert("age".to_string(), "70".to_string());
+    data.insert("product".to_string(), "latte".into());
+    data.insert("size".to_string(), "large".into());
+    data.insert("number_of_cups".to_string(), "2".into());
+    data.insert("has_loyalty_card".to_string(), "true".into());
+    data.insert("age".to_string(), "70".into());
 
     let (total, total_type) = get_rule_value(&engine, "coffee_order", "total", data);
 
@@ -125,10 +124,10 @@ fn test_02_library_fees() {
     let engine = load_specs_folder_examples();
 
     let mut data = HashMap::new();
-    data.insert("due_date".to_string(), "2024-01-01".to_string());
-    data.insert("return_date".to_string(), "2024-01-06".to_string());
-    data.insert("book_type".to_string(), "regular".to_string());
-    data.insert("is_first_offense".to_string(), "false".to_string());
+    data.insert("due_date".to_string(), "2024-01-01".into());
+    data.insert("return_date".to_string(), "2024-01-06".into());
+    data.insert("book_type".to_string(), "regular".into());
+    data.insert("is_first_offense".to_string(), "false".into());
 
     let (final_fee, final_fee_type) =
         get_rule_value(&engine, "library_fees", "final_fee", data.clone());
@@ -143,9 +142,9 @@ fn test_03_recipe_scaling() {
     let engine = load_specs_folder_examples();
 
     let mut data = HashMap::new();
-    data.insert("original_servings".to_string(), "4".to_string());
-    data.insert("desired_servings".to_string(), "8".to_string());
-    data.insert("recipe_name".to_string(), "chocolate_cake".to_string());
+    data.insert("original_servings".to_string(), "4".into());
+    data.insert("desired_servings".to_string(), "8".into());
+    data.insert("recipe_name".to_string(), "chocolate_cake".into());
 
     let (scaling_factor, _) =
         get_rule_value(&engine, "recipe_scaling", "scaling_factor", data.clone());
@@ -181,7 +180,7 @@ fn test_04_membership_benefits() {
 
     // Test membership_benefits spec (references premium_membership)
     let mut benefits_data = HashMap::new();
-    benefits_data.insert("monthly_spend".to_string(), "150".to_string());
+    benefits_data.insert("monthly_spend".to_string(), "150".into());
     let (discount, _) = get_rule_value(
         &engine,
         "membership_benefits",
@@ -221,9 +220,9 @@ fn test_05_weather_clothing() {
     let engine = load_specs_folder_examples();
 
     let mut data = HashMap::new();
-    data.insert("temperature".to_string(), "15 celsius".to_string());
-    data.insert("is_raining".to_string(), "false".to_string());
-    data.insert("wind_speed".to_string(), "10".to_string());
+    data.insert("temperature".to_string(), "15 celsius".into());
+    data.insert("is_raining".to_string(), "false".into());
+    data.insert("wind_speed".to_string(), "10".into());
 
     let (clothing_layer, _) =
         get_rule_value(&engine, "weather_clothing", "clothing_layer", data.clone());
@@ -250,11 +249,11 @@ fn test_nl_tax_net_salary() {
     };
 
     let mut data = HashMap::new();
-    data.insert("gross_salary".to_string(), "5000 eur".to_string());
-    data.insert("pay_period".to_string(), "month".to_string());
-    data.insert("income_source".to_string(), "employment".to_string());
-    data.insert("pension_contribution".to_string(), "0 eur".to_string());
-    data.insert("payroll_tax_credit".to_string(), "true".to_string());
+    data.insert("gross_salary".to_string(), "5000 eur".into());
+    data.insert("pay_period".to_string(), "month".into());
+    data.insert("income_source".to_string(), "employment".into());
+    data.insert("pension_contribution".to_string(), "0 eur".into());
+    data.insert("payroll_tax_credit".to_string(), "true".into());
     let response = engine
         .run(None, "net_salary", Some(&effective), data, None, true)
         .expect("net_salary run");

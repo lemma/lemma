@@ -45,8 +45,8 @@ fn eval_rule(engine: &mut Engine, spec: &str, data: HashMap<String, String>, rul
         .results
         .get(rule)
         .unwrap_or_else(|| panic!("rule '{rule}' missing"))
-        .display()
-        .expect("display")
+        .result()
+        .expect("result")
         .to_string()
 }
 
@@ -61,7 +61,7 @@ data age: calendar
 rule value: age as year"#;
     let mut engine = load_ok(code);
     let mut data = HashMap::new();
-    data.insert("age".to_string(), "42 year".to_string());
+    data.insert("age".to_string(), "42 year".into());
     let result = eval_rule(&mut engine, "test", data, "value");
     assert_eq!(result, "42 year");
 }
@@ -77,7 +77,7 @@ data age: calendar -> minimum 1 year
 rule value: age as year"#;
     let mut engine = load_ok(code);
     let mut data = HashMap::new();
-    data.insert("age".to_string(), "36 month".to_string());
+    data.insert("age".to_string(), "36 month".into());
     let result = eval_rule(&mut engine, "test", data, "value");
     assert_eq!(result, "3 year");
 }
@@ -151,7 +151,7 @@ data height: length
 rule value: height as rod"#;
     let mut engine = load_ok(code);
     let mut data = HashMap::new();
-    data.insert("height".to_string(), "33 span".to_string());
+    data.insert("height".to_string(), "33 span".into());
     let result = eval_rule(&mut engine, "test", data, "value");
     assert_eq!(result, "2 rod");
 }
@@ -199,7 +199,7 @@ data age: units.calendar
 rule value: age as year"#;
     let mut engine = load_ok(code);
     let mut data = HashMap::new();
-    data.insert("age".to_string(), "36 month".to_string());
+    data.insert("age".to_string(), "36 month".into());
     let result = eval_rule(&mut engine, "test", data, "value");
     assert_eq!(result, "3 year");
 }

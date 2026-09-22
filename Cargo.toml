@@ -13,7 +13,7 @@ default-members = ["cli"]
 exclude = ["engine/fuzz"]
 
 [workspace.package]
-version = "0.9.10"
+version = "0.9.11"
 edition = "2021"
 authors = ["Ben Rogmans <ben@lemmabase.com>"]
 description = "A pure, declarative language for business rules."
@@ -28,4 +28,4 @@ serde = { version = "1.0", features = ["derive", "rc"] }
 serde_json = { version = "1.0", features = ["preserve_order"] }
 chrono = { version = "0.4", features = ["serde"] }
 tokio = { version = "1.53.1", features = ["full"] }
-rust_decimal = { version = "1.42", features = ["serde", "maths"] }
+rust_decimal = { version = "1.42", features = ["serde", "serde-with-str", "maths"] }

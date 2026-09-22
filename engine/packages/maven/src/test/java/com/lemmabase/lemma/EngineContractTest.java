@@ -281,7 +281,7 @@ final class EngineContractTest {
                   .effective("2024-06-01")
                   .data(Map.of("amount", "3")));
       assertTrue(response.results().get("ok") instanceof RuleResult.Number);
-      assertEquals("3", ((RuleResult.Number) response.results().get("ok")).display());
+      assertEquals("3", ((RuleResult.Number) response.results().get("ok")).result());
     }
   }
 

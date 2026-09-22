@@ -26,6 +26,7 @@
           }
         }
       },
+      "path": [],
       "suggestion": {
         "number": "1"
       },
@@ -52,12 +53,13 @@
           }
         }
       },
+      "path": [],
       "branches": [
         {
           "result": {
             "type": "literal",
             "number": "1",
-            "display": "1"
+            "result": "1"
           }
         }
       ],

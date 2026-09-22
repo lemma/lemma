@@ -5,7 +5,6 @@
 use lemma::{DateTimeValue, Engine, SourceType};
 use rust_decimal::Decimal;
 use std::collections::HashMap;
-use std::str::FromStr;
 
 #[test]
 fn unless_gated_dep_flag_false_empty_missing_data() {
@@ -26,7 +25,7 @@ rule total: 0
         .expect("load");
     let now = DateTimeValue::now();
     let mut data = HashMap::new();
-    data.insert("flag".to_string(), "false".to_string());
+    data.insert("flag".to_string(), "false".into());
     let response = engine
         .run(
             None,
@@ -44,16 +43,13 @@ rule total: 0
         "flag=false must not surface amount: {:?}",
         total.missing_data()
     );
-    let number = Decimal::from_str(
-        total
-            .value
-            .as_ref()
-            .expect("value")
-            .number
-            .as_ref()
-            .expect("number"),
-    )
-    .expect("decimal");
+    let number = *total
+        .result
+        .as_ref()
+        .expect("value")
+        .number
+        .as_ref()
+        .expect("number");
     assert_eq!(number, Decimal::ZERO);
 }
 
@@ -76,7 +72,7 @@ rule total: 0
         .expect("load");
     let now = DateTimeValue::now();
     let mut data = HashMap::new();
-    data.insert("flag".to_string(), "true".to_string());
+    data.insert("flag".to_string(), "true".into());
     let response = engine
         .run(
             None,
@@ -90,7 +86,7 @@ rule total: 0
     let total = response.results.get("total").expect("total");
     assert!(total.vetoed);
     assert!(
-        total.awaits_missing_data(),
+        total.is_missing_data(),
         "flag=true unbound amount must await: {:?}",
         total.veto_reason
     );
@@ -133,15 +129,13 @@ rule y: a.x + 1
     assert_eq!(response.results.len(), 1);
     let y = response.results.get("y").expect("y");
     assert!(!y.vetoed);
-    let number = Decimal::from_str(
-        y.value
-            .as_ref()
-            .expect("value")
-            .number
-            .as_ref()
-            .expect("number"),
-    )
-    .expect("decimal");
+    let number = *y
+        .result
+        .as_ref()
+        .expect("value")
+        .number
+        .as_ref()
+        .expect("number");
     assert_eq!(number, Decimal::from(8));
 }
 
@@ -174,7 +168,7 @@ fn run_gate(data: &[(&str, &str)], rules: Option<&[String]>) -> lemma::Response 
 fn rule_ref_and_left_true_lists_unbound_right_tip_run() {
     let response = run_gate(&[("n", "5")], Some(&["main".to_string()]));
     let main = response.results.get("main").expect("main");
-    assert!(main.awaits_missing_data(), "{:?}", main.veto_reason);
+    assert!(main.is_missing_data(), "{:?}", main.veto_reason);
     assert_eq!(main.missing_data(), &["secret".to_string()][..]);
 }
 
@@ -182,7 +176,7 @@ fn rule_ref_and_left_true_lists_unbound_right_tip_run() {
 fn rule_ref_and_left_true_lists_unbound_right_full_run() {
     let response = run_gate(&[("n", "5")], None);
     let main = response.results.get("main").expect("main");
-    assert!(main.awaits_missing_data(), "{:?}", main.veto_reason);
+    assert!(main.is_missing_data(), "{:?}", main.veto_reason);
     assert_eq!(main.missing_data(), &["secret".to_string()][..]);
     let gate_rule = response.results.get("gate_rule").expect("gate_rule");
     assert!(!gate_rule.vetoed);
@@ -193,7 +187,7 @@ fn rule_ref_and_left_true_lists_unbound_right_full_run() {
 fn rule_ref_and_left_missing_data_lists_left_only() {
     let response = run_gate(&[], Some(&["main".to_string()]));
     let main = response.results.get("main").expect("main");
-    assert!(main.awaits_missing_data(), "{:?}", main.veto_reason);
+    assert!(main.is_missing_data(), "{:?}", main.veto_reason);
     assert_eq!(main.missing_data(), &["n".to_string()][..]);
 }
 
@@ -203,14 +197,14 @@ fn rule_ref_and_left_false_is_false_without_missing_data() {
     let main = response.results.get("main").expect("main");
     assert!(!main.vetoed, "{:?}", main.veto_reason);
     assert!(main.missing_data().is_empty());
-    assert_eq!(main.value.as_ref().expect("value").boolean, Some(false));
+    assert_eq!(main.result.as_ref().expect("result").boolean, Some(false));
 }
 
 #[test]
 fn rule_ref_piecewise_condition_true_lists_unbound_body() {
     let response = run_gate(&[("n", "5")], Some(&["pw".to_string()]));
     let pw = response.results.get("pw").expect("pw");
-    assert!(pw.awaits_missing_data(), "{:?}", pw.veto_reason);
+    assert!(pw.is_missing_data(), "{:?}", pw.veto_reason);
     assert_eq!(pw.missing_data(), &["secret".to_string()][..]);
 }
 
@@ -233,7 +227,7 @@ rule total: 0
         .expect("load");
     let now = DateTimeValue::now();
     let mut data = HashMap::new();
-    data.insert("flag".to_string(), "false".to_string());
+    data.insert("flag".to_string(), "false".into());
     let response = engine
         .run(None, "gated", Some(&now), data, None, false)
         .expect("run");
@@ -246,7 +240,7 @@ rule total: 0
     );
     let dep = response.results.get("dep").expect("dep");
     assert!(
-        dep.awaits_missing_data(),
+        dep.is_missing_data(),
         "full run still evaluates dep: {dep:?}"
     );
     assert_eq!(

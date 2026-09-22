@@ -24,8 +24,8 @@ fn eval_display(code: &str, spec: &str, rule: &str) -> String {
         .results
         .get(rule)
         .unwrap_or_else(|| panic!("rule {rule}"))
-        .display()
-        .expect("display")
+        .result()
+        .expect("result")
         .to_string()
 }
 

@@ -19,12 +19,9 @@ const SHIPPING: &str = include_str!("../benches/specs/shipping.lemma");
 /// after warmup, on this machine's allocator accounting. Update deliberately
 /// when the eval path's allocation shape changes.
 ///
-/// Measured 52: `rule_values` sized from `plan.rules`, the value table, and
-/// the results each rule walk clones out of cached cells. The lazy fill (a Kind
-/// walk that hits an empty `rule_ref` unwinds to the heap stack, which fills
-/// the reference and retries the parent) allocates nothing: it unwinds with a
-/// `RuleIndex` and re-reads cached cells. Below the eager authored-dep
-/// closure's 57 because only rules the walk actually reaches are evaluated.
+/// Measured 52: public `Engine::run` takes `HashMap<String, String>` and maps
+/// each overlay to `RunDataValue::string` before resolve; display binding on
+/// values is still `Option<Arc<str>>`.
 const SHIPPING_EVAL_ALLOCATIONS: usize = 52;
 
 fn shipping_effective() -> DateTimeValue {

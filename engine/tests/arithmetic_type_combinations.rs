@@ -7,6 +7,7 @@
 
 use lemma::DateTimeValue;
 use lemma::Engine;
+use rust_decimal::Decimal;
 use std::collections::{BTreeMap, HashMap};
 
 fn eval_result(
@@ -43,14 +44,14 @@ fn eval_rule(
     data: HashMap<String, String>,
 ) -> String {
     eval_result(code, spec_name, rule_name, data)
-        .display()
-        .expect("display")
+        .result()
+        .expect("result")
         .to_string()
 }
 
-fn eval_measure_map(code: &str, spec_name: &str, rule_name: &str) -> BTreeMap<String, String> {
+fn eval_measure_map(code: &str, spec_name: &str, rule_name: &str) -> BTreeMap<String, Decimal> {
     eval_result(code, spec_name, rule_name, HashMap::new())
-        .value
+        .result
         .expect("rule result value")
         .measure
         .expect("measure map")
@@ -401,7 +402,7 @@ data d: 10 hour
 data n: 3
 rule result: d * n"#;
     let map = eval_measure_map(code, "t", "result");
-    assert_eq!(map["hour"], "30", "10 hour * 3 = 30 hour");
+    assert_eq!(map["hour"], Decimal::from(30), "10 hour * 3 = 30 hour");
 }
 
 #[test]
@@ -412,7 +413,7 @@ data n: 3
 data d: 10 hour
 rule result: n * d"#;
     let map = eval_measure_map(code, "t", "result");
-    assert_eq!(map["hour"], "30", "3 * 10 hour = 30 hour");
+    assert_eq!(map["hour"], Decimal::from(30), "3 * 10 hour = 30 hour");
 }
 
 #[test]
@@ -423,7 +424,7 @@ data d: 12 hour
 data n: 4
 rule result: d / n"#;
     let map = eval_measure_map(code, "t", "result");
-    assert_eq!(map["hour"], "3", "12 hour / 4 = 3 hour");
+    assert_eq!(map["hour"], Decimal::from(3), "12 hour / 4 = 3 hour");
 }
 
 #[test]
@@ -434,7 +435,7 @@ data d: 10 hour
 data n: 3
 rule result: d % n"#;
     let map = eval_measure_map(code, "t", "result");
-    assert_eq!(map["hour"], "1", "10 hour % 3 = 1 hour");
+    assert_eq!(map["hour"], Decimal::from(1), "10 hour % 3 = 1 hour");
 }
 
 #[test]
@@ -513,7 +514,7 @@ data d: 10 hour
 data r: 50%
 rule result: d * r"#;
     let map = eval_measure_map(code, "t", "result");
-    assert_eq!(map["hour"], "5", "10 hour * 50% = 5 hour");
+    assert_eq!(map["hour"], Decimal::from(5), "10 hour * 50% = 5 hour");
 }
 
 #[test]
@@ -524,7 +525,7 @@ data r: 50%
 data d: 10 hour
 rule result: r * d"#;
     let map = eval_measure_map(code, "t", "result");
-    assert_eq!(map["hour"], "5", "50% * 10 hour = 5 hour");
+    assert_eq!(map["hour"], Decimal::from(5), "50% * 10 hour = 5 hour");
 }
 
 #[test]
@@ -535,7 +536,7 @@ data d: 10 hour
 data r: 50%
 rule result: d / r"#;
     let map = eval_measure_map(code, "t", "result");
-    assert_eq!(map["hour"], "20", "10 hour / 50% = 20 hour");
+    assert_eq!(map["hour"], Decimal::from(20), "10 hour / 50% = 20 hour");
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -778,7 +779,7 @@ data a: 10 hour
 data b: 5 hour
 rule result: a + b"#;
     let map = eval_measure_map(code, "t", "result");
-    assert_eq!(map["hour"], "15", "10 hour + 5 hour = 15 hour");
+    assert_eq!(map["hour"], Decimal::from(15), "10 hour + 5 hour = 15 hour");
 }
 
 #[test]
@@ -789,7 +790,7 @@ data a: 10 hour
 data b: 3 hour
 rule result: a - b"#;
     let map = eval_measure_map(code, "t", "result");
-    assert_eq!(map["hour"], "7", "10 hour - 3 hour = 7 hour");
+    assert_eq!(map["hour"], Decimal::from(7), "10 hour - 3 hour = 7 hour");
 }
 
 // ═══════════════════════════════════════════════════════════════════

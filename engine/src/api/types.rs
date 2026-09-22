@@ -2,14 +2,15 @@
 
 use crate::computation::rational::RationalInteger;
 use crate::literals::{
-    rational_to_serialized_str, BaseMeasureVector, DateTimeValue, MeasureUnit as DomainMeasureUnit,
-    MeasureUnits, RatioUnit as DomainRatioUnit, RatioUnits, TimeValue,
+    BaseMeasureVector, DateTimeValue, MeasureUnit as DomainMeasureUnit, MeasureUnits,
+    RatioUnit as DomainRatioUnit, RatioUnits, TimeValue,
 };
 use crate::planning::semantics::{
     LemmaType as DomainLemmaType, MeasureTrait as DomainMeasureTrait,
     TypeDefiningSpec as DomainTypeDefiningSpec, TypeExtends as DomainTypeExtends,
     TypeSpecification as DomainTypeSpecification,
 };
+use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
 /// Exact rational factor as reduced numer/denom integer strings.
@@ -32,16 +33,17 @@ impl RationalFactor {
     }
 }
 
-/// Unit-scoped bound `{ value, unit }` (decimal string + unit name).
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+/// Unit-scoped bound `{ value, unit }` (decimal magnitude + unit name).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NamedBound {
-    pub value: String,
+    pub value: Decimal,
     pub unit: String,
 }
 
-fn planned_bound_decimal(rational: &RationalInteger) -> String {
-    rational_to_serialized_str(rational)
-        .expect("BUG: planned bound must serialize to decimal string")
+fn planned_bound_decimal(rational: &RationalInteger) -> Decimal {
+    rational
+        .try_to_decimal()
+        .expect("BUG: planned bound must convert to decimal")
 }
 
 fn named_bound_from(bound: &(RationalInteger, String)) -> NamedBound {
@@ -55,7 +57,7 @@ fn optional_named_bound(bound: &Option<(RationalInteger, String)>) -> Option<Nam
     bound.as_ref().map(named_bound_from)
 }
 
-fn optional_decimal_bound(bound: &Option<RationalInteger>) -> Option<String> {
+fn optional_decimal_bound(bound: &Option<RationalInteger>) -> Option<Decimal> {
     bound.as_ref().map(planned_bound_decimal)
 }
 
@@ -75,22 +77,22 @@ impl From<DomainMeasureTrait> for MeasureTrait {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MeasureUnit {
     pub name: String,
     pub factor: RationalFactor,
     pub derived_measure_factors: Vec<(String, i32)>,
     pub decomposition: BaseMeasureVector,
     #[serde(skip_serializing_if = "Option::is_none", default)]
-    pub minimum: Option<String>,
+    pub minimum: Option<Decimal>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
-    pub maximum: Option<String>,
+    pub maximum: Option<Decimal>,
     #[serde(
         rename = "suggestion",
         skip_serializing_if = "Option::is_none",
         default
     )]
-    pub suggestion_magnitude: Option<String>,
+    pub suggestion_magnitude: Option<Decimal>,
 }
 
 impl From<&DomainMeasureUnit> for MeasureUnit {
@@ -101,35 +103,38 @@ impl From<&DomainMeasureUnit> for MeasureUnit {
             derived_measure_factors: unit.derived_measure_factors.clone(),
             decomposition: unit.decomposition.clone(),
             minimum: unit.minimum.as_ref().map(|minimum| {
-                rational_to_serialized_str(minimum)
-                    .expect("BUG: planned measure unit minimum must serialize to decimal string")
+                minimum
+                    .try_to_decimal()
+                    .expect("BUG: planned measure unit minimum must convert to decimal")
             }),
             maximum: unit.maximum.as_ref().map(|maximum| {
-                rational_to_serialized_str(maximum)
-                    .expect("BUG: planned measure unit maximum must serialize to decimal string")
+                maximum
+                    .try_to_decimal()
+                    .expect("BUG: planned measure unit maximum must convert to decimal")
             }),
             suggestion_magnitude: unit.suggestion_magnitude.as_ref().map(|suggestion| {
-                rational_to_serialized_str(suggestion)
-                    .expect("BUG: planned measure unit suggestion must serialize to decimal string")
+                suggestion
+                    .try_to_decimal()
+                    .expect("BUG: planned measure unit suggestion must convert to decimal")
             }),
         }
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RatioUnit {
     pub name: String,
     pub value: RationalFactor,
     #[serde(skip_serializing_if = "Option::is_none", default)]
-    pub minimum: Option<String>,
+    pub minimum: Option<Decimal>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
-    pub maximum: Option<String>,
+    pub maximum: Option<Decimal>,
     #[serde(
         rename = "suggestion",
         skip_serializing_if = "Option::is_none",
         default
     )]
-    pub suggestion_magnitude: Option<String>,
+    pub suggestion_magnitude: Option<Decimal>,
 }
 
 impl From<&DomainRatioUnit> for RatioUnit {
@@ -138,16 +143,19 @@ impl From<&DomainRatioUnit> for RatioUnit {
             name: unit.name.clone(),
             value: RationalFactor::from_ratio(&unit.value),
             minimum: unit.minimum.as_ref().map(|minimum| {
-                rational_to_serialized_str(minimum)
-                    .expect("BUG: planned ratio unit minimum must serialize to decimal string")
+                minimum
+                    .try_to_decimal()
+                    .expect("BUG: planned ratio unit minimum must convert to decimal")
             }),
             maximum: unit.maximum.as_ref().map(|maximum| {
-                rational_to_serialized_str(maximum)
-                    .expect("BUG: planned ratio unit maximum must serialize to decimal string")
+                maximum
+                    .try_to_decimal()
+                    .expect("BUG: planned ratio unit maximum must convert to decimal")
             }),
             suggestion_magnitude: unit.suggestion_magnitude.as_ref().map(|suggestion| {
-                rational_to_serialized_str(suggestion)
-                    .expect("BUG: planned ratio unit suggestion must serialize to decimal string")
+                suggestion
+                    .try_to_decimal()
+                    .expect("BUG: planned ratio unit suggestion must convert to decimal")
             }),
         }
     }
@@ -205,7 +213,7 @@ impl From<&DomainTypeExtends> for TypeExtends {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "lowercase")]
 pub enum TypeSpecification {
     Boolean {
@@ -226,41 +234,41 @@ pub enum TypeSpecification {
     },
     Number {
         #[serde(default)]
-        minimum: Option<String>,
+        minimum: Option<Decimal>,
         #[serde(default)]
-        maximum: Option<String>,
+        maximum: Option<Decimal>,
         decimals: Option<u8>,
         help: String,
     },
     NumberRange {
         #[serde(default)]
-        lower: Option<String>,
+        lower: Option<Decimal>,
         #[serde(default)]
-        upper: Option<String>,
+        upper: Option<Decimal>,
         #[serde(default)]
-        minimum: Option<String>,
+        minimum: Option<Decimal>,
         #[serde(default)]
-        maximum: Option<String>,
+        maximum: Option<Decimal>,
         help: String,
     },
     Ratio {
         #[serde(default)]
-        minimum: Option<String>,
+        minimum: Option<Decimal>,
         #[serde(default)]
-        maximum: Option<String>,
+        maximum: Option<Decimal>,
         decimals: Option<u8>,
         units: Vec<RatioUnit>,
         help: String,
     },
     RatioRange {
         #[serde(default)]
-        lower: Option<String>,
+        lower: Option<Decimal>,
         #[serde(default)]
-        upper: Option<String>,
+        upper: Option<Decimal>,
         #[serde(default)]
-        minimum: Option<String>,
+        minimum: Option<Decimal>,
         #[serde(default)]
-        maximum: Option<String>,
+        maximum: Option<Decimal>,
         units: Vec<RatioUnit>,
         help: String,
     },
@@ -468,7 +476,7 @@ impl From<&DomainTypeSpecification> for TypeSpecification {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LemmaType {
     pub name: Option<String>,
     #[serde(flatten)]

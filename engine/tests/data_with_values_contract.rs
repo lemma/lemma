@@ -28,7 +28,7 @@ fn assert_rule_vetoed(
     assert!(
         rr.vetoed,
         "rule '{rule_name}' must veto on invalid override, got {:?}",
-        rr.display()
+        rr.result()
     );
     let reason = rr.veto_reason.clone().expect("veto reason");
     if !reason_contains.is_empty() {
@@ -48,7 +48,7 @@ fn rule_value(result: &lemma::Response, name: &str) -> String {
     if rr.vetoed {
         return format!("VETO({})", rr.veto_reason.as_deref().unwrap_or("Vetoed"));
     }
-    rr.display().expect("display").to_string()
+    rr.result().expect("result").to_string()
 }
 
 #[test]
@@ -67,8 +67,8 @@ rule r: x
         .unwrap();
 
     let mut data = HashMap::new();
-    data.insert("x".to_string(), "1".to_string());
-    data.insert("does_not_exist".to_string(), "42".to_string());
+    data.insert("x".to_string(), "1".into());
+    data.insert("does_not_exist".to_string(), "42".into());
 
     let now = DateTimeValue::now();
     let response = engine
@@ -97,7 +97,7 @@ rule r: i.x
 
     let mut data = HashMap::new();
     // `i` is a SpecRef, not a data value — overriding it is meaningless.
-    data.insert("i".to_string(), "42".to_string());
+    data.insert("i".to_string(), "42".into());
 
     let now = DateTimeValue::now();
     let response = engine
@@ -128,7 +128,7 @@ rule r: x
         .unwrap();
 
     let mut data = HashMap::new();
-    data.insert("x".to_string(), "42".to_string());
+    data.insert("x".to_string(), "42".into());
 
     let now = DateTimeValue::now();
     let resp = engine
@@ -153,7 +153,7 @@ rule r: x
         .unwrap();
 
     let mut data = HashMap::new();
-    data.insert("x".to_string(), "99".to_string());
+    data.insert("x".to_string(), "99".into());
 
     let now = DateTimeValue::now();
     let resp = engine
@@ -178,7 +178,7 @@ rule r: age
         .unwrap();
 
     let mut data = HashMap::new();
-    data.insert("age".to_string(), "thirty".to_string());
+    data.insert("age".to_string(), "thirty".into());
 
     let now = DateTimeValue::now();
     assert_rule_vetoed(
@@ -204,7 +204,7 @@ rule r: n
         .unwrap();
 
     let mut data = HashMap::new();
-    data.insert("n".to_string(), "5".to_string());
+    data.insert("n".to_string(), "5".into());
 
     let now = DateTimeValue::now();
     assert_rule_vetoed(
@@ -230,7 +230,7 @@ rule r: n
         .unwrap();
 
     let mut data = HashMap::new();
-    data.insert("n".to_string(), "10".to_string());
+    data.insert("n".to_string(), "10".into());
 
     let now = DateTimeValue::now();
     assert_rule_vetoed(
@@ -256,7 +256,7 @@ rule r: msg
         .unwrap();
 
     let mut data = HashMap::new();
-    data.insert("msg".to_string(), "way too long".to_string());
+    data.insert("msg".to_string(), "way too long".into());
 
     let now = DateTimeValue::now();
     assert_rule_vetoed(
@@ -293,7 +293,7 @@ rule r: color
     }
 
     let mut data = HashMap::new();
-    data.insert("color".to_string(), "purple".to_string());
+    data.insert("color".to_string(), "purple".into());
 
     let now = DateTimeValue::now();
     assert_rule_vetoed(
@@ -345,7 +345,7 @@ rule r: i.v
         .unwrap();
 
     let mut data = HashMap::new();
-    data.insert("i.v".to_string(), "500".to_string());
+    data.insert("i.v".to_string(), "500".into());
 
     let now = DateTimeValue::now();
     let resp = engine
@@ -377,7 +377,7 @@ rule r: i.n
     load_result.expect("binding with i.n must plan");
 
     let mut data = HashMap::new();
-    data.insert("i.n".to_string(), "10".to_string());
+    data.insert("i.n".to_string(), "10".into());
 
     let now = DateTimeValue::now();
     assert_rule_vetoed(

@@ -191,6 +191,8 @@ fn is_numeric_only(cells: &Cells<'_>, id: NormalFormId) -> bool {
 }
 
 /// Merge a nested Sum into its Sum parent (same for Product).
+/// Recovers the n-ary cell the source chain already had; not a semantic rewrite,
+/// so the flat cell carries no fold origin.
 fn flatten_associative(
     n: &mut Normalizer<'_>,
     id: NormalFormId,
@@ -216,7 +218,7 @@ fn flatten_associative(
     if !flattened {
         return Ok(None);
     }
-    Ok(Some(n.cells.fold_into(operator.wrap(flat), id)))
+    Ok(Some(n.cells.intern_empty(operator.wrap(flat))))
 }
 
 /// The two associative arithmetic operators whose n-ary cells flatten and sort.
@@ -806,10 +808,10 @@ fn constant_fold(n: &mut Normalizer<'_>, id: NormalFormId) -> Result<Option<Norm
                 return Ok(None);
             };
             let folded = comparison_operation(
-                left_literal,
+                &left_literal.value,
                 cells.result_type(left),
                 &op,
-                right_literal,
+                &right_literal.value,
                 cells.result_type(right),
             );
             // A comparison the planner cannot decide (incomparable literal

@@ -78,7 +78,7 @@ total: 4821.09 eur
    │     │     └─ hours_worked: 37.5
    │     └─ rush_surcharge: 796.88 eur
    │        ├─ is_super_rush is false
-   │        ├─ is_rush is true
+   │        ├─ is_rush
    │        └─ labor * 25%
    │           └─ labor: 3187.50 eur
    │              └─ hourly_rate * hours_worked
@@ -94,7 +94,7 @@ total: 4821.09 eur
                │     └─ hours_worked: 37.5
                └─ rush_surcharge: 796.88 eur
                   ├─ is_super_rush is false
-                  ├─ is_rush is true
+                  ├─ is_rush
                   └─ labor * 25%
                      └─ labor: 3187.50 eur
                         └─ hourly_rate * hours_worked
@@ -111,7 +111,7 @@ total: 5785.31 eur
    │     │     ├─ hourly_rate: 85.00 eur
    │     │     └─ hours_worked: 37.5
    │     └─ rush_surcharge: 1593.75 eur
-   │        ├─ is_super_rush is true
+   │        ├─ is_super_rush
    │        └─ labor * 50%
    │           └─ labor: 3187.50 eur
    │              └─ hourly_rate * hours_worked
@@ -126,7 +126,7 @@ total: 5785.31 eur
                │     ├─ hourly_rate: 85.00 eur
                │     └─ hours_worked: 37.5
                └─ rush_surcharge: 1593.75 eur
-                  ├─ is_super_rush is true
+                  ├─ is_super_rush
                   └─ labor * 50%
                      └─ labor: 3187.50 eur
                         └─ hourly_rate * hours_worked

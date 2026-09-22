@@ -33,19 +33,19 @@ rule to_hours: duration as hour
         .as_ref()
         .expect("explanation")
         .result
-        .value()
+        .literal_value()
         .expect("value")
         .clone();
 
     if let ValueKind::Measure(_) = &val.value {
         assert_eq!(
             rule_result
-                .value
+                .result
                 .as_ref()
                 .and_then(|v| v.measure.as_ref())
                 .and_then(|m| m.get("hour"))
-                .map(String::as_str),
-            Some("1"),
+                .copied(),
+            Some(rust_decimal::Decimal::from(1)),
             "60 minute as hour"
         );
     } else {

@@ -31,7 +31,7 @@ rule total: validated_price * quantity
         .find(|r| r.rule.name == "total")
         .expect("total rule");
 
-    assert_eq!(total.display(), Some("0"));
+    assert_eq!(total.result(), Some("0"));
 }
 
 #[test]
@@ -90,7 +90,7 @@ rule flag: validated_quantity is veto
         .expect("flag");
 
     assert_eq!(
-        flag.value.as_ref().expect("rule result value").boolean,
+        flag.result.as_ref().expect("rule result value").boolean,
         Some(true)
     );
 }
@@ -122,7 +122,7 @@ rule total: price * validated_quantity
         .find(|r| r.rule.name == "total")
         .expect("total");
 
-    assert_eq!(total.display(), Some("0"));
+    assert_eq!(total.result(), Some("0"));
 }
 
 #[test]
@@ -151,7 +151,7 @@ rule flag: validated_price is veto
         .expect("flag");
 
     assert_eq!(
-        flag.value.as_ref().expect("rule result value").boolean,
+        flag.result.as_ref().expect("rule result value").boolean,
         Some(false)
     );
 }
@@ -187,8 +187,8 @@ rule right_to_left: veto is validated_price
         .find(|r| r.rule.name == "right_to_left")
         .expect("right_to_left");
 
-    let ltr_bool = ltr.value.as_ref().expect("rule result value").boolean;
-    let rtl_bool = rtl.value.as_ref().expect("rule result value").boolean;
+    let ltr_bool = ltr.result.as_ref().expect("rule result value").boolean;
+    let rtl_bool = rtl.result.as_ref().expect("rule result value").boolean;
     assert_eq!(ltr_bool, rtl_bool);
     assert_eq!(ltr_bool, Some(true));
 }
@@ -222,8 +222,8 @@ rule b: not veto is validated_price
         .values()
         .find(|r| r.rule.name == "b")
         .expect("b");
-    let a_bool = a.value.as_ref().expect("rule result value").boolean;
-    let b_bool = b.value.as_ref().expect("rule result value").boolean;
+    let a_bool = a.result.as_ref().expect("rule result value").boolean;
+    let b_bool = b.result.as_ref().expect("rule result value").boolean;
     assert_eq!(a_bool, b_bool);
     assert_eq!(a_bool, Some(true));
 }

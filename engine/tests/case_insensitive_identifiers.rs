@@ -47,7 +47,7 @@ fn rule_value(result: &lemma::Response, name: &str) -> String {
             rule_result.veto_reason.as_deref().unwrap_or("Vetoed")
         )
     } else {
-        rule_result.display().expect("display").to_string()
+        rule_result.result().expect("result").to_string()
     }
 }
 
@@ -62,7 +62,7 @@ rule r: price
     load_ok(&mut engine, code);
     let now = DateTimeValue::now();
     let mut data = HashMap::new();
-    data.insert("price".to_string(), "10".to_string());
+    data.insert("price".to_string(), "10".into());
     let resp = engine
         .run(None, "s", Some(&now), data, None, false)
         .expect("evaluates");

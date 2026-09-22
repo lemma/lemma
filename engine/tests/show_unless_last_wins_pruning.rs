@@ -80,9 +80,9 @@ fn run_omits_membership_dates_when_premium_member_true() {
     let names = missing_data_union(&run_can_view(
         &engine,
         HashMap::from([
-            ("type".to_string(), "rental".to_string()),
-            ("views_consumed".to_string(), "6".to_string()),
-            ("premium_member".to_string(), "true".to_string()),
+            ("type".to_string(), "rental".into()),
+            ("views_consumed".to_string(), "6".into()),
+            ("premium_member".to_string(), "true".into()),
         ]),
     ));
 
@@ -106,9 +106,9 @@ fn run_includes_membership_dates_when_premium_member_false() {
     let names = missing_data_union(&run_can_view(
         &engine,
         HashMap::from([
-            ("type".to_string(), "rental".to_string()),
-            ("views_consumed".to_string(), "6".to_string()),
-            ("premium_member".to_string(), "false".to_string()),
+            ("type".to_string(), "rental".into()),
+            ("views_consumed".to_string(), "6".into()),
+            ("premium_member".to_string(), "false".into()),
         ]),
     ));
 
@@ -132,8 +132,8 @@ fn run_includes_membership_dates_when_premium_member_unknown() {
     let names = missing_data_union(&run_can_view(
         &engine,
         HashMap::from([
-            ("type".to_string(), "rental".to_string()),
-            ("views_consumed".to_string(), "6".to_string()),
+            ("type".to_string(), "rental".into()),
+            ("views_consumed".to_string(), "6".into()),
         ]),
     ));
 

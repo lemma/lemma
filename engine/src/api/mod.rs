@@ -12,7 +12,8 @@ mod value;
 
 pub use response::{Response, RuleResult};
 pub use show::{
-    Show, ShowBranch, ShowConversionTarget, ShowData, ShowExpression, ShowRule, ShowVersion,
+    PathSegment, Show, ShowBranch, ShowConversionTarget, ShowData, ShowExpression, ShowRule,
+    ShowVersion,
 };
 pub use types::{
     LemmaType, MeasureTrait, MeasureUnit, NamedBound, RatioUnit, RationalFactor, TypeDefiningSpec,

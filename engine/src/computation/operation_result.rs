@@ -3,7 +3,8 @@
 use std::fmt;
 
 use crate::planning::semantics::{
-    DataPath, LemmaType, LiteralValue, SemanticDateTime, SemanticTime, TypeSpecification,
+    BoundValueKind, DataPath, LemmaType, LiteralValue, SemanticDateTime, SemanticTime,
+    TypeSpecification,
 };
 use serde::Serialize;
 
@@ -69,15 +70,20 @@ impl Serialize for VetoType {
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum OperationResult {
-    /// Operation produced a value
-    Value(LiteralValue),
+    /// Operation produced a value (canonical magnitude + optional written unit)
+    Value(BoundValueKind),
     /// Operation was vetoed (valid result, no value)
     Veto(VetoType),
 }
 
 impl OperationResult {
+    /// Wrap a typeless literal with no written-unit binding.
     pub fn from_literal(value: LiteralValue) -> Self {
-        Self::Value(value)
+        Self::Value(BoundValueKind::unbound(value.value))
+    }
+
+    pub fn from_bound(bound: BoundValueKind) -> Self {
+        Self::Value(bound)
     }
 
     pub fn vetoed(&self) -> bool {
@@ -91,11 +97,17 @@ impl OperationResult {
     }
 
     #[must_use]
-    pub fn value(&self) -> Option<&LiteralValue> {
+    pub fn value(&self) -> Option<&BoundValueKind> {
         match self {
             OperationResult::Value(value) => Some(value),
             OperationResult::Veto(_) => None,
         }
+    }
+
+    /// Typeless payload (written unit dropped). Prefer [`Self::value`] when the binding matters.
+    #[must_use]
+    pub fn literal_value(&self) -> Option<LiteralValue> {
+        self.value().map(BoundValueKind::to_literal)
     }
 
     pub fn number(number: rust_decimal::Decimal) -> Self {
@@ -129,9 +141,10 @@ impl OperationResult {
         };
         let canonical = checked_mul(&rational, &factor)
             .expect("BUG: measure canonicalization overflow in OperationResult::measure");
-        Self::from_literal(LiteralValue::measure_with_bound_unit(
-            canonical, unit_name, lemma_type,
-        ))
+        Self::from_bound(BoundValueKind {
+            value: crate::planning::semantics::ValueKind::Measure(canonical),
+            measure_binding_unit: Some(std::sync::Arc::from(unit_name)),
+        })
     }
 
     pub fn text(text: impl Into<String>) -> Self {

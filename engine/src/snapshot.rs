@@ -158,6 +158,24 @@ rule y: x + 1
     }
 
     #[test]
+    fn postcard_decimal_binary_round_trips() {
+        use crate::literals::Value;
+        use crate::parsing::ast::UnitArg;
+        use rust_decimal::Decimal;
+        use std::str::FromStr;
+
+        let v = Value::Number(Decimal::from(42));
+        let bytes = postcard::to_allocvec(&v).expect("ser value");
+        let back: Value = postcard::from_bytes(&bytes).expect("de value");
+        assert_eq!(v, back);
+
+        let arg = UnitArg::Factor(Decimal::from_str("0.0092").unwrap());
+        let bytes = postcard::to_allocvec(&arg).expect("ser unit");
+        let back: UnitArg = postcard::from_bytes(&bytes).expect("de unit");
+        assert_eq!(arg, back);
+    }
+
+    #[test]
     fn encode_decode_round_trip() {
         let engine = load_simple();
         let bytes = encode(&engine).expect("encode");

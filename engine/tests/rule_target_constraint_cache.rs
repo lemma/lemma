@@ -40,7 +40,7 @@ rule r: i.slot
     let r = response.results.get("r").expect("r");
     assert!(!r.vetoed);
     assert_eq!(
-        r.value.as_ref().and_then(|v| v.display.as_deref()),
+        r.result.as_ref().and_then(|v| v.result.as_deref()),
         Some("10")
     );
 

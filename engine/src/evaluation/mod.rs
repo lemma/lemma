@@ -25,7 +25,8 @@ use crate::planning::execution_plan::{
 };
 use crate::planning::normalize::NormalFormId;
 use crate::planning::semantics::{
-    DataDefinition, DataPath, LemmaType, LiteralValue, ReferenceTarget, RulePath, ValueKind,
+    BoundValueKind, DataDefinition, DataPath, LemmaType, LiteralValue, ReferenceTarget, RulePath,
+    ValueKind,
 };
 use indexmap::IndexMap;
 pub use response::{Response, RuleResult};
@@ -56,8 +57,6 @@ pub(crate) struct EvaluationContext {
     ignored_unknown: Vec<String>,
     /// Whether this run data left any of the plan's promptable data paths unbound.
     any_promptable_data_unbound: bool,
-    /// Successful overlays stamped with the caller-supplied unit (display/veto).
-    overlay_types: HashMap<DataPath, Arc<LemmaType>>,
     /// Evaluation policy: visit every cell narration displays (rewrite
     /// pre-images, arithmetic siblings after a definitive veto). Set for explain
     /// runs. Never changes a value. Unless arms after the winner are already
@@ -89,8 +88,16 @@ impl EvaluationContext {
             if values[leaf.index()].is_some() {
                 continue;
             }
-            if let Some(value) = definition.value() {
-                values[leaf.index()] = Some(OperationResult::from_literal(value));
+            if let Some(fill) = definition.bound_fill() {
+                values[leaf.index()] = Some(OperationResult::from_bound(fill.clone()));
+            } else if let Some(literal) = definition.value() {
+                let measure_binding_unit = definition
+                    .schema_type()
+                    .and_then(|schema| schema.measure_binding_unit.as_deref().map(Arc::from));
+                values[leaf.index()] = Some(OperationResult::from_bound(BoundValueKind {
+                    value: literal.value,
+                    measure_binding_unit,
+                }));
             }
         }
 
@@ -117,10 +124,8 @@ impl EvaluationContext {
                         Some(OperationResult::Veto(veto)) => {
                             values[leaf.index()] = Some(OperationResult::Veto(veto.clone()));
                         }
-                        Some(OperationResult::Value(value)) => {
-                            let copied = LiteralValue {
-                                value: value.value.clone(),
-                            };
+                        Some(OperationResult::Value(bound)) => {
+                            let copied = bound.to_literal();
                             match validate_value_against_type(
                                 resolved_type.as_ref(),
                                 &copied,
@@ -128,7 +133,7 @@ impl EvaluationContext {
                             ) {
                                 Ok(()) => {
                                     values[leaf.index()] =
-                                        Some(OperationResult::from_literal(copied));
+                                        Some(OperationResult::from_bound(bound.clone()));
                                 }
                                 Err(msg) => {
                                     values[leaf.index()] = Some(OperationResult::Veto(
@@ -179,7 +184,6 @@ impl EvaluationContext {
             now,
             ignored_unknown: run_data.ignored_unknown.clone(),
             any_promptable_data_unbound,
-            overlay_types: run_data.overlay_types.clone(),
             exhaustive,
             rule_explanations: HashMap::new(),
         }
@@ -205,54 +209,69 @@ impl EvaluationContext {
         &self.now
     }
 
-    /// Overlay type for a data path when the caller supplied an explicit unit.
-    #[must_use]
-    pub(crate) fn overlay_type(&self, path: &DataPath) -> Option<&Arc<LemmaType>> {
-        self.overlay_types.get(path)
-    }
-
-    /// Schema or overlay type for displaying a data path value.
+    /// Planned schema type for displaying a data path value.
+    ///
+    /// Binding priority: schema/`as` > settled > fill > suggest > first declared.
+    /// Reuses the plan's [`Arc`] when no binding overrides the unit.
     #[must_use]
     pub(crate) fn data_display_type(
         &self,
         plan: &ExecutionPlan,
         path: &DataPath,
     ) -> Arc<LemmaType> {
-        if let Some(overlay) = self.overlay_type(path) {
-            return Arc::clone(overlay);
-        }
-        plan.data
+        let def = plan
+            .data
             .get(path)
-            .and_then(|def| def.schema_type())
-            .map(|ty| Arc::new(ty.clone()))
-            .expect("BUG: data path leaf missing schema type")
+            .expect("BUG: data path leaf missing from plan.data");
+        let schema = def
+            .resolved_type_arc()
+            .expect("BUG: data path leaf missing schema type");
+        let settled = self.data_slot(plan, path).and_then(OperationResult::value);
+        crate::planning::semantics::lemma_type_arc_with_display_binding(
+            schema,
+            settled,
+            def.bound_fill(),
+            def.bound_suggestion(),
+        )
     }
 
-    /// Rule result type with overlay binding when the rule body is a bound data path.
+    /// Rule result type for display.
+    ///
+    /// Binding priority: `as` on planned type > settled > fill > suggest on a data-path leaf >
+    /// first declared. Reuses the planned [`Arc`] when no binding overrides the unit.
     #[must_use]
     pub(crate) fn rule_result_type(
         &self,
         plan: &ExecutionPlan,
         rule: &crate::planning::execution_plan::ExecutableRule,
     ) -> Arc<LemmaType> {
-        let planned = Arc::clone(&rule.rule_type);
+        let planned = &rule.rule_type;
+        if planned.measure_binding_unit.is_some() {
+            return Arc::clone(planned);
+        }
+        let settled = self
+            .rule_values
+            .get(plan.rule_index(&rule.path).index())
+            .and_then(|slot| slot.as_ref())
+            .and_then(OperationResult::value);
         match &plan.normal_form(rule.normal_form).kind {
             crate::planning::normalize::NormalFormKind::Leaf(
                 crate::planning::normalize::LeafKind::DataPath(path),
             ) => {
-                if let Some(overlay) = self.overlay_type(path) {
-                    return Arc::new(
-                        planned.as_ref().clone().with_measure_binding_unit(
-                            overlay
-                                .measure_binding_unit
-                                .clone()
-                                .expect("BUG: overlay_types entry must carry binding unit"),
-                        ),
-                    );
-                }
-                planned
+                let def = plan
+                    .data
+                    .get(path)
+                    .expect("BUG: rule DataPath leaf missing from plan.data");
+                crate::planning::semantics::lemma_type_arc_with_display_binding(
+                    planned,
+                    settled,
+                    def.bound_fill(),
+                    def.bound_suggestion(),
+                )
             }
-            _ => planned,
+            _ => crate::planning::semantics::lemma_type_arc_with_display_binding(
+                planned, settled, None, None,
+            ),
         }
     }
 
@@ -331,7 +350,7 @@ impl Evaluator {
         plan: &ExecutionPlan,
         run_data: &RunData,
         now: LiteralValue,
-        response_rules: &std::collections::HashSet<String>,
+        response_rules: &std::collections::HashSet<RulePath>,
         explain: bool,
     ) -> Response {
         let effective = match &now.value {
@@ -353,7 +372,7 @@ impl Evaluator {
         let requested: Vec<&crate::planning::execution_plan::ExecutableRule> = plan
             .rules
             .values()
-            .filter(|rule| rule.path.segments.is_empty() && response_rules.contains(rule.name()))
+            .filter(|rule| response_rules.contains(&rule.path))
             .collect();
 
         for exec_rule in &requested {
@@ -373,7 +392,13 @@ impl Evaluator {
             let rule_type = context.rule_result_type(plan, exec_rule);
 
             let explanation = explain.then(|| {
-                narration::explanation_for(exec_rule, &context, &result, Arc::clone(&rule_type))
+                narration::explanation_for(
+                    exec_rule,
+                    plan,
+                    &context,
+                    &result,
+                    Arc::clone(&rule_type),
+                )
             });
 
             let missing_data = match &result {
@@ -385,7 +410,7 @@ impl Evaluator {
 
             response.add_result(RuleResult::from_operation_result(
                 EvaluatedRule {
-                    name: exec_rule.name().to_string(),
+                    name: exec_rule.path.input_key(),
                     path: exec_rule.path.clone(),
                     source_location: exec_rule.source.clone(),
                     rule_type: Arc::clone(&rule_type),

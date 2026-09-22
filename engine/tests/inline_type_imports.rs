@@ -32,7 +32,7 @@ rule is_adult: user_age >= 18
     let now = DateTimeValue::now();
 
     let mut data = HashMap::new();
-    data.insert("user_age".to_string(), "25".to_string());
+    data.insert("user_age".to_string(), "25".into());
     let response = engine.run(None, "test", Some(&now), data, None, false)?;
 
     // The data should be evaluated correctly with the imported type
@@ -46,7 +46,7 @@ rule is_adult: user_age >= 18
 
     assert_eq!(
         is_adult_result
-            .value
+            .result
             .as_ref()
             .expect("rule result value")
             .boolean,
@@ -87,7 +87,7 @@ rule is_senior: user_age >= 65
     let now = DateTimeValue::now();
 
     let mut data = HashMap::new();
-    data.insert("user_age".to_string(), "70".to_string());
+    data.insert("user_age".to_string(), "70".into());
     let response = engine.run(None, "test", Some(&now), data, None, false)?;
 
     // Check the rule result
@@ -99,7 +99,7 @@ rule is_senior: user_age >= 65
 
     assert_eq!(
         is_senior_result
-            .value
+            .result
             .as_ref()
             .expect("rule result value")
             .boolean,

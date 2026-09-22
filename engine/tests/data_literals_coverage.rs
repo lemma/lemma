@@ -6,6 +6,7 @@
 
 use lemma::DateTimeValue;
 use lemma::Engine;
+use rust_decimal::Decimal;
 use std::collections::HashMap;
 
 fn load_ok(engine: &mut Engine, code: &str) {
@@ -49,20 +50,19 @@ fn rule_value(result: &lemma::Response, rule_name: &str) -> String {
     if rr.vetoed {
         return format!("VETO({})", rr.veto_reason.as_deref().unwrap_or("Vetoed"));
     }
-    rr.display().expect("display").to_string()
+    rr.result().expect("result").to_string()
 }
 
-fn rule_measure_unit(result: &lemma::Response, rule_name: &str, unit: &str) -> String {
+fn rule_measure_unit(result: &lemma::Response, rule_name: &str, unit: &str) -> Decimal {
     let rr = result
         .results
         .get(rule_name)
         .unwrap_or_else(|| panic!("rule '{}' not found", rule_name));
     assert!(!rr.vetoed, "rule '{}' vetoed", rule_name);
-    rr.value
+    *rr.result
         .as_ref()
         .and_then(|v| v.measure.as_ref())
         .and_then(|map| map.get(unit))
-        .cloned()
         .unwrap_or_else(|| panic!("measure map missing unit '{unit}' for rule '{rule_name}'"))
 }
 
@@ -432,7 +432,10 @@ rule r: d
 "#;
     let mut engine = Engine::new();
     load_ok(&mut engine, code);
-    assert_eq!(rule_measure_unit(&run(&engine, "s"), "r", "day"), "7");
+    assert_eq!(
+        rule_measure_unit(&run(&engine, "s"), "r", "day"),
+        Decimal::from(7)
+    );
 }
 
 #[test]
@@ -520,14 +523,14 @@ fn rule_ratio(
         .as_ref()
         .expect("explanation")
         .result
-        .value()
+        .literal_value()
         .expect("value");
     match &lit.value {
         ValueKind::Ratio(n) => (
             lemma::ValueKind::Number(n.clone())
                 .as_decimal_magnitude()
                 .unwrap(),
-            rr.value
+            rr.result
                 .as_ref()
                 .and_then(|v| v.ratio.as_ref())
                 .and_then(|m| {
@@ -640,7 +643,7 @@ rule out: r
         .as_ref()
         .expect("explanation")
         .result
-        .value()
+        .literal_value()
         .expect("value");
     use lemma::ValueKind;
     match &lit.value {

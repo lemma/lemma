@@ -46,7 +46,7 @@ fn rule_value(result: &lemma::Response, name: &str) -> String {
     if rr.vetoed {
         format!("VETO({})", rr.veto_reason.as_deref().unwrap_or("Vetoed"))
     } else {
-        rr.display().expect("display").to_string()
+        rr.result().expect("result").to_string()
     }
 }
 
@@ -137,7 +137,7 @@ rule answer: r.zone
     );
 
     let mut data = HashMap::new();
-    data.insert("dest_zip3".to_string(), "100".to_string());
+    data.insert("dest_zip3".to_string(), "100".into());
     let resp = engine
         .run(None, "wrap", Some(&now), data, None, false)
         .expect("evaluates");
@@ -348,7 +348,7 @@ rule r: i.x
     let mut engine = Engine::new();
     load_ok(&mut engine, code);
     let mut data = HashMap::new();
-    data.insert("i.x".to_string(), "99".to_string());
+    data.insert("i.x".to_string(), "99".into());
     let now = DateTimeValue::now();
     let resp = engine
         .run(None, "outer", Some(&now), data, None, false)
@@ -377,7 +377,7 @@ rule r: m.l.v
     let mut engine = Engine::new();
     load_ok(&mut engine, code);
     let mut data = HashMap::new();
-    data.insert("m.l.v".to_string(), "123".to_string());
+    data.insert("m.l.v".to_string(), "123".into());
     let now = DateTimeValue::now();
     let resp = engine
         .run(None, "outer", Some(&now), data, None, false)
@@ -397,7 +397,7 @@ rule r: x
     let mut engine = Engine::new();
     load_ok(&mut engine, code);
     let mut data = HashMap::new();
-    data.insert("X".to_string(), "99".to_string());
+    data.insert("X".to_string(), "99".into());
     let now = DateTimeValue::now();
     let resp = engine
         .run(None, "s", Some(&now), data, None, false)

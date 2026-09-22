@@ -44,6 +44,7 @@ const showMinimal = showMinimalJson as {
           defining_spec: { kind: "local" };
         };
       };
+      path: [];
       suggestion: { number: "1" };
       needed_by_rules: ["ok"];
     };
@@ -64,6 +65,7 @@ const showMinimal = showMinimalJson as {
           defining_spec: { kind: "local" };
         };
       };
+      path: [];
       branches: [
         {
           result: {

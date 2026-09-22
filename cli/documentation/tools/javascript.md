@@ -26,7 +26,7 @@ const response = engine.run({ spec: 'pricing', data: { quantity: 50, is_vip: fal
 // response.results.total      → 800 eur
 ```
 
-`Lemma()` initializes the engine once and returns an `Engine`. The response carries each rule's value (or veto), per-rule `missing_data` when inputs are still unbound, and optional explanation trees when `run` is called with `explain: true` ([api.v1.json](../../../engine/schemas/api.v1.json)). Types and suggestions are on `engine.show(...)` (`Show.data` values are `ShowData`). Non-veto results flatten `RuleResultValue` (`display` + typed field) onto each `RuleResult`.
+`Lemma()` initializes the engine once and returns an `Engine`. The response carries each rule's value (or veto), per-rule `missing_data` when inputs are still unbound, and optional explanation trees when `run` is called with `explain: true` ([api.v1.json](../../../engine/schemas/api.v1.json)). Types and suggestions are on `engine.show(...)` (`Show.data` values are `ShowData`). Non-veto results flatten `RuleResultValue` (`result` + typed field) onto each `RuleResult`.
 
 ## Browser
 
@@ -93,7 +93,7 @@ A pre-wired Monaco adapter ships at `@lemmabase/lemma-engine/monaco`.
 | `load(sources)` | Load multiple sources in one planning pass (object or `[label, code][]`; object keys keep insertion order, array form is the explicit ordered API; `@owner/name` keys tag LemmaBase repositories) |
 | `install(name)` | Download a repository from LemmaBase; resolves with `{ source, id }`. Does not load and does not write `lemma_deps/`. |
 | `list()` | JSON array of `ResolvedRepository`: each has `repository` and `specs`. |
-| `show(repo?, spec, effective?)` | `Show`: data catalog + local rule graph (`ShowRule`: `type`, `branches`, `depends_on_rules`) + temporal window (no Lemma text; empty `needed_by_rules` = reuse-only) |
+| `show(repo?, spec, effective?)` | `Show`: data catalog + this spec's rule graph (`ShowRule`: `type`, `path`, `branches`, `depends_on_rules` as `input_key`) + temporal window (no Lemma text; empty `needed_by_rules` = reuse-only) |
 | `source(repo?, spec?, effective?)` | Formatted Lemma source (omit `spec` for whole repo) |
 | `run({ spec, repository?, effective?, data?, rules?, explain? })` | Evaluate. Omit `rules` for all rules; pass a non-empty array to scope. `[]` errors. Returns a `Response`. With `explain: true`, per-rule `explanation` matches [api.v1.json](../../../engine/schemas/api.v1.json). |
 | `remove(repo?, name, effective?)` | Remove a temporal spec slice. |
@@ -115,7 +115,7 @@ writeFileSync('engine.lems', bytes);
 const restored = Engine.fromSnapshot(readFileSync('engine.lems'));
 ```
 
-**API values (`RuleResultValue`):** when present, always `display`, plus exactly one typed field (`measure` / `ratio` / `number` / …) or `range` instead. Same shape on `ShowData.fill` / `ShowData.suggestion`; non-veto rule results flatten those fields onto `RuleResult` (no `value` wrapper). Measure and ratio maps hold every declared unit name → magnitude string so interactive prompts can switch units.
+**API values (`RuleResultValue`):** when present, always `result`, plus exactly one typed field (`measure` / `ratio` / `number` / …) or `range` instead. Same shape on `ShowData.fill` / `ShowData.suggestion`; non-veto rule results flatten those fields onto `RuleResult` (no `value` wrapper). Measure and ratio maps hold every declared unit name → magnitude string so interactive prompts can switch units.
 
 ## Install from LemmaBase
 

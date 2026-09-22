@@ -112,10 +112,10 @@ fn build_envelope(
     for (name, rule_result) in &response.results {
         let mut entry = serde_json::Map::new();
         entry.insert("vetoed".into(), serde_json::Value::Bool(rule_result.vetoed));
-        if let Some(display) = rule_result.display() {
+        if let Some(result) = rule_result.result() {
             entry.insert(
-                "display".into(),
-                serde_json::Value::String(display.to_string()),
+                "result".into(),
+                serde_json::Value::String(result.to_string()),
             );
         }
         if let Some(veto_reason) = &rule_result.veto_reason {

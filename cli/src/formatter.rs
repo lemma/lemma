@@ -16,7 +16,7 @@ impl Default for Formatter {
 
 impl Formatter {
     /// Format evaluation response. When `explain` is false: one line for a single rule, or one table
-    /// for multiple rules. When true: data tree and full explanation trees per rule.
+    /// for multiple rules. When true: reasoning tables per rule.
     pub fn format_response(&self, response: &Response, explain: bool) -> String {
         if response.results.is_empty() {
             return String::new();
@@ -32,7 +32,7 @@ impl Formatter {
                 .values()
                 .next()
                 .expect("BUG: len==1 but no values");
-            return format!("{}\n", self.format_rule_display(result));
+            return format!("{}\n", self.format_rule_result_line(result));
         }
 
         let mut table = Table::new();
@@ -42,7 +42,7 @@ impl Formatter {
         for result in response.results.values() {
             table.add_row(vec![
                 Cell::new(&result.rule.name).set_alignment(CellAlignment::Left),
-                Cell::new(self.format_rule_display(result)).set_alignment(CellAlignment::Left),
+                Cell::new(self.format_rule_result_line(result)).set_alignment(CellAlignment::Left),
             ]);
         }
         format!("{}\n", table)
@@ -50,27 +50,9 @@ impl Formatter {
 
     fn format_response_explain(&self, response: &Response) -> String {
         let mut output = String::new();
-        let missing: Vec<&str> = response
-            .results
-            .values()
-            .filter(|result| result.awaits_missing_data())
-            .flat_map(|result| result.missing_data().iter().map(String::as_str))
-            .collect();
-        if !missing.is_empty() {
-            output.push_str("Missing data\n");
-            for key in &missing {
-                output.push_str("  ");
-                output.push_str(key);
-                output.push('\n');
-            }
+        for result in response.results.values() {
+            output.push_str(&self.format_rule_result(result));
             output.push('\n');
-        }
-        if !response.results.is_empty() {
-            output.push_str("Rules\n");
-            for result in response.results.values() {
-                output.push_str(&self.format_rule_result(result));
-                output.push('\n');
-            }
         }
         output
     }
@@ -146,7 +128,7 @@ impl Formatter {
             let header = format!(
                 "{}: {}",
                 result.rule.name,
-                self.highlight_value(&self.format_rule_display(result))
+                self.highlight_value(&self.format_rule_result_line(result))
             );
             table.add_row(vec![Cell::new(&header).set_alignment(CellAlignment::Left)]);
         }
@@ -160,7 +142,7 @@ impl Formatter {
         table.to_string()
     }
 
-    fn format_rule_display(&self, result: &RuleResult) -> String {
+    fn format_rule_result_line(&self, result: &RuleResult) -> String {
         if result.vetoed {
             return result
                 .veto_reason
@@ -168,8 +150,8 @@ impl Formatter {
                 .expect("BUG: vetoed rule result must have veto_reason");
         }
         result
-            .display()
-            .expect("BUG: non-veto rule result must have display")
+            .result()
+            .expect("BUG: non-veto rule result must have result")
             .to_string()
     }
 

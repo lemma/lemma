@@ -91,7 +91,7 @@ fn test_unit_multiply_percentage() -> Result<(), lemma::Errors> {
         .as_ref()
         .expect("explanation")
         .result
-        .value()
+        .literal_value()
         .expect("value");
     if let lemma::ValueKind::Number(_n) = &lit.value {
         assert_eq!(
@@ -101,7 +101,7 @@ fn test_unit_multiply_percentage() -> Result<(), lemma::Errors> {
     } else {
         panic!(
             "Expected number for scaled, got {:?}",
-            scaled_result.display()
+            scaled_result.result()
         );
     }
 
@@ -169,7 +169,7 @@ fn test_percentage_arithmetic() -> Result<(), lemma::Errors> {
         .as_ref()
         .expect("explanation")
         .result
-        .value()
+        .literal_value()
         .expect("value");
     if let lemma::ValueKind::Ratio(_r) = &lit.value {
         assert_eq!(
@@ -179,7 +179,7 @@ fn test_percentage_arithmetic() -> Result<(), lemma::Errors> {
     } else {
         panic!(
             "Expected percentage for combined_discount, got {:?}",
-            combined_result.display()
+            combined_result.result()
         );
     }
 
@@ -195,7 +195,7 @@ fn test_percentage_arithmetic() -> Result<(), lemma::Errors> {
         .as_ref()
         .expect("explanation")
         .result
-        .value()
+        .literal_value()
         .expect("value");
     if let lemma::ValueKind::Ratio(_r) = &lit.value {
         assert_eq!(
@@ -205,7 +205,7 @@ fn test_percentage_arithmetic() -> Result<(), lemma::Errors> {
     } else {
         panic!(
             "Expected percentage for net_rate, got {:?}",
-            net_rate_result.display()
+            net_rate_result.result()
         );
     }
 
@@ -221,7 +221,7 @@ fn test_percentage_arithmetic() -> Result<(), lemma::Errors> {
         .as_ref()
         .expect("explanation")
         .result
-        .value()
+        .literal_value()
         .expect("value");
     if let lemma::ValueKind::Ratio(_r) = &lit.value {
         assert_eq!(
@@ -231,7 +231,7 @@ fn test_percentage_arithmetic() -> Result<(), lemma::Errors> {
     } else {
         panic!(
             "Expected percentage for compound, got {:?}",
-            compound_result.display()
+            compound_result.result()
         );
     }
 
@@ -247,7 +247,7 @@ fn test_percentage_arithmetic() -> Result<(), lemma::Errors> {
         .as_ref()
         .expect("explanation")
         .result
-        .value()
+        .literal_value()
         .expect("value");
     match &lit.value {
         lemma::ValueKind::Ratio(rational_val) => {

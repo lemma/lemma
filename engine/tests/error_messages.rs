@@ -382,7 +382,7 @@ fn test_division_by_zero_returns_veto_with_message() {
     assert!(
         result_rule.vetoed,
         "Expected Veto, got display: {:?}",
-        result_rule.display()
+        result_rule.result()
     );
     let message = result_rule.veto_reason.as_deref().expect("veto_reason");
     assert!(

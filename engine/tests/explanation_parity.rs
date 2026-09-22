@@ -17,7 +17,7 @@ fn run_explain(engine: &Engine, spec: &str, inputs: &[(&str, &str)]) -> lemma::R
     let now = DateTimeValue::now();
     let data: HashMap<String, String> = inputs
         .iter()
-        .map(|(name, value)| (name.to_string(), value.to_string()))
+        .map(|(name, value)| (name.to_string(), (*value).to_string()))
         .collect();
     engine
         .run(None, spec, Some(&now), data, None, true)
@@ -134,6 +134,11 @@ rule huge: 10 ^ 100
         !explanation.result.vetoed(),
         "explanation.result reflects exact rule_results storage; RuleResultValue veto is separate"
     );
+    assert_eq!(
+        serde_json::to_value(explanation).unwrap()["result"].as_str(),
+        Some("Calculated result exceeds decimal value limit"),
+        "explanation result must match the RuleResult veto reason"
+    );
 }
 
 #[test]
@@ -157,7 +162,7 @@ rule r: flag and expensive_check
     );
     let result = rule_result(&response, "r");
     assert!(!result.vetoed);
-    assert_eq!(result.display(), Some("false"));
+    assert_eq!(result.result(), Some("false"));
 
     let explanation = result.explanation.as_ref().expect("explanation built");
     let rendered = format_explanation(explanation);
@@ -182,7 +187,7 @@ rule active: a >= b
     let response = run_explain(&engine, "comparison_operands", &[("a", "7"), ("b", "3")]);
     let result = rule_result(&response, "active");
     assert!(!result.vetoed);
-    assert_eq!(result.display(), Some("true"));
+    assert_eq!(result.result(), Some("true"));
 
     let explanation = result.explanation.as_ref().expect("explanation built");
     let rendered = format_explanation(explanation);

@@ -49,15 +49,15 @@ rule double_meeting: meeting_length * 2
         .unwrap();
     let rule = response.results.get("double_meeting").unwrap();
     let measure = rule
-        .value
+        .result
         .as_ref()
         .expect("rule result value")
         .measure
         .as_ref()
         .expect("measure map");
     assert_eq!(
-        measure.get("minute").map(String::as_str),
-        Some("60"),
+        measure.get("minute").copied(),
+        Some(rust_decimal::Decimal::from(60)),
         "30 minute * 2 = 60 minute"
     );
 }
@@ -88,7 +88,7 @@ rule end: start + 7 day
         .as_ref()
         .expect("explanation")
         .result
-        .value()
+        .literal_value()
         .expect("value");
 
     match result {
@@ -130,7 +130,7 @@ rule can_access: is_active and not is_premium
         .as_ref()
         .expect("explanation")
         .result
-        .value()
+        .literal_value()
         .expect("value");
 
     match result {

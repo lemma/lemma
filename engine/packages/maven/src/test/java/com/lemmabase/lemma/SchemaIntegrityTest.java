@@ -81,9 +81,11 @@ final class SchemaIntegrityTest {
     Set<String> schemaTypes = refOneOfConsts(defs.get("ExplanationNode"), "type");
     Map<String, ExplanationNode> samples =
         Map.of(
-            "rule", new ExplanationNode.Rule("n", "r", "b", null, null),
-            "compose", new ExplanationNode.Compose("e", List.of()),
-            "data", new ExplanationNode.Data("n", "d"),
+            "rule",
+                new ExplanationNode.Rule(
+                    "n", new RuleResultValue.ResultOnly("d"), "b", null, null),
+            "compose", new ExplanationNode.Compose("e", null, List.of()),
+            "data", new ExplanationNode.Data("n", new RuleResultValue.ResultOnly("d")),
             "data_unused", new ExplanationNode.DataUnused("n"),
             "conversion", new ExplanationNode.Conversion("e", List.of(), List.of()),
             "veto", new ExplanationNode.Veto(null));

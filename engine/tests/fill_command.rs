@@ -45,8 +45,8 @@ fn eval_rule(engine: &mut Engine, spec: &str, data: HashMap<String, String>, rul
         .results
         .get(rule)
         .unwrap_or_else(|| panic!("rule '{rule}' missing"))
-        .display()
-        .expect("display")
+        .result()
+        .expect("result")
         .to_string()
 }
 
@@ -79,7 +79,7 @@ data age: calendar -> fill 25 year
 rule r: age as year"#;
     let mut engine = load_ok(code);
     let mut data = HashMap::new();
-    data.insert("age".to_string(), "30 year".to_string());
+    data.insert("age".to_string(), "30 year".into());
     let result = eval_rule(&mut engine, "test", data, "r");
     assert_eq!(result, "30 year");
 }
@@ -165,8 +165,8 @@ rule r: n"#;
         "-> fill must not surface as suggestion"
     );
     assert_eq!(
-        entry.fill.as_ref().and_then(|v| v.number.as_deref()),
-        Some("42")
+        entry.fill.as_ref().and_then(|v| v.number),
+        Some(rust_decimal::Decimal::from(42))
     );
 }
 

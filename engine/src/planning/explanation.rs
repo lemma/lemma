@@ -5,11 +5,14 @@
 //! follows origins so rewritten cells display their pre-image, and fills these
 //! nodes for the response.
 //!
-//! Bound data narration is `Data` with a required `display` string.
-//! Structural mentions of paths that were never looked up are `DataUnused`
-//! (no display field), distinct from a Missing-data veto on a visited leaf.
+//! Bound data narration is `Data` with a flattened [`RuleResultValue`] (result
+//! plus typed fields). Structural mentions of paths that were never looked up
+//! are `DataUnused` (no value fields), distinct from a Missing-data veto on a
+//! visited leaf.
 
+use crate::parsing::ast::ArithmeticComputation;
 use crate::planning::semantics::{DataPath, RulePath};
+use crate::result_value::RuleResultValue;
 use serde::{Serialize, Serializer};
 
 pub(crate) fn serialize_rule_path_as_name<S>(
@@ -19,7 +22,7 @@ pub(crate) fn serialize_rule_path_as_name<S>(
 where
     S: Serializer,
 {
-    serializer.serialize_str(&path.rule)
+    serializer.serialize_str(&path.input_key())
 }
 
 pub(crate) fn serialize_data_path_as_name<S>(
@@ -38,8 +41,8 @@ pub enum ExplanationNode {
     Rule {
         #[serde(serialize_with = "serialize_rule_path_as_name")]
         name: RulePath,
-        #[serde(serialize_with = "serialize_option_string")]
-        result: Option<String>,
+        #[serde(flatten)]
+        result: RuleResultValue,
         body: String,
         #[serde(skip_serializing_if = "Vec::is_empty")]
         causes: Vec<Cause>,
@@ -48,13 +51,16 @@ pub enum ExplanationNode {
     },
     Compose {
         expression: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        operator: Option<ArithmeticComputation>,
         operands: Vec<ExplanationNode>,
     },
-    /// Evaluated / bound data narration. `display` is always the looked-up value or veto text.
+    /// Evaluated / bound data narration. Result fields flatten like [`crate::evaluation::response::RuleResult`].
     Data {
         #[serde(serialize_with = "serialize_data_path_as_name")]
         name: DataPath,
-        display: String,
+        #[serde(flatten)]
+        result: RuleResultValue,
     },
     /// Structural mention of a data path that was not looked up for this cause
     /// (short-circuit skip or static record narration without a binding).
@@ -71,16 +77,6 @@ pub enum ExplanationNode {
         #[serde(skip_serializing_if = "Option::is_none")]
         message: Option<String>,
     },
-}
-
-fn serialize_option_string<S>(value: &Option<String>, serializer: S) -> Result<S::Ok, S::Error>
-where
-    S: Serializer,
-{
-    match value {
-        Some(s) => serializer.serialize_str(s),
-        None => serializer.serialize_none(),
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]

@@ -59,14 +59,14 @@ fn run_rational(engine: &Engine, spec: &str, raw: &str) -> (Decimal, Option<Stri
         .as_ref()
         .expect("explanation")
         .result
-        .value()
+        .literal_value()
         .expect("value");
     match &lit.value {
         ValueKind::Ratio(n) => (
             lemma::ValueKind::Number(n.clone())
                 .as_decimal_magnitude()
                 .unwrap(),
-            rr.value
+            rr.result
                 .as_ref()
                 .and_then(|v| v.ratio.as_ref())
                 .and_then(|m| {
@@ -75,7 +75,20 @@ fn run_rational(engine: &Engine, spec: &str, raw: &str) -> (Decimal, Option<Stri
                         .measure_binding_unit
                         .as_ref()
                         .and_then(|u| m.contains_key(u).then(|| u.clone()))
-                        .or_else(|| m.contains_key("percent").then(|| "percent".to_string()))
+                        .or_else(|| {
+                            // Overlay unit identity: name present in the raw input.
+                            if (raw.contains("%%") || raw.contains("permille"))
+                                && m.contains_key("permille")
+                            {
+                                Some("permille".to_string())
+                            } else if (raw.contains('%') || raw.contains("percent"))
+                                && m.contains_key("percent")
+                            {
+                                Some("percent".to_string())
+                            } else {
+                                m.keys().find(|u| raw.contains(u.as_str())).cloned()
+                            }
+                        })
                         .or_else(|| m.keys().next().cloned())
                 }),
         ),
@@ -97,7 +110,7 @@ fn run_veto_reason(engine: &Engine, spec: &str, raw: &str) -> String {
     assert!(
         rr.vetoed,
         "expected '{raw}' to be rejected via veto, got value {:?}",
-        rr.display()
+        rr.result()
     );
     rr.veto_reason.clone().expect("veto reason")
 }

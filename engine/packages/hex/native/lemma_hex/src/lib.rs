@@ -537,7 +537,7 @@ fn map_term_to_data_values(term: Term) -> Result<HashMap<String, String>, rustle
     for (key, value) in iter {
         let key_str = map_key_string(key)?;
         let value_str = term_to_string(value)?;
-        result.insert(key_str, value_str);
+        result.insert(key_str, value_str.to_string());
     }
     Ok(result)
 }

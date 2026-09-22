@@ -23,9 +23,9 @@ lemma run [[repo] spec] [name=value ...] [--prefix PATH] [--rules=RULES] [option
 
 **Options:**
 - `--prefix <path>`: workspace directory or `.lemma` file (default: current directory)
-- `--rules <rules>`: comma-separated rule names (omit to evaluate all)
+- `--rules <rules>`: comma-separated `Show.rules` keys (omit to evaluate this spec's outputs)
 - `--json`: output results as JSON (default: human-readable table). Each rule result may include `missing_data` (unbound input keys in evaluation / decision-tree order). Types, filled values, and suggestions come from `lemma show`, not from evaluate JSON.
-- `-x, --explain`: include explanation trees (human: reasoning tables; JSON: per-rule `explanation` objects matching [`api.v1.json`](../../../engine/schemas/api.v1.json)). Human output prints **Missing data** only for rules still awaiting input (`MissingData` veto), not leftover live keys on a settled value or UserDefined/Computation answer. JSON still carries raw per-rule `missing_data` from the engine.
+- `-x, --explain`: include explanation trees (human: reasoning tables per rule; JSON: per-rule `explanation` objects matching [`api.v1.json`](../../../engine/schemas/api.v1.json)). Unbound inputs appear in those tables when a rule still awaits input (`MissingData` veto). JSON still carries raw per-rule `missing_data` from the engine.
 - `-i, --interactive`: guided spec/rule/data selection
 - `--effective <datetime>`: evaluate at effective datetime (e.g. `2025`, `2025-03`, `2025-03-04`)
 
@@ -45,9 +45,9 @@ lemma run '@iso/countries' alpha2
 
 ### `lemma show`: declared data catalog and rules
 
-Shows declared data slots with types and constraints (minimum, maximum, units, decimals, text options), filled values, suggestions, and the local rule graph (`ShowRule`: type, branches, depends_on_rules). Lemma source text is available via `Engine::source` (API) only.
+Shows declared data slots with types and constraints (minimum, maximum, units, decimals, text options), filled values, suggestions, import `path`, and this spec's rule graph (`ShowRule`: type, path, branches, depends_on_rules as `input_key`). Lemma source text is available via `Engine::source` (API) only.
 
-`show` lists every declared promptable data slot (types, constraints, `fill`, suggestions). `needed_by_rules` names local rules that still need the slot after normalize; empty means offered for reuse (`data x: alias.slot`), not an eval intake key for this spec. Run-data-aware pruning for a concrete `run` is per-rule `results.*.missing_data`.
+`show` lists every declared promptable data slot (types, constraints, `fill`, suggestions, `path`). `needed_by_rules` names Show.rules keys that still need the slot after normalize; empty means offered for reuse (`data x: alias.slot`), not an eval intake key for this spec. Run-data-aware pruning for a concrete `run` is per-rule `results.*.missing_data`.
 
 ```bash
 lemma show [[repo] spec] [--prefix PATH] [--effective <datetime>] [--json]

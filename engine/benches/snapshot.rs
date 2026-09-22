@@ -56,7 +56,7 @@ fn terminal_display(engine: &Engine) -> String {
         .results
         .get(LogisticsFixture::TERMINAL_RULE)
         .expect("BUG: requested terminal rule missing from response")
-        .display()
+        .result()
         .expect("BUG: logistics terminal rule must produce a value on the shipment inputs")
         .to_string()
 }

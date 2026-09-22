@@ -72,7 +72,7 @@ rule contract_valid: is_salary_valid and vacation_days_ok and is_adult
         .as_ref()
         .expect("explanation")
         .result
-        .value()
+        .literal_value()
         .expect("value");
     match &lit.value {
         lemma::ValueKind::Number(n) => assert_eq!(
@@ -91,7 +91,7 @@ rule contract_valid: is_salary_valid and vacation_days_ok and is_adult
         .unwrap();
     assert_eq!(
         contract_valid
-            .value
+            .result
             .as_ref()
             .expect("rule result value")
             .boolean,
@@ -157,7 +157,7 @@ rule effective_rate: (tax_amount / income) * 100%
         .as_ref()
         .expect("explanation")
         .result
-        .value()
+        .literal_value()
         .expect("value");
     match &lit.value {
         lemma::ValueKind::Number(n) => assert_eq!(
@@ -175,7 +175,7 @@ rule effective_rate: (tax_amount / income) * 100%
         .find(|r| r.rule.name == "in_mid_bracket")
         .unwrap();
     assert_eq!(
-        in_mid.value.as_ref().expect("rule result value").boolean,
+        in_mid.result.as_ref().expect("rule result value").boolean,
         Some(true)
     );
 
@@ -190,7 +190,7 @@ rule effective_rate: (tax_amount / income) * 100%
         .as_ref()
         .expect("explanation")
         .result
-        .value()
+        .literal_value()
         .expect("value");
     match &lit.value {
         lemma::ValueKind::Ratio(n) => {
@@ -230,8 +230,8 @@ rule status: "LOW"
         .unwrap();
 
     let mut data = std::collections::HashMap::new();
-    data.insert("threshold".to_string(), "500".to_string());
-    data.insert("multiplier".to_string(), "2".to_string());
+    data.insert("threshold".to_string(), "500".into());
+    data.insert("multiplier".to_string(), "2".into());
 
     let now = DateTimeValue::now();
     let response = engine
@@ -243,18 +243,18 @@ rule status: "LOW"
         .values()
         .find(|r| r.rule.name == "calculated_value")
         .unwrap();
-    assert_eq!(calculated.display().expect("display").to_string(), "200");
+    assert_eq!(calculated.result().expect("result").to_string(), "200");
 
     let status = response
         .results
         .values()
         .find(|r| r.rule.name == "status")
         .unwrap();
-    assert_eq!(status.display().expect("display").to_string(), "LOW");
+    assert_eq!(status.result().expect("result").to_string(), "LOW");
 
     let mut data2 = std::collections::HashMap::new();
-    data2.insert("threshold".to_string(), "150".to_string());
-    data2.insert("multiplier".to_string(), "2".to_string());
+    data2.insert("threshold".to_string(), "150".into());
+    data2.insert("multiplier".to_string(), "2".into());
     let response2 = engine
         .run(None, "dynamic_config", Some(&now), data2, None, true)
         .unwrap();
@@ -264,7 +264,7 @@ rule status: "LOW"
         .values()
         .find(|r| r.rule.name == "status")
         .unwrap();
-    assert_eq!(status2.display().expect("display").to_string(), "HIGH");
+    assert_eq!(status2.result().expect("result").to_string(), "HIGH");
 
     let _ = engine.remove(None, "dynamic_config", Some(&now));
 }
@@ -317,7 +317,7 @@ rule is_on_schedule: elapsed_time <= phase1_duration + phase2_duration
         .find(|r| r.rule.name == "is_phase1_complete")
         .unwrap();
     assert_eq!(
-        phase1_complete.display().expect("display").to_string(),
+        phase1_complete.result().expect("result").to_string(),
         "true"
     );
 
@@ -328,7 +328,7 @@ rule is_on_schedule: elapsed_time <= phase1_duration + phase2_duration
         .unwrap();
     assert_eq!(
         phase2_complete
-            .value
+            .result
             .as_ref()
             .expect("rule result value")
             .boolean,
@@ -378,7 +378,7 @@ rule is_valid: salary >= base_contract.min_salary and salary <= base_contract.ma
         .find(|r| r.rule.name == "is_valid")
         .unwrap();
     assert_eq!(
-        is_valid.value.as_ref().expect("rule result value").boolean,
+        is_valid.result.as_ref().expect("rule result value").boolean,
         Some(true)
     );
 }
@@ -422,7 +422,7 @@ rule probation_end: base_contract.project_start + base_contract.probation_period
 
     assert!(!probation_end.vetoed);
     let date = probation_end
-        .value
+        .result
         .as_ref()
         .expect("rule result value")
         .date

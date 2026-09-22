@@ -52,7 +52,7 @@ fn format_run_text(response: &Response) -> String {
     let missing: Vec<&str> = response
         .results
         .values()
-        .filter(|result| result.awaits_missing_data())
+        .filter(|result| result.is_missing_data())
         .flat_map(|result| result.missing_data().iter().map(String::as_str))
         .collect();
     if !missing.is_empty() {

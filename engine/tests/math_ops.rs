@@ -22,7 +22,7 @@ fn run(code: &str, rule: &str) -> Result<String, lemma::Errors> {
         .results
         .values()
         .find(|r| r.rule.name == rule)
-        .and_then(|r| r.display().map(str::to_string))
+        .and_then(|r| r.result().map(str::to_string))
         .expect("rule value");
     Ok(v.to_string())
 }
@@ -86,7 +86,7 @@ fn run_authoritative_decimal(code: &str, rule: &str) -> Decimal {
         rule_result.veto_reason
     );
     let display = rule_result
-        .display()
+        .result()
         .expect("authoritative display")
         .to_string();
     display.parse().unwrap_or_else(|_| {

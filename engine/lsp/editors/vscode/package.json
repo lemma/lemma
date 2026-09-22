@@ -2,7 +2,7 @@
   "name": "lemma-language",
   "displayName": "Lemma Language",
   "description": "Language support for Lemma: syntax highlighting, inline diagnostics, and clickable Registry references",
-  "version": "0.9.10",
+  "version": "0.9.11",
   "publisher": "lemma",
   "license": "Apache-2.0",
   "icon": "lemma_128.png",

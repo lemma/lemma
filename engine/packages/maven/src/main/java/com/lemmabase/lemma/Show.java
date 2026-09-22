@@ -12,6 +12,7 @@ import org.jspecify.annotations.Nullable;
 /**
  * Show.
  *
+ * @param repository interned repository name; null for the unnamed workspace
  * @param spec spec
  * @param commentary commentary
  * @param effectiveFrom effectiveFrom
@@ -20,10 +21,11 @@ import org.jspecify.annotations.Nullable;
  * @param startLine startLine
  * @param sourceType sourceType
  * @param data data
- * @param rules local rule graph
+ * @param rules this spec's rule graph (local plus reachable imports)
  * @param meta meta
  */
 public record Show(
+    @Nullable String repository,
     String spec,
     @Nullable String commentary,
     @Nullable String effectiveFrom,
@@ -35,15 +37,57 @@ public record Show(
     Map<String, ShowRule> rules,
     Map<String, LiteralValue> meta) {
   /**
+   * One uses hop on a Show data or rule path.
+   *
+   * @param uses uses alias for this hop
+   * @param repository target repository name; null for the unnamed workspace
+   * @param spec resolved target spec name
+   */
+  public record PathSegment(String uses, @Nullable String repository, String spec) {
+    /**
+     * Parses JSON.
+     *
+     * @param p parser at value start
+     * @return parsed value
+     * @throws IOException if JSON IO fails
+     */
+    static PathSegment read(JsonParser p) throws IOException {
+      JsonReading.expectStartObject(p, "PathSegment");
+      String uses = null;
+      String repository = null;
+      String spec = null;
+      while (p.nextToken() != JsonToken.END_OBJECT) {
+        String field = p.currentName();
+        p.nextToken();
+        switch (field) {
+          case "uses" -> uses = JsonReading.readString(p);
+          case "repository" -> repository = JsonReading.readString(p);
+          case "spec" -> spec = JsonReading.readString(p);
+          default -> JsonReading.unknownField(field, "PathSegment");
+        }
+      }
+      if (uses == null) {
+        JsonReading.missingRequired("uses", "PathSegment");
+      }
+      if (spec == null) {
+        JsonReading.missingRequired("spec", "PathSegment");
+      }
+      return new PathSegment(uses, repository, spec);
+    }
+  }
+
+  /**
    * One declared data slot.
    *
    * @param type type
+   * @param path import hops to this slot; empty means this spec
    * @param fill spec literal or literal {@code with} binding
    * @param suggestion suggestion
-   * @param neededByRules local rules that need this slot; empty = reuse-only
+   * @param neededByRules Show.rules keys that need this slot; empty = reuse-only
    */
   public record ShowData(
       LemmaType type,
+      List<PathSegment> path,
       @Nullable RuleResultValue fill,
       @Nullable RuleResultValue suggestion,
       List<String> neededByRules) {
@@ -57,6 +101,7 @@ public record Show(
     static ShowData read(JsonParser p) throws IOException {
       JsonReading.expectStartObject(p, "ShowData");
       LemmaType type = null;
+      List<PathSegment> path = null;
       RuleResultValue fill = null;
       RuleResultValue suggestion = null;
       List<String> neededByRules = null;
@@ -65,6 +110,7 @@ public record Show(
         p.nextToken();
         switch (field) {
           case "type" -> type = LemmaType.read(p);
+          case "path" -> path = JsonReading.readList(p, PathSegment::read);
           case "fill" -> fill = RuleResultValue.read(p);
           case "suggestion" -> suggestion = RuleResultValue.read(p);
           case "needed_by_rules" -> neededByRules = JsonReading.readList(p, JsonReading::readString);
@@ -74,10 +120,13 @@ public record Show(
       if (type == null) {
         JsonReading.missingRequired("type", "ShowData");
       }
+      if (path == null) {
+        JsonReading.missingRequired("path", "ShowData");
+      }
       if (neededByRules == null) {
         JsonReading.missingRequired("needed_by_rules", "ShowData");
       }
-      return new ShowData(type, fill, suggestion, neededByRules);
+      return new ShowData(type, path, fill, suggestion, neededByRules);
     }
   }
 
@@ -158,13 +207,15 @@ public record Show(
   }
 
   /**
-   * Local rule on Show: result type, authored branches, stored depends_on_rules.
+   * Rule on Show: result type, path, authored branches, depends_on_rules.
    *
    * @param type result type
+   * @param path import hops to this rule; empty means this spec
    * @param branches default then unless arms
-   * @param dependsOnRules local topo deps
+   * @param dependsOnRules Show.rules keys this rule depends on
    */
-  public record ShowRule(LemmaType type, List<ShowBranch> branches, List<String> dependsOnRules) {
+  public record ShowRule(
+      LemmaType type, List<PathSegment> path, List<ShowBranch> branches, List<String> dependsOnRules) {
     /**
      * Parses JSON.
      *
@@ -175,6 +226,7 @@ public record Show(
     static ShowRule read(JsonParser p) throws IOException {
       JsonReading.expectStartObject(p, "ShowRule");
       LemmaType type = null;
+      List<PathSegment> path = null;
       List<ShowBranch> branches = null;
       List<String> dependsOnRules = null;
       while (p.nextToken() != JsonToken.END_OBJECT) {
@@ -182,6 +234,7 @@ public record Show(
         p.nextToken();
         switch (field) {
           case "type" -> type = LemmaType.read(p);
+          case "path" -> path = JsonReading.readList(p, PathSegment::read);
           case "branches" -> branches = JsonReading.readList(p, ShowBranch::read);
           case "depends_on_rules" -> dependsOnRules = JsonReading.readList(p, JsonReading::readString);
           default -> JsonReading.unknownField(field, "ShowRule");
@@ -190,13 +243,16 @@ public record Show(
       if (type == null) {
         JsonReading.missingRequired("type", "ShowRule");
       }
+      if (path == null) {
+        JsonReading.missingRequired("path", "ShowRule");
+      }
       if (branches == null) {
         JsonReading.missingRequired("branches", "ShowRule");
       }
       if (dependsOnRules == null) {
         JsonReading.missingRequired("depends_on_rules", "ShowRule");
       }
-      return new ShowRule(type, branches, dependsOnRules);
+      return new ShowRule(type, path, branches, dependsOnRules);
     }
   }
 
@@ -209,6 +265,7 @@ public record Show(
    */
   static Show read(JsonParser p) throws IOException {
     JsonReading.expectStartObject(p, "Show");
+    String repository = null;
     String spec = null;
     String commentary = null;
     String effectiveFrom = null;
@@ -223,6 +280,7 @@ public record Show(
       String field = p.currentName();
       p.nextToken();
       switch (field) {
+        case "repository" -> repository = JsonReading.readString(p);
         case "spec" -> spec = JsonReading.readString(p);
         case "commentary" -> commentary = JsonReading.readString(p);
         case "effective_from" -> effectiveFrom = JsonReading.readString(p);
@@ -252,6 +310,7 @@ public record Show(
       JsonReading.missingRequired("meta", "Show");
     }
     return new Show(
+        repository,
         spec,
         commentary,
         effectiveFrom,

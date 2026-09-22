@@ -77,8 +77,8 @@ Install a repository from LemmaBase (download only; then `load`). Default transp
 | `Lemma.install/2-3` | Download a repository from LemmaBase (`{:ok, map}` with `:source` / `:id`); optional `(url, headers) -> …` transport (default `Lemma.Transport.get/2`); does not load and does not write `lemma_deps/` |
 | `Lemma.list/1` | List loaded Specs (includes embedded `lemma` / `spec units`) |
 | `Lemma.source/4` | Formatted Lemma source (`repository`, `spec`, `effective`; omit `spec` for repo-wide) |
-| `Lemma.show/4` | Declared data catalog + temporal window (`repository`, `spec`, `effective`). Empty `needed_by_rules` = reuse-only. `Show.data` values are `Lemma.ShowData`. |
-| `Lemma.run/3` | Evaluate: `target` map (`repo`, `spec`, `effective`), `options` map (`data`, `rules`, `explain`). Each rule result may include `missing_data` (unbound input keys). Non-veto results carry flattened `display` + typed keys (`Lemma.RuleResult`). With `explain: true`, `explanation` matches [api.v1.json](../../../engine/schemas/api.v1.json) (`RuleResult.explanation` / `ExplanationNode`). Types and suggestions are on `Lemma.show/4` only. |
+| `Lemma.show/4` | Declared data catalog + this spec's rule graph + temporal window (`repository`, `spec`, `effective`). Empty `needed_by_rules` = reuse-only. `Show.data` / `Show.rules` carry `path` (`[]` = this spec). `Show.data` values are `Lemma.ShowData`. |
+| `Lemma.run/3` | Evaluate: `target` map (`repo`, `spec`, `effective`), `options` map (`data`, `rules`, `explain`). Each rule result may include `missing_data` (unbound input keys). Non-veto results carry flattened `result` + typed keys (`Lemma.RuleResult`). With `explain: true`, `explanation` matches [api.v1.json](../../../engine/schemas/api.v1.json) (`RuleResult.explanation` / `ExplanationNode`). Types and suggestions are on `Lemma.show/4` only. |
 | `Lemma.remove/4` | Remove temporal slice: `repository`, `spec`, `effective` |
 | `Lemma.update/3-4` | Upsert identities from code; optional source `attribute` |
 | `Lemma.quality/1` | Structural quality recommendations across loaded specs (advisory only) |

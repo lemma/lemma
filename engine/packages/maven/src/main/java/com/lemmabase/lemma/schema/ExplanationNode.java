@@ -2,11 +2,16 @@ package com.lemmabase.lemma.schema;
 
 import com.lemmabase.lemma.JsonReading;
 import com.lemmabase.lemma.LemmaBugError;
+import com.lemmabase.lemma.RuleResultValue;
 
 import com.fasterxml.jackson.core.JsonParser;
 import com.fasterxml.jackson.core.JsonToken;
 import java.io.IOException;
+import java.math.BigDecimal;
+import java.time.LocalDate;
+import java.time.LocalTime;
 import java.util.List;
+import java.util.Map;
 import org.jspecify.annotations.Nullable;
 
 /** Nested explanation tree node (tagged by {@code type}). */
@@ -97,15 +102,16 @@ public sealed interface ExplanationNode {
 
   /**
    * Rule.
+   *
    * @param name name
-   * @param result result
+   * @param result flattened RuleResultValue (one-liner plus typed maps)
    * @param body body
    * @param causes causes
    * @param children children
    */
   record Rule(
       String name,
-      String result,
+      RuleResultValue result,
       String body,
       @Nullable List<Cause> causes,
       @Nullable List<ExplanationNode> children)
@@ -127,6 +133,15 @@ public sealed interface ExplanationNode {
       JsonReading.expectStartObject(p, "ExplanationNode.Rule");
       String name = null;
       String result = null;
+      Map<String, BigDecimal> measure = null;
+      Map<String, BigDecimal> ratio = null;
+      BigDecimal number = null;
+      Boolean booleanValue = null;
+      String text = null;
+      LocalDate date = null;
+      LocalTime time = null;
+      RuleResultValue.CalendarResult calendar = null;
+      RuleResultValue.RangeResult range = null;
       String body = null;
       List<Cause> causes = null;
       List<ExplanationNode> children = null;
@@ -137,6 +152,15 @@ public sealed interface ExplanationNode {
           case "type" -> expectType(p, "rule");
           case "name" -> name = JsonReading.readString(p);
           case "result" -> result = JsonReading.readString(p);
+          case "measure" -> measure = JsonReading.readMap(p, JsonReading::readDecimal);
+          case "ratio" -> ratio = JsonReading.readMap(p, JsonReading::readDecimal);
+          case "number" -> number = JsonReading.readDecimal(p);
+          case "boolean" -> booleanValue = JsonReading.readBoolean(p);
+          case "text" -> text = JsonReading.readString(p);
+          case "date" -> date = JsonReading.readLocalDate(p);
+          case "time" -> time = JsonReading.readLocalTime(p);
+          case "calendar" -> calendar = RuleResultValue.CalendarResult.read(p);
+          case "range" -> range = RuleResultValue.RangeResult.read(p);
           case "body" -> body = JsonReading.readString(p);
           case "causes" -> causes = JsonReading.readList(p, Cause::read);
           case "children" -> children = JsonReading.readList(p, ExplanationNode::read);
@@ -152,16 +176,25 @@ public sealed interface ExplanationNode {
       if (body == null) {
         JsonReading.missingRequired("body", "ExplanationNode.Rule");
       }
-      return new Rule(name, result, body, causes, children);
+      return new Rule(
+          name,
+          typedValue(
+              result, measure, ratio, number, booleanValue, text, date, time, calendar, range),
+          body,
+          causes,
+          children);
     }
   }
 
   /**
    * Compose.
    * @param expression expression
+   * @param operator arithmetic operator when this compose is arithmetic; null otherwise
    * @param operands operands
    */
-  record Compose(String expression, List<ExplanationNode> operands) implements ExplanationNode {
+  record Compose(
+      String expression, @Nullable String operator, List<ExplanationNode> operands)
+      implements ExplanationNode {
     /** {@inheritDoc} */
     @Override
     public String type() {
@@ -178,6 +211,7 @@ public sealed interface ExplanationNode {
     public static Compose read(JsonParser p) throws IOException {
       JsonReading.expectStartObject(p, "ExplanationNode.Compose");
       String expression = null;
+      String operator = null;
       List<ExplanationNode> operands = null;
       while (p.nextToken() != JsonToken.END_OBJECT) {
         String field = p.currentName();
@@ -185,6 +219,7 @@ public sealed interface ExplanationNode {
         switch (field) {
           case "type" -> expectType(p, "compose");
           case "expression" -> expression = JsonReading.readString(p);
+          case "operator" -> operator = JsonReading.readString(p);
           case "operands" -> operands = JsonReading.readList(p, ExplanationNode::read);
           default -> JsonReading.unknownField(field, "ExplanationNode.Compose");
         }
@@ -195,16 +230,26 @@ public sealed interface ExplanationNode {
       if (operands == null) {
         JsonReading.missingRequired("operands", "ExplanationNode.Compose");
       }
-      return new Compose(expression, operands);
+      if (operator != null
+          && !(operator.equals("add")
+              || operator.equals("subtract")
+              || operator.equals("multiply")
+              || operator.equals("divide")
+              || operator.equals("modulo")
+              || operator.equals("power"))) {
+        throw new LemmaBugError("BUG: invalid Compose operator '" + operator + "'");
+      }
+      return new Compose(expression, operator, operands);
     }
   }
 
   /**
    * Data.
+   *
    * @param name name
-   * @param display display
+   * @param result flattened RuleResultValue (one-liner plus typed maps)
    */
-  record Data(String name, String display) implements ExplanationNode {
+  record Data(String name, RuleResultValue result) implements ExplanationNode {
     /** {@inheritDoc} */
     @Override
     public String type() {
@@ -221,24 +266,45 @@ public sealed interface ExplanationNode {
     public static Data read(JsonParser p) throws IOException {
       JsonReading.expectStartObject(p, "ExplanationNode.Data");
       String name = null;
-      String display = null;
+      String result = null;
+      Map<String, BigDecimal> measure = null;
+      Map<String, BigDecimal> ratio = null;
+      BigDecimal number = null;
+      Boolean booleanValue = null;
+      String text = null;
+      LocalDate date = null;
+      LocalTime time = null;
+      RuleResultValue.CalendarResult calendar = null;
+      RuleResultValue.RangeResult range = null;
       while (p.nextToken() != JsonToken.END_OBJECT) {
         String field = p.currentName();
         p.nextToken();
         switch (field) {
           case "type" -> expectType(p, "data");
           case "name" -> name = JsonReading.readString(p);
-          case "display" -> display = JsonReading.readString(p);
+          case "result" -> result = JsonReading.readString(p);
+          case "measure" -> measure = JsonReading.readMap(p, JsonReading::readDecimal);
+          case "ratio" -> ratio = JsonReading.readMap(p, JsonReading::readDecimal);
+          case "number" -> number = JsonReading.readDecimal(p);
+          case "boolean" -> booleanValue = JsonReading.readBoolean(p);
+          case "text" -> text = JsonReading.readString(p);
+          case "date" -> date = JsonReading.readLocalDate(p);
+          case "time" -> time = JsonReading.readLocalTime(p);
+          case "calendar" -> calendar = RuleResultValue.CalendarResult.read(p);
+          case "range" -> range = RuleResultValue.RangeResult.read(p);
           default -> JsonReading.unknownField(field, "ExplanationNode.Data");
         }
       }
       if (name == null) {
         JsonReading.missingRequired("name", "ExplanationNode.Data");
       }
-      if (display == null) {
-        JsonReading.missingRequired("display", "ExplanationNode.Data");
+      if (result == null) {
+        JsonReading.missingRequired("result", "ExplanationNode.Data");
       }
-      return new Data(name, display);
+      return new Data(
+          name,
+          typedValue(
+              result, measure, ratio, number, booleanValue, text, date, time, calendar, range));
     }
   }
 
@@ -362,6 +428,47 @@ public sealed interface ExplanationNode {
       }
       return new Veto(message);
     }
+  }
+
+  private static RuleResultValue typedValue(
+      String result,
+      @Nullable Map<String, BigDecimal> measure,
+      @Nullable Map<String, BigDecimal> ratio,
+      @Nullable BigDecimal number,
+      @Nullable Boolean booleanValue,
+      @Nullable String text,
+      @Nullable LocalDate date,
+      @Nullable LocalTime time,
+      RuleResultValue.@Nullable CalendarResult calendar,
+      RuleResultValue.@Nullable RangeResult range) {
+    if (number != null) {
+      return new RuleResultValue.Number(result, number);
+    }
+    if (text != null) {
+      return new RuleResultValue.Text(result, text);
+    }
+    if (booleanValue != null) {
+      return new RuleResultValue.BooleanValue(result, booleanValue);
+    }
+    if (date != null) {
+      return new RuleResultValue.Date(result, date);
+    }
+    if (time != null) {
+      return new RuleResultValue.Time(result, time);
+    }
+    if (measure != null) {
+      return new RuleResultValue.Measure(result, measure);
+    }
+    if (ratio != null) {
+      return new RuleResultValue.Ratio(result, ratio);
+    }
+    if (calendar != null) {
+      return new RuleResultValue.Calendar(result, calendar);
+    }
+    if (range != null) {
+      return new RuleResultValue.Range(result, range);
+    }
+    return new RuleResultValue.ResultOnly(result);
   }
 
   private static void expectType(JsonParser p, String expected) throws IOException {

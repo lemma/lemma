@@ -44,8 +44,8 @@ pub struct RuleResult {
     pub veto_reason: Option<String>,
     pub rule_type: String,
 
-    /// Flattened value fields, including `display` when the rule is not vetoed.
-    pub value: Option<RuleResultValue>,
+    /// Flattened value fields, including `result` when the rule is not vetoed.
+    pub result: Option<RuleResultValue>,
     pub explanation: Option<Explanation>,
     /// Unbound caller data paths still live for this rule under the current run data
     /// (`DataPath::input_key` strings; subset of `Show.data` keys with non-empty
@@ -55,20 +55,20 @@ pub struct RuleResult {
 }
 
 impl RuleResult {
-    /// Engine-rendered display string from the flattened [`RuleResultValue`].
+    /// Engine-rendered one-liner from the flattened [`RuleResultValue`].
     #[must_use]
-    pub fn display(&self) -> Option<&str> {
-        self.value
+    pub fn result(&self) -> Option<&str> {
+        self.result
             .as_ref()
-            .and_then(|value| value.display.as_deref())
+            .and_then(|value| value.result.as_deref())
     }
 
-    /// True when this rule still waits on unbound inputs (`MissingData` veto).
+    /// True when this result is a [`VetoType::MissingData`] veto.
     ///
     /// Value and non-`MissingData` vetoes are settled answers; leftover live keys in
     /// [`Self::missing_data`] must not drive prompts or human "Missing data" display.
     #[must_use]
-    pub fn awaits_missing_data(&self) -> bool {
+    pub fn is_missing_data(&self) -> bool {
         matches!(
             self.veto_detail.as_ref(),
             Some(VetoType::MissingData { .. })
@@ -119,19 +119,19 @@ impl RuleResult {
                     _ => Some(veto.to_string()),
                 },
                 rule_type: rule_type_name,
-                value: None,
+                result: None,
                 explanation,
                 missing_data,
             },
-            OperationResult::Value(literal) => {
-                match rule_result_value_from_literal(literal, rule_type, family_units) {
+            OperationResult::Value(bound) => {
+                match rule_result_value_from_literal(&bound.to_literal(), rule_type, family_units) {
                     Ok(value) => Self {
                         rule,
                         veto_detail: None,
                         vetoed: false,
                         veto_reason: None,
                         rule_type: rule_type_name,
-                        value: Some(value),
+                        result: Some(value),
                         explanation,
                         missing_data,
                     },
@@ -158,9 +158,9 @@ impl RuleResult {
             self.rule.name
         );
         let value = self
-            .value
+            .result
             .as_ref()
-            .unwrap_or_else(|| panic!("BUG: non-vetoed rule '{}' missing value", self.rule.name));
+            .unwrap_or_else(|| panic!("BUG: non-vetoed rule '{}' missing result", self.rule.name));
         value.to_literal(&self.rule.rule_type)
     }
 }
@@ -212,7 +212,12 @@ mod tests {
     use crate::planning::unit_family::FamilyUnitCatalog;
     use crate::planning::unit_index::UnitIndex;
     use rust_decimal::Decimal;
+    use std::str::FromStr;
     use std::sync::Arc;
+
+    fn dec(s: &str) -> Decimal {
+        Decimal::from_str(s).expect("BUG: test decimal literal")
+    }
 
     fn empty_family_catalog() -> FamilyUnitCatalog {
         FamilyUnitCatalog::default()
@@ -334,9 +339,10 @@ mod tests {
         );
         // Override committed decimal number field to match serialization path under test
         if let Some(rule) = results.get_mut("third") {
-            rule.value = Some(crate::result_value::RuleResultValue {
-                display: Some(decimal_string.clone()),
-                number: Some(decimal_string.clone()),
+            let decimal = rational.try_to_decimal().unwrap();
+            rule.result = Some(crate::result_value::RuleResultValue {
+                result: Some(decimal_string.clone()),
+                number: Some(decimal),
                 ..Default::default()
             });
         }
@@ -534,13 +540,13 @@ mod tests {
             Vec::new(),
         );
         let measure = result
-            .value
+            .result
             .as_ref()
             .expect("value")
             .measure
             .clone()
             .expect("measure map");
-        assert_eq!(measure.get("usd"), Some(&"10.00".to_string()));
+        assert_eq!(measure.get("usd"), Some(&dec("10.00")));
         assert!(measure.contains_key("eur"));
     }
 
@@ -562,14 +568,14 @@ mod tests {
             Vec::new(),
         );
         let measure = result
-            .value
+            .result
             .as_ref()
             .expect("value")
             .measure
             .clone()
             .expect("measure map");
-        assert_eq!(measure.get("eur"), Some(&"10.00".to_string()));
-        assert_eq!(measure.get("usd"), Some(&"10.99".to_string()));
+        assert_eq!(measure.get("eur"), Some(&dec("10.00")));
+        assert_eq!(measure.get("usd"), Some(&dec("10.99")));
     }
 
     #[test]
@@ -625,14 +631,14 @@ mod tests {
             Vec::new(),
         );
         let measure = result
-            .value
+            .result
             .as_ref()
             .expect("value")
             .measure
             .clone()
             .expect("measure map");
-        assert_eq!(measure.get("eur"), Some(&"3.12".to_string()));
-        assert_eq!(measure.get("usd"), Some(&"3.71".to_string()));
+        assert_eq!(measure.get("eur"), Some(&dec("3.12")));
+        assert_eq!(measure.get("usd"), Some(&dec("3.71")));
     }
 
     #[test]
@@ -683,14 +689,14 @@ mod tests {
             Vec::new(),
         );
         let ratio = result
-            .value
+            .result
             .as_ref()
             .expect("value")
             .ratio
             .clone()
             .expect("ratio map");
-        assert_eq!(ratio.get("percent"), Some(&"50".to_string()));
-        assert_eq!(ratio.get("basis_points"), Some(&"5000".to_string()));
+        assert_eq!(ratio.get("percent"), Some(&dec("50")));
+        assert_eq!(ratio.get("basis_points"), Some(&dec("5000")));
     }
 
     #[test]
@@ -752,7 +758,7 @@ data money: measure
         let out = response.results.get("out").expect("out rule");
         assert!(!out.vetoed);
         let measure = out
-            .value
+            .result
             .as_ref()
             .expect("value")
             .measure

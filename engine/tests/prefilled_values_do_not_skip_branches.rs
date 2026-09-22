@@ -147,7 +147,7 @@ fn prefilled_is_member_bound_not_in_missing_data() {
         .expect("pricing spec must load");
     let now = DateTimeValue::now();
     let mut inputs = HashMap::new();
-    inputs.insert("quantity".to_string(), "5".to_string());
+    inputs.insert("quantity".to_string(), "5".into());
 
     let show = engine
         .show(None, "pricing", Some(&now))
@@ -197,8 +197,8 @@ fn eval_honors_supplied_override_for_unless_arm() {
     assert!(default_show.data.contains_key("is_member"));
 
     let mut inputs = HashMap::new();
-    inputs.insert("quantity".to_string(), "5".to_string());
-    inputs.insert("is_member".to_string(), "true".to_string());
+    inputs.insert("quantity".to_string(), "5".into());
+    inputs.insert("is_member".to_string(), "true".into());
 
     let response = engine
         .run(
@@ -216,7 +216,7 @@ fn eval_honors_supplied_override_for_unless_arm() {
         .get("discount")
         .expect("discount must be present");
     assert_eq!(
-        discount.display(),
+        discount.result(),
         Some("20%"),
         "supplied override is_member true must activate member unless arm"
     );

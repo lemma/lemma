@@ -56,7 +56,7 @@ fn eval_bool_with_data(
             rule.veto_reason.as_deref().unwrap_or("Vetoed")
         );
     }
-    rule.value
+    rule.result
         .as_ref()
         .expect("rule result value")
         .boolean
@@ -90,7 +90,7 @@ fn eval_bool(code: &str, spec_name: &str, rule_name: &str) -> bool {
             rule.veto_reason.as_deref().unwrap_or("Vetoed")
         );
     }
-    rule.value
+    rule.result
         .as_ref()
         .expect("rule result value")
         .boolean
@@ -151,7 +151,7 @@ uses lemma units
 data band: units.calendar range -> suggest 18 year...67 year
 rule span: 30 year in band"#;
     let mut data = HashMap::new();
-    data.insert("band".to_string(), "18 year...67 year".to_string());
+    data.insert("band".to_string(), "18 year...67 year".into());
     assert!(eval_bool_with_data(code, "band", "span", data));
 }
 
@@ -194,7 +194,7 @@ rule upper: (18 year...67 year) + 2 year"#;
         )
         .expect("Should evaluate");
     let rule = response.results.get("upper").expect("upper");
-    assert_eq!(rule.display().expect("display"), "216 month...828 month");
+    assert_eq!(rule.result().expect("result"), "216 month...828 month");
 }
 
 #[test]

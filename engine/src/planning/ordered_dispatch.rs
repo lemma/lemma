@@ -752,7 +752,13 @@ mod tests {
                     "text class only uses is / is not"
                 );
             }
-            match comparison_operation(scrutinee, scrutinee_type, operator, key, scrutinee_type) {
+            match comparison_operation(
+                &scrutinee.value,
+                scrutinee_type,
+                operator,
+                &key.value,
+                scrutinee_type,
+            ) {
                 OperationResult::Value(result) => match &result.value {
                     ValueKind::Boolean(_) => {}
                     other => panic!("expected boolean comparison result, got {other:?}"),

@@ -3,7 +3,6 @@
 use lemma::{DateTimeValue, Engine};
 use rust_decimal::Decimal;
 use std::collections::HashMap;
-use std::str::FromStr;
 
 const PRICING_SPEC: &str = r#"
 spec pricing
@@ -67,24 +66,21 @@ fn run_calc(data: HashMap<String, String>) -> lemma::Response {
 fn rule_number(response: &lemma::Response, rule: &str) -> Decimal {
     let result = response.get(rule).unwrap_or_else(|_| panic!("rule {rule}"));
     assert!(!result.vetoed, "rule {rule} vetoed");
-    Decimal::from_str(
-        result
-            .value
-            .as_ref()
-            .expect("rule result value")
-            .number
-            .as_ref()
-            .expect("number payload"),
-    )
-    .expect("decimal")
+    *result
+        .result
+        .as_ref()
+        .expect("rule result value")
+        .number
+        .as_ref()
+        .expect("number payload")
 }
 
 fn rule_display(response: &lemma::Response, rule: &str) -> String {
     response
         .get(rule)
         .unwrap_or_else(|_| panic!("rule {rule}"))
-        .display()
-        .expect("display")
+        .result()
+        .expect("result")
         .to_string()
 }
 
@@ -92,8 +88,8 @@ fn rule_measure_display(response: &lemma::Response, rule: &str) -> String {
     response
         .get(rule)
         .unwrap_or_else(|_| panic!("rule {rule}"))
-        .display()
-        .expect("display")
+        .result()
+        .expect("result")
         .to_string()
 }
 
@@ -139,7 +135,7 @@ rule total: base + offset
     let engine = load_engine(code, "chain.lemma");
     let now = DateTimeValue::now();
     let mut data = HashMap::new();
-    data.insert("x".to_string(), "3".to_string());
+    data.insert("x".to_string(), "3".into());
     let response = engine
         .run(None, "chain", Some(&now), data, None, false)
         .expect("run");
@@ -179,14 +175,14 @@ rule check_step3: step3 is veto
     let engine = load_engine(code, "deep_veto.lemma");
     let now = DateTimeValue::now();
     let mut bad = HashMap::new();
-    bad.insert("input".to_string(), "-1".to_string());
+    bad.insert("input".to_string(), "-1".into());
     let resp = engine
         .run(None, "deep_veto", Some(&now), bad, None, false)
         .expect("run");
     assert_eq!(rule_display(&resp, "check_step3"), "true");
 
     let mut good = HashMap::new();
-    good.insert("input".to_string(), "5".to_string());
+    good.insert("input".to_string(), "5".into());
     let resp = engine
         .run(None, "deep_veto", Some(&now), good, None, false)
         .expect("run");
@@ -210,14 +206,14 @@ rule result: 0
     let engine = load_engine(code, "unless_veto.lemma");
     let now = DateTimeValue::now();
     let mut large = HashMap::new();
-    large.insert("input".to_string(), "2000".to_string());
+    large.insert("input".to_string(), "2000".into());
     let resp = engine
         .run(None, "unless_veto_cond", Some(&now), large, None, false)
         .expect("run");
     assert_eq!(rule_display(&resp, "result"), "0");
 
     let mut ok = HashMap::new();
-    ok.insert("input".to_string(), "100".to_string());
+    ok.insert("input".to_string(), "100".into());
     let resp = engine
         .run(None, "unless_veto_cond", Some(&now), ok, None, false)
         .expect("run");
@@ -240,7 +236,7 @@ rule result: 0
     let engine = load_engine(code, "unless_veto_prop.lemma");
     let now = DateTimeValue::now();
     let mut large = HashMap::new();
-    large.insert("input".to_string(), "2000".to_string());
+    large.insert("input".to_string(), "2000".into());
     let resp = engine
         .run(None, "unless_veto_prop", Some(&now), large, None, false)
         .expect("run");

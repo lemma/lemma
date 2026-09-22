@@ -2,6 +2,24 @@
 
 Releases cover the Lemma engine, `lemma` CLI, OpenAPI crate, LSP, SDKs and VS Code extension. They all follow the same version everywhere. The release version is `[workspace.package] version` in the root `Cargo.toml`. Git tags follow `lemma-v{version}` (for example `lemma-v0.8.20`); releases before the rename used `cli-v{version}`. Draft notes for the next version quickly by running `cargo changelog` to print `git diff` / `git log` since the latest release tag (`xtask` `versions-diff`). Tip: feed that into an LLM to create a summary for this changelog.
 
+## [0.9.11] - 2026-09-22
+
+`show` now names where imported data and rules live. The result string field is `result`, not `display`. Bare `uses` takes the target name as the alias.
+
+### Added
+
+- **Import paths on `show`**: each data slot and rule has `path`: a list of hops `{ uses, repository?, spec }`. Empty `path` means this spec. `Show.repository` is set when the spec lives in a named repository. `Show.rules` includes rules you can reach through `uses`, not only rules written in this spec. Keys look like `src.computed`. Same shape in the SDKs, schema, MCP, and HTTP JSON.
+- **Large integers on npm**: pass integers bigger than `Number.MAX_SAFE_INTEGER` as a digit string or `bigint` (up to 28 digits). Small integers may still be JS numbers. Decimals stay strings. Unit maps (`{ eur: 84n }`) follow the same rule.
+- **Typed explanation nodes**: rule and data nodes carry the same typed fields as a rule result (`result`, plus `measure` / `ratio` / `number` / …). Arithmetic compose nodes include `operator` (`add`, `subtract`, `multiply`, `divide`, `modulo`, `power`).
+
+### Changed
+
+- **[breaking] `display` is now `result`**: JSON, Rust `RuleResult::result()`, Hex, npm, and Java. Same one-line string as before.
+- **[breaking] `run` rule names match `show`**: omit `rules` to evaluate this spec's own outputs. Pass `rules: ["src.computed"]` (or CLI `--rules`) to evaluate an imported rule. Response keys use those names.
+- **[breaking] Bare `uses` alias is the target name**: `uses premium_membership` then `premium_membership.discount_rate`. Explicit: `uses membership: premium_membership` then `membership.discount_rate`.
+- **Result units follow what you passed**: if you bind `84 eur`, the one-liner stays in `eur`, not another unit of the same type. A spec `as` clause still wins. On `+`/`-`, the left operand's unit wins when they disagree.
+- **CLI `--explain`**: one reasoning table per rule. Missing inputs show in that table when the rule is waiting on data. The extra "Missing data" block at the top is gone.
+
 ## [0.9.10] - 2026-09-14
 
 Show rule graph on `Engine::show`, MCP Streamable HTTP, and evaluation that walks only live `rule_ref` (the 0.9.9 authored schedule is gone).

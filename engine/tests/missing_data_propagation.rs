@@ -92,7 +92,7 @@ rule message: "Order processed"
         .unwrap();
 
     let mut data = std::collections::HashMap::new();
-    data.insert("price".to_string(), "10".to_string());
+    data.insert("price".to_string(), "10".into());
 
     let now = DateTimeValue::now();
     let response = engine
@@ -122,7 +122,7 @@ rule message: "Order processed"
     );
     assert_eq!(
         message_rule
-            .value
+            .result
             .as_ref()
             .expect("rule result value")
             .text

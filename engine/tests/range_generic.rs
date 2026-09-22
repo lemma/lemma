@@ -61,7 +61,7 @@ fn eval_literal_with_data(
         .as_ref()
         .expect("explanation")
         .result
-        .value()
+        .literal_value()
         .expect("BUG: non-vetoed rule missing value")
         .clone()
 }
@@ -90,8 +90,8 @@ fn eval_rule(code: &str, spec_name: &str, rule_name: &str) -> String {
         .results
         .get(rule_name)
         .unwrap_or_else(|| panic!("Rule '{}' not found", rule_name))
-        .display()
-        .expect("display")
+        .result()
+        .expect("result")
         .to_string()
 }
 
@@ -131,7 +131,7 @@ fn eval_bool_with_data(
             rule.veto_reason.as_deref().unwrap_or("Vetoed")
         );
     }
-    rule.value
+    rule.result
         .as_ref()
         .expect("rule result value")
         .boolean
@@ -303,9 +303,9 @@ data value: number -> suggest 50
 rule bounds: lower...upper
 rule check: value in bounds"#;
     let mut data = HashMap::new();
-    data.insert("lower".to_string(), "0".to_string());
-    data.insert("upper".to_string(), "100".to_string());
-    data.insert("value".to_string(), "50".to_string());
+    data.insert("lower".to_string(), "0".into());
+    data.insert("upper".to_string(), "100".into());
+    data.insert("value".to_string(), "50".into());
     assert!(eval_bool_with_data(code, "test", "check", data));
 }
 
@@ -326,7 +326,7 @@ fn p20_user_declared() {
 data bounds: number range -> suggest 0...100
 rule check: 50 in bounds"#;
     let mut data = HashMap::new();
-    data.insert("bounds".to_string(), "0...100".to_string());
+    data.insert("bounds".to_string(), "0...100".into());
     assert!(eval_bool_with_data(code, "test", "check", data));
 }
 
@@ -336,7 +336,7 @@ fn p21_user_declared_dynamic() {
 data bounds: number range
 rule check: 50 in bounds"#;
     let mut data = HashMap::new();
-    data.insert("bounds".to_string(), "0...100".to_string());
+    data.insert("bounds".to_string(), "0...100".into());
     let lit = eval_literal_with_data(code, "test", "check", data);
     match lit.value {
         ValueKind::Boolean(val) => assert!(val),
@@ -476,10 +476,7 @@ data weight: measure -> unit gram: 1 -> unit kilogram: 1000
 data acceptable: weight range -> suggest 30 kilogram...35 kilogram
 rule check: 32 kilogram in acceptable"#;
     let mut data = HashMap::new();
-    data.insert(
-        "acceptable".to_string(),
-        "30 kilogram...35 kilogram".to_string(),
-    );
+    data.insert("acceptable".to_string(), "30 kilogram...35 kilogram".into());
     assert!(eval_bool_with_data(code, "test", "check", data));
 }
 
@@ -506,7 +503,7 @@ data estimated: money range -> suggest 30 eur...50 eur
 rule inside: 40 eur in estimated
 rule span: (30 eur...50 eur) >= 20 eur"#;
     let mut data = HashMap::new();
-    data.insert("estimated".to_string(), "30 eur...50 eur".to_string());
+    data.insert("estimated".to_string(), "30 eur...50 eur".into());
     assert!(eval_bool_with_data(code, "test", "inside", data.clone()));
     assert!(eval_bool_with_data(code, "test", "span", data));
 }

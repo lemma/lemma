@@ -60,7 +60,9 @@ pub use planning::execution_plan::{
     Show, ShowBranch, ShowConversionTarget, ShowData, ShowExpression, ShowRule, ShowVersion,
 };
 pub use planning::explanation::{ConversionTraceRole, SerializedConversionTraceStep};
-pub use planning::semantics::{DataPath, LemmaType, LiteralValue, TypeSpecification, ValueKind};
+pub use planning::semantics::{
+    DataPath, LemmaType, LiteralValue, PathSegment, TypeSpecification, ValueKind,
+};
 pub use result_value::{CalendarResult, RangeResult, RuleResultValue, RuleResultValueFailure};
 pub use spec_set_id::parse_spec_set_id;
 pub use stdlib::UNITS_LEMMA;

@@ -56,7 +56,7 @@ rule line_total: pricing.final_price * quantity
         .as_ref()
         .expect("explanation")
         .result
-        .value()
+        .literal_value()
         .expect("value");
     match &lit.value {
         lemma::ValueKind::Number(n) => assert_eq!(
@@ -121,7 +121,7 @@ rule top_calc: middle_ref.middle_calc
         .as_ref()
         .expect("explanation")
         .result
-        .value()
+        .literal_value()
         .expect("value");
     match &lit.value {
         lemma::ValueKind::Number(n) => assert_eq!(
@@ -208,7 +208,7 @@ rule final_value: settings.config.value * 2
         .as_ref()
         .expect("explanation")
         .result
-        .value()
+        .literal_value()
         .expect("value");
     match &lit.value {
         lemma::ValueKind::Number(n) => assert_eq!(
@@ -279,7 +279,7 @@ rule order_total: line.line_total
         .as_ref()
         .expect("explanation")
         .result
-        .value()
+        .literal_value()
         .expect("value");
     match &lit.value {
         lemma::ValueKind::Number(n) => assert_eq!(
@@ -358,7 +358,7 @@ rule difference: total2 - total1
         .as_ref()
         .expect("explanation")
         .result
-        .value()
+        .literal_value()
         .expect("value");
     match &lit.value {
         lemma::ValueKind::Number(n) => assert_eq!(
@@ -376,7 +376,7 @@ rule difference: total2 - total1
         .as_ref()
         .expect("explanation")
         .result
-        .value()
+        .literal_value()
         .expect("value");
     match &lit.value {
         lemma::ValueKind::Number(n) => assert_eq!(
@@ -394,7 +394,7 @@ rule difference: total2 - total1
         .as_ref()
         .expect("explanation")
         .result
-        .value()
+        .literal_value()
         .expect("value");
     match &lit.value {
         lemma::ValueKind::Number(n) => assert_eq!(
@@ -466,7 +466,7 @@ rule product: c1.value * c2.value
         .as_ref()
         .expect("explanation")
         .result
-        .value()
+        .literal_value()
         .expect("value");
     match &lit.value {
         lemma::ValueKind::Number(n) => assert_eq!(
@@ -484,7 +484,7 @@ rule product: c1.value * c2.value
         .as_ref()
         .expect("explanation")
         .result
-        .value()
+        .literal_value()
         .expect("value");
     match &lit.value {
         lemma::ValueKind::Number(n) => assert_eq!(
@@ -561,7 +561,7 @@ rule final_result: middle_config.x_squared_plus_ten * 2
         .as_ref()
         .expect("explanation")
         .result
-        .value()
+        .literal_value()
         .expect("value");
     match &lit.value {
         lemma::ValueKind::Number(n) => assert_eq!(
@@ -637,7 +637,7 @@ rule price_difference: retail_final - wholesale_final
         .as_ref()
         .expect("explanation")
         .result
-        .value()
+        .literal_value()
         .expect("value");
     match &lit.value {
         lemma::ValueKind::Number(n) => assert_eq!(
@@ -655,7 +655,7 @@ rule price_difference: retail_final - wholesale_final
         .as_ref()
         .expect("explanation")
         .result
-        .value()
+        .literal_value()
         .expect("value");
     match &lit.value {
         lemma::ValueKind::Number(n) => assert_eq!(
@@ -673,7 +673,7 @@ rule price_difference: retail_final - wholesale_final
         .as_ref()
         .expect("explanation")
         .result
-        .value()
+        .literal_value()
         .expect("value");
     match &lit.value {
         lemma::ValueKind::Number(n) => assert_eq!(

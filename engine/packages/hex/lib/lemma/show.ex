@@ -3,12 +3,13 @@ defmodule Lemma.Show do
   Typed projection of the JSON map returned by `Lemma.show/4`: spec interface and
   resolved temporal window.
 
-  Each `data` entry's `type` and each `rules` entry's `type` are raw `LemmaType` JSON
-  maps (a Rust discriminated union tagged by `"kind"`). Rule values are
-  `Lemma.ShowRule` structs (`type`, `branches`, `depends_on_rules`). `meta` values are
-  raw `LiteralValue` JSON maps. Pattern-match on those tags directly rather than
-  through a parallel Elixir struct hierarchy — see `Lemma.ShowData` and
-  `Lemma.ShowRule`.
+  Optional `repository` is the interned repository name (nil for the unnamed
+  workspace). Each `data` entry's `type` and each `rules` entry's `type` are raw
+  `LemmaType` JSON maps (a Rust discriminated union tagged by `"kind"`). Rule values
+  are `Lemma.ShowRule` structs (`type`, `path`, `branches`, `depends_on_rules`).
+  `meta` values are raw `LiteralValue` JSON maps. Pattern-match on those tags
+  directly rather than through a parallel Elixir struct hierarchy — see
+  `Lemma.ShowData` and `Lemma.ShowRule`.
 
   `Lemma.show/4` itself still returns the plain decoded JSON map for backward
   compatibility; call `from_map/1` on that map to get a typed struct.
@@ -19,6 +20,7 @@ defmodule Lemma.Show do
   alias Lemma.ShowVersion
 
   @type t :: %__MODULE__{
+          repository: String.t() | nil,
           spec: String.t(),
           commentary: String.t() | nil,
           effective_from: String.t() | nil,
@@ -33,6 +35,7 @@ defmodule Lemma.Show do
 
   @enforce_keys [:spec, :start_line]
   defstruct [
+    :repository,
     :spec,
     :commentary,
     :effective_from,
@@ -55,6 +58,7 @@ defmodule Lemma.Show do
   @spec from_map(map()) :: t()
   def from_map(map) when is_map(map) do
     %__MODULE__{
+      repository: Map.get(map, "repository"),
       spec: Map.fetch!(map, "spec"),
       commentary: Map.get(map, "commentary"),
       effective_from: Map.get(map, "effective_from"),

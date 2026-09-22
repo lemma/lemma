@@ -20,7 +20,7 @@ fn rule_answer_decimal(response: &lemma::Response) -> Decimal {
         .as_ref()
         .expect("explanation")
         .result
-        .value()
+        .literal_value()
         .expect("value");
     match &lit.value {
         lemma::ValueKind::Number(n) => lemma::ValueKind::Number(n.clone())

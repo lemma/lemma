@@ -178,8 +178,9 @@ rule out: r
         .ratio
         .as_ref()
         .and_then(|m| m.get("percent"))
+        .copied()
         .expect("percent magnitude");
-    assert_eq!(decimal_lit(percent), decimal_lit("1.5"));
+    assert_eq!(percent, decimal_lit("1.5"));
 }
 
 #[test]
@@ -207,7 +208,7 @@ fn ratio_minimum_custom_unit_override_enforced() {
     load(&mut engine, bps_spec());
 
     let mut data = HashMap::new();
-    data.insert("r".to_string(), "400 basis_points".to_string());
+    data.insert("r".to_string(), "400 basis_points".into());
 
     let now = DateTimeValue::now();
     let resp = engine
@@ -254,8 +255,9 @@ rule out: r
         .ratio
         .as_ref()
         .and_then(|m| m.get("basis_points"))
+        .copied()
         .expect("basis_points magnitude");
-    assert_eq!(decimal_lit(basis_points), decimal_lit("500"));
+    assert_eq!(basis_points, decimal_lit("500"));
 }
 
 #[test]
@@ -264,7 +266,7 @@ fn ratio_minimum_custom_unit_override_accepts_at_bound() {
     load(&mut engine, bps_spec());
 
     let mut data = HashMap::new();
-    data.insert("r".to_string(), "500 basis_points".to_string());
+    data.insert("r".to_string(), "500 basis_points".into());
 
     let now = DateTimeValue::now();
     let resp = engine
@@ -282,7 +284,7 @@ fn ratio_minimum_custom_unit_override_accepts_at_bound() {
         .as_ref()
         .expect("explanation")
         .result
-        .value()
+        .literal_value()
         .expect("value");
     match &lit.value {
         ValueKind::Ratio(n) => {

@@ -1,4 +1,5 @@
 use lemma::Engine;
+use rust_decimal::Decimal;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -43,7 +44,7 @@ fn eval_rule_measure_unit(
     rule_name: &str,
     unit: &str,
     data: HashMap<String, String>,
-) -> String {
+) -> Decimal {
     let code = code.as_ref();
     let mut engine = Engine::new();
     engine
@@ -64,11 +65,11 @@ fn eval_rule_measure_unit(
             rule.veto_reason.as_deref().unwrap_or("Vetoed")
         );
     }
-    rule.value
+    *rule
+        .result
         .as_ref()
         .and_then(|v| v.measure.as_ref())
         .and_then(|m| m.get(unit))
-        .cloned()
         .unwrap_or_else(|| panic!("measure map missing unit '{unit}'"))
 }
 
@@ -93,8 +94,8 @@ fn eval_rule(code: impl AsRef<str>, spec_name: &str, rule_name: &str) -> String 
         .results
         .get(rule_name)
         .unwrap_or_else(|| panic!("Rule '{}' not found", rule_name))
-        .display()
-        .expect("display")
+        .result()
+        .expect("result")
         .to_string()
 }
 
@@ -226,10 +227,10 @@ data elapsed: duration -> suggest 2 hour
 rule value: elapsed as minute"#;
     let _engine = load_ok(code);
     let mut data = HashMap::new();
-    data.insert("elapsed".to_string(), "2 hour".to_string());
+    data.insert("elapsed".to_string(), "2 hour".into());
     assert_eq!(
         eval_rule_measure_unit(code, "test", "value", "minute", data),
-        "120"
+        Decimal::from(120)
     );
 }
 

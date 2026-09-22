@@ -77,9 +77,9 @@ rule total: age + adult_age + twenties
     let now = DateTimeValue::now();
 
     let mut data = HashMap::new();
-    data.insert("age".to_string(), "25".to_string());
-    data.insert("adult_age".to_string(), "30".to_string());
-    data.insert("twenties".to_string(), "25".to_string());
+    data.insert("age".to_string(), "25".into());
+    data.insert("adult_age".to_string(), "30".into());
+    data.insert("twenties".to_string(), "25".into());
     let response = engine
         .run(None, "test_types", Some(&now), data, None, false)
         .expect("Evaluation failed");
@@ -93,7 +93,7 @@ rule total: age + adult_age + twenties
         .expect("total rule not found");
 
     // 25 + 30 + 25 = 80
-    assert_eq!(total_rule.display().expect("display").to_string(), "80");
+    assert_eq!(total_rule.result().expect("result").to_string(), "80");
 }
 
 #[test]
@@ -120,13 +120,13 @@ rule x: pi
 
     let now = DateTimeValue::now();
     let mut data = HashMap::new();
-    data.insert("pi".to_string(), "3.14".to_string());
+    data.insert("pi".to_string(), "3.14".into());
     let response = engine
         .run(None, "finance", Some(&now), data, None, false)
         .expect("run finance");
 
     let rule_x = response.results.get("x").expect("rule x");
-    assert_eq!(rule_x.display().expect("display").to_string(), "3.14");
+    assert_eq!(rule_x.result().expect("result").to_string(), "3.14");
 }
 
 /// Regression test: measure type with `-> suggest` before `-> unit` must work.
@@ -455,8 +455,8 @@ fn child_measure_may_add_new_unit() {
     let display = response
         .results
         .get("r")
-        .and_then(|r| r.display().map(str::to_string))
-        .expect("display");
+        .and_then(|r| r.result().map(str::to_string))
+        .expect("result");
     assert!(
         display.contains("eur"),
         "expected eur conversion display, got {display}"

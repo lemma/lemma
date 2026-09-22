@@ -58,10 +58,10 @@ fn test_02_rules_and_unless() {
     let now = DateTimeValue::now();
 
     let mut data = std::collections::HashMap::new();
-    data.insert("base_price".to_string(), "100.00".to_string());
-    data.insert("quantity".to_string(), "10".to_string());
-    data.insert("is_premium".to_string(), "true".to_string());
-    data.insert("customer_age".to_string(), "17".to_string());
+    data.insert("base_price".to_string(), "100.00".into());
+    data.insert("quantity".to_string(), "10".into());
+    data.insert("is_premium".to_string(), "true".into());
+    data.insert("customer_age".to_string(), "17".into());
     let response = engine
         .run(None, "rules_and_unless", Some(&now), data, None, true)
         .expect("Evaluation failed");
@@ -75,7 +75,7 @@ fn test_02_rules_and_unless() {
         .as_ref()
         .expect("explanation")
         .result
-        .value()
+        .literal_value()
         .expect("value");
     match &lit.value {
         lemma::ValueKind::Number(n) => assert_eq!(
@@ -120,7 +120,7 @@ fn test_03_spec_references() {
         .as_ref()
         .expect("explanation")
         .result
-        .value()
+        .literal_value()
         .expect("value");
     match &lit.value {
         lemma::ValueKind::Number(n) => assert_eq!(
@@ -135,7 +135,7 @@ fn test_03_spec_references() {
     let employee_summary = response.results.get("employee_summary").unwrap();
     assert_eq!(
         employee_summary
-            .value
+            .result
             .as_ref()
             .expect("rule result value")
             .text
@@ -167,29 +167,29 @@ fn test_04_unit_conversions() {
     assert!(!duration_hours.vetoed);
     assert_eq!(
         duration_hours
-            .value
+            .result
             .as_ref()
             .and_then(|v| v.measure.as_ref())
             .and_then(|m| m.get("hour"))
-            .map(String::as_str),
-        Some("1.5")
+            .copied(),
+        Some(rust_decimal::Decimal::new(15, 1))
     );
 
     let duration_seconds = response.results.get("duration_seconds").unwrap();
     assert!(!duration_seconds.vetoed);
     assert_eq!(
         duration_seconds
-            .value
+            .result
             .as_ref()
             .and_then(|v| v.measure.as_ref())
             .and_then(|m| m.get("second"))
-            .map(String::as_str),
-        Some("5400")
+            .copied(),
+        Some(rust_decimal::Decimal::from(5400))
     );
 
     let is_quick_processing = response.results.get("is_quick_processing").unwrap();
     assert_eq!(
-        is_quick_processing.display().expect("display").to_string(),
+        is_quick_processing.result().expect("result").to_string(),
         lemma::LiteralValue::from_bool(true).to_string(),
     );
 }
@@ -200,7 +200,7 @@ fn test_05_date_handling() {
     let now = DateTimeValue::now();
 
     let mut data = std::collections::HashMap::new();
-    data.insert("current_date".to_string(), "2024-06-15".to_string());
+    data.insert("current_date".to_string(), "2024-06-15".into());
     let response = engine
         .run(None, "date_handling", Some(&now), data, None, true)
         .expect("Evaluation failed");
@@ -210,7 +210,7 @@ fn test_05_date_handling() {
 
     let probation_end = response.results.get("probation_end_date").unwrap();
     let date = probation_end
-        .value
+        .result
         .as_ref()
         .expect("rule result value")
         .date
@@ -222,10 +222,7 @@ fn test_05_date_handling() {
 
     let is_probation_complete = response.results.get("is_probation_complete").unwrap();
     assert_eq!(
-        is_probation_complete
-            .display()
-            .expect("display")
-            .to_string(),
+        is_probation_complete.result().expect("result").to_string(),
         lemma::LiteralValue::from_bool(true).to_string(),
     );
 }
@@ -253,7 +250,7 @@ fn test_08_rule_references() {
             .results
             .get("can_drive_legally")
             .unwrap()
-            .value
+            .result
             .as_ref()
             .expect("rule result value")
             .boolean,
@@ -263,7 +260,7 @@ fn test_08_rule_references() {
     let driving_status = response.results.get("driving_status").unwrap();
     assert_eq!(
         driving_status
-            .value
+            .result
             .as_ref()
             .expect("rule result value")
             .text

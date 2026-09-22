@@ -21,8 +21,8 @@ fn eval_rule(code: &str, spec_name: &str, rule_name: &str) -> String {
         .results
         .get(rule_name)
         .unwrap_or_else(|| panic!("Rule '{}' not found", rule_name))
-        .display()
-        .expect("display")
+        .result()
+        .expect("result")
         .to_string()
 }
 

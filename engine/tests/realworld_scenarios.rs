@@ -16,7 +16,7 @@ fn run_spec(engine: &Engine, spec: &str, data: &[(&str, &str)]) -> lemma::Respon
     let now = DateTimeValue::now();
     let data_map: HashMap<String, String> = data
         .iter()
-        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .map(|(k, v)| (k.to_string(), (*v).to_string()))
         .collect();
     engine
         .run(None, spec, Some(&now), data_map, None, false)
@@ -29,7 +29,7 @@ fn rule_display(response: &lemma::Response, rule_name: &str) -> String {
         .values()
         .find(|r| r.rule.name == rule_name)
         .unwrap_or_else(|| panic!("rule '{}' not found", rule_name))
-        .display()
+        .result()
         .unwrap_or_else(|| panic!("rule '{}' has no display", rule_name))
         .to_string()
 }
@@ -644,7 +644,7 @@ rule total: amount + tax
 
     // Evaluate at a date after 2024-01-01 — should use 21%
     let effective = DateTimeValue::from_str("2024-06-15").unwrap();
-    let data_map: HashMap<String, String> = [("amount".to_string(), "1000".to_string())].into();
+    let data_map: HashMap<String, String> = [("amount".to_string(), "1000".into())].into();
     let resp = engine
         .run(
             None,
@@ -660,7 +660,7 @@ rule total: amount + tax
 
     // Evaluate before 2024-01-01 — should use 19%
     let effective_old = DateTimeValue::from_str("2023-06-15").unwrap();
-    let data_map2: HashMap<String, String> = [("amount".to_string(), "1000".to_string())].into();
+    let data_map2: HashMap<String, String> = [("amount".to_string(), "1000".into())].into();
     let resp2 = engine
         .run(
             None,

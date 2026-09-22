@@ -59,7 +59,7 @@ fn test_response_serialization() {
         .as_object()
         .unwrap()
         .contains_key("test_rule"));
-    assert_eq!(deserialized["results"]["test_rule"]["display"], "42");
+    assert_eq!(deserialized["results"]["test_rule"]["result"], "42");
     assert_eq!(deserialized["results"]["test_rule"]["number"], "42");
     assert_eq!(deserialized["results"]["test_rule"]["vetoed"], false);
 }

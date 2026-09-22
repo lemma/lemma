@@ -457,7 +457,7 @@ pub fn evaluate_past_future_range(
         duration_type,
     );
     let shifted_value = match shifted {
-        OperationResult::Value(value) => value,
+        OperationResult::Value(value) => value.to_literal(),
         OperationResult::Veto(reason) => return OperationResult::Veto(reason),
     };
 

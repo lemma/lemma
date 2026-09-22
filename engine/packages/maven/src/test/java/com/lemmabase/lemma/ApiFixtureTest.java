@@ -2,6 +2,8 @@ package com.lemmabase.lemma;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
@@ -65,7 +67,14 @@ final class ApiFixtureTest {
       case "show_minimal.json" -> {
         Show show = JsonSupport.parseShow(json);
         assertEquals("sample", show.spec());
+        assertNull(show.repository());
         assertInstanceOf(LiteralValue.Text.class, show.meta().get("author"));
+        Show.ShowData amount = show.data().get("amount");
+        assertNotNull(amount);
+        assertTrue(amount.path().isEmpty());
+        Show.ShowRule ok = show.rules().get("ok");
+        assertNotNull(ok);
+        assertTrue(ok.path().isEmpty());
       }
       case "source_type_variants.json" -> parseSourceTypeVariants(json);
       case "literal_value_variants.json" -> parseLiteralValueVariants(json);
@@ -113,7 +122,7 @@ final class ApiFixtureTest {
           "results": {
             "ok": {
               "vetoed": false,
-              "display": "0.3333333333333333333333333333",
+              "result": "0.3333333333333333333333333333",
               "rule_type": "number",
               "number": "0.3333333333333333333333333333"
             }

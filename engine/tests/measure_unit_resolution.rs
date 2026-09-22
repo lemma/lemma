@@ -65,11 +65,11 @@ rule qualified: 5 price.eur
 
     assert_eq!(rule_type(&response, "bare").name(), "money");
     assert_eq!(rule_type(&response, "bare").decimal_places(), None);
-    assert_eq!(response.results["bare"].display().unwrap(), "5 eur");
+    assert_eq!(response.results["bare"].result().unwrap(), "5 eur");
 
     assert_eq!(rule_type(&response, "qualified").name(), "price");
     assert_eq!(rule_type(&response, "qualified").decimal_places(), Some(2));
-    assert_eq!(response.results["qualified"].display().unwrap(), "5.00 eur");
+    assert_eq!(response.results["qualified"].result().unwrap(), "5.00 eur");
 }
 
 #[test]
@@ -121,7 +121,7 @@ rule qualified: 5 weight.kilogram
     assert_eq!(rule_type(&response, "qualified").name(), "weight");
     assert_eq!(rule_type(&response, "qualified").decimal_places(), Some(2));
     assert_eq!(
-        response.results["qualified"].display().unwrap(),
+        response.results["qualified"].result().unwrap(),
         "5.00 kilogram"
     );
 }

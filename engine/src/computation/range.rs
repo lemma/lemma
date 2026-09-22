@@ -97,10 +97,10 @@ fn compute_signed_span(
             let empty_signature_index = SignatureIndex::new();
             (
                 super::arithmetic_operation(
-                    right,
+                    &crate::planning::semantics::BoundValueKind::unbound(right.value.clone()),
                     right_type,
                     &ArithmeticComputation::Subtract,
-                    left,
+                    &crate::planning::semantics::BoundValueKind::unbound(left.value.clone()),
                     left_type,
                     &empty_unit_index,
                     &empty_signature_index,
@@ -112,13 +112,14 @@ fn compute_signed_span(
 }
 
 fn absolute_span(span: OperationResult, span_type: &Arc<LemmaType>) -> OperationResult {
-    let OperationResult::Value(literal) = span else {
+    let OperationResult::Value(bound) = span else {
         return span;
     };
+    let literal = bound.to_literal();
     let magnitude = stored_magnitude(&literal);
     match magnitude.try_cmp(&rational_zero()) {
         Ok(std::cmp::Ordering::Less) => {}
-        Ok(_) => return OperationResult::from_literal(literal),
+        Ok(_) => return OperationResult::from_bound(bound),
         Err(e) => return OperationResult::Veto(VetoType::computation(e.to_string())),
     }
     let negated = match negate_stored_magnitude(&literal) {
@@ -200,10 +201,10 @@ fn comparison_boolean_result(result: OperationResult, context: &str) -> Result<b
 /// Half-open interval `[lo, hi)` where `lo` and `hi` are the ordered range endpoints.
 /// Returns `OperationResult::from_literal(Boolean)` or propagates a Veto from inner comparisons.
 pub fn check_containment(
-    value: &LiteralValue,
+    value: &ValueKind,
     value_type: &Arc<LemmaType>,
-    range_left: &LiteralValue,
-    range_right: &LiteralValue,
+    range_left: &ValueKind,
+    range_right: &ValueKind,
     endpoint_type: &Arc<LemmaType>,
 ) -> OperationResult {
     let (lo, hi) = match comparison_boolean_result(
@@ -273,7 +274,13 @@ mod tests {
 
     fn assert_contained(value: &LiteralValue, left: &LiteralValue, right: &LiteralValue) -> bool {
         let number_ty = primitive_number_arc();
-        match check_containment(value, number_ty, left, right, number_ty) {
+        match check_containment(
+            &value.value,
+            number_ty,
+            &left.value,
+            &right.value,
+            number_ty,
+        ) {
             OperationResult::Value(lit) => match &lit.value {
                 ValueKind::Boolean(b) => *b,
                 other => panic!("expected Boolean, got {other:?}"),

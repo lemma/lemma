@@ -67,7 +67,7 @@ rule total: 5 eur
     let total = response.results.get("total").expect("total");
     assert!(!total.vetoed);
     let measure = total
-        .value
+        .result
         .as_ref()
         .expect("value")
         .measure
@@ -150,7 +150,7 @@ rule rate_out: rate_slot
     let rate = response.results.get("rate_out").expect("rate_out");
     assert!(!rate.vetoed);
     let ratio = rate
-        .value
+        .result
         .as_ref()
         .expect("value")
         .ratio
@@ -184,7 +184,7 @@ rule need_parent: base_rate
     let out = response.results.get("out").expect("out");
     assert!(!out.vetoed);
     let ratio = out
-        .value
+        .result
         .as_ref()
         .expect("value")
         .ratio
@@ -241,7 +241,7 @@ rule band: (1 eur...10 eur)
     let band = response.results.get("band").expect("band");
     assert!(!band.vetoed);
     let range = band
-        .value
+        .result
         .as_ref()
         .expect("value")
         .range

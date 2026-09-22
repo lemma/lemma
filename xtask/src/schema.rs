@@ -244,7 +244,7 @@ pub fn api_v1_schema() -> Value {
     );
 
     let rule_result_value_fields = json!({
-        "display": {"type": "string"},
+        "result": {"type": "string"},
         "measure": {"type": "object", "additionalProperties": decimal_string()},
         "ratio": {"type": "object", "additionalProperties": decimal_string()},
         "number": decimal_string(),
@@ -275,6 +275,29 @@ pub fn api_v1_schema() -> Value {
             "missing_data".to_string(),
             json!({"type": "array", "items": {"type": "string"}}),
         );
+        m
+    };
+
+    let rule_node_properties = {
+        let mut m = rule_result_value_properties.clone();
+        m.insert("type".to_string(), json!({"const": "rule"}));
+        m.insert("name".to_string(), json!({"type": "string"}));
+        m.insert("body".to_string(), json!({"type": "string"}));
+        m.insert(
+            "causes".to_string(),
+            json!({"type": "array", "items": {"$ref": "#/$defs/Cause"}}),
+        );
+        m.insert(
+            "children".to_string(),
+            json!({"type": "array", "items": {"$ref": "#/$defs/ExplanationNode"}}),
+        );
+        m
+    };
+
+    let data_node_properties = {
+        let mut m = rule_result_value_properties.clone();
+        m.insert("type".to_string(), json!({"const": "data"}));
+        m.insert("name".to_string(), json!({"type": "string"}));
         m
     };
 
@@ -386,21 +409,37 @@ pub fn api_v1_schema() -> Value {
         "RuleResultValue": {
             "type": "object",
             "additionalProperties": false,
-            "description": "API value shared by RuleResult (flattened), ShowData.fill, and ShowData.suggestion. When present: always `display`, plus exactly one typed field for a non-range value; `range` is set instead for a range value.",
+            "description": "API value shared by RuleResult (flattened), ShowData.fill/suggestion, and explanation Rule/Data nodes (flattened). When present: always `result`, plus exactly one typed field for a non-range value; `range` is set instead for a range value.",
             "properties": rule_result_value_properties
+        },
+        "PathSegment": {
+            "type": "object",
+            "required": ["uses", "spec"],
+            "additionalProperties": false,
+            "description": "One uses hop on a Show data or rule path. uses is the alias; repository is omitted for the unnamed workspace; spec is the resolved target name.",
+            "properties": {
+                "uses": {"type": "string"},
+                "repository": {"type": "string"},
+                "spec": {"type": "string"}
+            }
         },
         "ShowData": {
             "type": "object",
-            "required": ["type", "needed_by_rules"],
+            "required": ["type", "path", "needed_by_rules"],
             "additionalProperties": false,
             "properties": {
                 "type": {"$ref": "#/$defs/LemmaType"},
+                "path": {
+                    "type": "array",
+                    "items": {"$ref": "#/$defs/PathSegment"},
+                    "description": "Import hops to this slot. Empty means this spec."
+                },
                 "fill": {"$ref": "#/$defs/RuleResultValue"},
                 "suggestion": {"$ref": "#/$defs/RuleResultValue"},
                 "needed_by_rules": {
                     "type": "array",
                     "items": {"type": "string"},
-                    "description": "Local rule names that transitively need this data after normalize. Empty = reuse catalog only (not an eval intake key for this spec)."
+                    "description": "Show.rules keys that transitively need this data after normalize. Empty = reuse catalog only (not an eval intake key for this spec)."
                 }
             }
         },
@@ -451,7 +490,7 @@ pub fn api_v1_schema() -> Value {
                     "additionalProperties": false,
                     "properties": {
                         "type": {"const": "literal"},
-                        "display": {"type": "string"},
+                        "result": {"type": "string"},
                         "measure": {"type": "object", "additionalProperties": {"type": "string"}},
                         "ratio": {"type": "object", "additionalProperties": {"type": "string"}},
                         "number": {"type": "string"},
@@ -631,16 +670,21 @@ pub fn api_v1_schema() -> Value {
         },
         "ShowRule": {
             "type": "object",
-            "required": ["type", "branches", "depends_on_rules"],
+            "required": ["type", "path", "branches", "depends_on_rules"],
             "additionalProperties": false,
-            "description": "Local rule on Show: result type, authored default/unless branches, stored planning depends_on_rules.",
+            "description": "Rule on Show: result type, import path ([] = this spec), authored default/unless branches, and depends_on_rules (Show.rules keys).",
             "properties": {
                 "type": {"$ref": "#/$defs/LemmaType"},
+                "path": {
+                    "type": "array",
+                    "items": {"$ref": "#/$defs/PathSegment"},
+                    "description": "Import hops to this rule. Empty means this spec."
+                },
                 "branches": {"type": "array", "items": {"$ref": "#/$defs/ShowBranch"}},
                 "depends_on_rules": {
                     "type": "array",
                     "items": {"type": "string"},
-                    "description": "Local rule names this rule depends on (planning topo). Always present."
+                    "description": "Show.rules keys this rule depends on (planning topo). Always present."
                 }
             }
         },
@@ -699,8 +743,9 @@ pub fn api_v1_schema() -> Value {
             "type": "object",
             "required": ["spec", "start_line", "data", "rules", "meta"],
             "additionalProperties": false,
-            "description": "Result of Engine::show: declared promptable data catalog (needed_by_rules empty = reuse-only), local rule graph (ShowRule with type, branches, depends_on_rules), and resolved temporal window.",
+            "description": "Result of Engine::show: declared promptable data catalog (needed_by_rules empty = reuse-only), this spec's rule graph (local rules plus reachable imports as ShowRule with type, path, branches, depends_on_rules), and resolved temporal window.",
             "properties": {
+                "repository": {"type": "string", "description": "Interned repository name. Omitted for the unnamed workspace."},
                 "spec": {"type": "string"},
                 "commentary": nullable_string(),
                 "effective_from": nullable_string(),
@@ -840,14 +885,8 @@ pub fn api_v1_schema() -> Value {
             "type": "object",
             "required": ["type", "name", "result", "body"],
             "additionalProperties": false,
-            "properties": {
-                "type": {"const": "rule"},
-                "name": {"type": "string"},
-                "result": {"type": "string", "description": "Display string for this rule's result."},
-                "body": {"type": "string"},
-                "causes": {"type": "array", "items": {"$ref": "#/$defs/Cause"}},
-                "children": {"type": "array", "items": {"$ref": "#/$defs/ExplanationNode"}}
-            }
+            "description": "Rule explanation node. RuleResultValue fields are flattened (result plus typed measure/ratio/… maps).",
+            "properties": rule_node_properties
         },
         "ComposeNode": {
             "type": "object",
@@ -856,18 +895,19 @@ pub fn api_v1_schema() -> Value {
             "properties": {
                 "type": {"const": "compose"},
                 "expression": {"type": "string"},
+                "operator": {
+                    "type": "string",
+                    "enum": ["add", "subtract", "multiply", "divide", "modulo", "power"]
+                },
                 "operands": {"type": "array", "items": {"$ref": "#/$defs/ExplanationNode"}}
             }
         },
         "DataNode": {
             "type": "object",
-            "required": ["type", "name", "display"],
+            "required": ["type", "name", "result"],
             "additionalProperties": false,
-            "properties": {
-                "type": {"const": "data"},
-                "name": {"type": "string"},
-                "display": {"type": "string"}
-            }
+            "description": "Bound data narration. RuleResultValue fields are flattened (result plus typed measure/ratio/… maps).",
+            "properties": data_node_properties
         },
         "DataUnusedNode": {
             "type": "object",

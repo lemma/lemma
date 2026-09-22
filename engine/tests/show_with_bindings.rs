@@ -221,7 +221,7 @@ rule r: i.v
         .run(None, "outer", Some(&now), HashMap::new(), None, false)
         .unwrap();
     let r = resp.results.values().find(|x| x.rule.name == "r").unwrap();
-    assert_eq!(r.display(), Some("10"));
+    assert_eq!(r.result(), Some("10"));
 }
 
 /// Spec that has genuinely different data requirements per branch — used to
@@ -278,7 +278,7 @@ fn run_prunes_simple_branch_when_mode_is_complex() {
         .unwrap();
     let now = DateTimeValue::now();
     let mut inputs = HashMap::new();
-    inputs.insert("mode".to_string(), "complex".to_string());
+    inputs.insert("mode".to_string(), "complex".into());
     let response = engine
         .run(
             None,
@@ -364,7 +364,7 @@ rule total_price: bag.total_price
 
     let now = DateTimeValue::now();
     let mut inputs = HashMap::new();
-    inputs.insert("type_of_nut".to_string(), "peanut".to_string());
+    inputs.insert("type_of_nut".to_string(), "peanut".into());
     let response = engine
         .run(
             None,

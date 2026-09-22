@@ -125,12 +125,14 @@ fn wrap_suggestion_in_show_json(
         name.to_string(),
         lemma::ShowData {
             lemma_type,
+            path: Vec::new(),
             fill: None,
             suggestion: Some(value),
             needed_by_rules: Vec::new(),
         },
     );
     let show = Show {
+        repository: None,
         spec: "api_test".to_string(),
         commentary: None,
         effective_from: None,
@@ -367,8 +369,8 @@ fn ratio_prompt_bare_0_5() {
     let bare = LiteralValue::ratio_from_decimal(decimal_lit("0.5"));
     let ty = LemmaType::primitive(TypeSpecification::ratio());
     assert_eq!(
-        bare.magnitude_suggestion_for_decimal_prompt(&ty).as_deref(),
-        Some("0.5")
+        bare.magnitude_suggestion_for_decimal_prompt(&ty),
+        Some(decimal_lit("0.5"))
     );
 }
 
@@ -391,10 +393,8 @@ fn measure_prompt_eur_per_hour_25() {
     let (default, default_ty) =
         show_default_literal(&cost_price_engine(), "cost_price", "labor_cost");
     assert_eq!(
-        default
-            .magnitude_suggestion_for_decimal_prompt(&default_ty)
-            .as_deref(),
-        Some("25")
+        default.magnitude_suggestion_for_decimal_prompt(&default_ty),
+        Some(decimal_lit("25"))
     );
 }
 
@@ -430,10 +430,8 @@ fn measure_show_default_includes_all_declared_units() {
         .expect("inr_per_hour must have RuleResultValue");
     assert_ne!(inr, "25", "inr_per_hour must differ from eur magnitude");
     assert_eq!(
-        default
-            .magnitude_in_unit(&default_ty, "inr_per_hour")
-            .as_deref(),
-        Some(inr),
+        default.magnitude_in_unit(&default_ty, "inr_per_hour"),
+        Some(decimal_lit(inr)),
         "magnitude_in_unit must match API map"
     );
 }
@@ -451,10 +449,8 @@ fn ratio_show_default_includes_all_declared_units() {
         "basis_points magnitude"
     );
     assert_eq!(
-        default
-            .magnitude_in_unit(&default_ty, "basis_points")
-            .as_deref(),
-        Some("500"),
+        default.magnitude_in_unit(&default_ty, "basis_points"),
+        Some(decimal_lit("500")),
         "magnitude_in_unit must match API map"
     );
 }
@@ -484,10 +480,8 @@ fn measure_prompt_matches_api() {
         let suggestion = entry.suggestion.unwrap_or_else(|| panic!("{name} default"));
         let default = suggestion.clone().to_literal(&entry.lemma_type);
         assert_eq!(
-            default
-                .magnitude_suggestion_for_decimal_prompt(&entry.lemma_type)
-                .as_deref(),
-            Some(expected),
+            default.magnitude_suggestion_for_decimal_prompt(&entry.lemma_type),
+            Some(decimal_lit(expected)),
             "{name} prompt must match API"
         );
         let json = wrap_suggestion_in_show_json(name, entry.lemma_type, suggestion);
@@ -578,7 +572,7 @@ fn assert_cost_price_rule_not_vetoed(response: &lemma::Response, context: &str) 
         "{context}: must not veto for decimal limit"
     );
     assert!(
-        rule.display().is_some(),
+        rule.result().is_some(),
         "{context}: cost_price must produce a committable display value"
     );
 }
@@ -642,12 +636,12 @@ fn measure_show_default_each_declared_unit_convenience_input_evaluates() {
 fn measure_show_default_inr_per_hour_not_overprecision_string() {
     let (default, default_ty) =
         show_default_literal(&cost_price_engine(), "cost_price", "labor_cost");
-    let decimal_string = default
+    let magnitude = default
         .magnitude_in_unit(&default_ty, "inr_per_hour")
         .expect("inr_per_hour must have RuleResultValue");
-    let overprecision = "2717.3913043478260869565217391";
+    let overprecision = decimal_lit("2717.3913043478260869565217391");
     assert_ne!(
-        decimal_string, overprecision,
+        magnitude, overprecision,
         "show default must not emit unbounded output precision as convenience input"
     );
 }
@@ -660,7 +654,7 @@ fn ratio_show_default_basis_points_convenience_input_evaluates() {
     let magnitude = default
         .magnitude_in_unit(&default_ty, "basis_points")
         .expect("section E guarantees basis_points RuleResultValue");
-    assert_eq!(magnitude, "500");
+    assert_eq!(magnitude, decimal_lit("500"));
     let mut data = HashMap::new();
     data.insert("bps".into(), format!("{magnitude} basis_points"));
     let response = engine
@@ -716,7 +710,7 @@ fn ratio_eval_15_percent_ok() {
     let engine = policy_engine();
     let now = DateTimeValue::now();
     let mut data = HashMap::new();
-    data.insert("margin".into(), "15%".to_string());
+    data.insert("margin".into(), "15%".into());
     let response = engine
         .run(None, "policy", Some(&now), data, None, true)
         .expect("evaluation");
@@ -727,9 +721,9 @@ fn ratio_eval_15_percent_ok() {
         .as_ref()
         .expect("explanation")
         .result
-        .value()
+        .literal_value()
         .expect("result value");
-    assert_ratio_exact(lit, "rule m", "0.15", Some("percent"));
+    assert_ratio_exact(&lit, "rule m", "0.15", Some("percent"));
 }
 
 #[test]
@@ -860,10 +854,10 @@ fn show_suggestion_carries_per_unit_magnitude() {
     let json = serde_json::to_value(lemma::api::ShowData::from(&entry)).expect("ShowData JSON");
     let suggestion = entry.suggestion.expect("suggestion");
     let measure = suggestion.measure.as_ref().expect("measure unit map");
-    assert_eq!(measure.get("inr").map(String::as_str), Some("100.00"));
+    assert_eq!(measure.get("inr").copied(), Some(decimal_lit("100.00")));
     assert_ne!(
-        measure.get("eur").map(String::as_str),
-        Some("100.00"),
+        measure.get("eur").copied(),
+        Some(decimal_lit("100.00")),
         "eur magnitude must differ from inr (real unit conversion, not raw echo)"
     );
     assert_eq!(
@@ -871,9 +865,9 @@ fn show_suggestion_carries_per_unit_magnitude() {
         Some("100.00")
     );
     assert_eq!(
-        suggestion.display.as_deref(),
+        suggestion.result.as_deref(),
         Some("100.00 inr"),
-        "suggestion display must be LiteralValue::display_value, not the unit-map join"
+        "suggestion display must use the unit written on -> suggest"
     );
 }
 
@@ -885,7 +879,7 @@ fn show_fill_carries_per_unit_magnitude() {
     let json = serde_json::to_value(lemma::api::ShowData::from(&entry)).expect("ShowData JSON");
     let fill = entry.fill.expect("fill");
     let measure = fill.measure.as_ref().expect("measure unit map");
-    assert_eq!(measure.get("inr").map(String::as_str), Some("100.00"));
+    assert_eq!(measure.get("inr").copied(), Some(decimal_lit("100.00")));
     assert_eq!(json["fill"]["measure"]["inr"].as_str(), Some("100.00"));
 }
 
@@ -904,7 +898,7 @@ fn execution_plan_constant_keeps_canonical_magnitude() {
         .as_ref()
         .expect("explanation")
         .result
-        .value()
+        .literal_value()
         .expect("value");
     match &lit.value {
         ValueKind::Measure(canonical) => {

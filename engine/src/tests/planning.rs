@@ -508,7 +508,8 @@ rule getx: one.x
     // Verify that one.x keeps its declared custom type name while resolving in spec one.
     let one_x_path = DataPath {
         segments: vec![PathSegment {
-            data: "one".to_string(),
+            uses: "one".to_string(),
+            repository: None,
             spec: "one".to_string(),
         }],
         data: "x".to_string(),

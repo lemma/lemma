@@ -72,7 +72,7 @@ rule main: expensive
 "#,
     );
     let mut data = HashMap::new();
-    data.insert("flag".to_string(), "false".to_string());
+    data.insert("flag".to_string(), "false".into());
     let response = run(&engine, "demo", data, None, false);
     let md = missing(&response, "main");
     assert!(
@@ -97,7 +97,7 @@ rule main: a and b and c
 "#,
     );
     let mut data = HashMap::new();
-    data.insert("a".to_string(), "false".to_string());
+    data.insert("a".to_string(), "false".into());
     let response = run(&engine, "demo", data, None, false);
     let md = missing(&response, "main");
     assert!(
@@ -125,8 +125,8 @@ rule main: a and b and c
 "#,
     );
     let mut data = HashMap::new();
-    data.insert("a".to_string(), "true".to_string());
-    data.insert("b".to_string(), "false".to_string());
+    data.insert("a".to_string(), "true".into());
+    data.insert("b".to_string(), "false".into());
     let response = run(&engine, "demo", data, None, false);
     let md = missing(&response, "main");
     assert!(
@@ -163,7 +163,7 @@ rule main: shared
     );
     // flag_b arm is taken: default body (shared) and flag_a body (shared) are both dead.
     let mut data = HashMap::new();
-    data.insert("flag_b".to_string(), "true".to_string());
+    data.insert("flag_b".to_string(), "true".into());
     let response = run(&engine, "demo", data, None, false);
     let md = missing(&response, "main");
     assert!(
@@ -194,7 +194,7 @@ rule main: 1
 "#,
     );
     let mut data = HashMap::new();
-    data.insert("flag".to_string(), "false".to_string());
+    data.insert("flag".to_string(), "false".into());
     let response = run(&engine, "demo", data, None, false);
     let md = missing(&response, "main");
     assert!(
@@ -263,8 +263,8 @@ rule main: expensive
 "#,
     );
     let mut data = HashMap::new();
-    data.insert("flag_outer".to_string(), "true".to_string());
-    data.insert("flag_inner".to_string(), "true".to_string());
+    data.insert("flag_outer".to_string(), "true".into());
+    data.insert("flag_inner".to_string(), "true".into());
     let response = run(&engine, "demo", data, None, false);
     let md = missing(&response, "main");
     assert!(
@@ -289,8 +289,8 @@ rule main: a + b
 "#,
     );
     let mut data = HashMap::new();
-    data.insert("a".to_string(), "1".to_string());
-    data.insert("b".to_string(), "2".to_string());
+    data.insert("a".to_string(), "1".into());
+    data.insert("b".to_string(), "2".into());
     let response = run(&engine, "demo", data, None, false);
     let main = rule(&response, "main");
     assert!(
@@ -336,7 +336,7 @@ rule main: a + b + c
 "#,
     );
     let mut data = HashMap::new();
-    data.insert("a".to_string(), "1".to_string());
+    data.insert("a".to_string(), "1".into());
     let response = run(&engine, "demo", data, None, false);
     assert_eq!(missing(&response, "main"), &["b", "c"]);
 }
@@ -461,7 +461,7 @@ rule r2: s + t
     );
 
     let mut data = HashMap::new();
-    data.insert("s".to_string(), "3".to_string());
+    data.insert("s".to_string(), "3".into());
     let response = run(
         &engine,
         "demo",
@@ -549,7 +549,7 @@ fn c2_mode_simple_prunes_complex_inputs() {
     let mut engine = Engine::new();
     load(&mut engine, CHOOSER);
     let mut data = HashMap::new();
-    data.insert("mode".to_string(), "simple".to_string());
+    data.insert("mode".to_string(), "simple".into());
     let response = run(
         &engine,
         "chooser",
@@ -578,7 +578,7 @@ fn c3_mode_complex_prunes_simple_input() {
     let mut engine = Engine::new();
     load(&mut engine, CHOOSER);
     let mut data = HashMap::new();
-    data.insert("mode".to_string(), "complex".to_string());
+    data.insert("mode".to_string(), "complex".into());
     let response = run(
         &engine,
         "chooser",
@@ -611,7 +611,7 @@ rule main: expensive * 2
 "#,
     );
     let mut data = HashMap::new();
-    data.insert("threshold".to_string(), "4".to_string());
+    data.insert("threshold".to_string(), "4".into());
     let response = run(&engine, "demo", data, Some(&["main".to_string()]), false);
     let md = missing(&response, "main");
     assert!(
@@ -668,7 +668,7 @@ rule main: flag and expensive > 0
 "#,
     );
     let mut data = HashMap::new();
-    data.insert("flag".to_string(), "false".to_string());
+    data.insert("flag".to_string(), "false".into());
     let response = run(&engine, "demo", data, None, false);
     let md = missing(&response, "main");
     assert!(
@@ -717,7 +717,7 @@ rule main: missing_factor * loading
 "#,
     );
     let mut data = HashMap::new();
-    data.insert("is_smoker".to_string(), "true".to_string());
+    data.insert("is_smoker".to_string(), "true".into());
     let response = run(&engine, "demo", data, Some(&["main".to_string()]), false);
     let md = missing(&response, "main");
     assert!(
@@ -755,7 +755,7 @@ rule main: missing_flag and (loading > 0)
 "#,
     );
     let mut data = HashMap::new();
-    data.insert("is_smoker".to_string(), "true".to_string());
+    data.insert("is_smoker".to_string(), "true".into());
     let response = run(&engine, "demo", data, Some(&["main".to_string()]), false);
     let md = missing(&response, "main");
     assert!(
@@ -792,7 +792,7 @@ rule main: (1 / denom) * loading
 "#,
     );
     let mut data = HashMap::new();
-    data.insert("denom".to_string(), "0".to_string());
+    data.insert("denom".to_string(), "0".into());
     let plain = run(
         &engine,
         "demo",
@@ -836,7 +836,7 @@ rule main: base * loading
 "#,
     );
     let mut data = HashMap::new();
-    data.insert("age".to_string(), "80".to_string());
+    data.insert("age".to_string(), "80".into());
     let response = run(&engine, "demo", data, Some(&["main".to_string()]), false);
     let main = rule(&response, "main");
     assert!(main.vetoed);
@@ -871,7 +871,7 @@ rule main: missing_factor * base
 "#,
     );
     let mut data = HashMap::new();
-    data.insert("age".to_string(), "80".to_string());
+    data.insert("age".to_string(), "80".into());
     let plain = run(
         &engine,
         "demo",
@@ -890,8 +890,8 @@ rule main: missing_factor * base
         main.veto_reason
     );
     assert!(
-        !main.awaits_missing_data(),
-        "rule must be settled, not awaiting MissingData"
+        !main.is_missing_data(),
+        "rule must be settled, not a MissingData veto"
     );
     assert!(
         main.missing_data().is_empty(),
@@ -908,7 +908,7 @@ rule main: missing_factor * base
 /// And left MissingData + right definitive: MissingData wins intake (`false` can still answer).
 /// The right conjunct is never visited (parity with d4), so `age` is not listed.
 #[test]
-fn d8_and_missing_left_awaits_despite_later_definitive_veto() {
+fn d8_and_missing_left_is_missing_data_despite_later_definitive_veto() {
     let mut engine = Engine::new();
     load(
         &mut engine,
@@ -922,7 +922,7 @@ rule main: missing_flag and (base > 0)
 "#,
     );
     let mut data = HashMap::new();
-    data.insert("age".to_string(), "80".to_string());
+    data.insert("age".to_string(), "80".into());
     let plain = run(
         &engine,
         "demo",
@@ -934,8 +934,8 @@ rule main: missing_flag and (base > 0)
     let main = rule(&plain, "main");
     assert!(main.vetoed);
     assert!(
-        main.awaits_missing_data(),
-        "unbound left And must await MissingData even when right settles veto: {:?}",
+        main.is_missing_data(),
+        "unbound left And must be MissingData even when right settles veto: {:?}",
         main.veto_reason
     );
     assert!(
@@ -973,8 +973,8 @@ rule main: missing_flag and (base > 0)
 "#,
     );
     let mut data = HashMap::new();
-    data.insert("missing_flag".to_string(), "false".to_string());
-    data.insert("age".to_string(), "80".to_string());
+    data.insert("missing_flag".to_string(), "false".into());
+    data.insert("age".to_string(), "80".into());
     let response = run(&engine, "demo", data, Some(&["main".to_string()]), false);
     let main = rule(&response, "main");
     assert!(
@@ -982,17 +982,17 @@ rule main: missing_flag and (base > 0)
         "false and … must answer false, not inherit right veto: {:?}",
         main.veto_reason
     );
-    assert!(!main.awaits_missing_data(), "false And is settled");
+    assert!(!main.is_missing_data(), "false And is settled");
     assert!(
         main.missing_data().is_empty(),
         "settled false must clear missing_data: {:?}",
         main.missing_data()
     );
     assert_eq!(
-        main.value.as_ref().and_then(|v| v.boolean),
+        main.result.as_ref().and_then(|v| v.boolean),
         Some(false),
         "false and veto must be boolean false, got {:?}",
-        main.display()
+        main.result()
     );
 }
 
@@ -1026,8 +1026,8 @@ rule z: x and y
     let z = rule(&plain, "z");
     assert!(z.vetoed, "z must veto when left conjunct vetoes");
     assert!(
-        !z.awaits_missing_data(),
-        "definitive And must not await MissingData"
+        !z.is_missing_data(),
+        "definitive And must not be MissingData"
     );
     assert!(
         z.missing_data().is_empty(),
@@ -1105,7 +1105,7 @@ rule main: missing_threshold > loading
 "#,
     );
     let mut data = HashMap::new();
-    data.insert("is_smoker".to_string(), "true".to_string());
+    data.insert("is_smoker".to_string(), "true".into());
     let response = run(&engine, "demo", data, Some(&["main".to_string()]), false);
     let md = missing(&response, "main");
     assert!(
@@ -1138,7 +1138,7 @@ rule main: missing_threshold > base
 "#,
     );
     let mut data = HashMap::new();
-    data.insert("age".to_string(), "80".to_string());
+    data.insert("age".to_string(), "80".into());
     let plain = run(
         &engine,
         "demo",
@@ -1157,8 +1157,8 @@ rule main: missing_threshold > base
         main.veto_reason
     );
     assert!(
-        !main.awaits_missing_data(),
-        "rule must be settled, not awaiting MissingData"
+        !main.is_missing_data(),
+        "rule must be settled, not a MissingData veto"
     );
     assert!(
         main.missing_data().is_empty(),
@@ -1188,7 +1188,7 @@ rule main: missing_threshold...base
 "#,
     );
     let mut data = HashMap::new();
-    data.insert("age".to_string(), "80".to_string());
+    data.insert("age".to_string(), "80".into());
     let plain = run(
         &engine,
         "demo",
@@ -1207,8 +1207,8 @@ rule main: missing_threshold...base
         main.veto_reason
     );
     assert!(
-        !main.awaits_missing_data(),
-        "rule must be settled, not awaiting MissingData"
+        !main.is_missing_data(),
+        "rule must be settled, not a MissingData veto"
     );
     assert!(
         main.missing_data().is_empty(),
@@ -1238,7 +1238,7 @@ rule main: missing_threshold in 0...base
 "#,
     );
     let mut data = HashMap::new();
-    data.insert("age".to_string(), "80".to_string());
+    data.insert("age".to_string(), "80".into());
     let plain = run(
         &engine,
         "demo",
@@ -1257,8 +1257,8 @@ rule main: missing_threshold in 0...base
         main.veto_reason
     );
     assert!(
-        !main.awaits_missing_data(),
-        "rule must be settled, not awaiting MissingData"
+        !main.is_missing_data(),
+        "rule must be settled, not a MissingData veto"
     );
     assert!(
         main.missing_data().is_empty(),
@@ -1287,7 +1287,7 @@ rule main: 100 > base
 "#,
     );
     let mut data = HashMap::new();
-    data.insert("age".to_string(), "80".to_string());
+    data.insert("age".to_string(), "80".into());
     let plain = run(
         &engine,
         "demo",
@@ -1306,8 +1306,8 @@ rule main: 100 > base
         main.veto_reason
     );
     assert!(
-        !main.awaits_missing_data(),
-        "rule must be settled, not awaiting MissingData"
+        !main.is_missing_data(),
+        "rule must be settled, not a MissingData veto"
     );
     assert!(
         main.missing_data().is_empty(),
@@ -1336,7 +1336,7 @@ rule main: 0...base
 "#,
     );
     let mut data = HashMap::new();
-    data.insert("age".to_string(), "80".to_string());
+    data.insert("age".to_string(), "80".into());
     let plain = run(
         &engine,
         "demo",
@@ -1355,8 +1355,8 @@ rule main: 0...base
         main.veto_reason
     );
     assert!(
-        !main.awaits_missing_data(),
-        "rule must be settled, not awaiting MissingData"
+        !main.is_missing_data(),
+        "rule must be settled, not a MissingData veto"
     );
     assert!(
         main.missing_data().is_empty(),
@@ -1385,7 +1385,7 @@ rule main: 50 in 0...base
 "#,
     );
     let mut data = HashMap::new();
-    data.insert("age".to_string(), "80".to_string());
+    data.insert("age".to_string(), "80".into());
     let plain = run(
         &engine,
         "demo",
@@ -1404,8 +1404,8 @@ rule main: 50 in 0...base
         main.veto_reason
     );
     assert!(
-        !main.awaits_missing_data(),
-        "rule must be settled, not awaiting MissingData"
+        !main.is_missing_data(),
+        "rule must be settled, not a MissingData veto"
     );
     assert!(
         main.missing_data().is_empty(),
@@ -1520,7 +1520,7 @@ rule main: a + b
 "#,
     );
     let mut data = HashMap::new();
-    data.insert("a".to_string(), "1".to_string());
+    data.insert("a".to_string(), "1".into());
     let plain = run(&engine, "demo", data.clone(), None, false);
     let explained = run(&engine, "demo", data, None, true);
     assert_eq!(
@@ -1531,7 +1531,7 @@ rule main: a + b
     let p = rule(&plain, "main");
     let e = rule(&explained, "main");
     assert_eq!(p.vetoed, e.vetoed);
-    assert_eq!(p.display(), e.display());
+    assert_eq!(p.result(), e.result());
     assert_eq!(p.veto_reason, e.veto_reason);
 }
 
@@ -1547,7 +1547,7 @@ rule main: a
 "#,
     );
     let mut data = HashMap::new();
-    data.insert("a".to_string(), "9".to_string());
+    data.insert("a".to_string(), "9".into());
     let response = run(&engine, "demo", data, None, true);
     assert!(
         missing(&response, "main").is_empty(),
@@ -1648,20 +1648,20 @@ rule name: prev.name
 fn assert_attach_invariant(response: &lemma::Response) {
     use lemma::VetoType;
     for result in response.results.values() {
-        if !result.awaits_missing_data() {
+        if !result.is_missing_data() {
             continue;
         }
         assert!(
             !result.missing_data().is_empty(),
-            "awaiting rule '{}' must not attach empty missing_data",
+            "MissingData rule '{}' must not attach empty missing_data",
             result.rule.name
         );
         let VetoType::MissingData { data, .. } = result
             .veto_detail
             .as_ref()
-            .expect("BUG: awaits_missing_data without MissingData veto_detail")
+            .expect("BUG: is_missing_data without MissingData veto_detail")
         else {
-            panic!("BUG: awaits_missing_data without MissingData veto_detail");
+            panic!("BUG: is_missing_data without MissingData veto_detail");
         };
         let key = data.input_key();
         assert!(
@@ -1692,7 +1692,7 @@ rule main: missing_threshold > loading
 "#,
     );
     let mut data = HashMap::new();
-    data.insert("is_smoker".to_string(), "true".to_string());
+    data.insert("is_smoker".to_string(), "true".into());
     let comparison = run(&engine, "demo", data, Some(&["main".to_string()]), false);
     assert_attach_invariant(&comparison);
     assert!(
@@ -1717,7 +1717,7 @@ rule main: missing_flag and (loading > 0)
 "#,
     );
     let mut data = HashMap::new();
-    data.insert("is_smoker".to_string(), "true".to_string());
+    data.insert("is_smoker".to_string(), "true".into());
     let and_case = run(&engine, "demo", data, Some(&["main".to_string()]), false);
     assert_attach_invariant(&and_case);
     assert!(
@@ -1746,9 +1746,9 @@ rule main: a + b + c
     );
 }
 
-/// Engine::run must never attach awaiting MissingData with empty or mismatched missing_data.
+/// Engine::run must never attach MissingData veto with empty or mismatched missing_data.
 #[test]
-fn g5_engine_run_never_awaits_with_empty_missing_data() {
+fn g5_engine_run_never_attaches_empty_missing_data() {
     let mut engine = Engine::new();
     load(
         &mut engine,
@@ -1777,7 +1777,7 @@ rule main: missing_threshold > loading
 "#,
     );
     let mut data = HashMap::new();
-    data.insert("is_smoker".to_string(), "true".to_string());
+    data.insert("is_smoker".to_string(), "true".into());
     assert_attach_invariant(&run(
         &engine,
         "demo",
@@ -1841,7 +1841,7 @@ rule main: expensive unless flag then 0
     );
 
     let mut data = HashMap::new();
-    data.insert("flag".to_string(), "true".to_string());
+    data.insert("flag".to_string(), "true".into());
     let gated = run(&engine, "demo", data, None, false);
     assert!(
         missing(&gated, "main").is_empty(),
@@ -1849,7 +1849,7 @@ rule main: expensive unless flag then 0
         missing(&gated, "main")
     );
     assert!(
-        !rule(&gated, "main").awaits_missing_data(),
+        !rule(&gated, "main").is_missing_data(),
         "flag true settles the rule"
     );
 }
@@ -1975,7 +1975,7 @@ rule result: veto "pick mode"
     );
 
     let mut complex = HashMap::new();
-    complex.insert("mode".to_string(), "complex".to_string());
+    complex.insert("mode".to_string(), "complex".into());
     let complex_response = run(
         &engine,
         "chooser",
@@ -1989,7 +1989,7 @@ rule result: veto "pick mode"
     );
 
     let mut high = HashMap::new();
-    high.insert("priority".to_string(), "high".to_string());
+    high.insert("priority".to_string(), "high".into());
     let high_alone = run(
         &engine,
         "chooser",
@@ -2004,8 +2004,8 @@ rule result: veto "pick mode"
     );
 
     let mut middle_wins = HashMap::new();
-    middle_wins.insert("mode".to_string(), "simple".to_string());
-    middle_wins.insert("priority".to_string(), "high".to_string());
+    middle_wins.insert("mode".to_string(), "simple".into());
+    middle_wins.insert("priority".to_string(), "high".into());
     let middle = run(
         &engine,
         "chooser",

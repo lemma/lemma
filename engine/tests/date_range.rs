@@ -1,7 +1,9 @@
 use lemma::{DateGranularity, ValueKind};
 use lemma::{DateTimeValue, Engine, LiteralValue, TimezoneValue};
+use rust_decimal::Decimal;
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::str::FromStr;
 use std::sync::Arc;
 
 fn source() -> lemma::SourceType {
@@ -65,7 +67,7 @@ fn eval_literal_with_data(
         .as_ref()
         .expect("explanation")
         .result
-        .value()
+        .literal_value()
         .expect("BUG: non-vetoed rule missing value")
         .clone()
 }
@@ -74,7 +76,7 @@ fn eval_rule(code: &str, spec_name: &str, rule_name: &str) -> String {
     eval_rule_with_effective(code, spec_name, rule_name, &default_effective())
 }
 
-fn eval_rule_number(code: &str, spec_name: &str, rule_name: &str) -> String {
+fn eval_rule_number(code: &str, spec_name: &str, rule_name: &str) -> Decimal {
     let mut engine = Engine::new();
     engine
         .load([(source(), code.to_string())])
@@ -90,15 +92,15 @@ fn eval_rule_number(code: &str, spec_name: &str, rule_name: &str) -> String {
             true,
         )
         .expect("Should evaluate");
-    response
+    *response
         .results
         .get(rule_name)
         .unwrap_or_else(|| panic!("Rule '{}' not found", rule_name))
-        .value
+        .result
         .as_ref()
         .expect("rule result value")
         .number
-        .clone()
+        .as_ref()
         .expect("number result")
 }
 
@@ -126,8 +128,8 @@ fn eval_rule_with_effective(
         .results
         .get(rule_name)
         .unwrap_or_else(|| panic!("Rule '{}' not found", rule_name))
-        .display()
-        .expect("display")
+        .result()
+        .expect("result")
         .to_string()
 }
 
@@ -500,7 +502,7 @@ rule span: 2024-01-15...2025-01-14 as year as number"#;
     // 364-day span is 11 calendar month → 11/12 year when de-canonicalized to year.
     assert_eq!(
         eval_rule_number(code, "test", "span"),
-        "0.9166666666666666666666666667"
+        Decimal::from_str("0.9166666666666666666666666667").expect("span decimal")
     );
 }
 
@@ -800,7 +802,7 @@ uses lemma units
 data period: date range -> suggest 2024-01-01...2025-01-01
 rule month: period as month as number"#;
     let mut data = HashMap::new();
-    data.insert("period".to_string(), "2024-01-01...2025-01-01".to_string());
+    data.insert("period".to_string(), "2024-01-01...2025-01-01".into());
     let val = eval_literal_with_data(code, "test", "month", &default_effective(), data).to_string();
     assert_contains_all(&val, &["12"]);
 }
@@ -812,7 +814,7 @@ data period: date range
 data event: 2024-03-15
 rule check: event in period"#;
     let mut data = HashMap::new();
-    data.insert("period".to_string(), "2024-01-01...2024-12-31".to_string());
+    data.insert("period".to_string(), "2024-01-01...2024-12-31".into());
     let lit = eval_literal_with_data(code, "test", "check", &default_effective(), data);
     match lit.value {
         ValueKind::Boolean(val) => assert!(val),
@@ -990,8 +992,8 @@ rule valid: now in start...start + length
 #[test]
 fn premium_membership_outside_period() {
     let mut data = HashMap::new();
-    data.insert("start".to_string(), "2026-07-01".to_string());
-    data.insert("length".to_string(), "10 day".to_string());
+    data.insert("start".to_string(), "2026-07-01".into());
+    data.insert("length".to_string(), "10 day".into());
     let val = eval_bool_with_data(
         PREMIUM_MEMBERSHIP_SPEC,
         "premium_membership",
@@ -1005,8 +1007,8 @@ fn premium_membership_outside_period() {
 #[test]
 fn premium_membership_inside_period() {
     let mut data = HashMap::new();
-    data.insert("start".to_string(), "2026-07-01".to_string());
-    data.insert("length".to_string(), "10 day".to_string());
+    data.insert("start".to_string(), "2026-07-01".into());
+    data.insert("length".to_string(), "10 day".into());
     let val = eval_bool_with_data(
         PREMIUM_MEMBERSHIP_SPEC,
         "premium_membership",

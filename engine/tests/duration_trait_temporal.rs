@@ -1,4 +1,5 @@
 use lemma::{DateGranularity, DateTimeValue, Engine, TimezoneValue, ValueKind};
+use rust_decimal::Decimal;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -58,7 +59,7 @@ fn eval_literal(
         .as_ref()
         .expect("explanation")
         .result
-        .value()
+        .literal_value()
         .expect("BUG: non-vetoed rule missing value")
         .clone()
 }
@@ -81,8 +82,8 @@ fn eval_rule(
         .results
         .get(rule_name)
         .unwrap_or_else(|| panic!("Rule '{}' not found", rule_name))
-        .display()
-        .expect("display")
+        .result()
+        .expect("result")
         .to_string()
 }
 
@@ -92,7 +93,7 @@ fn eval_rule_measure_unit(
     rule_name: &str,
     unit: &str,
     effective: &DateTimeValue,
-) -> String {
+) -> Decimal {
     let code = code.as_ref();
     let mut engine = Engine::new();
     engine
@@ -112,11 +113,11 @@ fn eval_rule_measure_unit(
             rule.veto_reason.as_deref().unwrap_or("Vetoed")
         );
     }
-    rule.value
+    *rule
+        .result
         .as_ref()
         .and_then(|v| v.measure.as_ref())
         .and_then(|m| m.get(unit))
-        .cloned()
         .unwrap_or_else(|| panic!("measure map missing unit '{unit}'"))
 }
 
@@ -306,7 +307,7 @@ rule value: (future 2 hour) as minute"#;
             "minute",
             &effective(2026, 3, 8, 12, 0, 0)
         ),
-        "120"
+        Decimal::from(120)
     );
 }
 

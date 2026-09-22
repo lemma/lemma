@@ -6,15 +6,17 @@ use crate::computation::operation_result::{OperationResult, VetoType};
 use crate::computation::rational::RationalInteger;
 use crate::planning::semantics::{ComparisonComputation, LemmaType, LiteralValue, ValueKind};
 
-/// Perform type-aware comparison, returning OperationResult (Veto on error)
+/// Perform type-aware comparison, returning OperationResult (Veto on error).
+///
+/// Operates on [`ValueKind`] magnitudes; written-unit bindings are irrelevant to ordering.
 pub fn comparison_operation(
-    left: &LiteralValue,
+    left: &ValueKind,
     left_type: &Arc<LemmaType>,
     op: &ComparisonComputation,
-    right: &LiteralValue,
+    right: &ValueKind,
     right_type: &Arc<LemmaType>,
 ) -> OperationResult {
-    match (&left.value, &right.value) {
+    match (left, right) {
         (ValueKind::Range(range_left, range_right), ValueKind::Measure(_))
             if left_type.is_date_range() && right_type.is_calendar_like() =>
         {
@@ -135,10 +137,24 @@ pub fn comparison_operation(
         }
 
         (ValueKind::Date(_), ValueKind::Date(_)) => {
-            super::datetime::datetime_comparison(left, left_type, op, right, right_type)
+            let left_lit = LiteralValue {
+                value: left.clone(),
+            };
+            let right_lit = LiteralValue {
+                value: right.clone(),
+            };
+            super::datetime::datetime_comparison(
+                &left_lit, left_type, op, &right_lit, right_type,
+            )
         }
         (ValueKind::Time(_), ValueKind::Time(_)) => {
-            super::datetime::time_comparison(left, left_type, op, right, right_type)
+            let left_lit = LiteralValue {
+                value: left.clone(),
+            };
+            let right_lit = LiteralValue {
+                value: right.clone(),
+            };
+            super::datetime::time_comparison(&left_lit, left_type, op, &right_lit, right_type)
         }
 
         (ValueKind::Measure(value), ValueKind::Number(n))
@@ -193,14 +209,14 @@ fn compare_with_operation_result(
     left_result: OperationResult,
     left_type: &Arc<LemmaType>,
     op: &ComparisonComputation,
-    right: &LiteralValue,
+    right: &ValueKind,
     right_type: &Arc<LemmaType>,
 ) -> OperationResult {
     let left_value = match left_result {
         OperationResult::Value(value) => value,
         OperationResult::Veto(reason) => return OperationResult::Veto(reason),
     };
-    comparison_operation(&left_value, left_type, op, right, right_type)
+    comparison_operation(&left_value.value, left_type, op, right, right_type)
 }
 
 /// Endpoint type for runtime range span, with decomposition filled when units exist
@@ -224,7 +240,7 @@ fn range_endpoint_type_for_runtime_span(range_type: &LemmaType) -> Arc<LemmaType
 }
 
 fn compare_with_right_result(
-    left: &LiteralValue,
+    left: &ValueKind,
     left_type: &Arc<LemmaType>,
     op: &ComparisonComputation,
     right_result: OperationResult,
@@ -234,7 +250,7 @@ fn compare_with_right_result(
         OperationResult::Value(value) => value,
         OperationResult::Veto(reason) => return OperationResult::Veto(reason),
     };
-    comparison_operation(left, left_type, op, &right_value, right_type)
+    comparison_operation(left, left_type, op, &right_value.value, right_type)
 }
 
 #[cfg(test)]
@@ -243,7 +259,7 @@ mod tests {
     use crate::computation::rational::rational_new;
     use crate::planning::semantics::{primitive_number_arc, ComparisonComputation, LiteralValue};
 
-    fn eval_bool(left: &LiteralValue, op: &ComparisonComputation, right: &LiteralValue) -> bool {
+    fn eval_bool(left: &ValueKind, op: &ComparisonComputation, right: &ValueKind) -> bool {
         let number_ty = primitive_number_arc();
         let OperationResult::Value(lit) =
             comparison_operation(left, number_ty, op, right, number_ty)
@@ -258,8 +274,8 @@ mod tests {
 
     #[test]
     fn number_greater_than() {
-        let left = LiteralValue::number(rational_new(5, 1));
-        let right = LiteralValue::number(rational_new(3, 1));
+        let left = LiteralValue::number(rational_new(5, 1)).value;
+        let right = LiteralValue::number(rational_new(3, 1)).value;
         assert!(eval_bool(
             &left,
             &ComparisonComputation::GreaterThan,

@@ -3,7 +3,6 @@
 use lemma::{Engine, ValueKind};
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::str::FromStr;
 use std::sync::Arc;
 
 fn source() -> lemma::SourceType {
@@ -80,7 +79,7 @@ fn runtime_data_ten_divide_three_returns_value_not_veto() {
         .as_ref()
         .expect("explanation")
         .result
-        .value()
+        .literal_value()
         .expect("ten / three must return Value, not Veto");
     match &value.value {
         ValueKind::Number(n) => {
@@ -125,14 +124,14 @@ fn integer_division_is_exact_rational_not_truncation() {
         .as_ref()
         .expect("explanation")
         .result
-        .value()
+        .literal_value()
         .expect("value");
     let pos_n = pos
         .explanation
         .as_ref()
         .expect("explanation")
         .result
-        .value()
+        .literal_value()
         .expect("value");
 
     match (&neg_n.value, &pos_n.value) {
@@ -180,7 +179,7 @@ rule pay: (hourly_rate * (period_start...period_end as hour))"#;
         .expect("spec must evaluate");
     let rr = response.results.get("pay").expect("pay");
     let measure = rr
-        .value
+        .result
         .as_ref()
         .and_then(|v| v.measure.as_ref())
         .expect("measure map");
@@ -189,9 +188,6 @@ rule pay: (hourly_rate * (period_start...period_end as hour))"#;
         "pay must expose eur, got keys {:?}",
         measure.keys().collect::<Vec<_>>()
     );
-    let amount = measure.get("eur").expect("eur");
-    assert_eq!(
-        rust_decimal::Decimal::from_str(amount).expect("decimal"),
-        rust_decimal::Decimal::from(1200)
-    );
+    let amount = measure.get("eur").copied().expect("eur");
+    assert_eq!(amount, rust_decimal::Decimal::from(1200));
 }

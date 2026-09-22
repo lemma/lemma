@@ -142,7 +142,7 @@ fn test_data_value_size_limit() {
 
     let large_string = "a".repeat(100);
     let mut data = std::collections::HashMap::new();
-    data.insert("name".to_string(), large_string);
+    data.insert("name".to_string(), large_string.to_string());
 
     let now = DateTimeValue::now();
     let response = engine
@@ -400,7 +400,7 @@ fn performance_test_10k_rules() {
 
     eprintln!(
         "{num_rules:>6} rules ({nodes:>7} nodes, {bytes:>8} bytes): parse+plan {elapsed:>8.2?}  eval {eval_time:>8.2?}  result={:?}",
-        resp.results[0].display()
+        resp.results[0].result()
     );
 }
 
@@ -483,7 +483,7 @@ fn bench_deep_chains_body() {
 
         eprintln!(
             "chain {num_rules:>6} rules (~{est_nodes:>6} nodes): parse+plan {elapsed:>8.2?}  eval {eval_time:>8.2?}  result={:?}",
-            resp.results[0].display()
+            resp.results[0].result()
         );
     }
 
@@ -520,7 +520,7 @@ fn bench_deep_chains_body() {
 
         eprintln!(
             "tree  {total_rules:>6} rules (depth {depth:>2}, ~{est_nodes:>6} nodes): parse+plan {elapsed:>8.2?}  eval {eval_time:>8.2?}  result={:?}",
-            resp.results[0].display()
+            resp.results[0].result()
         );
     }
 }

@@ -194,7 +194,7 @@ fn custom_measure_range_overlay_vetoes_endpoint() {
     load(&mut engine, cargo_mass_shipment_ok(), "cargo_veto_ep.lemma");
 
     let mut data = HashMap::new();
-    data.insert("shipment".to_string(), "50 kilogram...1 tonne".to_string());
+    data.insert("shipment".to_string(), "50 kilogram...1 tonne".into());
     let response = engine
         .run(None, "s", Some(&now()), data, None, false)
         .expect("run must complete with veto, not Error");
@@ -214,7 +214,7 @@ fn custom_measure_range_overlay_vetoes_width() {
 
     let mut data = HashMap::new();
     // Endpoints inside envelope but span 100kg < minimum 500kg
-    data.insert("shipment".to_string(), "1 tonne...1.1 tonne".to_string());
+    data.insert("shipment".to_string(), "1 tonne...1.1 tonne".into());
     let response = engine
         .run(None, "s", Some(&now()), data, None, false)
         .expect("run must complete with veto, not Error");
@@ -624,7 +624,7 @@ rule out: tier
     let mut engine = Engine::new();
     load(&mut engine, code, "number_overlay.lemma");
     let mut data = HashMap::new();
-    data.insert("tier".to_string(), "0...5".to_string());
+    data.insert("tier".to_string(), "0...5".into());
     let response = engine
         .run(None, "s", Some(&now()), data, None, false)
         .expect("run must complete");

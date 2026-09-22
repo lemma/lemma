@@ -21,8 +21,8 @@ fn eval_rule(code: &str, spec_name: &str, rule_name: &str) -> String {
         .results
         .get(rule_name)
         .unwrap_or_else(|| panic!("rule {rule_name:?} missing"))
-        .display()
-        .expect("display")
+        .result()
+        .expect("result")
         .to_string()
 }
 
@@ -49,7 +49,7 @@ rule hour: age as hour"#;
         .expect("plan");
     let now = DateTimeValue::now();
     let mut data = HashMap::new();
-    data.insert("age".to_string(), "90 minute".to_string());
+    data.insert("age".to_string(), "90 minute".into());
     let response = engine
         .run(None, "consumer", Some(&now), data, None, false)
         .expect("run");
@@ -58,12 +58,12 @@ rule hour: age as hour"#;
             .results
             .get("hour")
             .expect("hour rule")
-            .value
+            .result
             .as_ref()
             .and_then(|v| v.measure.as_ref())
             .and_then(|m| m.get("hour"))
-            .map(String::as_str),
-        Some("1.5")
+            .copied(),
+        Some(rust_decimal::Decimal::new(15, 1))
     );
 }
 

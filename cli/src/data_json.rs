@@ -1,6 +1,8 @@
 use lemma::RunDataValue;
+use rust_decimal::Decimal;
 use serde_json::Value;
 use std::collections::{BTreeMap, HashMap};
+use std::str::FromStr;
 
 /// Parse `application/x-www-form-urlencoded` fields into data inputs (all [`RunDataValue::String`] values).
 pub fn form_urlencoded_to_data_values(
@@ -15,13 +17,16 @@ pub fn form_urlencoded_to_data_values(
 }
 
 /// Convert one JSON value to [`RunDataValue`]. Rejects unsupported shapes.
-pub fn json_value_to_run_data_value(value: Value) -> Result<RunDataValue, String> {
+///
+/// JSON `null` means omit: returns `Ok(None)`.
+pub fn json_value_to_run_data_value(value: Value) -> Result<Option<RunDataValue>, String> {
     match value {
-        Value::String(s) => Ok(RunDataValue::String(s)),
-        Value::Bool(b) => Ok(RunDataValue::Boolean(b)),
+        Value::Null => Ok(None),
+        Value::String(s) => Ok(Some(RunDataValue::String(s))),
+        Value::Bool(b) => Ok(Some(RunDataValue::Boolean(b))),
         Value::Number(n) => {
             if n.is_i64() || n.is_u64() {
-                Ok(RunDataValue::String(n.to_string()))
+                Ok(Some(RunDataValue::String(n.to_string())))
             } else {
                 Err("decimal values must be passed as strings to preserve exactness".to_string())
             }
@@ -37,22 +42,17 @@ pub fn json_value_to_run_data_value(value: Value) -> Result<RunDataValue, String
                 );
             }
             if obj.values().all(|v| v.is_string()) {
-                let map: BTreeMap<String, String> = obj
-                    .into_iter()
-                    .map(|(k, v)| {
-                        (
-                            k,
-                            v.as_str()
-                                .expect("BUG: object values checked as strings")
-                                .to_string(),
-                        )
-                    })
-                    .collect();
-                return Ok(RunDataValue::MeasureMap(map));
+                let mut map = BTreeMap::new();
+                for (k, v) in obj {
+                    let text = v.as_str().expect("BUG: object values checked as strings");
+                    let decimal = Decimal::from_str(text.trim())
+                        .map_err(|error| format!("invalid decimal '{text}': {error}"))?;
+                    map.insert(k, decimal);
+                }
+                return Ok(Some(RunDataValue::MeasureMap(map)));
             }
             Err("data value object must be a unit map with string magnitudes".to_string())
         }
-        Value::Null => Err("data value must not be null".to_string()),
         Value::Array(_) => Err("data value must not be an array".to_string()),
     }
 }
@@ -60,11 +60,23 @@ pub fn json_value_to_run_data_value(value: Value) -> Result<RunDataValue, String
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rust_decimal::Decimal;
     use std::collections::HashMap;
+    use std::str::FromStr;
+
+    #[test]
+    fn json_null_is_omitted() {
+        assert_eq!(
+            json_value_to_run_data_value(Value::Null).expect("null is omit"),
+            None
+        );
+    }
 
     #[test]
     fn json_string_preserved() {
-        let input = json_value_to_run_data_value(Value::String("Alice".to_string())).unwrap();
+        let input = json_value_to_run_data_value(Value::String("Alice".to_string()))
+            .unwrap()
+            .expect("string present");
         assert_eq!(input, RunDataValue::String("Alice".to_string()));
     }
 
@@ -72,10 +84,15 @@ mod tests {
     fn json_unit_map_parsed() {
         let mut map = serde_json::Map::new();
         map.insert("eur_per_hour".to_string(), Value::String("85".to_string()));
-        let input = json_value_to_run_data_value(Value::Object(map)).unwrap();
+        let input = json_value_to_run_data_value(Value::Object(map))
+            .unwrap()
+            .expect("object present");
         match input {
             RunDataValue::MeasureMap(m) => {
-                assert_eq!(m.get("eur_per_hour"), Some(&"85".to_string()));
+                assert_eq!(
+                    m.get("eur_per_hour"),
+                    Some(&Decimal::from_str("85").unwrap())
+                );
             }
             other => panic!("expected measure map, got {:?}", other),
         }
@@ -99,13 +116,17 @@ mod tests {
 
     #[test]
     fn json_integer_accepted() {
-        let input = json_value_to_run_data_value(serde_json::json!(42)).unwrap();
+        let input = json_value_to_run_data_value(serde_json::json!(42))
+            .unwrap()
+            .expect("integer present");
         assert_eq!(input, RunDataValue::String("42".to_string()));
     }
 
     #[test]
     fn json_negative_integer_accepted() {
-        let input = json_value_to_run_data_value(serde_json::json!(-7)).unwrap();
+        let input = json_value_to_run_data_value(serde_json::json!(-7))
+            .unwrap()
+            .expect("integer present");
         assert_eq!(input, RunDataValue::String("-7".to_string()));
     }
 
@@ -117,7 +138,9 @@ mod tests {
 
     #[test]
     fn json_decimal_string_accepted() {
-        let input = json_value_to_run_data_value(Value::String("0.1".to_string())).unwrap();
+        let input = json_value_to_run_data_value(Value::String("0.1".to_string()))
+            .unwrap()
+            .expect("string present");
         assert_eq!(input, RunDataValue::String("0.1".to_string()));
     }
 
@@ -149,15 +172,21 @@ mod tests {
 
     #[test]
     fn object_roundtrip_via_server_shape() {
-        let body: HashMap<String, Value> = serde_json::from_str(r#"{"age":"30"}"#).unwrap();
+        let body: HashMap<String, Value> =
+            serde_json::from_str(r#"{"age":"30","skip":null}"#).unwrap();
         let converted: HashMap<String, RunDataValue> = body
             .into_iter()
-            .map(|(k, v)| json_value_to_run_data_value(v).map(|input| (k, input)))
+            .filter_map(|(k, v)| match json_value_to_run_data_value(v) {
+                Ok(Some(input)) => Some(Ok((k, input))),
+                Ok(None) => None,
+                Err(e) => Some(Err(e)),
+            })
             .collect::<Result<_, _>>()
             .unwrap();
         assert_eq!(
             converted.get("age"),
             Some(&RunDataValue::String("30".to_string()))
         );
+        assert!(!converted.contains_key("skip"));
     }
 }

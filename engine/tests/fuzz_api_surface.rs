@@ -5,6 +5,7 @@
 use lemma::DateTimeValue;
 use lemma::{Engine, SourceType};
 use std::collections::HashMap;
+use std::str::FromStr;
 
 fn engine_with_files(files: HashMap<String, String>) -> Engine {
     let mut engine = Engine::new();
@@ -58,10 +59,7 @@ fn fuzz_data_bindings_api_number_too_long_no_panic() {
     // 30 nines exceeds Decimal::MAX (~7.92e28): unrepresentable input must
     // veto with a parse reason, not panic.
     let mut data = HashMap::new();
-    data.insert(
-        "x".to_string(),
-        "999999999999999999999999999999".to_string(),
-    );
+    data.insert("x".to_string(), "999999999999999999999999999999".into());
     let now = DateTimeValue::now();
     let response = engine
         .run(None, "fuzz_test", Some(&now), data, None, false)
@@ -70,7 +68,7 @@ fn fuzz_data_bindings_api_number_too_long_no_panic() {
     assert!(
         doubled.vetoed,
         "expected veto for unrepresentable number, got {:?}",
-        doubled.display()
+        doubled.result()
     );
     let reason = doubled.veto_reason.as_deref().expect("veto reason");
     assert!(
@@ -181,15 +179,11 @@ fn data_binding_at_max_fractional_digits_evaluates() {
         "max-scale input must evaluate, got {:?}",
         doubled.veto_reason
     );
-    let expected = format!("0.{}", "2".repeat(scale));
+    let expected = rust_decimal::Decimal::from_str(&format!("0.{}", "2".repeat(scale)))
+        .expect("expected doubled decimal");
     assert_eq!(
-        doubled
-            .value
-            .as_ref()
-            .expect("rule result value")
-            .number
-            .as_deref(),
-        Some(expected.as_str()),
+        doubled.result.as_ref().expect("rule result value").number,
+        Some(expected),
         "doubled 0.(1×{scale}) must be 0.(2×{scale})"
     );
 }
@@ -219,7 +213,7 @@ fn data_binding_with_excess_fractional_digits_vetoes_at_input() {
     assert!(
         doubled.vetoed,
         "excess fractional digits must veto, got {:?}",
-        doubled.display()
+        doubled.result()
     );
     let reason = doubled.veto_reason.as_deref().expect("veto reason");
     assert!(

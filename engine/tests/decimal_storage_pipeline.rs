@@ -20,7 +20,7 @@ fn rule_number(resp: &lemma::Response, rule: &str) -> Decimal {
         .as_ref()
         .expect("explanation")
         .result
-        .value()
+        .literal_value()
         .expect("value");
     match &lit.value {
         ValueKind::Number(d) => lemma::ValueKind::Number(d.clone())
@@ -71,9 +71,9 @@ rule double: x * 2
         .as_ref()
         .expect("explanation")
         .result
-        .value()
+        .literal_value()
         .expect("value");
-    assert_json_number_scalar(lit);
+    assert_json_number_scalar(&lit);
 }
 
 #[test]
@@ -88,7 +88,7 @@ rule doubled: number_data * 2
         .load([(lemma::SourceType::Volatile, code.to_string())])
         .expect("load");
     let now = DateTimeValue::now();
-    let data = HashMap::from([("number_data".to_string(), "50".to_string())]);
+    let data = HashMap::from([("number_data".to_string(), "50".into())]);
     let resp = engine
         .run(None, "s", Some(&now), data, None, true)
         .expect("run");
@@ -101,9 +101,9 @@ rule doubled: number_data * 2
         .as_ref()
         .expect("explanation")
         .result
-        .value()
+        .literal_value()
         .expect("value");
-    assert_json_number_scalar(lit);
+    assert_json_number_scalar(&lit);
 }
 
 #[test]
@@ -148,10 +148,10 @@ rule root: sqrt 2
         .as_ref()
         .expect("explanation")
         .result
-        .value()
+        .literal_value()
         .expect("value");
     assert!(matches!(lit.value, ValueKind::Number(_)));
-    assert_json_number_scalar(lit);
+    assert_json_number_scalar(&lit);
 }
 
 #[test]
@@ -176,10 +176,10 @@ rule s: sin 1
         .as_ref()
         .expect("explanation")
         .result
-        .value()
+        .literal_value()
         .expect("value");
     assert!(matches!(lit.value, ValueKind::Number(_)));
-    assert_json_number_scalar(lit);
+    assert_json_number_scalar(&lit);
 }
 
 #[test]
@@ -209,12 +209,12 @@ rule converted: amount as eur
         .as_ref()
         .expect("explanation")
         .result
-        .value()
+        .literal_value()
         .expect("value");
     match &lit.value {
         ValueKind::Measure(magnitude) => {
             let measure = rr
-                .value
+                .result
                 .as_ref()
                 .and_then(|v| v.measure.as_ref())
                 .expect("measure map");
@@ -229,7 +229,7 @@ rule converted: amount as eur
                     .unwrap(),
                 Decimal::from(84)
             );
-            let json = serde_json::to_value(lemma::api::LiteralValue::from(lit)).unwrap();
+            let json = serde_json::to_value(lemma::api::LiteralValue::from(&lit)).unwrap();
             let measure_json = json.get("value").and_then(|v| v.get("measure")).unwrap();
             assert!(
                 !measure_json

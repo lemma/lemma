@@ -336,13 +336,13 @@ rule doubled: base_value * 2
     );
 
     assert!(
-        stdout.contains("Rules"),
-        "explain output should render Rules section, got:\n{}",
+        !stdout.lines().any(|line| line == "Rules"),
+        "explain must not print Rules heading, got:\n{}",
         stdout
     );
     assert!(
-        !stdout.contains("Missing data"),
-        "prefilled input must not appear as Missing data, got:\n{}",
+        !stdout.lines().any(|line| line == "Missing data"),
+        "prefilled input must not appear as Missing data section, got:\n{}",
         stdout
     );
     assert!(
@@ -388,8 +388,8 @@ rule premium: (1 / denom) * loading
         stdout
     );
     assert!(
-        stdout.contains("Rules"),
-        "explain must show Rules section, got:\n{}",
+        !stdout.lines().any(|line| line == "Rules"),
+        "explain must not print Rules heading, got:\n{}",
         stdout
     );
     assert!(
@@ -400,7 +400,7 @@ rule premium: (1 / denom) * loading
 }
 
 #[test]
-fn test_cli_explain_still_prints_missing_data_when_awaiting_input() {
+fn test_cli_explain_shows_unbound_inputs_in_box_without_section() {
     let temp_dir = TempDir::new().unwrap();
     fs::write(
         temp_dir.path().join("test.lemma"),
@@ -429,13 +429,18 @@ rule main: a + b
         stdout
     );
     assert!(
-        stdout.contains("Missing data"),
-        "true MissingData must still print Missing data, got:\n{}",
+        !stdout.lines().any(|line| line == "Missing data"),
+        "explain must not print Missing data section, got:\n{}",
+        stdout
+    );
+    assert!(
+        !stdout.lines().any(|line| line == "Rules"),
+        "explain must not print Rules heading, got:\n{}",
         stdout
     );
     assert!(
         stdout.contains("a") && stdout.contains("b"),
-        "Missing data must list unbound operands, got:\n{}",
+        "unbound operands must appear in the main explanation box, got:\n{}",
         stdout
     );
 }

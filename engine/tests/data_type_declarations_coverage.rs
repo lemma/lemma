@@ -45,7 +45,7 @@ fn rule_value(result: &lemma::Response, name: &str) -> String {
     if rr.vetoed {
         format!("VETO({})", rr.veto_reason.as_deref().unwrap_or("Vetoed"))
     } else {
-        rr.display().expect("display").to_string()
+        rr.result().expect("result").to_string()
     }
 }
 
@@ -58,10 +58,10 @@ fn run(
     engine.run(None, spec, Some(&now), data, None, false)
 }
 
-fn assert_awaits_missing(rr: &lemma::RuleResult, key: &str) {
-    assert!(rr.vetoed, "unbound {key} must veto, got {:?}", rr.display());
+fn assert_is_missing_data(rr: &lemma::RuleResult, key: &str) {
+    assert!(rr.vetoed, "unbound {key} must veto, got {:?}", rr.result());
     assert!(
-        rr.awaits_missing_data(),
+        rr.is_missing_data(),
         "unbound {key} must be MissingData, got {:?}",
         rr.veto_reason
     );
@@ -112,7 +112,7 @@ rule r: x
     let mut engine = Engine::new();
     load_ok(&mut engine, code);
     let resp = run(&engine, "s", HashMap::new()).expect("evaluates");
-    assert_awaits_missing(resp.results.get("r").expect("r"), "x");
+    assert_is_missing_data(resp.results.get("r").expect("r"), "x");
 }
 
 #[test]
@@ -125,7 +125,7 @@ rule r: x
     let mut engine = Engine::new();
     load_ok(&mut engine, code);
     let resp = run(&engine, "s", HashMap::new()).expect("evaluates");
-    assert_awaits_missing(resp.results.get("r").expect("r"), "x");
+    assert_is_missing_data(resp.results.get("r").expect("r"), "x");
 }
 
 #[test]
@@ -138,7 +138,7 @@ rule r: b
     let mut engine = Engine::new();
     load_ok(&mut engine, code);
     let resp = run(&engine, "s", HashMap::new()).expect("evaluates");
-    assert_awaits_missing(resp.results.get("r").expect("r"), "b");
+    assert_is_missing_data(resp.results.get("r").expect("r"), "b");
 }
 
 #[test]
@@ -151,7 +151,7 @@ rule r: d
     let mut engine = Engine::new();
     load_ok(&mut engine, code);
     let resp = run(&engine, "s", HashMap::new()).expect("evaluates");
-    assert_awaits_missing(resp.results.get("r").expect("r"), "d");
+    assert_is_missing_data(resp.results.get("r").expect("r"), "d");
 }
 
 #[test]
@@ -165,7 +165,7 @@ rule r: d
     let mut engine = Engine::new();
     load_ok(&mut engine, code);
     let resp = run(&engine, "s", HashMap::new()).expect("evaluates");
-    assert_awaits_missing(resp.results.get("r").expect("r"), "d");
+    assert_is_missing_data(resp.results.get("r").expect("r"), "d");
 }
 
 #[test]
@@ -178,7 +178,7 @@ rule r: p
     let mut engine = Engine::new();
     load_ok(&mut engine, code);
     let resp = run(&engine, "s", HashMap::new()).expect("evaluates");
-    assert_awaits_missing(resp.results.get("r").expect("r"), "p");
+    assert_is_missing_data(resp.results.get("r").expect("r"), "p");
 }
 
 // ─── Constraint × primitive compatibility matrix ─────────────────────
@@ -194,7 +194,7 @@ rule r: n
     let mut engine = Engine::new();
     load_ok(&mut engine, code);
     let mut data = HashMap::new();
-    data.insert("n".to_string(), "5".to_string());
+    data.insert("n".to_string(), "5".into());
     let resp = run(&engine, "s", data).expect("5 < 10 must complete with veto");
     let rr = resp.results.get("r").expect("rule r");
     assert!(rr.vetoed, "5 < 10 must veto rule r");
@@ -216,7 +216,7 @@ rule r: n
     let mut engine = Engine::new();
     load_ok(&mut engine, code);
     let mut data = HashMap::new();
-    data.insert("n".to_string(), "10".to_string());
+    data.insert("n".to_string(), "10".into());
     let resp = run(&engine, "s", data).expect("10 > 5 must complete with veto");
     let rr = resp.results.get("r").expect("rule r");
     assert!(rr.vetoed, "10 > 5 must veto rule r");
@@ -303,7 +303,7 @@ rule r: msg
     let mut engine = Engine::new();
     load_ok(&mut engine, code);
     let mut data = HashMap::new();
-    data.insert("msg".to_string(), "way too long".to_string());
+    data.insert("msg".to_string(), "way too long".into());
     let resp = run(&engine, "s", data).expect("length 5 must complete with veto");
     let rr = resp.results.get("r").expect("rule r");
     assert!(rr.vetoed, "length 5 must reject longer text");
@@ -360,7 +360,7 @@ rule r: n
     let mut engine = Engine::new();
     load_ok(&mut engine, code);
     let mut data = HashMap::new();
-    data.insert("n".to_string(), "99".to_string());
+    data.insert("n".to_string(), "99".into());
     let resp = run(&engine, "s", data).expect("evaluates");
     assert_eq!(rule_value(&resp, "r"), "99");
 }
@@ -451,12 +451,12 @@ rule r: z
     load_ok(&mut engine, code);
 
     let mut above_child = HashMap::new();
-    above_child.insert("z".to_string(), "4".to_string());
+    above_child.insert("z".to_string(), "4".into());
     let resp = run(&engine, "s", above_child).expect("4 >= child min 3");
     assert_eq!(rule_value(&resp, "r"), "4");
 
     let mut below_child = HashMap::new();
-    below_child.insert("z".to_string(), "2".to_string());
+    below_child.insert("z".to_string(), "2".into());
     let resp = run(&engine, "s", below_child).expect("2 < child min 3 must veto");
     let rr = resp.results.get("r").expect("rule r");
     assert!(rr.vetoed, "2 < child min 3 must veto");
@@ -468,7 +468,7 @@ rule r: z
     );
 
     let mut above_parent_max = HashMap::new();
-    above_parent_max.insert("z".to_string(), "11".to_string());
+    above_parent_max.insert("z".to_string(), "11".into());
     let resp = run(&engine, "s", above_parent_max).expect("11 > inherited max 10 must veto");
     let rr = resp.results.get("r").expect("rule r");
     assert!(rr.vetoed, "11 > inherited max 10 must veto");
@@ -491,7 +491,7 @@ rule r: small_number
     let mut engine = Engine::new();
     load_ok(&mut engine, code);
     let mut data = HashMap::new();
-    data.insert("small_number".to_string(), "200".to_string());
+    data.insert("small_number".to_string(), "200".into());
     let resp = run(&engine, "s", data).expect("overridden max 100 must complete with veto");
     let rr = resp.results.get("r").expect("rule r");
     assert!(rr.vetoed, "overridden max 100 must reject 200");
@@ -559,7 +559,7 @@ rule r: person_age
     let mut engine = Engine::new();
     load_ok(&mut engine, code);
     let mut data = HashMap::new();
-    data.insert("person_age".to_string(), "30".to_string());
+    data.insert("person_age".to_string(), "30".into());
     let resp = run(&engine, "s", data).expect("evaluates");
     assert_eq!(rule_value(&resp, "r"), "30");
 }
@@ -575,7 +575,7 @@ rule r: person_age
     let mut engine = Engine::new();
     load_ok(&mut engine, code);
     let mut data = HashMap::new();
-    data.insert("person_age".to_string(), "200".to_string());
+    data.insert("person_age".to_string(), "200".into());
     let resp = run(&engine, "s", data).expect("200 > 150 must complete with veto");
     let rr = resp.results.get("r").expect("rule r");
     assert!(rr.vetoed, "200 > 150 must veto via inherited max");
@@ -659,7 +659,7 @@ rule r: price
     let mut engine = Engine::new();
     load_ok(&mut engine, code);
     let mut data = HashMap::new();
-    data.insert("price".to_string(), "100 eur".to_string());
+    data.insert("price".to_string(), "100 eur".into());
     let resp = run(&engine, "app", data).expect("evaluates");
     let out = rule_value(&resp, "r");
     assert!(out.contains("100") && out.contains("eur"), "got: {out}");

@@ -99,7 +99,7 @@ declare module './lemma.bindings.js' {
     quality(): Recommendation[];
 
     /**
-     * Evaluate a spec. Pass integers as numbers, decimals as strings in `data`.
+     * Evaluate a spec. Large integers: digit `string` or `bigint`. Safe integers may be numbers. Decimals: strings.
      */
     run(options: RunOptions): Response;
   }
@@ -113,8 +113,12 @@ export interface RunOptions {
   repository?: string | null;
   /** ISO datetime for temporal resolution, or omit for now. */
   effective?: string | null;
-  /** Input data values. Pass integers as numbers, decimals as strings. */
-  data?: Record<string, unknown>;
+  /**
+   * Input data values.
+   * Magnitudes: digit `string` or `bigint` (exact through Decimal::MAX); `number` only when `Number.isSafeInteger`; decimals as strings.
+   * Booleans and unit maps (`{ eur: "84" }` or `{ eur: 84n }`) also accepted.
+   */
+  data?: Record<string, string | boolean | bigint | number | Record<string, string | bigint | number>>;
   /** Rule names to evaluate, or omit for all rules. */
   rules?: string[] | string | null;
   /** Include explanation tree in response. */
@@ -188,11 +192,11 @@ export interface EngineError {
  * API value fields shared by `RuleResult` (flattened into its top-level fields),
  * `ShowData.fill`, `ShowData.suggestion`, and range endpoints.
  * A `None` field is absent (not `null`) per Rust `skip_serializing_if`.
- * When present: always `display`, plus exactly one typed field.
+ * When present: always `result`, plus exactly one typed field.
  */
 export interface RuleResultValueEndpoint {
-  /** Engine-rendered string (`LiteralValue::display_value`). */
-  display?: string;
+  /** Engine-rendered one-liner (`LiteralValue::display_value`). */
+  result?: string;
   /** All declared measure units, keyed by unit name. */
   measure?: Record<string, string>;
   /** All declared ratio units, keyed by unit name. */
@@ -207,7 +211,7 @@ export interface RuleResultValueEndpoint {
 
 /**
  * API value shared by `RuleResult` (flattened into its top-level fields),
- * `ShowData.fill`, and `ShowData.suggestion`. When present: always `display`,
+ * `ShowData.fill`, and `ShowData.suggestion`. When present: always `result`,
  * plus exactly one typed field for a non-range value; `range` is set instead for a
  * range value. A range endpoint (`range.from`/`range.to`) never itself carries a
  * `range` field.
@@ -342,14 +346,26 @@ export type LemmaType =
       }
   );
 
+/** One uses hop on a Show data or rule path. */
+export interface PathSegment {
+  /** Uses alias for this hop. */
+  uses: string;
+  /** Target repository name; omitted for the unnamed workspace. */
+  repository?: string;
+  /** Resolved target spec name. */
+  spec: string;
+}
+
 /** One input declared in a spec. Omitted fields are absent (not `null`). */
 export interface ShowData {
   type: LemmaType;
+  /** Import hops to this slot. Empty means this spec. */
+  path: PathSegment[];
   /** Spec literal or literal `with` binding; UIs may skip review. */
   fill?: RuleResultValue;
   /** `-> suggest ...` suggestion; prompt with prefill in interactive UIs. */
   suggestion?: RuleResultValue;
-  /** Local rule names that transitively need this data after normalize. Empty = reuse catalog only. */
+  /** Show.rules keys that transitively need this data after normalize. Empty = reuse catalog only. */
   needed_by_rules: string[];
 }
 
@@ -392,24 +408,23 @@ export interface ConversionStep {
 
 /** Nested explanation tree node (tagged by `type`). */
 export type ExplanationNode =
-  | {
+  | ({
       type: "rule";
       name: string;
-      result: string;
       body: string;
       causes?: Cause[];
       children?: ExplanationNode[];
-    }
+    } & RuleResultValue)
   | {
       type: "compose";
       expression: string;
+      operator?: "add" | "subtract" | "multiply" | "divide" | "modulo" | "power";
       operands: ExplanationNode[];
     }
-  | {
+  | ({
       type: "data";
       name: string;
-      display: string;
-    }
+    } & RuleResultValue)
   | {
       type: "data_unused";
       name: string;
@@ -426,14 +441,13 @@ export type ExplanationNode =
     };
 
 /** Root and nested rule explanation (same shape). */
-export interface Explanation {
+export type Explanation = {
   type: "rule";
   name: string;
-  result: string;
   body: string;
   causes?: Cause[];
   children?: ExplanationNode[];
-}
+} & RuleResultValue;
 
 /** Half-open `[effective_from, effective_to)` for one loaded temporal row. */
 export interface ShowVersion {
@@ -554,15 +568,19 @@ export interface ShowBranch {
   result: ShowExpression;
 }
 
-/** Local rule on Show: result type, branches, stored depends_on_rules. */
+/** Rule on Show: result type, path, branches, depends_on_rules. */
 export interface ShowRule {
   type: LemmaType;
+  /** Import hops to this rule. Empty means this spec. */
+  path: PathSegment[];
   branches: ShowBranch[];
   depends_on_rules: string[];
 }
 
 /** Return shape of {@link Engine.show}. */
 export interface Show {
+  /** Interned repository name; omitted for the unnamed workspace. */
+  repository?: string;
   spec: string;
   commentary?: string;
   effective_from?: string;
@@ -571,7 +589,7 @@ export interface Show {
   source_type?: SourceType;
   versions?: ShowVersion[];
   data: Record<string, ShowData>;
-  /** Local rule graph; measure/ratio units live under `type.units`. */
+  /** This spec's rule graph (local plus reachable imports); measure/ratio units under `type.units`. */
   rules: Record<string, ShowRule>;
   meta: Record<string, LiteralValue>;
 }

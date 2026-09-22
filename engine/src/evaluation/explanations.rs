@@ -7,6 +7,11 @@
 
 use crate::computation::{OperationResult, VetoType};
 use crate::planning::semantics::{LemmaType, RulePath};
+use crate::planning::unit_family::FamilyUnitCatalog;
+use crate::result_value::{
+    rule_result_value_failure_message, rule_result_value_from_literal, RuleResultValue,
+    RuleResultValueFailure,
+};
 use serde::Serialize;
 use std::sync::Arc;
 
@@ -19,8 +24,10 @@ pub use crate::planning::explanation::{
 pub struct Explanation {
     pub name: RulePath,
     pub result: OperationResult,
-    /// Type of [`Self::result`] for measure/ratio display (binding unit, decimals).
+    /// Type of [`Self::result`] for measure/ratio rendering (binding unit, decimals).
     pub result_type: Arc<LemmaType>,
+    /// Family catalog needed to build the rule-node [`RuleResultValue`] on serialize.
+    pub(crate) family_units: Arc<FamilyUnitCatalog>,
     pub body: String,
     pub causes: Vec<Cause>,
     pub children: Vec<ExplanationNode>,
@@ -33,10 +40,11 @@ impl Serialize for Explanation {
     {
         ExplanationNode::Rule {
             name: self.name.clone(),
-            result: Some(format_operation_result(
+            result: explanation_result_value(
                 &self.result,
                 self.result_type.as_ref(),
-            )),
+                &self.family_units,
+            ),
             body: self.body.clone(),
             causes: self.causes.clone(),
             children: self.children.clone(),
@@ -47,23 +55,63 @@ impl Serialize for Explanation {
 
 pub(crate) fn format_operation_result(result: &OperationResult, result_type: &LemmaType) -> String {
     match result {
-        OperationResult::Value(value) => value.display_value_with_type(result_type),
+        OperationResult::Value(bound) => bound.to_literal().display_value_with_type(result_type),
         OperationResult::Veto(VetoType::UserDefined { message: None }) => String::new(),
         OperationResult::Veto(veto) => veto.to_string(),
     }
 }
 
+/// Build a [`RuleResultValue`] for an explanation node from a settled operation result.
+pub(crate) fn explanation_result_value(
+    result: &OperationResult,
+    lemma_type: &LemmaType,
+    family_units: &FamilyUnitCatalog,
+) -> RuleResultValue {
+    match result {
+        OperationResult::Value(bound) => {
+            match rule_result_value_from_literal(&bound.to_literal(), lemma_type, family_units) {
+                Ok(value) => value,
+                // Same veto message RuleResult attaches; result is veto text, not magnitude.
+                Err(RuleResultValueFailure::DecimalLimit) => RuleResultValue {
+                    result: Some(
+                        rule_result_value_failure_message(RuleResultValueFailure::DecimalLimit)
+                            .to_string(),
+                    ),
+                    ..RuleResultValue::default()
+                },
+                Err(failure) => panic!(
+                    "BUG: settled explanation value failed rule_result_value_from_literal: {}",
+                    rule_result_value_failure_message(failure)
+                ),
+            }
+        }
+        OperationResult::Veto(VetoType::UserDefined { message: None }) => RuleResultValue {
+            result: Some(String::new()),
+            ..RuleResultValue::default()
+        },
+        OperationResult::Veto(veto) => RuleResultValue {
+            result: Some(veto.to_string()),
+            ..RuleResultValue::default()
+        },
+    }
+}
+
 pub fn format_explanation(explanation: &Explanation) -> String {
     let mut lines = Vec::new();
-    let result_display =
-        format_operation_result(&explanation.result, explanation.result_type.as_ref());
-    lines.push(format!("{}: {}", explanation.name.rule, result_display));
+    let result_line = explanation_result_value(
+        &explanation.result,
+        explanation.result_type.as_ref(),
+        &explanation.family_units,
+    )
+    .result
+    .expect("BUG: root explanation must carry result");
+    lines.push(format!("{}: {}", explanation.name, result_line));
     let mut ctx = FormatContext {
         lines: &mut lines,
         indent: String::new(),
     };
     ctx.render_rule_contents(
-        &result_display,
+        &result_line,
         &explanation.body,
         &explanation.causes,
         &explanation.children,
@@ -82,12 +130,13 @@ struct FormatContext<'a> {
     indent: String,
 }
 
-impl<'a> FormatContext<'a> {
+impl FormatContext<'_> {
     fn push_line(&mut self, connector: Connector, text: &str) {
         self.lines.push(format!(
-            "{}{} {text}",
+            "{}{} {}",
             self.indent,
-            connector_str(connector)
+            connector_str(connector),
+            text
         ));
     }
 
@@ -100,12 +149,12 @@ impl<'a> FormatContext<'a> {
 
     fn render_rule_contents(
         &mut self,
-        result_display: &str,
+        result_line: &str,
         body: &str,
         causes: &[Cause],
         children: &[ExplanationNode],
     ) {
-        let body_shown = !body.is_empty() && body != result_display;
+        let body_shown = !body.is_empty() && body != result_line;
         let total = causes.len() + usize::from(body_shown);
         let mut index = 0;
 
@@ -145,7 +194,7 @@ impl<'a> FormatContext<'a> {
     }
 
     /// Cause children for ASCII: omit bare literals and Data that only restates
-    /// a `name is display` cause line (JSON keeps the structured child).
+    /// a `name is result` cause line (JSON keeps the structured child).
     fn render_cause_children(&mut self, cause: &Cause, value: &str, line: &str) {
         let visible: Vec<&ExplanationNode> = cause
             .children
@@ -226,9 +275,10 @@ impl<'a> FormatContext<'a> {
                 children,
             } => {
                 let result_str = result
+                    .result
                     .as_deref()
-                    .expect("BUG: ExplanationNode::Rule.result not filled by eval");
-                self.push_line(connector, &format!("{}: {result_str}", name.rule));
+                    .expect("BUG: ExplanationNode::Rule.result.result not filled by eval");
+                self.push_line(connector, &format!("{name}: {result_str}"));
                 let child_indent = self.child_indent(connector);
                 let mut child_ctx = FormatContext {
                     lines: self.lines,
@@ -239,6 +289,7 @@ impl<'a> FormatContext<'a> {
             ExplanationNode::Compose {
                 expression,
                 operands,
+                ..
             } => {
                 if parent_body.is_some_and(|body| body == expression) {
                     self.render_nodes(operands, None);
@@ -252,11 +303,15 @@ impl<'a> FormatContext<'a> {
                     child_ctx.render_nodes(operands, None);
                 }
             }
-            ExplanationNode::Data { name, display } => {
+            ExplanationNode::Data { name, result } => {
+                let result_str = result
+                    .result
+                    .as_deref()
+                    .expect("BUG: ExplanationNode::Data.result.result not filled by eval");
                 if name.data.is_empty() {
-                    self.push_line(connector, display);
+                    self.push_line(connector, result_str);
                 } else {
-                    self.push_line(connector, &format!("{name}: {display}"));
+                    self.push_line(connector, &format!("{name}: {result_str}"));
                 }
             }
             ExplanationNode::DataUnused { name } => {
@@ -309,14 +364,21 @@ fn is_bare_literal_compose(node: &ExplanationNode) -> bool {
 }
 
 /// `code is NL` already states the binding; ASCII skips child `code: NL`.
-/// Flipped / inequality cause lines do not match `{key} is {display}`.
+/// Flipped / inequality cause lines do not match `{key} is {result}`.
 fn data_restates_true_cause_line(node: &ExplanationNode, value: &str, line: &str) -> bool {
     if value != "true" {
         return false;
     }
     match node {
-        ExplanationNode::Data { name, display } => {
-            line == format!("{} is {display}", name.input_key())
+        ExplanationNode::Data {
+            name,
+            result: node_result,
+        } => {
+            let result_str = node_result
+                .result
+                .as_deref()
+                .expect("BUG: Data node must carry result");
+            line == format!("{} is {result_str}", name.input_key())
         }
         _ => false,
     }

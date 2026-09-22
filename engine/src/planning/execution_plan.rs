@@ -73,7 +73,7 @@ pub struct ExecutionPlan {
     pub resolved_types: ResolvedSpecTypes,
 
     /// Precomputed measure/ratio family unit expansion for rule results and show rule schemas.
-    pub family_units: FamilyUnitCatalog,
+    pub family_units: Arc<FamilyUnitCatalog>,
 
     /// Reverse index: canonical-form unit signature `Vec<(unit_name, exponent)>` →
     /// (unit_name, owning type). Built from expression-scope units during planning so
@@ -107,8 +107,8 @@ pub struct ExecutionPlan {
     /// Built in [`build_execution_plan`].
     pub(crate) needed_by_rules: Vec<Vec<u32>>,
 
-    /// Prefill/suggestion [`RuleResultValue`]s for show, keyed by data path.
-    /// Built once at plan time so show does not re-run unit expansion per request.
+    /// Prefill/suggestion [`BoundValueKind`]s for show, keyed by data path.
+    /// Built once at plan time; [`RuleResultValue`] is expanded at show.
     pub(crate) data_display: IndexMap<DataPath, ShowDataCache>,
 
     /// Show rule graph (type, branches, depends_on_rules), keyed by local rule path.
@@ -124,17 +124,24 @@ pub struct ExecutionPlan {
     /// Built once at plan time so every `Engine::run` call avoids rebuilding it.
     pub(crate) input_key_index: IndexMap<String, DataPath>,
 
+    /// Precomputed `input_key` → `RulePath` for [`Self::show_rules`].
+    /// Built once so [`Self::get_rule`] is O(1) without allocating per candidate.
+    pub(crate) show_rule_index: IndexMap<String, RulePath>,
+
     /// Every [`Self::data`] path → its [`LeafKind::DataPath`] cell in
     /// [`Self::normal_forms`]. Built once so evaluation writes bindings into
     /// the value table by [`NormalFormId`] instead of a parallel path map.
     pub(crate) data_leaf: IndexMap<DataPath, NormalFormId>,
 }
 
-/// Plan-time prefill/suggestion [`RuleResultValue`] for one data path (show cache).
+/// Plan-time prefill/suggestion for one data path (show cache).
+///
+/// Stores domain [`BoundValueKind`] — postcard-safe. [`RuleResultValue`] is built at
+/// show time (JSON / API boundary), not snapshotted.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct ShowDataCache {
-    pub fill: Option<RuleResultValue>,
-    pub suggestion: Option<RuleResultValue>,
+    pub fill: Option<crate::planning::semantics::BoundValueKind>,
+    pub suggestion: Option<crate::planning::semantics::BoundValueKind>,
 }
 
 /// A named rule's root in the normal-form table, plus declaration metadata.
@@ -249,7 +256,7 @@ pub(crate) fn build_execution_plan(
 
     let signature_index = resolved_types.signature_index.clone();
 
-    let family_units = FamilyUnitCatalog::build(&resolved_types.unit_index);
+    let family_units = Arc::new(FamilyUnitCatalog::build(&resolved_types.unit_index));
 
     let reference_ends = graph.reference_ends();
     let rule_types: HashMap<RulePath, Arc<LemmaType>> = graph
@@ -261,12 +268,29 @@ pub(crate) fn build_execution_plan(
     let mut completed_rules: HashMap<RulePath, NormalFormId> = HashMap::new();
     let mut show_rules: IndexMap<RulePath, ShowRule> = IndexMap::new();
 
-    let local_rule_names: HashSet<String> = graph
+    // Local rules plus depends_on_rules closure = Show.rules universe.
+    let mut reachable: HashSet<RulePath> = HashSet::new();
+    let mut stack: Vec<RulePath> = graph
         .rules()
         .keys()
         .filter(|path| path.segments.is_empty())
-        .map(|path| path.rule.clone())
+        .cloned()
         .collect();
+    while let Some(path) = stack.pop() {
+        if !reachable.insert(path.clone()) {
+            continue;
+        }
+        let node = graph
+            .rules()
+            .get(&path)
+            .expect("BUG: reachable rule path missing from graph.rules");
+        for dep in &node.depends_on_rules {
+            if !reachable.contains(dep) {
+                stack.push(dep.clone());
+            }
+        }
+    }
+    let show_keys: HashSet<String> = reachable.iter().map(|path| path.input_key()).collect();
 
     for rule_path in rule_order {
         let rule_node = graph.rules().get(rule_path).expect(
@@ -310,15 +334,16 @@ pub(crate) fn build_execution_plan(
         );
         completed_rules.insert(rule_path.clone(), body);
 
-        if rule_path.segments.is_empty() {
+        if reachable.contains(rule_path) {
             show_rules.insert(
                 rule_path.clone(),
                 ShowRule {
                     lemma_type: family_units.rule_type_for_show(rule_node.rule_type.as_ref()),
-                    branches: show_branches_from(&rule_node.branches, &local_rule_names),
+                    path: rule_path.segments.clone(),
+                    branches: show_branches_from(&rule_node.branches, &show_keys),
                     depends_on_rules: project_depends_on_rules(
                         &rule_node.depends_on_rules,
-                        &local_rule_names,
+                        &show_keys,
                     ),
                 },
             );
@@ -369,6 +394,7 @@ pub(crate) fn build_execution_plan(
         // Filled below after validation succeeds.
         reference_ends: IndexMap::new(),
         input_key_index: IndexMap::new(),
+        show_rule_index: IndexMap::new(),
         data_leaf: IndexMap::new(),
     };
 
@@ -383,6 +409,11 @@ pub(crate) fn build_execution_plan(
     plan.reference_ends = graph.reference_ends().clone();
     plan.input_key_index = plan
         .data
+        .keys()
+        .map(|path| (path.input_key(), path.clone()))
+        .collect();
+    plan.show_rule_index = plan
+        .show_rules
         .keys()
         .map(|path| (path.input_key(), path.clone()))
         .collect();
@@ -464,33 +495,59 @@ fn build_data_display(plan: &ExecutionPlan) -> IndexMap<DataPath, ShowDataCache>
         if data.schema_type().is_none() || matches!(data, DataDefinition::Reference { .. }) {
             continue;
         }
-        let lemma_type = data
-            .schema_type()
-            .expect("BUG: filter above ensured lemma_type is Some");
-        let input_key = path.input_key();
-        let fill = data.value().map(|literal| {
-            crate::result_value::type_scoped_result_value_from_literal(&literal, lemma_type)
-                .unwrap_or_else(|failure| {
-                    panic!(
-                        "BUG: show fill value for '{input_key}' failed type_scoped_result_value_from_literal: {}",
-                        crate::result_value::rule_result_value_failure_message(failure)
-                    )
-                })
-        });
-        let suggestion = data.suggestion().map(|literal| {
-            crate::result_value::type_scoped_result_value_from_literal(&literal, lemma_type)
-                .unwrap_or_else(|failure| {
-                    panic!(
-                        "BUG: show suggestion value for '{input_key}' failed type_scoped_result_value_from_literal: {}",
-                        crate::result_value::rule_result_value_failure_message(failure)
-                    )
-                })
-        });
+        let fill = match data {
+            DataDefinition::Value {
+                value,
+                resolved_type,
+                ..
+            } => Some(crate::planning::semantics::BoundValueKind {
+                value: value.value.clone(),
+                measure_binding_unit: resolved_type.measure_binding_unit.as_deref().map(Arc::from),
+            }),
+            _ => data.bound_fill().cloned(),
+        };
+        let suggestion = data.bound_suggestion().cloned();
         if fill.is_some() || suggestion.is_some() {
             out.insert(path.clone(), ShowDataCache { fill, suggestion });
         }
     }
     out
+}
+
+/// Whether a show bound value is the fill or the suggestion for a data path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ShowBoundRole {
+    Fill,
+    Suggestion,
+}
+
+pub(crate) fn show_bound_result_value(
+    bound: &crate::planning::semantics::BoundValueKind,
+    schema_type: &crate::planning::semantics::LemmaType,
+    input_key: &str,
+    role: ShowBoundRole,
+) -> crate::result_value::RuleResultValue {
+    let (fill, suggestion) = match role {
+        ShowBoundRole::Fill => (Some(bound), None),
+        ShowBoundRole::Suggestion => (None, Some(bound)),
+    };
+    let display_type = crate::planning::semantics::lemma_type_with_display_binding(
+        schema_type,
+        None,
+        fill,
+        suggestion,
+    );
+    crate::result_value::type_scoped_result_value_from_literal(&bound.to_literal(), &display_type)
+        .unwrap_or_else(|failure| {
+            let role_name = match role {
+                ShowBoundRole::Fill => "fill",
+                ShowBoundRole::Suggestion => "suggestion",
+            };
+            panic!(
+                "BUG: show {role_name} value for '{input_key}' failed type_scoped_result_value_from_literal: {}",
+                crate::result_value::rule_result_value_failure_message(failure)
+            )
+        })
 }
 
 /// One data entry in a [`Show`].
@@ -503,9 +560,11 @@ fn build_data_display(plan: &ExecutionPlan) -> IndexMap<DataPath, ShowDataCache>
 #[derive(Debug, Clone, PartialEq)]
 pub struct ShowData {
     pub lemma_type: LemmaType,
+    /// Import hops to this slot (`[]` = this spec). Clone of [`DataPath::segments`].
+    pub path: Vec<crate::planning::semantics::PathSegment>,
     pub fill: Option<RuleResultValue>,
     pub suggestion: Option<RuleResultValue>,
-    /// Local rule names that transitively need this data after normalize.
+    /// Show.rules keys that transitively need this data after normalize.
     /// Empty = reuse catalog only (not an eval intake key for this spec).
     pub needed_by_rules: Vec<String>,
 }
@@ -529,11 +588,13 @@ impl std::fmt::Display for ShowVersion {
 }
 
 /// Consumer [`Engine::show`] result: declared promptable data catalog (with
-/// [`ShowData::needed_by_rules`] for intake vs reuse), local rule graph
-/// ([`ShowRule`] with type, branches, depends_on_rules), and resolved temporal
-/// window. Source: [`Engine::source`].
+/// [`ShowData::needed_by_rules`] for intake vs reuse), this spec's rule graph
+/// (local rules plus reachable imports), and resolved temporal window.
+/// Source: [`Engine::source`].
 #[derive(Debug, Clone, PartialEq)]
 pub struct Show {
+    /// Interned repository name (`list()` string). `None` = unnamed workspace.
+    pub repository: Option<String>,
     pub spec: String,
     pub commentary: Option<String>,
     pub effective_from: Option<crate::parsing::ast::DateTimeValue>,
@@ -549,7 +610,10 @@ pub struct Show {
 
 impl std::fmt::Display for Show {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Spec: {}", self.spec)?;
+        match &self.repository {
+            Some(repository) => write!(f, "Spec: {} {}", repository, self.spec)?,
+            None => write!(f, "Spec: {}", self.spec)?,
+        }
 
         if let Some(commentary) = &self.commentary {
             write!(f, "\n  {}", commentary)?;
@@ -886,15 +950,6 @@ impl ExecutionPlan {
         &self.resolved_types.unit_index
     }
 
-    /// Names of local (main-spec) rules in plan topological order.
-    pub fn local_rule_names(&self) -> Vec<String> {
-        self.rules
-            .values()
-            .filter(|r| r.path.segments.is_empty())
-            .map(|r| r.path.rule.clone())
-            .collect()
-    }
-
     /// Per [`Self::data`] position: local [`Self::rules`] positions that transitively need
     /// that slot (through rule references), in alphabetical rule-name order.
     ///
@@ -965,17 +1020,22 @@ impl ExecutionPlan {
             bits_by_rule.push(bits);
         }
 
-        let mut local: Vec<usize> = self
+        let mut consumers: Vec<usize> = self
             .rules
-            .iter()
+            .keys()
             .enumerate()
-            .filter(|(_, (path, _))| path.segments.is_empty())
+            .filter(|(_, path)| self.show_rules.contains_key(*path))
             .map(|(pos, _)| pos)
             .collect();
-        local.sort_by(|&a, &b| self.rules[a].path.rule.cmp(&self.rules[b].path.rule));
+        consumers.sort_by(|&a, &b| {
+            self.rules[a]
+                .path
+                .input_key()
+                .cmp(&self.rules[b].path.input_key())
+        });
 
         let mut needed_by_rules = vec![Vec::new(); data_len];
-        for &rule_pos in &local {
+        for &rule_pos in &consumers {
             let rule_id = u32::try_from(rule_pos).expect("BUG: rule count exceeds u32");
             let bits = &bits_by_rule[rule_pos];
             for (word_idx, &word) in bits.iter().enumerate() {
@@ -1013,15 +1073,21 @@ impl ExecutionPlan {
         }
     }
 
-    /// Validate caller-requested rule names and return canonical local rule names.
+    /// Validate caller-requested rule names and return resolved [`RulePath`]s.
     ///
-    /// `None` means all local rules. `Some(&[])` is an error. Unknown names in `Some` slice error.
-    pub fn validated_response_rule_names(
+    /// `None` means all local rules (this spec's outputs). `Some(&[])` is an error.
+    /// Unknown names in `Some` slice error. Explicit names may be any Show.rules key.
+    pub fn validated_response_rule_paths(
         &self,
         rules: Option<&[String]>,
-    ) -> Result<std::collections::HashSet<String>, Error> {
+    ) -> Result<std::collections::HashSet<RulePath>, Error> {
         let Some(rules) = rules else {
-            return Ok(self.local_rule_names().into_iter().collect());
+            return Ok(self
+                .rules
+                .values()
+                .filter(|r| r.path.segments.is_empty())
+                .map(|r| r.path.clone())
+                .collect());
         };
         if rules.is_empty() {
             return Err(Error::request(
@@ -1029,7 +1095,7 @@ impl ExecutionPlan {
                 None::<String>,
             ));
         }
-        let mut names = std::collections::HashSet::new();
+        let mut paths = std::collections::HashSet::new();
         for rule_name in rules {
             let rule = self.get_rule(rule_name).ok_or_else(|| {
                 Error::request(
@@ -1037,17 +1103,16 @@ impl ExecutionPlan {
                     None::<String>,
                 )
             })?;
-            names.insert(rule.path.rule.clone());
+            paths.insert(rule.path.clone());
         }
-        Ok(names)
+        Ok(paths)
     }
 
-    /// Look up a local rule by its name (rule in the main spec).
+    /// Look up a Show.rules key (`RulePath::input_key`) in the reachable graph.
     pub fn get_rule(&self, name: &str) -> Option<&ExecutableRule> {
-        let canonical_name = crate::parsing::ast::ascii_lowercase_logical_name(name.to_string());
-        self.rules
-            .values()
-            .find(|r| r.path.rule == canonical_name && r.path.segments.is_empty())
+        let canonical = crate::parsing::ast::ascii_lowercase_logical_name(name.to_string());
+        let path = self.show_rule_index.get(&canonical)?;
+        self.rules.get(path)
     }
 
     /// Look up a normal-form cell by id.
@@ -1381,7 +1446,8 @@ pub(crate) fn validate_value_against_type(
         magnitude: &RationalInteger,
     ) -> String {
         expected_type
-            .try_rational_as_decimal_string(magnitude)
+            .try_rational_as_decimal(magnitude)
+            .map(|decimal| decimal.to_string())
             .unwrap_or_else(|_| magnitude.display_str())
     }
 
@@ -1847,7 +1913,7 @@ fn validate_range_literal(
                          op: ComparisonComputation,
                          fail_msg: String|
      -> Result<(), String> {
-        match comparison_operation(&range_lit, &range_type, &op, bound, bound_type) {
+        match comparison_operation(&range_lit.value, &range_type, &op, &bound.value, bound_type) {
             OperationResult::Value(result) => match &result.value {
                 ValueKind::Boolean(true) => Ok(()),
                 ValueKind::Boolean(false) => Err(fail_msg),
@@ -2122,7 +2188,10 @@ mod tests {
         }
     }
 
-    fn bound_value<'a>(run_data: &'a RunData, path: &DataPath) -> Option<&'a LiteralValue> {
+    fn bound_value<'a>(
+        run_data: &'a RunData,
+        path: &DataPath,
+    ) -> Option<&'a crate::planning::semantics::BoundValueKind> {
         run_data.bindings.get(path).and_then(OperationResult::value)
     }
 
@@ -2264,7 +2333,8 @@ mod tests {
         let run_data = resolve_run_data(plan, values);
         let data_path = DataPath {
             segments: vec![PathSegment {
-                data: "rules".to_string(),
+                uses: "rules".to_string(),
+                repository: None,
                 spec: "private".to_string(),
             }],
             data: "base_price".to_string(),
@@ -2325,7 +2395,7 @@ mod tests {
             data_reference_order: Vec::new(),
             meta: IndexMap::new(),
             resolved_types: ResolvedSpecTypes::default(),
-            family_units: FamilyUnitCatalog::default(),
+            family_units: Arc::new(FamilyUnitCatalog::default()),
             signature_index: IndexMap::new(),
             effective: EffectiveDate::Origin,
             effective_from: None,
@@ -2338,6 +2408,7 @@ mod tests {
             show_rules: IndexMap::new(),
             reference_ends: IndexMap::new(),
             input_key_index,
+            show_rule_index: IndexMap::new(),
             data_leaf: IndexMap::new(),
         };
 
@@ -2400,7 +2471,7 @@ mod tests {
             data_reference_order: Vec::new(),
             meta: IndexMap::new(),
             resolved_types: ResolvedSpecTypes::default(),
-            family_units: FamilyUnitCatalog::default(),
+            family_units: Arc::new(FamilyUnitCatalog::default()),
             signature_index: IndexMap::new(),
             effective: EffectiveDate::Origin,
             effective_from: None,
@@ -2413,6 +2484,7 @@ mod tests {
             show_rules: IndexMap::new(),
             reference_ends: IndexMap::new(),
             input_key_index,
+            show_rule_index: IndexMap::new(),
             data_leaf: IndexMap::new(),
         };
 
@@ -2487,7 +2559,7 @@ mod tests {
             data_reference_order: Vec::new(),
             meta: IndexMap::new(),
             resolved_types: ResolvedSpecTypes::default(),
-            family_units: FamilyUnitCatalog::default(),
+            family_units: Arc::new(FamilyUnitCatalog::default()),
             signature_index: IndexMap::new(),
             effective: EffectiveDate::Origin,
             effective_from: None,
@@ -2500,6 +2572,7 @@ mod tests {
             show_rules: IndexMap::new(),
             reference_ends: IndexMap::new(),
             input_key_index,
+            show_rule_index: IndexMap::new(),
             data_leaf: IndexMap::new(),
         };
 
@@ -2527,7 +2600,7 @@ mod tests {
             data_reference_order: Vec::new(),
             meta: IndexMap::new(),
             resolved_types: ResolvedSpecTypes::default(),
-            family_units: FamilyUnitCatalog::default(),
+            family_units: Arc::new(FamilyUnitCatalog::default()),
             signature_index: IndexMap::new(),
             effective,
             effective_from: None,
@@ -2540,6 +2613,7 @@ mod tests {
             show_rules: IndexMap::new(),
             reference_ends: IndexMap::new(),
             input_key_index: IndexMap::new(),
+            show_rule_index: IndexMap::new(),
             data_leaf: IndexMap::new(),
         }
     }
@@ -3363,13 +3437,13 @@ rule total: wh.total_logistics_per_ce
             }
         };
         HashMap::from([
-            (key("units_per_pallet"), "1".into()),
-            (key("storage_duration"), "10 day".into()),
-            (key("interbranch_transport_per_pallet"), "0 eur".into()),
-            (key("inbound_handling_per_pallet"), "0 eur".into()),
-            (key("storage_per_pallet_per_week"), "10 eur".into()),
-            (key("labeling_per_pallet"), "0 eur".into()),
-            (key("outbound_handling_per_pallet"), "0 eur".into()),
+            (key("units_per_pallet"), "1".to_string()),
+            (key("storage_duration"), "10 day".to_string()),
+            (key("interbranch_transport_per_pallet"), "0 eur".to_string()),
+            (key("inbound_handling_per_pallet"), "0 eur".to_string()),
+            (key("storage_per_pallet_per_week"), "10 eur".to_string()),
+            (key("labeling_per_pallet"), "0 eur".to_string()),
+            (key("outbound_handling_per_pallet"), "0 eur".to_string()),
         ])
     }
 
@@ -3407,7 +3481,7 @@ rule total: wh.total_logistics_per_ce
             .results
             .get("total")
             .expect("rule total must be present")
-            .display()
+            .result()
             .expect("total must have display")
             .to_string();
         assert_eq!(
@@ -3440,7 +3514,10 @@ rule band: allowed_band
         let plan = plans.values().next().expect("plan");
         let path = DataPath::local("allowed_band".into());
         let def = plan.data.get(&path).expect("allowed_band in plan.data");
-        let suggestion = def.suggestion().expect("declared default must exist");
+        let suggestion = def
+            .bound_suggestion()
+            .expect("declared default must exist")
+            .to_literal();
 
         let (left, right) = match &suggestion.value {
             crate::planning::semantics::ValueKind::Range(l, r) => (l.as_ref(), r.as_ref()),

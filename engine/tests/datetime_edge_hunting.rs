@@ -61,7 +61,7 @@ fn eval_bool_with_datas(
             rr.veto_reason.as_deref().unwrap_or("Vetoed")
         );
     }
-    rr.value
+    rr.result
         .as_ref()
         .expect("rule result value")
         .boolean
@@ -93,7 +93,7 @@ fn eval_value(
         .as_ref()
         .expect("explanation")
         .result
-        .value()
+        .literal_value()
         .expect("BUG: non-vetoed rule missing value")
         .clone()
 }

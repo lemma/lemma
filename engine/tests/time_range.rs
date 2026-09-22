@@ -78,7 +78,7 @@ fn eval_literal_with_data(
         .as_ref()
         .expect("explanation")
         .result
-        .value()
+        .literal_value()
         .expect("BUG: non-vetoed rule missing value")
         .clone()
 }
@@ -103,8 +103,8 @@ fn eval_rule(code: &str, spec_name: &str, rule_name: &str) -> String {
         .results
         .get(rule_name)
         .unwrap_or_else(|| panic!("Rule '{}' not found", rule_name))
-        .display()
-        .expect("display")
+        .result()
+        .expect("result")
         .to_string()
 }
 
@@ -136,7 +136,7 @@ rule inside: 12:30 in window
 rule lower: 09:00 in window
 rule upper_excluded: 17:00 in window"#;
     let mut data = HashMap::new();
-    data.insert("window".to_string(), "09:00...17:00".to_string());
+    data.insert("window".to_string(), "09:00...17:00".into());
     assert!(eval_bool_with_data(code, "test", "inside", data.clone()));
     assert!(eval_bool_with_data(code, "test", "lower", data.clone()));
     assert!(!eval_bool_with_data(code, "test", "upper_excluded", data));

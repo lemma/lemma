@@ -26,7 +26,7 @@ fn run_override_veto_message(
     assert!(
         rr.vetoed,
         "rule '{rule_name}' must veto on invalid override, got {:?}",
-        rr.display()
+        rr.result()
     );
     rr.veto_reason.clone().expect("veto reason")
 }
@@ -58,7 +58,7 @@ rule check: true
             None,
             "pricing",
             Some(&now),
-            HashMap::from([("price".to_string(), "150 eur".to_string())]),
+            HashMap::from([("price".to_string(), "150 eur".into())]),
             None,
             true,
         )
@@ -98,7 +98,7 @@ rule check: price
     let msg = run_override_veto_message(
         &engine,
         "pricing",
-        HashMap::from([("price".to_string(), "100 btc".to_string())]),
+        HashMap::from([("price".to_string(), "100 btc".into())]),
         "check",
     );
     assert!(msg.contains("btc"), "actual veto: {msg}");
@@ -138,7 +138,7 @@ rule price_eur: amount as eur
         .as_ref()
         .expect("explanation")
         .result
-        .value()
+        .literal_value()
         .expect("value");
     assert!(
         matches!(lit.value, ValueKind::Measure(_)),
@@ -146,15 +146,12 @@ rule price_eur: amount as eur
         lit.value
     );
     let measure = rule_result
-        .value
+        .result
         .as_ref()
         .and_then(|v| v.measure.as_ref())
         .expect("measure map");
-    let amount = measure.get("eur").expect("eur in measure map");
-    assert_eq!(
-        Decimal::from_str(amount).expect("decimal"),
-        Decimal::from(84)
-    );
+    let amount = measure.get("eur").copied().expect("eur in measure map");
+    assert_eq!(amount, Decimal::from(84));
     assert!(measure.contains_key("eur"));
 }
 
@@ -188,14 +185,14 @@ rule taxable: gross - pension
 
     assert!(!rule_result.vetoed);
     let measure = rule_result
-        .value
+        .result
         .as_ref()
         .expect("rule result value")
         .measure
         .as_ref()
         .expect("measure map");
-    assert_eq!(measure.get("eur"), Some(&"6384".to_string()));
-    assert_eq!(measure.get("usd"), Some(&"7600".to_string()));
+    assert_eq!(measure.get("eur").copied(), Some(Decimal::from(6384)));
+    assert_eq!(measure.get("usd").copied(), Some(Decimal::from(7600)));
 }
 
 #[test]
@@ -264,7 +261,7 @@ rule base_shipping: 5.99
         .as_ref()
         .expect("explanation")
         .result
-        .value()
+        .literal_value()
         .expect("value");
     match &lit.value {
         ValueKind::Number(d) => {
@@ -316,7 +313,7 @@ rule total: base_fee + surcharge
         .as_ref()
         .expect("explanation")
         .result
-        .value()
+        .literal_value()
         .expect("value");
     match &lit.value {
         ValueKind::Measure(d) => {
@@ -355,7 +352,7 @@ rule result: mass as gram as number
 
     let now = DateTimeValue::now();
     let mut data = HashMap::new();
-    data.insert("mass".to_string(), "2 kilogram".to_string());
+    data.insert("mass".to_string(), "2 kilogram".into());
     let response = engine
         .run(None, "physics", Some(&now), data, None, true)
         .unwrap();
@@ -371,7 +368,7 @@ rule result: mass as gram as number
         .as_ref()
         .expect("explanation")
         .result
-        .value()
+        .literal_value()
         .expect("value");
     let amount = match &lit.value {
         ValueKind::Number(n) => n.clone(),
@@ -406,7 +403,7 @@ rule result: mass as kilogram as number
 
     let now = DateTimeValue::now();
     let mut data = HashMap::new();
-    data.insert("mass".to_string(), "500 gram".to_string());
+    data.insert("mass".to_string(), "500 gram".into());
     let response = engine
         .run(None, "physics", Some(&now), data, None, true)
         .unwrap();
@@ -422,7 +419,7 @@ rule result: mass as kilogram as number
         .as_ref()
         .expect("explanation")
         .result
-        .value()
+        .literal_value()
         .expect("value");
     let amount = match &lit.value {
         ValueKind::Number(n) => n.clone(),
@@ -458,7 +455,7 @@ rule result: mass as gram as number
 
     let now = DateTimeValue::now();
     let mut data = HashMap::new();
-    data.insert("mass".to_string(), "1 pound".to_string());
+    data.insert("mass".to_string(), "1 pound".into());
     let response = engine
         .run(None, "physics", Some(&now), data, None, true)
         .unwrap();
@@ -474,7 +471,7 @@ rule result: mass as gram as number
         .as_ref()
         .expect("explanation")
         .result
-        .value()
+        .literal_value()
         .expect("value");
     let amount = match &lit.value {
         ValueKind::Number(n) => n.clone(),
@@ -521,14 +518,17 @@ rule total: a + b
 
     assert!(!rule.vetoed);
     let measure = rule
-        .value
+        .result
         .as_ref()
         .expect("rule result value")
         .measure
         .as_ref()
         .expect("measure map");
-    assert_eq!(measure.get("kilogram"), Some(&"1.5".to_string()));
-    assert_eq!(measure.get("gram"), Some(&"1500".to_string()));
+    assert_eq!(
+        measure.get("kilogram").copied(),
+        Some(Decimal::from_str("1.5").expect("1.5"))
+    );
+    assert_eq!(measure.get("gram").copied(), Some(Decimal::from(1500)));
 }
 
 #[test]
@@ -559,7 +559,7 @@ rule heavy: package > 1 kilogram
         .unwrap();
 
     assert_eq!(
-        rule.value.as_ref().expect("rule result value").boolean,
+        rule.result.as_ref().expect("rule result value").boolean,
         Some(true)
     );
 }
@@ -596,7 +596,7 @@ rule result: weight
         None,
         "physics",
         Some(&now),
-        HashMap::from([("weight".to_string(), "1500 gram".to_string())]),
+        HashMap::from([("weight".to_string(), "1500 gram".into())]),
         None,
         true,
     );
@@ -614,9 +614,21 @@ rule result: weight
         rule.veto_reason
     );
     assert_eq!(
-        rule.display().expect("display"),
+        rule.result().expect("result"),
         "1500 gram",
-        "accepted overlay must surface the supplied measure"
+        "display uses caller unit; family map still lists kilogram"
+    );
+    let measure = rule
+        .result
+        .as_ref()
+        .expect("value")
+        .measure
+        .as_ref()
+        .expect("measure map");
+    assert_eq!(
+        measure.get("gram").copied(),
+        Some(Decimal::from(1500)),
+        "accepted overlay magnitude must remain in measure.gram"
     );
 }
 
@@ -645,7 +657,7 @@ rule result: weight
         None,
         "physics",
         Some(&now),
-        HashMap::from([("weight".to_string(), "1500 gram".to_string())]),
+        HashMap::from([("weight".to_string(), "1500 gram".into())]),
         None,
         true,
     );
@@ -663,9 +675,21 @@ rule result: weight
         rule.veto_reason
     );
     assert_eq!(
-        rule.display().expect("display"),
+        rule.result().expect("result"),
         "1500 gram",
-        "accepted overlay must surface the supplied measure"
+        "display uses caller unit; family map still lists kilogram"
+    );
+    let measure = rule
+        .result
+        .as_ref()
+        .expect("value")
+        .measure
+        .as_ref()
+        .expect("measure map");
+    assert_eq!(
+        measure.get("gram").copied(),
+        Some(Decimal::from(1500)),
+        "accepted overlay magnitude must remain in measure.gram"
     );
 }
 
@@ -692,7 +716,7 @@ rule result: weight
     let message = run_override_veto_message(
         &engine,
         "physics",
-        HashMap::from([("weight".to_string(), "3000 gram".to_string())]),
+        HashMap::from([("weight".to_string(), "3000 gram".into())]),
         "result",
     );
     assert!(
@@ -725,7 +749,7 @@ rule out: cost_per_unit
     let message = run_override_veto_message(
         &engine,
         "s",
-        HashMap::from([("cost_per_unit".to_string(), "1 eur_per_kilo".to_string())]),
+        HashMap::from([("cost_per_unit".to_string(), "1 eur_per_kilo".into())]),
         "out",
     );
     assert!(
@@ -838,10 +862,22 @@ fn compound_measure_below_maximum_in_other_unit_passes() {
         "2.01 usd_per_tonne under converted maximum must not veto, got: {:?}",
         rule.veto_reason
     );
+    let display = rule.result().expect("result");
+    assert!(
+        display.contains("usd_per_tonne"),
+        "display uses caller unit, got: {display}"
+    );
+    let measure = rule
+        .result
+        .as_ref()
+        .expect("value")
+        .measure
+        .as_ref()
+        .expect("measure map");
     assert_eq!(
-        rule.display().expect("display"),
-        "2.01 usd_per_tonne",
-        "accepted overlay must surface the supplied measure"
+        measure.get("usd_per_tonne").copied(),
+        Some(Decimal::from_str("2.01").expect("2.01")),
+        "overlay magnitude must remain in measure.usd_per_tonne"
     );
 }
 
@@ -933,10 +969,22 @@ fn tri_compound_measure_below_maximum_in_other_unit_passes() {
         "2.01 usd_per_ton_hour under converted maximum must not veto, got: {:?}",
         rule.veto_reason
     );
+    let display = rule.result().expect("result");
+    assert!(
+        display.contains("usd_per_ton_hour"),
+        "display uses caller unit, got: {display}"
+    );
+    let measure = rule
+        .result
+        .as_ref()
+        .expect("value")
+        .measure
+        .as_ref()
+        .expect("measure map");
     assert_eq!(
-        rule.display().expect("display"),
-        "2.01 usd_per_ton_hour",
-        "accepted overlay must surface the supplied measure"
+        measure.get("usd_per_ton_hour").copied(),
+        Some(Decimal::from_str("2.01").expect("2.01")),
+        "overlay magnitude must remain in measure.usd_per_ton_hour"
     );
 }
 
@@ -995,7 +1043,7 @@ rule result: weight
     let message = run_override_veto_message(
         &engine,
         "physics",
-        HashMap::from([("weight".to_string(), "500 gram".to_string())]),
+        HashMap::from([("weight".to_string(), "500 gram".into())]),
         "result",
     );
     assert!(
@@ -1044,7 +1092,7 @@ fn eval_rule_measure_magnitude(
         "rule '{rule_name}' must not Veto, got {:?}",
         rule.veto_reason
     );
-    if let Some(measure) = rule.value.as_ref().and_then(|v| v.measure.as_ref()) {
+    if let Some(measure) = rule.result.as_ref().and_then(|v| v.measure.as_ref()) {
         let unit = rule
             .rule
             .rule_type
@@ -1052,7 +1100,7 @@ fn eval_rule_measure_magnitude(
             .clone()
             .filter(|u| measure.contains_key(u))
             .or_else(|| {
-                rule.display().and_then(|display| {
+                rule.result().and_then(|display| {
                     let lower = display.to_lowercase();
                     measure
                         .keys()
@@ -1062,20 +1110,17 @@ fn eval_rule_measure_magnitude(
             })
             .or_else(|| measure.keys().next().cloned())
             .unwrap_or_else(|| panic!("measure map empty for '{rule_name}'"));
-        let amount = measure
+        let amount = *measure
             .get(&unit)
             .unwrap_or_else(|| panic!("measure map missing unit '{unit}'"));
-        return (
-            Decimal::from_str(amount).expect("measure map decimal"),
-            unit,
-        );
+        return (amount, unit);
     }
     let lit = rule
         .explanation
         .as_ref()
         .expect("explanation")
         .result
-        .value()
+        .literal_value()
         .expect("value");
     match &lit.value {
         ValueKind::Measure(amount) => (
@@ -1276,12 +1321,12 @@ fn precision_many_prime_cycles_explain_tip_only() {
             true,
         )
         .expect("second tip-only explain must complete");
-    let first_display = final_step.display().map(str::to_string);
+    let first_display = final_step.result().map(str::to_string);
     let second_display = again
         .results
         .get("final_step")
         .expect("final_step")
-        .display()
+        .result()
         .map(str::to_string);
     assert_eq!(
         first_display, second_display,
@@ -1469,7 +1514,7 @@ rule r: x as minute
         .unwrap();
     let now = DateTimeValue::now();
     let mut data = HashMap::new();
-    data.insert("x".to_string(), "5".to_string());
+    data.insert("x".to_string(), "5".into());
     let response = engine
         .run(None, "t", Some(&now), data, None, true)
         .expect("stdlib duration with minute must run");
@@ -1477,8 +1522,8 @@ rule r: x as minute
         .results
         .get("r")
         .expect("rule r")
-        .display()
-        .expect("display");
+        .result()
+        .expect("result");
     assert_eq!(display, "5 minute");
 }
 
@@ -1510,14 +1555,14 @@ rule out: 5 eur as kg
         .as_ref()
         .expect("explanation")
         .result
-        .value()
+        .literal_value()
         .expect("value");
     let (magnitude, unit) = match &lit.value {
         ValueKind::Measure(m) => (
             lemma::ValueKind::Number(m.clone())
                 .as_decimal_magnitude()
                 .unwrap(),
-            out.value
+            out.result
                 .as_ref()
                 .and_then(|v| v.measure.as_ref())
                 .and_then(|m| m.keys().next().cloned()),
@@ -1531,7 +1576,7 @@ rule out: 5 eur as kg
     );
     assert_eq!(unit.as_deref(), Some("kg"), "target unit must be kg");
     assert!(
-        out.value
+        out.result
             .as_ref()
             .and_then(|v| v.measure.as_ref())
             .is_some(),
@@ -1563,14 +1608,14 @@ rule out: amount as eur as kg
         .as_ref()
         .expect("explanation")
         .result
-        .value()
+        .literal_value()
         .expect("value");
     let (magnitude, unit) = match &lit.value {
         ValueKind::Measure(m) => (
             lemma::ValueKind::Number(m.clone())
                 .as_decimal_magnitude()
                 .unwrap(),
-            out.value
+            out.result
                 .as_ref()
                 .and_then(|v| v.measure.as_ref())
                 .and_then(|m| m.keys().next().cloned()),
@@ -1606,14 +1651,14 @@ rule out: amount as eur as number as kg
         .as_ref()
         .expect("explanation")
         .result
-        .value()
+        .literal_value()
         .expect("value");
     let (magnitude, unit) = match &lit.value {
         ValueKind::Measure(m) => (
             lemma::ValueKind::Number(m.clone())
                 .as_decimal_magnitude()
                 .unwrap(),
-            out.value
+            out.result
                 .as_ref()
                 .and_then(|v| v.measure.as_ref())
                 .and_then(|m| m.keys().next().cloned()),

@@ -16,6 +16,7 @@ const SCAN_ROOTS: &[&str] = &[
     "cli/src",
     "engine/packages/maven/native/lemma_jni/src",
     "engine/packages/hex/native/lemma_hex/src",
+    "engine/packages/nuget/native/lemma_dotnet/src",
     "openapi/src",
 ];
 

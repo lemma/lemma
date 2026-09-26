@@ -7,6 +7,7 @@ members = [
     "engine/lsp",
     "engine/packages/hex/native/lemma_hex",
     "engine/packages/maven/native/lemma_jni",
+    "engine/packages/nuget/native/lemma_dotnet",
     "openapi",
 ]
 default-members = ["cli"]

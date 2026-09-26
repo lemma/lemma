@@ -1,0 +1,21 @@
+[package]
+name = "lemma_dotnet"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Lemma engine UniFFI crate for the .NET NuGet package"
+publish = false
+
+[lib]
+name = "lemma_dotnet"
+path = "src/lib.rs"
+crate-type = ["cdylib", "lib"]
+
+[dependencies]
+lemma-engine = { path = "../../../../" }
+serde = { workspace = true }
+serde_json.workspace = true
+thiserror = "2"
+uniffi = "=0.31.0"

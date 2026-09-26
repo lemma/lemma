@@ -353,6 +353,92 @@ jobs:
           path: jni-artifact/
           if-no-files-found: error
 
+  build-dotnet-binaries:
+    name: Build lemma_dotnet (${{ matrix.job.target }})
+    needs: [detect-version-changes, create-release]
+    if: needs.detect-version-changes.outputs.changed == 'true'
+    runs-on: ${{ matrix.job.os }}
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        job:
+          - { target: aarch64-apple-darwin, os: macos-latest }
+          - { target: x86_64-apple-darwin, os: macos-15-intel }
+          - {
+              target: aarch64-unknown-linux-gnu,
+              os: ubuntu-latest,
+              use-cross: true,
+            }
+          - { target: x86_64-unknown-linux-gnu, os: ubuntu-latest }
+          - { target: x86_64-pc-windows-msvc, os: windows-latest }
+          - { target: aarch64-pc-windows-msvc, os: windows-11-vs2026-arm }
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.92.0
+          targets: ${{ matrix.job.target }}
+
+      - name: Install cross
+        if: matrix.job.use-cross
+        uses: taiki-e/install-action@cross
+
+      - name: Build lemma_dotnet
+        shell: bash
+        run: |
+          if [ "${{ matrix.job.use-cross }}" == "true" ]; then
+            cross build --release -p lemma_dotnet --target ${{ matrix.job.target }}
+          else
+            cargo build --release -p lemma_dotnet --target ${{ matrix.job.target }}
+          fi
+
+      - name: Package lemma_dotnet library
+        shell: bash
+        run: |
+          VERSION="${{ needs.detect-version-changes.outputs.version }}"
+          TARGET="${{ matrix.job.target }}"
+          RELEASE_DIR="target/${TARGET}/release"
+
+          case "${{ runner.os }}" in
+            Windows)
+              SRC="${RELEASE_DIR}/lemma_dotnet.dll"
+              LIB_NAME="lemma_dotnet-v${VERSION}-${TARGET}.dll"
+              PKG_NAME="lemma_dotnet.dll" ;;
+            macOS)
+              SRC="${RELEASE_DIR}/liblemma_dotnet.dylib"
+              LIB_NAME="liblemma_dotnet-v${VERSION}-${TARGET}.dylib"
+              PKG_NAME="liblemma_dotnet.dylib" ;;
+            *)
+              SRC="${RELEASE_DIR}/liblemma_dotnet.so"
+              LIB_NAME="liblemma_dotnet-v${VERSION}-${TARGET}.so"
+              PKG_NAME="liblemma_dotnet.so" ;;
+          esac
+
+          cp "${SRC}" "${LIB_NAME}"
+          tar czf "${LIB_NAME}.tar.gz" "${LIB_NAME}"
+
+          mkdir -p "dotnet-artifact/natives/${TARGET}"
+          cp "${SRC}" "dotnet-artifact/natives/${TARGET}/${PKG_NAME}"
+
+      - name: Upload to release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: lemma-v${{ needs.detect-version-changes.outputs.version }}
+          files: "*lemma_dotnet-*.tar.gz"
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Upload artifact for NuGet package
+        uses: actions/upload-artifact@v4
+        with:
+          name: lemma-dotnet-${{ matrix.job.target }}
+          path: dotnet-artifact/
+          if-no-files-found: error
+
   # Publish jobs run in parallel (no dependencies between them). If one fails
   # (e.g. auth/expired token), update the secret and use "Re-run failed jobs".
   publish-crates:
@@ -494,6 +580,66 @@ jobs:
           MAVEN_USERNAME: ${{ secrets.MAVEN_CENTRAL_USERNAME }}
           MAVEN_PASSWORD: ${{ secrets.MAVEN_CENTRAL_PASSWORD }}
           MAVEN_GPG_PASSPHRASE: ${{ secrets.MAVEN_GPG_PASSPHRASE }}
+
+  publish-nuget:
+    name: Publish to NuGet.org
+    needs: [detect-version-changes, create-release, build-dotnet-binaries]
+    if: |
+      !cancelled() &&
+      needs.create-release.result == 'success' &&
+      needs.build-dotnet-binaries.result == 'success' &&
+      needs.detect-version-changes.outputs.changed == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download lemma_dotnet natives
+        uses: actions/download-artifact@v4
+        with:
+          pattern: lemma-dotnet-*
+          path: /tmp/lemma-dotnet
+          merge-multiple: true
+
+      - name: Install natives into NuGet package
+        run: |
+          set -euo pipefail
+          DEST="engine/packages/nuget/Lemmabase.Lemma.Engine"
+          mkdir -p "${DEST}"
+          cp -a /tmp/lemma-dotnet/natives "${DEST}/"
+          find "${DEST}/natives" -type f | sort
+
+      - name: Setup .NET 8
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+
+      - name: Install uniffi-bindgen-cs
+        run: cargo install uniffi-bindgen-cs --git https://github.com/NordSecurity/uniffi-bindgen-cs --tag v0.11.0+v0.31.0 --force
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.92.0
+
+      - name: Generate UniFFI C# bindings
+        run: |
+          set -euo pipefail
+          cargo build --release -p lemma_dotnet
+          SO="target/release/liblemma_dotnet.so"
+          OUT="engine/packages/nuget/Lemmabase.Lemma.Engine/Generated"
+          mkdir -p "${OUT}"
+          uniffi-bindgen-cs --library "${SO}" --out-dir "${OUT}" \
+            --config engine/packages/nuget/native/lemma_dotnet/uniffi.toml
+
+      - name: Pack and push NuGet package
+        working-directory: engine/packages/nuget/Lemmabase.Lemma.Engine
+        run: |
+          set -euo pipefail
+          dotnet pack -c Release -o /tmp/nuget-out
+          dotnet nuget push /tmp/nuget-out/*.nupkg \
+            --api-key "${{ secrets.NUGET_API_KEY }}" \
+            --source https://api.nuget.org/v3/index.json \
+            --skip-duplicate
 
   publish-npm-cli:
     name: Publish CLI to npm

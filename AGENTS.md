@@ -122,7 +122,7 @@ If you cannot finish an implementation completely, every unfinished path must ha
 
 ### 10. Use `cargo nextest run`, not `cargo test`
 
-Unit tests go in the same module as the code (to test private functions). Engine integration tests go in `engine/tests/`; CLI integration tests in `cli/tests/`. Hex ExUnit tests live in `engine/packages/hex/test/`. Always run with `cargo nextest run` (Rust tests only). CI runs `cargo precommit --fuzz`. Local shortcut: `cargo precommit` (no fuzz). The gate: versions-verify, mix/hex, vscode npm ci + publish CLI smoke, fmt, clippy `--all-features`, nextest, npm WASM build+test, Maven `./mvnw -B verify` after `lemma_jni`, cargo-deny, coverage `--check`; `--fuzz` then runs `engine/fuzz` for 30 minutes total, split across targets (needs nightly + `cargo-fuzz`). JDK 21+ for Maven.
+Unit tests go in the same module as the code (to test private functions). Engine integration tests go in `engine/tests/`; CLI integration tests in `cli/tests/`. Hex ExUnit tests live in `engine/packages/hex/test/`. Always run with `cargo nextest run` (Rust tests only). CI runs `cargo precommit --fuzz`. Local shortcut: `cargo precommit` (no fuzz). The gate: versions-verify, mix/hex, vscode npm ci + publish CLI smoke, fmt, clippy `--all-features`, nextest, npm WASM build+test, Maven `./mvnw -B verify` after `lemma_jni`, NuGet `dotnet test` after `lemma_dotnet` + UniFFI generate, cargo-deny, coverage `--check`; `--fuzz` then runs `engine/fuzz` for 30 minutes total, split across targets (needs nightly + `cargo-fuzz`). JDK 21+ for Maven. .NET 8 SDK for NuGet. `uniffi-bindgen-cs` tag `v0.11.0+v0.31.0` (uniffi 0.31.0).
 
 ---
 

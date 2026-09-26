@@ -16,6 +16,10 @@ mod tracked {
 
     pub const HEX_MIX: &str = "engine/packages/hex/mix.exs";
     pub const MAVEN_POM: &str = "engine/packages/maven/pom.xml";
+    pub const NUGET_CSPROJ: &str =
+        "engine/packages/nuget/Lemmabase.Lemma.Engine/Lemmabase.Lemma.Engine.csproj";
+    pub const NUGET_ENGINE_VERSION: &str =
+        "engine/packages/nuget/Lemmabase.Lemma.Engine/engine.version";
     pub const ENGINE_README: &str = "engine/README.md";
     pub const VSCODE_PACKAGE_JSON: &str = "engine/lsp/editors/vscode/package.json";
     pub const QUALITY_YML: &str = ".github/workflows/quality.yml";
@@ -28,10 +32,21 @@ mod tracked {
         "cli/documentation/tools/java.md",
         "engine/packages/maven/README.md",
     ];
+
+    /// Doc snippets that embed `dotnet add package Lemmabase.Lemma.Engine --version {v}`.
+    pub const NUGET_VERSION_DOCS: &[&str] = &[
+        "README.md",
+        "engine/README.md",
+        "cli/documentation/tools/dotnet.md",
+        "engine/packages/nuget/Lemmabase.Lemma.Engine/README.md",
+    ];
 }
 
 /// Exact wasm-pack version required by precommit / CI. Keep workflow `WASM_PACK_VERSION` in sync.
 pub const WASM_PACK_VERSION: &str = "0.15.0";
+
+/// Exact uniffi crate version for lemma_dotnet. Keep with `UNIFFI_BINDGEN_CS_TAG` in nuget_natives.
+pub const UNIFFI_VERSION: &str = "0.31.0";
 
 fn dep_pin_needle(v: &str) -> String {
     format!(r#"version = "={v}""#)
@@ -74,6 +89,41 @@ fn verify_maven_doc_versions(content: &str, v: &str) -> Result<(), String> {
     } else {
         Err(format!("expected `{xml}` and/or `{gradle}`"))
     }
+}
+
+fn nuget_package_needle(v: &str) -> String {
+    format!("Lemmabase.Lemma.Engine --version {v}")
+}
+
+fn nuget_csproj_version_line(v: &str) -> String {
+    format!("<Version>{v}</Version>")
+}
+
+fn replace_nuget_doc_versions(content: &str, old: &str, new: &str) -> Result<String, String> {
+    let from = nuget_package_needle(old);
+    let to = nuget_package_needle(new);
+    if !content.contains(&from) {
+        return Err(format!("expected `{from}`"));
+    }
+    Ok(content.replace(&from, &to))
+}
+
+fn verify_nuget_doc_versions(content: &str, v: &str) -> Result<(), String> {
+    let needle = nuget_package_needle(v);
+    if content.contains(&needle) {
+        Ok(())
+    } else {
+        Err(format!("expected `{needle}`"))
+    }
+}
+
+fn replace_nuget_csproj_version(content: &str, old: &str, new: &str) -> Result<String, String> {
+    let from = nuget_csproj_version_line(old);
+    let to = nuget_csproj_version_line(new);
+    if !content.contains(&from) {
+        return Err(format!("expected `{from}`"));
+    }
+    Ok(content.replacen(&from, &to, 1))
 }
 
 /// Paths relative to workspace root that must carry the same release version as `[workspace.package]`.
@@ -238,10 +288,29 @@ pub fn versions_bump(root: &Path, new: &str) -> Result<(), String> {
         .map_err(|e| format!("{}: {e}", pom.display()))?;
     fs::write(&pom, pom2).map_err(|e| format!("{}: {e}", pom.display()))?;
 
+    let csproj = root.join(tracked::NUGET_CSPROJ);
+    let csproj_raw =
+        fs::read_to_string(&csproj).map_err(|e| format!("{}: {e}", csproj.display()))?;
+    let csproj2 = replace_nuget_csproj_version(&csproj_raw, &old, new)
+        .map_err(|e| format!("{}: {e}", csproj.display()))?;
+    fs::write(&csproj, csproj2).map_err(|e| format!("{}: {e}", csproj.display()))?;
+
+    let engine_version = root.join(tracked::NUGET_ENGINE_VERSION);
+    fs::write(&engine_version, format!("{new}\n"))
+        .map_err(|e| format!("{}: {e}", engine_version.display()))?;
+
     for rel in tracked::MAVEN_VERSION_DOCS {
         let p = root.join(rel);
         let raw = fs::read_to_string(&p).map_err(|e| format!("{}: {e}", p.display()))?;
         let updated = replace_maven_doc_versions(&raw, &old, new)
+            .map_err(|e| format!("{}: {e}", p.display()))?;
+        fs::write(&p, updated).map_err(|e| format!("{}: {e}", p.display()))?;
+    }
+
+    for rel in tracked::NUGET_VERSION_DOCS {
+        let p = root.join(rel);
+        let raw = fs::read_to_string(&p).map_err(|e| format!("{}: {e}", p.display()))?;
+        let updated = replace_nuget_doc_versions(&raw, &old, new)
             .map_err(|e| format!("{}: {e}", p.display()))?;
         fs::write(&p, updated).map_err(|e| format!("{}: {e}", p.display()))?;
     }
@@ -384,11 +453,48 @@ pub fn versions_verify(root: &Path) -> Result<(), String> {
         Err(e) => errs.push(format!("{}: {e}", pom.display())),
     }
 
+    let csproj = root.join(tracked::NUGET_CSPROJ);
+    match fs::read_to_string(&csproj) {
+        Ok(s) => {
+            let needle = nuget_csproj_version_line(&v);
+            if !s.contains(&needle) {
+                errs.push(format!("{}: expected `{needle}`", csproj.display()));
+            }
+        }
+        Err(e) => errs.push(format!("{}: {e}", csproj.display())),
+    }
+
+    let engine_version = root.join(tracked::NUGET_ENGINE_VERSION);
+    match fs::read_to_string(&engine_version) {
+        Ok(s) => {
+            if s.trim() != v {
+                errs.push(format!(
+                    "{}: expected `{v}`, got {:?}",
+                    engine_version.display(),
+                    s.trim()
+                ));
+            }
+        }
+        Err(e) => errs.push(format!("{}: {e}", engine_version.display())),
+    }
+
     for rel in tracked::MAVEN_VERSION_DOCS {
         let p = root.join(rel);
         match fs::read_to_string(&p) {
             Ok(s) => {
                 if let Err(e) = verify_maven_doc_versions(&s, &v) {
+                    errs.push(format!("{}: {e}", p.display()));
+                }
+            }
+            Err(e) => errs.push(format!("{}: {e}", p.display())),
+        }
+    }
+
+    for rel in tracked::NUGET_VERSION_DOCS {
+        let p = root.join(rel);
+        match fs::read_to_string(&p) {
+            Ok(s) => {
+                if let Err(e) = verify_nuget_doc_versions(&s, &v) {
                     errs.push(format!("{}: {e}", p.display()));
                 }
             }

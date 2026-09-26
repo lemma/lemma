@@ -1,0 +1,5 @@
+[bindings.csharp]
+cdylib_name = "lemma_dotnet"
+namespace = "Lemmabase.Lemma.Engine.Native"
+global_methods_class_name = "LemmaDotnet"
+access_modifier = "internal"

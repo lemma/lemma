@@ -6,6 +6,7 @@ mod hex_standalone;
 mod llms;
 mod lsp;
 mod maven_natives;
+mod nuget_natives;
 mod schema;
 mod versions;
 mod versions_diff;
@@ -42,6 +43,7 @@ fn run_versions_verify() {
 const HEX_PACKAGE_DIR: &str = "engine/packages/hex";
 const NPM_WASM_DIR: &str = "engine/packages/npm";
 const MAVEN_PACKAGE_DIR: &str = "engine/packages/maven";
+const NUGET_PACKAGE_DIR: &str = "engine/packages/nuget";
 const FUZZ_PACKAGE_DIR: &str = "engine/fuzz";
 const FUZZ_TARGETS: &[&str] = &[
     "fuzz_parser",
@@ -185,6 +187,62 @@ fn run_maven_precommit() {
     if let Err(e) = warnings::reject_warnings_in_output(label, &combined) {
         eprintln!("{e}");
         std::process::exit(1);
+    }
+}
+
+fn require_uniffi_bindgen_cs() {
+    let output = Command::new("uniffi-bindgen-cs")
+        .arg("--version")
+        .output()
+        .unwrap_or_else(|e| {
+            panic!(
+                "uniffi-bindgen-cs not found on PATH. Install: cargo install uniffi-bindgen-cs --git https://github.com/NordSecurity/uniffi-bindgen-cs --tag {} ({e})",
+                nuget_natives::UNIFFI_BINDGEN_CS_TAG
+            )
+        });
+    if !output.status.success() {
+        panic!(
+            "uniffi-bindgen-cs --version failed. Install: cargo install uniffi-bindgen-cs --git https://github.com/NordSecurity/uniffi-bindgen-cs --tag {}",
+            nuget_natives::UNIFFI_BINDGEN_CS_TAG
+        );
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let line = stdout.lines().next().unwrap_or("").trim();
+    if !line.contains("0.11.0") {
+        panic!(
+            "uniffi-bindgen-cs version mismatch: got {line:?}, expected tag {}. Install: cargo install uniffi-bindgen-cs --git https://github.com/NordSecurity/uniffi-bindgen-cs --tag {}",
+            nuget_natives::UNIFFI_BINDGEN_CS_TAG,
+            nuget_natives::UNIFFI_BINDGEN_CS_TAG
+        );
+    }
+}
+
+fn run_nuget_precommit() {
+    require_command(
+        "dotnet",
+        "Install the .NET 8 SDK (https://dotnet.microsoft.com/download) for the NuGet package tests.",
+    );
+    require_uniffi_bindgen_cs();
+    let root = versions::workspace_root();
+    if let Err(e) = nuget_natives::run(&root) {
+        eprintln!("nuget-natives: {e}");
+        std::process::exit(1);
+    }
+    let nuget_dir = root.join(NUGET_PACKAGE_DIR);
+    eprintln!("xtask: dotnet test Lemmabase.Lemma.Engine.sln");
+    let status = Command::new("dotnet")
+        .args([
+            "test",
+            "Lemmabase.Lemma.Engine.sln",
+            "--nologo",
+            "--verbosity",
+            "minimal",
+        ])
+        .current_dir(&nuget_dir)
+        .status()
+        .unwrap_or_else(|e| panic!("failed to run dotnet test in {}: {e}", nuget_dir.display()));
+    if !status.success() {
+        std::process::exit(status.code().unwrap_or(1));
     }
 }
 
@@ -332,6 +390,8 @@ fn precommit(run_fuzz: bool) {
     run_npm_wasm_precommit();
     eprintln!("xtask: maven package");
     run_maven_precommit();
+    eprintln!("xtask: nuget package");
+    run_nuget_precommit();
     run_deny_precommit();
     eprintln!("xtask: coverage --check");
     let root = versions::workspace_root();
@@ -348,7 +408,7 @@ fn precommit(run_fuzz: bool) {
 
 fn usage() {
     eprintln!(
-        "usage:\n  cargo precommit [--fuzz] | cargo run -p xtask -- [precommit] [--fuzz]\n  cargo verify   | cargo run -p xtask -- versions-verify\n  cargo bump <version> | cargo run -p xtask -- versions-bump <version>\n  cargo changelog | cargo run -p xtask -- versions-diff [semver]\n  cargo lsp | cargo run -p xtask -- lsp [vsix|prepare|package|publish-marketplace|publish-openvsx|--help]\n  cargo run -p xtask -- hex-standalone\n  cargo benchmarks <engine|cli|all> | cargo run -p xtask -- benchmarks <engine|cli|all>\n  cargo coverage <engine|cli|all> [--check] | cargo run -p xtask -- coverage <engine|cli|all> [--check]\n  cargo run -p xtask -- schema\n  cargo run -p xtask -- llms\n  cargo run -p xtask -- maven-natives\n\n  --fuzz  after the gate, run engine/fuzz for 30 minutes total (split across targets; CI uses this)"
+        "usage:\n  cargo precommit [--fuzz] | cargo run -p xtask -- [precommit] [--fuzz]\n  cargo verify   | cargo run -p xtask -- versions-verify\n  cargo bump <version> | cargo run -p xtask -- versions-bump <version>\n  cargo changelog | cargo run -p xtask -- versions-diff [semver]\n  cargo lsp | cargo run -p xtask -- lsp [vsix|prepare|package|publish-marketplace|publish-openvsx|--help]\n  cargo run -p xtask -- hex-standalone\n  cargo benchmarks <engine|cli|all> | cargo run -p xtask -- benchmarks <engine|cli|all>\n  cargo coverage <engine|cli|all> [--check] | cargo run -p xtask -- coverage <engine|cli|all> [--check]\n  cargo run -p xtask -- schema\n  cargo run -p xtask -- llms\n  cargo run -p xtask -- maven-natives\n  cargo run -p xtask -- nuget-natives\n\n  --fuzz  after the gate, run engine/fuzz for 30 minutes total (split across targets; CI uses this)"
     );
 }
 
@@ -468,6 +528,18 @@ fn main() {
             let root = versions::workspace_root();
             if let Err(e) = maven_natives::run(&root) {
                 eprintln!("maven-natives: {e}");
+                std::process::exit(1);
+            }
+        }
+        Some("nuget-natives") => {
+            if args.next().is_some() {
+                eprintln!("nuget-natives: takes no arguments");
+                usage();
+                std::process::exit(1);
+            }
+            let root = versions::workspace_root();
+            if let Err(e) = nuget_natives::run(&root) {
+                eprintln!("nuget-natives: {e}");
                 std::process::exit(1);
             }
         }

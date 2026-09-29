@@ -207,6 +207,8 @@ export interface RuleResultValueEndpoint {
   date?: string;
   time?: string;
   calendar?: { value: string; unit: string };
+  /** Written unit for a measure or ratio value (including range endpoints). */
+  unit?: string;
 }
 
 /**
@@ -276,6 +278,8 @@ export type LemmaType =
         units: MeasureUnit[];
         traits: ("duration" | "calendar")[];
         decomposition: Record<string, number> | null;
+        /** Written unit when this type describes a value (omit on schema-only types). */
+        unit?: string;
         help: string;
       }
     | {
@@ -299,6 +303,8 @@ export type LemmaType =
         maximum: string | null;
         decimals: number | null;
         units: RatioUnit[];
+        /** Written unit when this type describes a value (omit on schema-only types). */
+        unit?: string;
         help: string;
       }
     | {
@@ -402,7 +408,7 @@ export interface Cause {
 }
 
 export interface ConversionStep {
-  role: "outcome" | "rule" | "source";
+  role: "outcome" | "rule";
   text: string;
 }
 

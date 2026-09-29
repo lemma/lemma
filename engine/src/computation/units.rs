@@ -7,7 +7,8 @@ use crate::computation::rational::{
 use crate::parsing::ast::PrimitiveKind;
 use crate::planning::semantics::{
     calendar_unit_factor, primitive_number_arc, primitive_text_arc, BoundValueKind, LemmaType,
-    LiteralValue, SemanticCalendarUnit, SemanticConversionTarget, TypeSpecification, ValueKind,
+    LiteralValue, SemanticCalendarUnit, SemanticConversionTarget, TypeSpecification, TypedLiteral,
+    ValueKind,
 };
 use std::sync::Arc;
 
@@ -51,7 +52,7 @@ pub fn convert_unit(
         SemanticConversionTarget::Unit {
             unit_name,
             owning_type,
-        } => cast_to_unit(&value.value, value_type, unit_name, owning_type),
+        } => cast_to_unit(&value.value, unit_name, owning_type),
     }
 }
 
@@ -98,7 +99,6 @@ fn same_primitive_kind(value_type: &LemmaType, target: PrimitiveKind) -> bool {
 
 fn cast_to_unit(
     value: &ValueKind,
-    value_type: &LemmaType,
     unit_name: &str,
     owning_type: &Arc<crate::planning::semantics::LemmaType>,
 ) -> OperationResult {
@@ -108,7 +108,7 @@ fn cast_to_unit(
         }
         ValueKind::Measure(magnitude) => cast_measure_to_unit(magnitude.clone(), unit_name),
         ValueKind::Range(left, right) => {
-            cast_range_span_to_unit(left, right, value_type, unit_name, owning_type)
+            cast_range_span_to_unit(left, right, unit_name, owning_type)
         }
         ValueKind::Ratio(magnitude) => cast_ratio_to_unit(magnitude.clone(), unit_name),
         other => unreachable!(
@@ -126,7 +126,7 @@ fn cast_number_to_unit(
     if owning_type.is_ratio() {
         return OperationResult::from_bound(BoundValueKind {
             value: ValueKind::Ratio(magnitude),
-            measure_binding_unit: Some(Arc::from(unit_name)),
+            unit: Some(Arc::from(unit_name)),
         });
     }
     let factor = owning_type.measure_unit_factor(unit_name).clone();
@@ -140,36 +140,30 @@ fn cast_number_to_unit(
     };
     OperationResult::from_bound(BoundValueKind {
         value: ValueKind::Measure(canonical),
-        measure_binding_unit: Some(Arc::from(unit_name)),
+        unit: Some(Arc::from(unit_name)),
     })
 }
 
 fn cast_measure_to_unit(magnitude: RationalInteger, unit_name: &str) -> OperationResult {
     OperationResult::from_bound(BoundValueKind {
         value: ValueKind::Measure(magnitude),
-        measure_binding_unit: Some(Arc::from(unit_name)),
+        unit: Some(Arc::from(unit_name)),
     })
 }
 
 fn cast_ratio_to_unit(magnitude: RationalInteger, unit_name: &str) -> OperationResult {
     OperationResult::from_bound(BoundValueKind {
         value: ValueKind::Ratio(magnitude),
-        measure_binding_unit: Some(Arc::from(unit_name)),
+        unit: Some(Arc::from(unit_name)),
     })
 }
 
 fn cast_range_span_to_unit(
-    left: &LiteralValue,
-    right: &LiteralValue,
-    value_type: &LemmaType,
+    left: &TypedLiteral,
+    right: &TypedLiteral,
     unit_name: &str,
     owning_type: &Arc<crate::planning::semantics::LemmaType>,
 ) -> OperationResult {
-    let endpoint_type = value_type
-        .specifications
-        .element_from_range()
-        .map(|element| Arc::new(LemmaType::primitive(element)))
-        .unwrap_or_else(|| Arc::new(value_type.clone()));
     if let (ValueKind::Date(left_date), ValueKind::Date(right_date)) = (&left.value, &right.value) {
         if calendar_unit_factor(unit_name).is_some() {
             return super::datetime::compute_date_calendar_difference(
@@ -179,14 +173,14 @@ fn cast_range_span_to_unit(
                 Arc::clone(owning_type),
             );
         }
-        let span = super::range::compute_span(left, &endpoint_type, right, &endpoint_type);
+        let span = super::range::compute_span(left, right);
         let OperationResult::Value(span) = span else {
             return span;
         };
         return convert_span_measure_to_unit(&span, unit_name);
     }
 
-    let span = super::range::compute_span(left, &endpoint_type, right, &endpoint_type);
+    let span = super::range::compute_span(left, right);
     let OperationResult::Value(span) = span else {
         return span;
     };
@@ -218,12 +212,7 @@ fn semantic_calendar_unit(unit_name: &str) -> SemanticCalendarUnit {
 fn cast_to_number(value: &ValueKind, value_type: &LemmaType) -> OperationResult {
     match value {
         ValueKind::Range(left, right) => {
-            let endpoint_type = value_type
-                .specifications
-                .element_from_range()
-                .map(|element| Arc::new(LemmaType::primitive(element)))
-                .unwrap_or_else(|| Arc::new(value_type.clone()));
-            let span = super::range::compute_span(left, &endpoint_type, right, &endpoint_type);
+            let span = super::range::compute_span(left, right);
             let OperationResult::Value(span_value) = span else {
                 return span;
             };

@@ -69,8 +69,8 @@ fn eval_decimal(code: &str, spec_name: &str, rule_name: &str) -> rust_decimal::D
         let unit = rule
             .rule
             .rule_type
-            .measure_binding_unit
-            .clone()
+            .unit()
+            .map(str::to_string)
             .filter(|u| measure.contains_key(u))
             .or_else(|| {
                 rule.result().and_then(|display| {

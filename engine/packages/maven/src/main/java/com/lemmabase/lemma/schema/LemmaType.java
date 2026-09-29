@@ -336,6 +336,7 @@ public sealed interface LemmaType {
    * @param units units
    * @param traits traits
    * @param decomposition decomposition
+   * @param unit written unit when describing a value, or null
    * @param help help
    * @param extendsType extendsType
    */
@@ -347,6 +348,7 @@ public sealed interface LemmaType {
       List<MeasureUnit> units,
       List<String> traits,
       @Nullable Map<String, Integer> decomposition,
+      @Nullable String unit,
       String help,
       TypeExtends extendsType)
       implements LemmaType {
@@ -377,6 +379,7 @@ public sealed interface LemmaType {
       List<String> traits = null;
       Map<String, Integer> decomposition = null;
       boolean decompositionSeen = false;
+      String unit = null;
       String help = null;
       TypeExtends extendsType = null;
       while (p.nextToken() != JsonToken.END_OBJECT) {
@@ -409,6 +412,7 @@ public sealed interface LemmaType {
                     ? null
                     : JsonReading.readMap(p, JsonReading::readInt);
           }
+          case "unit" -> unit = JsonReading.readString(p);
           case "help" -> help = JsonReading.readString(p);
           case "extends" -> extendsType = TypeExtends.read(p);
           default -> JsonReading.unknownField(field, "LemmaType.Measure");
@@ -442,7 +446,7 @@ public sealed interface LemmaType {
         JsonReading.missingRequired("extends", "LemmaType.Measure");
       }
       return new Measure(
-          name, minimum, maximum, decimals, units, traits, decomposition, help, extendsType);
+          name, minimum, maximum, decimals, units, traits, decomposition, unit, help, extendsType);
     }
   }
 
@@ -644,6 +648,7 @@ public sealed interface LemmaType {
    * @param maximum maximum
    * @param decimals decimals
    * @param units units
+   * @param unit written unit when describing a value, or null
    * @param help help
    * @param extendsType extendsType
    */
@@ -653,6 +658,7 @@ public sealed interface LemmaType {
       @Nullable BigDecimal maximum,
       @Nullable Integer decimals,
       List<RatioUnit> units,
+      @Nullable String unit,
       String help,
       TypeExtends extendsType)
       implements LemmaType {
@@ -680,6 +686,7 @@ public sealed interface LemmaType {
       Integer decimals = null;
       boolean decimalsSeen = false;
       List<RatioUnit> units = null;
+      String unit = null;
       String help = null;
       TypeExtends extendsType = null;
       while (p.nextToken() != JsonToken.END_OBJECT) {
@@ -704,6 +711,7 @@ public sealed interface LemmaType {
             decimals = JsonReading.readInt(p);
           }
           case "units" -> units = JsonReading.readList(p, RatioUnit::read);
+          case "unit" -> unit = JsonReading.readString(p);
           case "help" -> help = JsonReading.readString(p);
           case "extends" -> extendsType = TypeExtends.read(p);
           default -> JsonReading.unknownField(field, "LemmaType.Ratio");
@@ -730,7 +738,7 @@ public sealed interface LemmaType {
       if (extendsType == null) {
         JsonReading.missingRequired("extends", "LemmaType.Ratio");
       }
-      return new Ratio(name, minimum, maximum, decimals, units, help, extendsType);
+      return new Ratio(name, minimum, maximum, decimals, units, unit, help, extendsType);
     }
   }
 

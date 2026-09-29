@@ -581,8 +581,9 @@ rule result: mass as gram
         stdout.contains("1 kilogram is 1000 gram"),
         "stdout:\n{stdout}"
     );
+    assert!(stdout.contains("mass"), "stdout:\n{stdout}");
     assert!(
-        stdout.contains("The measure of mass is 2 kilogram"),
+        !stdout.contains("The measure of mass is"),
         "stdout:\n{stdout}"
     );
     assert!(!stdout.contains('×'), "stdout:\n{stdout}");
@@ -628,8 +629,9 @@ rule result: age as day
         stdout.contains("2024-06-01") && stdout.contains("2024-06-15"),
         "stdout:\n{stdout}"
     );
+    assert!(stdout.contains("age"), "stdout:\n{stdout}");
     assert!(
-        stdout.contains("The date range of age is"),
+        !stdout.contains("The date range of age is"),
         "stdout:\n{stdout}"
     );
     assert!(!stdout.contains("age as day is"), "stdout:\n{stdout}");
@@ -667,15 +669,12 @@ rule result: (mass * 2) as gram
         "run --explain should succeed: {}",
         stdout
     );
-    assert!(stdout.contains("4 kilogram"), "stdout:\n{stdout}");
     assert!(
         stdout.contains("1 kilogram is 1000 gram"),
         "stdout:\n{stdout}"
     );
-    assert!(
-        stdout.contains("The measure is 4 kilogram"),
-        "stdout:\n{stdout}"
-    );
+    assert!(!stdout.contains("The measure is"), "stdout:\n{stdout}");
+    assert!(!stdout.contains("4 kilogram"), "stdout:\n{stdout}");
     assert!(stdout.contains("mass"), "stdout:\n{stdout}");
 }
 

@@ -6,11 +6,11 @@ use std::sync::Arc;
 use crate::computation::rational::{checked_div, RationalInteger};
 use crate::planning::explanation::{ConversionTraceRole, SerializedConversionTraceStep};
 use crate::planning::semantics::{
-    compare_semantic_dates, DataPath, LemmaType, LiteralValue, SemanticConversionTarget,
-    TypeSpecification, ValueKind,
+    compare_semantic_dates, LemmaType, LiteralValue, SemanticConversionTarget, TypeSpecification,
+    ValueKind,
 };
 
-/// Build ordered explanation steps (outcome → rule → source) after a successful unit conversion.
+/// Build ordered explanation steps (outcome → rule) after a successful unit conversion.
 ///
 /// When the source and target unit are the same (identity), the Rule step is omitted.
 pub(crate) fn build_conversion_steps(
@@ -19,7 +19,6 @@ pub(crate) fn build_conversion_steps(
     target: &SemanticConversionTarget,
     result: &LiteralValue,
     result_type: &Arc<LemmaType>,
-    data_ref: Option<&DataPath>,
 ) -> Vec<SerializedConversionTraceStep> {
     let mut steps = Vec::new();
     steps.push(SerializedConversionTraceStep {
@@ -34,44 +33,7 @@ pub(crate) fn build_conversion_steps(
         });
     }
 
-    steps.push(SerializedConversionTraceStep {
-        role: ConversionTraceRole::Source,
-        text: conversion_source_step_text(value, value_type, data_ref),
-    });
-
     steps
-}
-
-fn conversion_source_step_text(
-    operand: &LiteralValue,
-    operand_type: &LemmaType,
-    data_ref: Option<&DataPath>,
-) -> String {
-    let type_name = type_specification_display_name(operand_type);
-    let value_display = operand.display_value_with_type(operand_type);
-    match data_ref {
-        Some(path) => format!("The {type_name} of {path} is {value_display}"),
-        None => format!("The {type_name} is {value_display}"),
-    }
-}
-
-fn type_specification_display_name(lemma_type: &LemmaType) -> &'static str {
-    match &lemma_type.specifications {
-        TypeSpecification::Boolean { .. } => "boolean",
-        TypeSpecification::Measure { .. } => "measure",
-        TypeSpecification::MeasureRange { .. } => "measure range",
-        TypeSpecification::Number { .. } => "number",
-        TypeSpecification::NumberRange { .. } => "number range",
-        TypeSpecification::Text { .. } => "text",
-        TypeSpecification::Date { .. } => "date",
-        TypeSpecification::DateRange { .. } => "date range",
-        TypeSpecification::TimeRange { .. } => "time range",
-        TypeSpecification::Time { .. } => "time",
-        TypeSpecification::Ratio { .. } => "ratio",
-        TypeSpecification::RatioRange { .. } => "ratio range",
-        TypeSpecification::Veto { .. } => "veto",
-        TypeSpecification::Undetermined => "undetermined",
-    }
 }
 
 fn conversion_rule_step_text(
@@ -99,8 +61,8 @@ fn conversion_rule_step_text(
 }
 
 fn range_span_rule_step_text(
-    left: &LiteralValue,
-    right: &LiteralValue,
+    left: &crate::planning::semantics::TypedLiteral,
+    right: &crate::planning::semantics::TypedLiteral,
     result: &LiteralValue,
 ) -> Option<String> {
     match (&left.value, &right.value) {
@@ -116,7 +78,9 @@ fn range_span_rule_step_text(
             ))
         }
         (ValueKind::Number(_), ValueKind::Number(_)) => {
-            let (lower, upper) = ordered_number_pair(left, right);
+            let left_lit = left.to_literal();
+            let right_lit = right.to_literal();
+            let (lower, upper) = ordered_number_pair(&left_lit, &right_lit);
             Some(format!(
                 "{} − {} = {}",
                 upper.display_value(),
@@ -125,7 +89,9 @@ fn range_span_rule_step_text(
             ))
         }
         (ValueKind::Measure(_), ValueKind::Measure(_)) => {
-            let (lower, upper) = ordered_measure_pair(left, right);
+            let left_lit = left.to_literal();
+            let right_lit = right.to_literal();
+            let (lower, upper) = ordered_measure_pair(&left_lit, &right_lit);
             Some(format!(
                 "{} − {} = {}",
                 upper.display_value(),

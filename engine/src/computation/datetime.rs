@@ -461,9 +461,17 @@ pub fn evaluate_past_future_range(
         OperationResult::Veto(reason) => return OperationResult::Veto(reason),
     };
 
+    let now_typed = crate::planning::semantics::TypedLiteral {
+        value: now_value.value,
+        lemma_type: crate::planning::semantics::primitive_date_arc().clone(),
+    };
+    let shifted_typed = crate::planning::semantics::TypedLiteral {
+        value: shifted_value.value,
+        lemma_type: crate::planning::semantics::primitive_date_arc().clone(),
+    };
     let range_value = match kind {
-        DateRelativeKind::InPast => LiteralValue::range(shifted_value, now_value),
-        DateRelativeKind::InFuture => LiteralValue::range(now_value, shifted_value),
+        DateRelativeKind::InPast => LiteralValue::range(shifted_typed, now_typed),
+        DateRelativeKind::InFuture => LiteralValue::range(now_typed, shifted_typed),
     };
 
     OperationResult::from_literal(range_value)

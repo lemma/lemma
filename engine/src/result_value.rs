@@ -73,6 +73,9 @@ pub struct RuleResultValue {
     pub time: Option<SemanticTime>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub calendar: Option<CalendarResult>,
+    /// Written unit for a measure or ratio value (including range endpoints).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unit: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub range: Option<Box<RangeResult>>,
 }
@@ -193,12 +196,18 @@ fn result_value_from_literal(
 ) -> Result<RuleResultValue, RuleResultValueFailure> {
     match &literal.value {
         ValueKind::Range(from, to) => {
-            let endpoint_ty = range_element_type_specification(&lemma_type.specifications)
-                .map(LemmaType::primitive)
-                .unwrap_or_else(|| lemma_type.clone());
-            let from_value =
-                result_value_from_range_endpoint(from, &endpoint_ty, expansion, catalog)?;
-            let to_value = result_value_from_range_endpoint(to, &endpoint_ty, expansion, catalog)?;
+            let from_value = result_value_from_range_endpoint(
+                &from.to_literal(),
+                from.lemma_type.as_ref(),
+                expansion,
+                catalog,
+            )?;
+            let to_value = result_value_from_range_endpoint(
+                &to.to_literal(),
+                to.lemma_type.as_ref(),
+                expansion,
+                catalog,
+            )?;
             Ok(RuleResultValue {
                 result: Some(literal.display_value_with_type(lemma_type)),
                 range: Some(Box::new(RangeResult {
@@ -282,6 +291,7 @@ fn result_value_from_non_range_literal(
                         )
                         .map_err(map_literal_unit_map_failure)?,
                 ),
+                unit: result_type.unit().map(str::to_string),
                 ..RuleResultValue::default()
             })
         }
@@ -300,6 +310,7 @@ fn result_value_from_non_range_literal(
                         )
                         .map_err(map_literal_unit_map_failure)?,
                 ),
+                unit: result_type.unit().map(str::to_string),
                 ..RuleResultValue::default()
             })
         }
@@ -377,19 +388,26 @@ fn literal_from_measure_map(
     let unit_names = rule_type
         .measure_unit_names()
         .expect("BUG: measure rule result must have declared units");
-    let unit_name = unit_names
-        .first()
+    let unit_name = rule_type
+        .unit()
+        .map(str::to_string)
+        .or_else(|| unit_names.first().map(|name| (*name).to_string()))
         .expect("BUG: measure rule result type must declare at least one unit");
     let magnitude = measure
-        .get(*unit_name)
+        .get(&unit_name)
         .unwrap_or_else(|| panic!("BUG: measure map missing unit '{unit_name}'"));
     let rational = rational_from_parsed_decimal(*magnitude)
         .expect("BUG: measure rule result value must lift to rational");
-    let factor = rule_type.measure_unit_factor(unit_name);
+    let factor = rule_type.measure_unit_factor(&unit_name);
     let canonical = checked_mul(&rational, factor).unwrap_or_else(|failure| {
         panic!("BUG: measure canonicalization from RuleResultValue fields failed: {failure}")
     });
-    LiteralValue::measure_with_type(canonical, Arc::new(rule_type.clone()))
+    let typed = if rule_type.unit() == Some(unit_name.as_str()) {
+        Arc::new(rule_type.clone())
+    } else {
+        Arc::new(rule_type.clone().with_unit(unit_name))
+    };
+    LiteralValue::measure_with_type(canonical, typed)
 }
 
 fn literal_from_ratio_map(
@@ -404,9 +422,10 @@ fn literal_from_ratio_map(
             rule_type.name()
         ),
     };
-    let unit = units
-        .iter()
-        .next()
+    let unit = rule_type
+        .unit()
+        .and_then(|name| units.get(name).ok())
+        .or_else(|| units.iter().next())
         .expect("BUG: ratio rule result type must declare at least one unit");
     let magnitude = ratio
         .get(&unit.name)
@@ -416,7 +435,12 @@ fn literal_from_ratio_map(
     let canonical = checked_div(&display_rational, &unit.value).unwrap_or_else(|failure| {
         panic!("BUG: ratio canonicalization from RuleResultValue fields failed: {failure}")
     });
-    LiteralValue::ratio_with_type(canonical, Arc::new(rule_type.clone()))
+    let typed = if rule_type.unit() == Some(unit.name.as_str()) {
+        Arc::new(rule_type.clone())
+    } else {
+        Arc::new(rule_type.clone().with_unit(unit.name.clone()))
+    };
+    LiteralValue::ratio_with_type(canonical, typed)
 }
 
 impl RuleResultValue {
@@ -429,17 +453,40 @@ impl RuleResultValue {
             if range.from.range.is_some() || range.to.range.is_some() {
                 panic!("BUG: range endpoint must not itself be a range");
             }
-            let endpoint_type =
+            let endpoint_schema =
                 element_type_from_range_rule(rule_type).unwrap_or_else(|| rule_type.clone());
-            let left = range.from.to_literal(&endpoint_type);
-            let right = range.to.to_literal(&endpoint_type);
-            return LiteralValue::range(left, right);
+            let left_type =
+                endpoint_type_with_written_unit(&endpoint_schema, range.from.unit.as_deref());
+            let right_type =
+                endpoint_type_with_written_unit(&endpoint_schema, range.to.unit.as_deref());
+            let left = range.from.to_literal(&left_type);
+            let right = range.to.to_literal(&right_type);
+            return LiteralValue::range(
+                crate::planning::semantics::TypedLiteral {
+                    value: left.value,
+                    lemma_type: Arc::new(left_type),
+                },
+                crate::planning::semantics::TypedLiteral {
+                    value: right.value,
+                    lemma_type: Arc::new(right_type),
+                },
+            );
         }
 
         if let Some(b) = self.boolean {
             return LiteralValue::from_bool(b);
         }
-        let owned_rule_type = Arc::new(rule_type.clone());
+        let owned_rule_type = match self.unit.as_deref() {
+            Some(unit)
+                if matches!(
+                    &rule_type.specifications,
+                    TypeSpecification::Measure { .. } | TypeSpecification::Ratio { .. }
+                ) && rule_type.unit() != Some(unit) =>
+            {
+                Arc::new(rule_type.clone().with_unit(unit))
+            }
+            _ => Arc::new(rule_type.clone()),
+        };
         if let Some(number) = self.number {
             return LiteralValue::number_with_type_from_decimal(number, owned_rule_type);
         }
@@ -449,10 +496,10 @@ impl RuleResultValue {
             return LiteralValue::measure_with_type(rational, owned_rule_type);
         }
         if let Some(measure) = &self.measure {
-            return literal_from_measure_map(measure, rule_type);
+            return literal_from_measure_map(measure, owned_rule_type.as_ref());
         }
         if let Some(ratio) = &self.ratio {
-            return literal_from_ratio_map(ratio, rule_type);
+            return literal_from_ratio_map(ratio, owned_rule_type.as_ref());
         }
         if let Some(date) = &self.date {
             return LiteralValue::date_with_type(date.clone(), owned_rule_type);
@@ -464,6 +511,20 @@ impl RuleResultValue {
             return LiteralValue::text_with_type(text.clone(), owned_rule_type);
         }
         panic!("BUG: rule result value fields cannot reconstruct literal");
+    }
+}
+
+fn endpoint_type_with_written_unit(endpoint_schema: &LemmaType, unit: Option<&str>) -> LemmaType {
+    match unit {
+        Some(unit)
+            if matches!(
+                &endpoint_schema.specifications,
+                TypeSpecification::Measure { .. } | TypeSpecification::Ratio { .. }
+            ) && endpoint_schema.unit() != Some(unit) =>
+        {
+            endpoint_schema.clone().with_unit(unit)
+        }
+        _ => endpoint_schema.clone(),
     }
 }
 

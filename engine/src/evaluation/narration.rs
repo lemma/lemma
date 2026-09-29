@@ -302,17 +302,12 @@ fn narrate_shape(id: NormalFormId, plan: &ExecutionPlan, ctx: &EvaluationContext
                     )),
                 },
                 OperationResult::Value(result_literal) => {
-                    let data_ref = match &inner_narrated.as_operand {
-                        Some(ExplanationNode::Data { name, .. }) => Some(name),
-                        _ => None,
-                    };
                     let steps = build_conversion_steps(
                         &borrow_value(&source, "conversion source").to_literal(),
                         plan.result_type(*inner),
                         target,
                         &result_literal.to_literal(),
                         plan.result_type(id),
-                        data_ref,
                     );
                     ExplanationNode::Conversion {
                         expression: expression.clone(),

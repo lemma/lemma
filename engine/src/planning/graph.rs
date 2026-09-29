@@ -8,14 +8,15 @@ use crate::parsing::source::Source;
 use crate::planning::discovery;
 use crate::planning::semantics::{
     self, bound_value_kind_from_raw_suggestion, calendar_decomposition, canonicalize_signature,
-    conversion_target_to_semantic, duration_decomposition, number_with_unit_to_value_kind,
-    parser_value_to_value_kind, primitive_boolean_arc, primitive_date_arc, primitive_number_arc,
-    primitive_ratio_arc, primitive_text_arc, primitive_time_arc,
-    range_type_specification_from_endpoints, value_kind_matches_spec, value_to_semantic,
-    ArithmeticComputation, BaseMeasureVector, BoundValueKind, ComparisonComputation,
-    DataDefinition, DataPath, Expression, ExpressionKind, LemmaType, LiteralValue, PathSegment,
-    RawSuggestion, ReferenceEnd, ReferenceTarget, RulePath, SemanticConversionTarget,
-    TypeDefiningSpec, TypeExtends, TypeSpecification, TypedLiteral, ValueKind,
+    conversion_target_to_semantic, duration_decomposition, lift_range_endpoint,
+    number_with_unit_to_value_kind, parser_value_to_value_kind, primitive_boolean_arc,
+    primitive_date_arc, primitive_number_arc, primitive_ratio_arc, primitive_text_arc,
+    primitive_time_arc, range_type_specification_from_endpoints, value_kind_matches_spec,
+    value_to_semantic, ArithmeticComputation, BaseMeasureVector, BoundValueKind,
+    ComparisonComputation, DataDefinition, DataPath, Expression, ExpressionKind, LemmaType,
+    LiteralValue, PathSegment, RawSuggestion, ReferenceEnd, ReferenceTarget, RulePath,
+    SemanticConversionTarget, TypeDefiningSpec, TypeExtends, TypeSpecification, TypedLiteral,
+    UnitTokenResolver, ValueKind,
 };
 use crate::planning::typing::{
     comparison_type, date_predicate_type, logical_and_type, logical_not_type, math_op_type,
@@ -318,20 +319,22 @@ impl<'a> Graph<'a> {
         Ok(data)
     }
 
-    /// Keep a measure literal's binding unit when replacing `lemma_type` with a schema type
+    /// Keep a measure literal's written unit when replacing `lemma_type` with a schema type
     /// that has the same specifications (or compatible family).
     fn preserve_measure_binding(
         schema_type: &Arc<LemmaType>,
         previous: &LemmaType,
     ) -> Arc<LemmaType> {
-        match &previous.measure_binding_unit {
-            Some(unit) => Arc::new(
-                schema_type
-                    .as_ref()
-                    .clone()
-                    .with_measure_binding_unit(unit.clone()),
-            ),
-            None => Arc::clone(schema_type),
+        match previous.unit() {
+            Some(unit)
+                if matches!(
+                    &schema_type.specifications,
+                    TypeSpecification::Measure { .. } | TypeSpecification::Ratio { .. }
+                ) =>
+            {
+                Arc::new(schema_type.as_ref().clone().with_unit(unit))
+            }
+            Some(_) | None => Arc::clone(schema_type),
         }
     }
 
@@ -347,15 +350,16 @@ impl<'a> Graph<'a> {
         }
 
         let schema_ref = schema_type.as_ref();
-        if lit.lemma_type.specifications == schema_ref.specifications {
+        if lit
+            .lemma_type
+            .specifications
+            .equal_ignoring_unit(&schema_ref.specifications)
+        {
             if !value_kind_matches_spec(&lit.value, &schema_ref.specifications) {
                 panic!(
                     "BUG: LiteralValue value kind {:?} inconsistent with lemma_type {:?}",
                     lit.value, lit.lemma_type.specifications
                 );
-            }
-            if let ValueKind::Measure(_) = &lit.value {
-                // Unit identity lives on lemma_type.measure_binding_unit when bound.
             }
             let mut out = lit.clone();
             out.lemma_type = Self::preserve_measure_binding(schema_type, &lit.lemma_type);
@@ -374,7 +378,10 @@ impl<'a> Graph<'a> {
             (TypeSpecification::Measure { .. }, ValueKind::Measure(_)) => {
                 if !lit.lemma_type.same_measure_family(schema_ref)
                     && !lit.lemma_type.compatible_with_anonymous_measure(schema_ref)
-                    && lit.lemma_type.specifications != schema_ref.specifications
+                    && !lit
+                        .lemma_type
+                        .specifications
+                        .equal_ignoring_unit(&schema_ref.specifications)
                 {
                     return Err(format!(
                         "value {} cannot be used as type {}: incompatible measure families",
@@ -403,23 +410,16 @@ impl<'a> Graph<'a> {
                     range_endpoint_schema_type(schema_ref).unwrap_or_else(|| {
                         unreachable!("BUG: range_endpoint_schema_type missing range schema arm")
                     });
-                let left_typed = TypedLiteral {
-                    value: left.value.clone(),
-                    lemma_type: Arc::clone(&endpoint_schema_type),
-                };
-                let right_typed = TypedLiteral {
-                    value: right.value.clone(),
-                    lemma_type: Arc::clone(&endpoint_schema_type),
-                };
-                let coerced_left =
-                    Self::coerce_literal_to_schema_type(&left_typed, &endpoint_schema_type)?;
-                let coerced_right =
-                    Self::coerce_literal_to_schema_type(&right_typed, &endpoint_schema_type)?;
+                let left_schema =
+                    Self::preserve_measure_binding(&endpoint_schema_type, left.lemma_type.as_ref());
+                let right_schema = Self::preserve_measure_binding(
+                    &endpoint_schema_type,
+                    right.lemma_type.as_ref(),
+                );
+                let coerced_left = Self::coerce_literal_to_schema_type(left, &left_schema)?;
+                let coerced_right = Self::coerce_literal_to_schema_type(right, &right_schema)?;
                 Ok(TypedLiteral {
-                    value: ValueKind::Range(
-                        Box::new(coerced_left.to_literal()),
-                        Box::new(coerced_right.to_literal()),
-                    ),
+                    value: ValueKind::Range(Box::new(coerced_left), Box::new(coerced_right)),
                     lemma_type: Arc::clone(schema_type),
                 })
             }
@@ -454,8 +454,21 @@ impl<'a> Graph<'a> {
     fn resolve_data_reference_types(
         &mut self,
         ordered_reference_paths: &[DataPath],
+        resolved_types: &ResolvedTypesMap,
     ) -> Result<(), Vec<Error>> {
         let mut errors: Vec<Error> = Vec::new();
+        let main_spec = self.main_spec;
+        let resolve_unit = |unit: &str| -> Result<String, String> {
+            let resolved = find_types_by_spec(resolved_types, main_spec).ok_or_else(|| {
+                format!(
+                    "Unknown unit '{unit}'. Declare it on a measure or ratio type, or import it with uses."
+                )
+            })?;
+            resolved
+                .unit_index
+                .resolve_with_named_types(unit, &resolved.resolved)
+                .map(|(bare, _)| bare)
+        };
 
         for reference_path in ordered_reference_paths {
             let (target_data_path, provisional, local_constraints, source) =
@@ -543,8 +556,11 @@ impl<'a> Graph<'a> {
                     merged.specifications.clone(),
                     constraints,
                     &source,
-                    &mut raw_suggestion,
-                    &mut raw_fill,
+                    ConstraintSuggestionSink {
+                        suggestion: &mut raw_suggestion,
+                        fill: &mut raw_fill,
+                        resolve_unit: Some(&resolve_unit),
+                    },
                 ) {
                     Ok(specs) => merged.specifications = specs,
                     Err(errs) => {
@@ -625,9 +641,22 @@ impl<'a> Graph<'a> {
     fn resolve_rule_reference_types(
         &mut self,
         computed_rule_types: &HashMap<RulePath, Arc<LemmaType>>,
+        resolved_types: &ResolvedTypesMap,
     ) -> Result<(), Vec<Error>> {
         let mut errors: Vec<Error> = Vec::new();
         let mut updates: Vec<RuleReferenceUpdate> = Vec::new();
+        let main_spec = self.main_spec;
+        let resolve_unit = |unit: &str| -> Result<String, String> {
+            let resolved = find_types_by_spec(resolved_types, main_spec).ok_or_else(|| {
+                format!(
+                    "Unknown unit '{unit}'. Declare it on a measure or ratio type, or import it with uses."
+                )
+            })?;
+            resolved
+                .unit_index
+                .resolve_with_named_types(unit, &resolved.resolved)
+                .map(|(bare, _)| bare)
+        };
 
         for (reference_path, entry) in &self.data {
             let DataDefinition::Reference {
@@ -674,8 +703,11 @@ impl<'a> Graph<'a> {
                         merged.specifications.clone(),
                         constraints,
                         source,
-                        &mut raw_suggestion,
-                        &mut raw_fill,
+                        ConstraintSuggestionSink {
+                            suggestion: &mut raw_suggestion,
+                            fill: &mut raw_fill,
+                            resolve_unit: Some(&resolve_unit),
+                        },
                     ) {
                         Ok(specs) => merged.specifications = specs,
                         Err(errs) => {
@@ -760,8 +792,11 @@ impl<'a> Graph<'a> {
                     merged.specifications.clone(),
                     constraints,
                     source,
-                    &mut raw_suggestion,
-                    &mut raw_fill,
+                    ConstraintSuggestionSink {
+                        suggestion: &mut raw_suggestion,
+                        fill: &mut raw_fill,
+                        resolve_unit: Some(&resolve_unit),
+                    },
                 ) {
                     Ok(specs) => merged.specifications = specs,
                     Err(errs) => {
@@ -1302,14 +1337,19 @@ fn should_defer_ranged_constraints(parent: &ParentType) -> bool {
 /// Used for both the GraphBuilder's regular TypeDeclaration path and the
 /// post-build reference type-merging pass, so the underlying constraint
 /// application logic stays in one place.
+struct ConstraintSuggestionSink<'a> {
+    suggestion: &'a mut Option<RawSuggestion>,
+    fill: &'a mut Option<RawSuggestion>,
+    resolve_unit: Option<&'a UnitTokenResolver<'a>>,
+}
+
 fn apply_constraints_to_spec(
     spec: &LemmaSpec,
     type_name: &str,
     mut specs: TypeSpecification,
     constraints: &[Constraint],
     source: &crate::parsing::source::Source,
-    declared_suggestion: &mut Option<RawSuggestion>,
-    declared_fill: &mut Option<RawSuggestion>,
+    sink: ConstraintSuggestionSink<'_>,
 ) -> Result<TypeSpecification, Vec<Error>> {
     let mut errors = Vec::new();
 
@@ -1376,6 +1416,12 @@ fn apply_constraints_to_spec(
         return Err(errors);
     }
 
+    let ConstraintSuggestionSink {
+        suggestion: declared_suggestion,
+        fill: declared_fill,
+        resolve_unit,
+    } = sink;
+
     let mut apply_one = |specs: &mut TypeSpecification,
                          command: TypeConstraintCommand,
                          args: &[CommandArg],
@@ -1389,6 +1435,7 @@ fn apply_constraints_to_spec(
             args,
             &mut suggestion_before,
             &mut fill_before,
+            resolve_unit,
         ) {
             Ok(()) => {
                 *declared_suggestion = suggestion_before;
@@ -1606,7 +1653,9 @@ impl<'a> Graph<'a> {
         // Phase 1: Resolve data-target reference types now that all data
         // definitions (across all specs) are populated. Rule-target references
         // are resolved in Phase 4 once the target rule's type is inferred.
-        if let Err(reference_errors) = self.resolve_data_reference_types(&reference_order) {
+        if let Err(reference_errors) =
+            self.resolve_data_reference_types(&reference_order, resolved_types)
+        {
             errors.extend(reference_errors);
         }
 
@@ -1640,7 +1689,8 @@ impl<'a> Graph<'a> {
         let (inferred_types, rule_reference_errors, type_errors) =
             with_infer_expression_type_cache(|| {
                 let inferred_types = infer_rule_types(self, &rule_order, resolved_types);
-                let rule_reference_errors = self.resolve_rule_reference_types(&inferred_types);
+                let rule_reference_errors =
+                    self.resolve_rule_reference_types(&inferred_types, resolved_types);
                 clear_infer_expression_type_cache();
                 let type_errors =
                     check_rule_types(self, &rule_order, &inferred_types, resolved_types);
@@ -1818,6 +1868,43 @@ impl<'a> GraphBuilder<'a> {
         resolved
             .unit_index
             .resolve_with_named_types(unit_ref, &resolved.resolved)
+    }
+
+    /// Build a measure/ratio [`ValueKind::Range`] with each endpoint typed and stamped with its
+    /// bare resolved unit. Same-unit and mixed-unit ranges both go through this path.
+    fn measure_ratio_range_from_number_with_unit_endpoints(
+        &self,
+        current_spec: &LemmaSpec,
+        left_mag: rust_decimal::Decimal,
+        left_unit: &str,
+        right_mag: rust_decimal::Decimal,
+        right_unit: &str,
+    ) -> Result<ValueKind, String> {
+        let (left_bare, left_lt) = self.resolve_unit_ref(current_spec, left_unit)?;
+        let (right_bare, right_lt) = self.resolve_unit_ref(current_spec, right_unit)?;
+        let left_kind = number_with_unit_to_value_kind(left_mag, &left_bare, left_lt.as_ref())?;
+        let right_kind = number_with_unit_to_value_kind(right_mag, &right_bare, right_lt.as_ref())?;
+        let left_ty = Arc::new(left_lt.as_ref().clone().with_unit(left_bare.as_str()));
+        let right_ty = Arc::new(right_lt.as_ref().clone().with_unit(right_bare.as_str()));
+        range_type_specification_from_endpoints(left_ty.as_ref(), right_ty.as_ref()).ok_or_else(
+            || {
+                format!(
+                    "Range endpoints must share a measure or ratio family (got '{}' and '{}')",
+                    left_lt.name(),
+                    right_lt.name()
+                )
+            },
+        )?;
+        Ok(ValueKind::Range(
+            Box::new(TypedLiteral {
+                value: left_kind,
+                lemma_type: left_ty,
+            }),
+            Box::new(TypedLiteral {
+                value: right_kind,
+                lemma_type: right_ty,
+            }),
+        ))
     }
 
     fn process_meta_fields(&mut self, spec: &LemmaSpec) {
@@ -2356,11 +2443,51 @@ impl<'a> GraphBuilder<'a> {
         current_spec: &LemmaSpec,
     ) {
         let semantic_value = if let Some(ref schema) = declared_schema_type {
-            match parser_value_to_value_kind(value, &schema.specifications) {
-                Ok(s) => s,
-                Err(e) => {
-                    self.errors.push(self.engine_error(e, &effective_source));
-                    return;
+            match value {
+                Value::Range(left, right)
+                    if matches!(
+                        &schema.specifications,
+                        TypeSpecification::MeasureRange { .. }
+                            | TypeSpecification::RatioRange { .. }
+                    ) =>
+                {
+                    let element = schema
+                        .specifications
+                        .element_from_range()
+                        .expect("BUG: measure/ratio range must define element_from_range");
+                    let resolve = |unit: &str| {
+                        self.resolve_unit_ref(current_spec, unit)
+                            .map(|(bare, _)| bare)
+                    };
+                    let left_lit = match lift_range_endpoint(left, &element, Some(&resolve)) {
+                        Ok(lit) => lit,
+                        Err(e) => {
+                            self.errors.push(self.engine_error(e, &effective_source));
+                            return;
+                        }
+                    };
+                    let right_lit = match lift_range_endpoint(right, &element, Some(&resolve)) {
+                        Ok(lit) => lit,
+                        Err(e) => {
+                            self.errors.push(self.engine_error(e, &effective_source));
+                            return;
+                        }
+                    };
+                    ValueKind::Range(Box::new(left_lit), Box::new(right_lit))
+                }
+                _ => {
+                    let resolve = |unit: &str| {
+                        self.resolve_unit_ref(current_spec, unit)
+                            .map(|(bare, _)| bare)
+                    };
+                    match parser_value_to_value_kind(value, &schema.specifications, Some(&resolve))
+                    {
+                        Ok(s) => s,
+                        Err(e) => {
+                            self.errors.push(self.engine_error(e, &effective_source));
+                            return;
+                        }
+                    }
                 }
             }
         } else {
@@ -2384,37 +2511,22 @@ impl<'a> GraphBuilder<'a> {
                 }
                 Value::Range(left, right) => match (left.as_ref(), right.as_ref()) {
                     (
-                        Value::NumberWithUnit(left_mag, unit),
+                        Value::NumberWithUnit(left_mag, left_unit),
                         Value::NumberWithUnit(right_mag, right_unit),
-                    ) if unit == right_unit => {
-                        let (bare, lt) = match self.resolve_unit_ref(current_spec, unit) {
-                            Ok(resolved) => resolved,
-                            Err(message) => {
-                                self.errors
-                                    .push(self.engine_error(message, &effective_source));
+                    ) => {
+                        match self.measure_ratio_range_from_number_with_unit_endpoints(
+                            current_spec,
+                            *left_mag,
+                            left_unit,
+                            *right_mag,
+                            right_unit,
+                        ) {
+                            Ok(s) => s,
+                            Err(e) => {
+                                self.errors.push(self.engine_error(e, &effective_source));
                                 return;
                             }
-                        };
-                        let left_kind =
-                            match number_with_unit_to_value_kind(*left_mag, &bare, lt.as_ref()) {
-                                Ok(v) => v,
-                                Err(e) => {
-                                    self.errors.push(self.engine_error(e, &effective_source));
-                                    return;
-                                }
-                            };
-                        let right_kind =
-                            match number_with_unit_to_value_kind(*right_mag, &bare, lt.as_ref()) {
-                                Ok(v) => v,
-                                Err(e) => {
-                                    self.errors.push(self.engine_error(e, &effective_source));
-                                    return;
-                                }
-                            };
-                        ValueKind::Range(
-                            Box::new(LiteralValue { value: left_kind }),
-                            Box::new(LiteralValue { value: right_kind }),
-                        )
+                        }
                     }
                     _ => match value_to_semantic(value) {
                         Ok(s) => s,
@@ -2448,39 +2560,33 @@ impl<'a> GraphBuilder<'a> {
             Value::Date(_) => primitive_date_arc().clone(),
             Value::Time(_) => primitive_time_arc().clone(),
             Value::Range(left_v, right_v) => match (left_v.as_ref(), right_v.as_ref()) {
-                (Value::NumberWithUnit(_, unit), Value::NumberWithUnit(_, right_unit))
-                    if unit == right_unit =>
+                (Value::NumberWithUnit(_, _), Value::NumberWithUnit(_, _)) => match &semantic_value
                 {
-                    match self.resolve_unit_ref(current_spec, unit) {
-                        Ok((bare, lt)) => {
-                            let endpoint =
-                                Arc::new(lt.as_ref().clone().with_measure_binding_unit(bare));
-                            let specs = range_type_specification_from_endpoints(
-                                endpoint.as_ref(),
-                                endpoint.as_ref(),
+                    ValueKind::Range(left, right) => {
+                        let specs = range_type_specification_from_endpoints(
+                                left.lemma_type.as_ref(),
+                                right.lemma_type.as_ref(),
                             )
                             .unwrap_or_else(|| {
                                 unreachable!(
-                                "BUG: measure range endpoints of same unit must form a range type"
-                            )
+                                    "BUG: measure/ratio range endpoints must form a range type after resolve"
+                                )
                             });
-                            Arc::new(LemmaType::primitive(specs))
-                        }
-                        Err(message) => {
-                            self.errors
-                                .push(self.engine_error(message, &effective_source));
-                            return;
-                        }
+                        Arc::new(LemmaType::primitive(specs))
                     }
-                }
+                    _ => unreachable!(
+                        "BUG: semantic range literal conversion returned non-range value kind"
+                    ),
+                },
                 _ => match &semantic_value {
                     ValueKind::Range(left, right) => {
-                        let endpoint_type = |endpoint: &LiteralValue| -> Arc<LemmaType> {
+                        let endpoint_type = |endpoint: &TypedLiteral| -> Arc<LemmaType> {
                             match &endpoint.value {
                                 ValueKind::Number(_) => primitive_number_arc().clone(),
                                 ValueKind::Date(_) => primitive_date_arc().clone(),
                                 ValueKind::Time(_) => primitive_time_arc().clone(),
                                 ValueKind::Ratio(_) => primitive_ratio_arc().clone(),
+                                ValueKind::Measure(_) => Arc::clone(&endpoint.lemma_type),
                                 other => unreachable!(
                                     "BUG: untyped range endpoint kind for insert_literal_data: {other:?}"
                                 ),
@@ -2514,7 +2620,7 @@ impl<'a> GraphBuilder<'a> {
                         return;
                     }
                 };
-                Arc::new(schema_type.as_ref().clone().with_measure_binding_unit(bare))
+                Arc::new(schema_type.as_ref().clone().with_unit(bare))
             }
             _ => schema_type,
         };
@@ -3178,40 +3284,18 @@ impl<'a> GraphBuilder<'a> {
                     }
                     Value::Range(left, right) => match (left.as_ref(), right.as_ref()) {
                         (
-                            Value::NumberWithUnit(left_mag, unit),
+                            Value::NumberWithUnit(left_mag, left_unit),
                             Value::NumberWithUnit(right_mag, right_unit),
-                        ) if unit == right_unit => {
-                            let (bare, lt) = match self.resolve_unit_ref(ctx.spec, unit) {
-                                Ok(resolved) => resolved,
-                                Err(message) => {
-                                    self.errors.push(self.engine_error(message, expr_src));
-                                    return None;
-                                }
-                            };
-                            let left_kind =
-                                match number_with_unit_to_value_kind(*left_mag, &bare, lt.as_ref())
-                                {
-                                    Ok(v) => v,
-                                    Err(e) => {
-                                        self.errors.push(self.engine_error(e, expr_src));
-                                        return None;
-                                    }
-                                };
-                            let right_kind = match number_with_unit_to_value_kind(
-                                *right_mag,
-                                &bare,
-                                lt.as_ref(),
+                        ) => {
+                            match self.measure_ratio_range_from_number_with_unit_endpoints(
+                                ctx.spec, *left_mag, left_unit, *right_mag, right_unit,
                             ) {
                                 Ok(v) => v,
                                 Err(e) => {
                                     self.errors.push(self.engine_error(e, expr_src));
                                     return None;
                                 }
-                            };
-                            ValueKind::Range(
-                                Box::new(LiteralValue { value: left_kind }),
-                                Box::new(LiteralValue { value: right_kind }),
-                            )
+                            }
                         }
                         _ => match value_to_semantic(value) {
                             Ok(v) => v,
@@ -3235,7 +3319,7 @@ impl<'a> GraphBuilder<'a> {
                     Value::NumberWithUnit(_, unit) => match self.resolve_unit_ref(ctx.spec, unit) {
                         Ok((bare, lt)) => match &semantic_value {
                             ValueKind::Measure(_) | ValueKind::Ratio(_) => {
-                                Arc::new(lt.as_ref().clone().with_measure_binding_unit(bare))
+                                Arc::new(lt.as_ref().clone().with_unit(bare))
                             }
                             _ => lt,
                         },
@@ -3249,32 +3333,28 @@ impl<'a> GraphBuilder<'a> {
                     Value::Time(_) => primitive_time_arc().clone(),
                     Value::Range(left_v, right_v) => match (left_v.as_ref(), right_v.as_ref()) {
                         (
-                            Value::NumberWithUnit(_, unit),
-                            Value::NumberWithUnit(_, right_unit),
-                        ) if unit == right_unit => match self.resolve_unit_ref(ctx.spec, unit) {
-                            Ok((bare, lt)) => {
-                                let endpoint = Arc::new(
-                                    lt.as_ref().clone().with_measure_binding_unit(bare),
-                                );
+                            Value::NumberWithUnit(_, _),
+                            Value::NumberWithUnit(_, _),
+                        ) => match &semantic_value {
+                            ValueKind::Range(left, right) => {
                                 let specs = range_type_specification_from_endpoints(
-                                    endpoint.as_ref(),
-                                    endpoint.as_ref(),
+                                    left.lemma_type.as_ref(),
+                                    right.lemma_type.as_ref(),
                                 )
                                 .unwrap_or_else(|| {
                                     unreachable!(
-                                        "BUG: measure range endpoints of same unit must form a range type"
+                                        "BUG: measure/ratio range endpoints must form a range type after resolve"
                                     )
                                 });
                                 Arc::new(LemmaType::primitive(specs))
                             }
-                            Err(message) => {
-                                self.errors.push(self.engine_error(message, expr_src));
-                                return None;
-                            }
+                            _ => unreachable!(
+                                "BUG: semantic range literal conversion returned non-range value kind"
+                            ),
                         },
                         _ => match &semantic_value {
                             ValueKind::Range(left, right) => {
-                                let endpoint_type = |endpoint: &LiteralValue| -> Arc<LemmaType> {
+                                let endpoint_type = |endpoint: &TypedLiteral| -> Arc<LemmaType> {
                                     match &endpoint.value {
                                         ValueKind::Number(_) => primitive_number_arc().clone(),
                                         ValueKind::Date(_) => primitive_date_arc().clone(),
@@ -3282,6 +3362,7 @@ impl<'a> GraphBuilder<'a> {
                                         ValueKind::Ratio(_) => {
                                             semantics::primitive_ratio_arc().clone()
                                         }
+                                        ValueKind::Measure(_) => Arc::clone(&endpoint.lemma_type),
                                         other => unreachable!(
                                             "BUG: untyped range endpoint kind in expression conversion: {other:?}"
                                         ),
@@ -6060,81 +6141,48 @@ fn refresh_named_range_specs(
             ..
         }) = declared_suggestions.get_mut(type_name.as_str())
         {
-            let stamp_for_value = |value: &ValueKind| -> Arc<LemmaType> {
-                match value {
-                    ValueKind::Number(_) => Arc::clone(semantics::primitive_number_arc()),
-                    ValueKind::Text(_) => Arc::clone(semantics::primitive_text_arc()),
-                    ValueKind::Boolean(_) => Arc::clone(semantics::primitive_boolean_arc()),
-                    ValueKind::Date(_) => Arc::clone(semantics::primitive_date_arc()),
-                    ValueKind::Time(_) => Arc::clone(semantics::primitive_time_arc()),
-                    ValueKind::Ratio(_) => Arc::clone(semantics::primitive_ratio_arc()),
-                    ValueKind::Measure(_) => {
-                        Arc::new(LemmaType::primitive(TypeSpecification::measure()))
-                    }
-                    other => panic!(
-                        "BUG: named range suggestion endpoint has non-endpoint kind {other:?}"
-                    ),
-                }
-            };
-            let left_value = left.value.clone();
-            let right_value = right.value.clone();
-            let coerced_left = match Graph::coerce_literal_to_schema_type(
-                &TypedLiteral {
-                    value: left_value.clone(),
-                    lemma_type: stamp_for_value(&left_value),
-                },
-                &endpoint_type,
-            ) {
-                Ok(coerced) => coerced,
-                Err(message) => {
-                    errors.push(Error::validation_with_context(
-                        format!(
+            let left_typed = left.as_ref().clone();
+            let right_typed = right.as_ref().clone();
+            let coerced_left =
+                match Graph::coerce_literal_to_schema_type(&left_typed, &endpoint_type) {
+                    Ok(coerced) => coerced,
+                    Err(message) => {
+                        errors.push(Error::validation_with_context(
+                            format!(
                             "In spec '{}': named range default left endpoint for '{}': {message}",
                             spec.name, type_name
                         ),
-                        Some(def.source.clone()),
-                        None::<String>,
-                        Some(spec),
-                        None,
-                    ));
-                    continue;
-                }
-            };
-            let coerced_right = match Graph::coerce_literal_to_schema_type(
-                &TypedLiteral {
-                    value: right_value.clone(),
-                    lemma_type: stamp_for_value(&right_value),
-                },
-                &endpoint_type,
-            ) {
-                Ok(coerced) => coerced,
-                Err(message) => {
-                    errors.push(Error::validation_with_context(
-                        format!(
+                            Some(def.source.clone()),
+                            None::<String>,
+                            Some(spec),
+                            None,
+                        ));
+                        continue;
+                    }
+                };
+            let coerced_right =
+                match Graph::coerce_literal_to_schema_type(&right_typed, &endpoint_type) {
+                    Ok(coerced) => coerced,
+                    Err(message) => {
+                        errors.push(Error::validation_with_context(
+                            format!(
                             "In spec '{}': named range default right endpoint for '{}': {message}",
                             spec.name, type_name
                         ),
-                        Some(def.source.clone()),
-                        None::<String>,
-                        Some(spec),
-                        None,
-                    ));
-                    continue;
-                }
-            };
-            let binding = declared_suggestions
-                .get(type_name.as_str())
-                .map(|bound| bound.measure_binding_unit.clone())
-                .unwrap_or(None);
+                            Some(def.source.clone()),
+                            None::<String>,
+                            Some(spec),
+                            None,
+                        ));
+                        continue;
+                    }
+                };
             *declared_suggestions
                 .get_mut(type_name.as_str())
                 .expect("BUG: named range default removed while refreshing endpoints") =
                 BoundValueKind {
-                    value: ValueKind::Range(
-                        Box::new(coerced_left.to_literal()),
-                        Box::new(coerced_right.to_literal()),
-                    ),
-                    measure_binding_unit: binding,
+                    value: ValueKind::Range(Box::new(coerced_left), Box::new(coerced_right)),
+                    unit: None,
                 };
         }
     }
@@ -6149,6 +6197,7 @@ fn apply_deferred_named_range_constraints(
     declared_suggestions: &mut IndexMap<String, BoundValueKind>,
     declared_fills: &mut IndexMap<String, BoundValueKind>,
     type_sources: &HashMap<String, Source>,
+    unit_index: &UnitIndex,
 ) -> Vec<Error> {
     let mut errors = Vec::new();
     for (type_name, def) in data_defs {
@@ -6163,14 +6212,22 @@ fn apply_deferred_named_range_constraints(
         };
         let mut declared_suggestion: Option<RawSuggestion> = None;
         let mut declared_fill: Option<RawSuggestion> = None;
+        let resolve = |unit: &str| {
+            unit_index
+                .resolve_with_named_types(unit, resolved)
+                .map(|(bare, _)| bare)
+        };
         match apply_constraints_to_spec(
             spec,
             &constraint_application_type_name(&def.parent, type_name),
             lemma_type.specifications.clone(),
             constraints,
             &def.source,
-            &mut declared_suggestion,
-            &mut declared_fill,
+            ConstraintSuggestionSink {
+                suggestion: &mut declared_suggestion,
+                fill: &mut declared_fill,
+                resolve_unit: Some(&resolve),
+            },
         ) {
             Ok(updated_specs) => {
                 let mut updated = lemma_type.as_ref().clone();
@@ -6523,7 +6580,6 @@ fn finalize_lemma_measure_magnitudes(
         name,
         mut specifications,
         extends,
-        measure_binding_unit,
     } = lemma_type;
     semantics::finalize_measure_unit_constraint_magnitudes(
         &mut specifications,
@@ -6534,7 +6590,6 @@ fn finalize_lemma_measure_magnitudes(
         name,
         specifications,
         extends,
-        measure_binding_unit,
     })
 }
 
@@ -8972,7 +9027,7 @@ rule r: i.x
         ) -> TypeSpecification {
             let mut suggestion: Option<RawSuggestion> = None;
             specs
-                .apply_constraint("test", command, args, &mut suggestion, &mut None)
+                .apply_constraint("test", command, args, &mut suggestion, &mut None, None)
                 .unwrap();
             specs
         }
@@ -9097,6 +9152,7 @@ rule r: i.x
                 &[number_arg(5)],
                 &mut None,
                 &mut None,
+                None,
             );
             assert!(res.is_err());
             assert!(res
@@ -9113,6 +9169,7 @@ rule r: i.x
                 &[number_arg(5)],
                 &mut None,
                 &mut None,
+                None,
             );
             assert!(res.is_err());
             assert!(res
@@ -9152,6 +9209,7 @@ rule r: i.x
                 maximum: Some(rational_new(1, 1)),
                 decimals: None,
                 units: crate::planning::semantics::RatioUnits::new(),
+                unit: None,
                 help: String::new(),
             };
 
@@ -9287,6 +9345,7 @@ rule r: i.x
                 }]),
                 traits: vec![],
                 decomposition: None,
+                unit: None,
                 help: String::new(),
             };
 
@@ -9334,6 +9393,7 @@ rule r: i.x
                 }]),
                 traits: vec![],
                 decomposition: None,
+                unit: None,
                 help: String::new(),
             };
 
@@ -9377,6 +9437,7 @@ rule r: i.x
                 }]),
                 traits: vec![],
                 decomposition: None,
+                unit: None,
                 help: String::new(),
             };
 
@@ -9428,9 +9489,9 @@ rule r: i.x
                     }]),
                     traits: vec![],
                     decomposition: Default::default(),
+                    unit: None,
                     help: String::new(),
                 },
-                measure_binding_unit: None,
             });
 
             let literal = TypedLiteral {
@@ -9532,8 +9593,11 @@ rule r: i.x
                 TypeSpecification::text(),
                 &constraints,
                 &source,
-                &mut suggestion,
-                &mut fill,
+                ConstraintSuggestionSink {
+                    suggestion: &mut suggestion,
+                    fill: &mut fill,
+                    resolve_unit: None,
+                },
             )
             .expect("options must apply")
         }
@@ -9757,6 +9821,7 @@ rule r: i.x
                     ]),
                     traits: Vec::new(),
                     decomposition: None,
+                    unit: None,
                     help: String::new(),
                 },
                 TypeExtends::Primitive,
@@ -9772,7 +9837,6 @@ rule r: i.x
                     .range_from_element()
                     .expect("BUG: weight measure defines MeasureRange"),
                 extends: weight.extends.clone(),
-                measure_binding_unit: None,
             })
         }
 
@@ -9802,6 +9866,7 @@ rule r: i.x
                     }]),
                     traits: vec![MeasureTrait::Calendar],
                     decomposition: Some(calendar_decomposition()),
+                    unit: None,
                     help: String::new(),
                 },
                 TypeExtends::Primitive,
@@ -10447,6 +10512,7 @@ impl<'a> TypeResolver<'a> {
                 &mut resolved_types.declared_suggestions,
                 &mut resolved_types.declared_fills,
                 &type_sources,
+                &resolved_types.unit_index,
             ));
         }
 
@@ -11016,14 +11082,29 @@ impl<'a> TypeResolver<'a> {
             let final_specs = if should_defer_ranged_constraints(&parent) {
                 parent_specs
             } else if let Some(constraints) = &constraints {
+                let resolve_unit = |unit: &str| -> Result<String, String> {
+                    for (_, _, rts) in already_resolved {
+                        if let Ok((bare, _)) =
+                            rts.unit_index.resolve_with_named_types(unit, &rts.resolved)
+                        {
+                            return Ok(bare);
+                        }
+                    }
+                    Err(format!(
+                        "Unknown unit '{unit}'. Declare it on a measure or ratio type, or import it with uses."
+                    ))
+                };
                 apply_constraints_to_spec(
                     spec,
                     &constraint_application_type_name(&parent, type_name),
                     parent_specs,
                     constraints,
                     &ftd.source,
-                    &mut declared_suggestion,
-                    &mut declared_fill,
+                    ConstraintSuggestionSink {
+                        suggestion: &mut declared_suggestion,
+                        fill: &mut declared_fill,
+                        resolve_unit: Some(&resolve_unit),
+                    },
                 )?
             } else {
                 parent_specs
@@ -11058,19 +11139,36 @@ impl<'a> TypeResolver<'a> {
             };
 
             let declared_suggestion = match &ftd.bound_literal {
-                Some(literal) => match semantics::parser_value_to_value_kind(literal, &final_specs)
-                {
-                    Ok(value_kind) => Some(RawSuggestion::Value(value_kind)),
-                    Err(message) => {
-                        return Err(vec![Error::validation_with_context(
-                            message,
-                            Some(ftd.source.clone()),
-                            None::<String>,
-                            Some(spec),
-                            None,
-                        )]);
+                Some(literal) => {
+                    let resolve_unit = |unit: &str| -> Result<String, String> {
+                        for (_, _, rts) in already_resolved {
+                            if let Ok((bare, _)) =
+                                rts.unit_index.resolve_with_named_types(unit, &rts.resolved)
+                            {
+                                return Ok(bare);
+                            }
+                        }
+                        Err(format!(
+                            "Unknown unit '{unit}'. Declare it on a measure or ratio type, or import it with uses."
+                        ))
+                    };
+                    match semantics::parser_value_to_value_kind(
+                        literal,
+                        &final_specs,
+                        Some(&resolve_unit),
+                    ) {
+                        Ok(value_kind) => Some(RawSuggestion::Value(value_kind)),
+                        Err(message) => {
+                            return Err(vec![Error::validation_with_context(
+                                message,
+                                Some(ftd.source.clone()),
+                                None::<String>,
+                                Some(spec),
+                                None,
+                            )]);
+                        }
                     }
-                },
+                }
                 None => declared_suggestion,
             };
 
@@ -11078,7 +11176,6 @@ impl<'a> TypeResolver<'a> {
                 name: Some(type_name.clone()),
                 specifications: final_specs,
                 extends,
-                measure_binding_unit: None,
             });
             resolved.insert(
                 type_name.clone(),

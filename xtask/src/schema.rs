@@ -34,13 +34,23 @@ fn nullable_integer() -> Value {
 
 /// One `LemmaType` variant: the flattened `TypeSpecification` fields plus the
 /// always-present `name`/`kind`/`extends` that `LemmaType` adds around them.
-fn lemma_type_variant(kind: &str, spec_fields: Vec<(&str, Value)>) -> Value {
+///
+/// `optional_fields` are allowed properties that are omitted when absent (not in
+/// `required`) — used for value-specific written `unit` on measure/ratio.
+fn lemma_type_variant(
+    kind: &str,
+    spec_fields: Vec<(&str, Value)>,
+    optional_fields: Vec<(&str, Value)>,
+) -> Value {
     let mut properties = serde_json::Map::new();
     let mut required: Vec<Value> = vec!["name".into(), "kind".into()];
     properties.insert("name".to_string(), nullable_string());
     properties.insert("kind".to_string(), json!({"const": kind}));
     for (name, schema) in spec_fields {
         required.push(name.into());
+        properties.insert(name.to_string(), schema);
+    }
+    for (name, schema) in optional_fields {
         properties.insert(name.to_string(), schema);
     }
     required.push("extends".into());
@@ -98,7 +108,7 @@ pub fn api_v1_schema() -> Value {
     });
 
     let lemma_type_boolean =
-        lemma_type_variant("boolean", vec![("help", json!({"type": "string"}))]);
+        lemma_type_variant("boolean", vec![("help", json!({"type": "string"}))], vec![]);
 
     let lemma_type_measure = lemma_type_variant(
         "measure",
@@ -120,6 +130,7 @@ pub fn api_v1_schema() -> Value {
             ),
             ("help", json!({"type": "string"})),
         ],
+        vec![("unit", json!({"type": "string"}))],
     );
 
     let lemma_type_number = lemma_type_variant(
@@ -130,6 +141,7 @@ pub fn api_v1_schema() -> Value {
             ("decimals", nullable_integer()),
             ("help", json!({"type": "string"})),
         ],
+        vec![],
     );
 
     let lemma_type_number_range = lemma_type_variant(
@@ -141,6 +153,7 @@ pub fn api_v1_schema() -> Value {
             ("maximum", nullable_decimal_string()),
             ("help", json!({"type": "string"})),
         ],
+        vec![],
     );
 
     let lemma_type_ratio = lemma_type_variant(
@@ -155,6 +168,7 @@ pub fn api_v1_schema() -> Value {
             ),
             ("help", json!({"type": "string"})),
         ],
+        vec![("unit", json!({"type": "string"}))],
     );
 
     let lemma_type_ratio_range = lemma_type_variant(
@@ -170,6 +184,7 @@ pub fn api_v1_schema() -> Value {
             ),
             ("help", json!({"type": "string"})),
         ],
+        vec![],
     );
 
     let lemma_type_text = lemma_type_variant(
@@ -182,6 +197,7 @@ pub fn api_v1_schema() -> Value {
             ),
             ("help", json!({"type": "string"})),
         ],
+        vec![],
     );
 
     let lemma_type_date = lemma_type_variant(
@@ -191,6 +207,7 @@ pub fn api_v1_schema() -> Value {
             ("maximum", nullable_string()),
             ("help", json!({"type": "string"})),
         ],
+        vec![],
     );
 
     let lemma_type_date_range = lemma_type_variant(
@@ -202,6 +219,7 @@ pub fn api_v1_schema() -> Value {
             ("maximum", nullable_named_bound()),
             ("help", json!({"type": "string"})),
         ],
+        vec![],
     );
 
     let lemma_type_time = lemma_type_variant(
@@ -211,6 +229,7 @@ pub fn api_v1_schema() -> Value {
             ("maximum", nullable_string()),
             ("help", json!({"type": "string"})),
         ],
+        vec![],
     );
 
     let lemma_type_time_range = lemma_type_variant(
@@ -222,6 +241,7 @@ pub fn api_v1_schema() -> Value {
             ("maximum", nullable_named_bound()),
             ("help", json!({"type": "string"})),
         ],
+        vec![],
     );
 
     let lemma_type_measure_range = lemma_type_variant(
@@ -241,6 +261,7 @@ pub fn api_v1_schema() -> Value {
             ),
             ("help", json!({"type": "string"})),
         ],
+        vec![],
     );
 
     let rule_result_value_fields = json!({
@@ -252,7 +273,8 @@ pub fn api_v1_schema() -> Value {
         "text": {"type": "string"},
         "date": {"type": "string"},
         "time": {"type": "string"},
-        "calendar": {"$ref": "#/$defs/CalendarResult"}
+        "calendar": {"$ref": "#/$defs/CalendarResult"},
+        "unit": {"type": "string"}
     });
     // Endpoint properties are RuleResultValue's fields minus `range`: a range endpoint
     // must never itself be a range (enforced by `RuleResultValue::to_literal`).
@@ -867,7 +889,7 @@ pub fn api_v1_schema() -> Value {
             "required": ["role", "text"],
             "additionalProperties": false,
             "properties": {
-                "role": {"enum": ["outcome", "rule", "source"]},
+                "role": {"enum": ["outcome", "rule"]},
                 "text": {"type": "string"}
             }
         },

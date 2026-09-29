@@ -91,12 +91,12 @@ impl EvaluationContext {
             if let Some(fill) = definition.bound_fill() {
                 values[leaf.index()] = Some(OperationResult::from_bound(fill.clone()));
             } else if let Some(literal) = definition.value() {
-                let measure_binding_unit = definition
+                let unit = definition
                     .schema_type()
-                    .and_then(|schema| schema.measure_binding_unit.as_deref().map(Arc::from));
+                    .and_then(|schema| schema.unit().map(Arc::from));
                 values[leaf.index()] = Some(OperationResult::from_bound(BoundValueKind {
                     value: literal.value,
-                    measure_binding_unit,
+                    unit,
                 }));
             }
         }
@@ -246,7 +246,7 @@ impl EvaluationContext {
         rule: &crate::planning::execution_plan::ExecutableRule,
     ) -> Arc<LemmaType> {
         let planned = &rule.rule_type;
-        if planned.measure_binding_unit.is_some() {
+        if planned.unit().is_some() {
             return Arc::clone(planned);
         }
         let settled = self

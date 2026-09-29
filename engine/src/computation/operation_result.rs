@@ -143,7 +143,7 @@ impl OperationResult {
             .expect("BUG: measure canonicalization overflow in OperationResult::measure");
         Self::from_bound(BoundValueKind {
             value: crate::planning::semantics::ValueKind::Measure(canonical),
-            measure_binding_unit: Some(std::sync::Arc::from(unit_name)),
+            unit: Some(std::sync::Arc::from(unit_name)),
         })
     }
 

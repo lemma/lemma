@@ -93,7 +93,7 @@ public sealed interface ExplanationNode {
       if (text == null) {
         JsonReading.missingRequired("text", "ConversionStep");
       }
-      if (!("outcome".equals(role) || "rule".equals(role) || "source".equals(role))) {
+      if (!("outcome".equals(role) || "rule".equals(role))) {
         throw new LemmaBugError("BUG: invalid ConversionStep role '" + role + "'");
       }
       return new ConversionStep(role, text);
@@ -142,6 +142,7 @@ public sealed interface ExplanationNode {
       LocalTime time = null;
       RuleResultValue.CalendarResult calendar = null;
       RuleResultValue.RangeResult range = null;
+      String unit = null;
       String body = null;
       List<Cause> causes = null;
       List<ExplanationNode> children = null;
@@ -161,6 +162,7 @@ public sealed interface ExplanationNode {
           case "time" -> time = JsonReading.readLocalTime(p);
           case "calendar" -> calendar = RuleResultValue.CalendarResult.read(p);
           case "range" -> range = RuleResultValue.RangeResult.read(p);
+          case "unit" -> unit = JsonReading.readString(p);
           case "body" -> body = JsonReading.readString(p);
           case "causes" -> causes = JsonReading.readList(p, Cause::read);
           case "children" -> children = JsonReading.readList(p, ExplanationNode::read);
@@ -179,7 +181,17 @@ public sealed interface ExplanationNode {
       return new Rule(
           name,
           typedValue(
-              result, measure, ratio, number, booleanValue, text, date, time, calendar, range),
+              result,
+              measure,
+              ratio,
+              number,
+              booleanValue,
+              text,
+              date,
+              time,
+              calendar,
+              range,
+              unit),
           body,
           causes,
           children);
@@ -276,6 +288,7 @@ public sealed interface ExplanationNode {
       LocalTime time = null;
       RuleResultValue.CalendarResult calendar = null;
       RuleResultValue.RangeResult range = null;
+      String unit = null;
       while (p.nextToken() != JsonToken.END_OBJECT) {
         String field = p.currentName();
         p.nextToken();
@@ -292,6 +305,7 @@ public sealed interface ExplanationNode {
           case "time" -> time = JsonReading.readLocalTime(p);
           case "calendar" -> calendar = RuleResultValue.CalendarResult.read(p);
           case "range" -> range = RuleResultValue.RangeResult.read(p);
+          case "unit" -> unit = JsonReading.readString(p);
           default -> JsonReading.unknownField(field, "ExplanationNode.Data");
         }
       }
@@ -304,7 +318,17 @@ public sealed interface ExplanationNode {
       return new Data(
           name,
           typedValue(
-              result, measure, ratio, number, booleanValue, text, date, time, calendar, range));
+              result,
+              measure,
+              ratio,
+              number,
+              booleanValue,
+              text,
+              date,
+              time,
+              calendar,
+              range,
+              unit));
     }
   }
 
@@ -440,7 +464,8 @@ public sealed interface ExplanationNode {
       @Nullable LocalDate date,
       @Nullable LocalTime time,
       RuleResultValue.@Nullable CalendarResult calendar,
-      RuleResultValue.@Nullable RangeResult range) {
+      RuleResultValue.@Nullable RangeResult range,
+      @Nullable String unit) {
     if (number != null) {
       return new RuleResultValue.Number(result, number);
     }
@@ -457,10 +482,10 @@ public sealed interface ExplanationNode {
       return new RuleResultValue.Time(result, time);
     }
     if (measure != null) {
-      return new RuleResultValue.Measure(result, measure);
+      return new RuleResultValue.Measure(result, measure, unit);
     }
     if (ratio != null) {
-      return new RuleResultValue.Ratio(result, ratio);
+      return new RuleResultValue.Ratio(result, ratio, unit);
     }
     if (calendar != null) {
       return new RuleResultValue.Calendar(result, calendar);

@@ -72,9 +72,9 @@ fn run_rational(engine: &Engine, spec: &str, raw: &str) -> (Decimal, Option<Stri
                 .and_then(|m| {
                     rr.rule
                         .rule_type
-                        .measure_binding_unit
-                        .as_ref()
-                        .and_then(|u| m.contains_key(u).then(|| u.clone()))
+                        .unit()
+                        .filter(|u| m.contains_key(*u))
+                        .map(str::to_string)
                         .or_else(|| {
                             // Overlay unit identity: name present in the raw input.
                             if (raw.contains("%%") || raw.contains("permille"))

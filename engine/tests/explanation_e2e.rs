@@ -357,7 +357,7 @@ rule total: bag.weight
 }
 
 #[test]
-fn explanation_conversion_source_uses_input_key() {
+fn explanation_conversion_operand_uses_input_key() {
     let mut engine = Engine::new();
     engine
         .load([(
@@ -388,21 +388,26 @@ rule in_grams: bag.weight as gram
         .as_ref()
         .expect("explanation");
     let json = serde_json::to_value(explanation).expect("serialize");
-    let steps = json["children"][0]["steps"]
-        .as_array()
-        .expect("conversion steps");
-    let source = steps
-        .iter()
-        .find(|s| s["role"] == "source")
-        .expect("source step");
-    let text = source["text"].as_str().expect("source text");
+    let conversion = &json["children"][0];
+    assert_eq!(conversion["type"], "conversion");
+    let steps = conversion["steps"].as_array().expect("conversion steps");
     assert!(
-        text.contains("bag.weight"),
-        "conversion source must name input_key, got: {text}"
+        steps.iter().all(|s| s["role"] != "source"),
+        "conversion must not emit source steps, got: {steps:?}"
     );
+    let operands = conversion["operands"].as_array().expect("operands");
+    let data_operand = operands
+        .iter()
+        .find(|o| o["type"] == "data")
+        .expect("data operand");
+    assert_eq!(
+        data_operand["name"], "bag.weight",
+        "conversion operand must name input_key, got: {data_operand:?}"
+    );
+    let ascii = format_explanation(explanation);
     assert!(
-        !text.contains('→') && !text.contains("nut_bag"),
-        "conversion source must not print hop/spec, got: {text}"
+        !ascii.contains('→') && !ascii.contains("nut_bag"),
+        "conversion tree must not print hop/spec, got:\n{ascii}"
     );
 }
 
@@ -443,5 +448,10 @@ rule in_grams: w as gram
         .as_array()
         .unwrap()
         .iter()
-        .any(|s| s["role"] == "source"));
+        .any(|s| s["role"] == "rule"));
+    assert!(steps
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|s| s["role"] != "source"));
 }

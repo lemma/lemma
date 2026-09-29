@@ -502,7 +502,7 @@ fn build_data_display(plan: &ExecutionPlan) -> IndexMap<DataPath, ShowDataCache>
                 ..
             } => Some(crate::planning::semantics::BoundValueKind {
                 value: value.value.clone(),
-                measure_binding_unit: resolved_type.measure_binding_unit.as_deref().map(Arc::from),
+                unit: resolved_type.unit().map(Arc::from),
             }),
             _ => data.bound_fill().cloned(),
         };
@@ -1510,8 +1510,7 @@ pub(crate) fn validate_value_against_type(
             use crate::planning::semantics::measure_declared_bound_to_canonical;
             use std::cmp::Ordering;
             let unit = expected_type
-                .measure_binding_unit
-                .as_deref()
+                .unit()
                 .or_else(|| {
                     units
                         .iter()
@@ -1636,8 +1635,7 @@ pub(crate) fn validate_value_against_type(
             use std::cmp::Ordering;
 
             let primary_unit = expected_type
-                .measure_binding_unit
-                .as_deref()
+                .unit()
                 .or_else(|| expected_type.ratio_primary_unit());
 
             if let Some(d) = decimals {
@@ -1846,8 +1844,8 @@ pub(crate) fn validate_value_against_type(
 fn validate_range_literal(
     expected_type: &LemmaType,
     range_spec: &TypeSpecification,
-    left: &LiteralValue,
-    right: &LiteralValue,
+    left: &crate::planning::semantics::TypedLiteral,
+    right: &crate::planning::semantics::TypedLiteral,
     unit_index: &crate::planning::unit_index::UnitIndex,
 ) -> Result<(), String> {
     use crate::computation::{comparison_operation, OperationResult};
@@ -1872,14 +1870,8 @@ fn validate_range_literal(
         }
     }
     let element_type = Arc::new(LemmaType::primitive(element_spec));
-    let left = LiteralValue {
-        value: left.value.clone(),
-    };
-    let right = LiteralValue {
-        value: right.value.clone(),
-    };
-    validate_value_against_type(element_type.as_ref(), &left, unit_index)?;
-    validate_value_against_type(element_type.as_ref(), &right, unit_index)?;
+    validate_value_against_type(element_type.as_ref(), &left.to_literal(), unit_index)?;
+    validate_value_against_type(element_type.as_ref(), &right.to_literal(), unit_index)?;
 
     let ordering = match (&left.value, &right.value) {
         (ValueKind::Number(l), ValueKind::Number(r)) => l
@@ -1899,7 +1891,9 @@ fn validate_range_literal(
     };
     if ordering == Ordering::Greater {
         return Err(format!(
-            "range left endpoint {left} is above right endpoint {right}"
+            "range left endpoint {} is above right endpoint {}",
+            left.display_value(),
+            right.display_value()
         ));
     }
 
@@ -2523,6 +2517,7 @@ mod tests {
                 ]),
                 traits: Vec::new(),
                 decomposition: None,
+                unit: None,
                 help: String::new(),
             },
         );

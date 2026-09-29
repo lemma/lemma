@@ -462,3 +462,176 @@ rule out: a * b * c
         );
     }
 }
+
+fn number_literal_kind(kind: &NormalFormKind) -> bool {
+    matches!(
+        kind,
+        NormalFormKind::Leaf(LeafKind::Literal(literal))
+            if matches!(literal.value, ValueKind::Number(_))
+    )
+}
+
+#[test]
+fn flatten_folded_literal_sum_origin_is_three_bare_literals() {
+    let plan = plan_from_code(
+        r#"
+spec t
+rule out: 2 + (3 + 5)
+"#,
+    );
+    let root = rule_root(&plan, "out");
+    assert!(
+        number_literal_kind(&root.kind),
+        "root must be a number literal, got {:?}",
+        root.kind
+    );
+    let origin_id = root.origin.expect("constant fold must record sum origin");
+    let origin = plan.normal_form(origin_id);
+    assert!(
+        origin.origin.is_none(),
+        "flattened sum origin must itself have no origin, got {:?}",
+        origin.origin
+    );
+    let NormalFormKind::Sum(children) = &origin.kind else {
+        panic!("origin must be Sum, got {:?}", origin.kind);
+    };
+    assert_eq!(
+        children.len(),
+        3,
+        "n-ary sum children, got {:?}",
+        origin.kind
+    );
+    for child in children {
+        assert!(
+            number_literal_kind(&plan.normal_form(*child).kind),
+            "summand must be a bare number literal, got {:?}",
+            plan.normal_form(*child).kind
+        );
+        assert!(
+            plan.normal_form(*child).origin.is_none(),
+            "summand must have no origin, got {:?}",
+            plan.normal_form(*child).origin
+        );
+    }
+}
+
+#[test]
+fn flatten_partial_literal_sum_with_data_has_three_children_and_no_origin() {
+    let plan = plan_from_code(
+        r#"
+spec t
+data x: number
+rule out: (2 + 3) + x
+"#,
+    );
+    let root = rule_root(&plan, "out");
+    assert!(
+        root.origin.is_none(),
+        "associative flatten is not a semantic rewrite; origin must be None, got {:?}",
+        root.origin
+    );
+    let NormalFormKind::Sum(children) = &root.kind else {
+        panic!("root must be Sum, got {:?}", root.kind);
+    };
+    assert_eq!(children.len(), 3, "n-ary sum children, got {:?}", root.kind);
+    assert!(
+        number_literal_kind(&plan.normal_form(children[0]).kind),
+        "first summand must be literal, got {:?}",
+        plan.normal_form(children[0]).kind
+    );
+    assert!(
+        number_literal_kind(&plan.normal_form(children[1]).kind),
+        "second summand must be literal, got {:?}",
+        plan.normal_form(children[1]).kind
+    );
+    assert!(
+        matches!(
+            plan.normal_form(children[2]).kind,
+            NormalFormKind::Leaf(LeafKind::DataPath(_))
+        ),
+        "third summand must be data path, got {:?}",
+        plan.normal_form(children[2]).kind
+    );
+}
+
+#[test]
+fn flatten_does_not_absorb_folded_subtract_into_outer_sum() {
+    let plan = plan_from_code(
+        r#"
+spec t
+rule out: 2 + (3 - 5)
+"#,
+    );
+    let root = rule_root(&plan, "out");
+    let origin_id = root.origin.expect("constant fold must record sum origin");
+    let origin = plan.normal_form(origin_id);
+    let NormalFormKind::Sum(children) = &origin.kind else {
+        panic!("origin must be Sum, got {:?}", origin.kind);
+    };
+    assert_eq!(
+        children.len(),
+        2,
+        "subtract must remain a single summand, got {:?}",
+        origin.kind
+    );
+    let reaches_subtract = children.iter().any(|child| {
+        let mut focus = *child;
+        for _ in 0..8 {
+            let cell = plan.normal_form(focus);
+            if matches!(cell.kind, NormalFormKind::Subtract(_, _)) {
+                return true;
+            }
+            match cell.origin {
+                Some(next) => focus = next,
+                None => return false,
+            }
+        }
+        false
+    });
+    assert!(
+        reaches_subtract,
+        "one summand must retain Subtract as fold origin, children: {:?}",
+        children
+            .iter()
+            .map(|c| &plan.normal_form(*c).kind)
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn flatten_leaves_rule_ref_summand_opaque() {
+    let plan = plan_from_code(
+        r#"
+spec t
+rule inner: 3 + 5
+rule out: 2 + inner
+"#,
+    );
+    let root = rule_root(&plan, "out");
+    let NormalFormKind::Sum(children) = &root.kind else {
+        // Constant-fold may wrap the outer sum; walk origin if present.
+        let origin_id = root.origin.expect("expected Sum root or folded Sum origin");
+        let origin = plan.normal_form(origin_id);
+        let NormalFormKind::Sum(children) = &origin.kind else {
+            panic!("expected Sum, got {:?}", origin.kind);
+        };
+        assert_eq!(
+            children.len(),
+            2,
+            "literal + rule ref, got {:?}",
+            origin.kind
+        );
+        assert!(
+            plan.normal_form(children[1]).rule_ref.is_some(),
+            "second summand must carry rule_ref, got {:?}",
+            plan.normal_form(children[1])
+        );
+        return;
+    };
+    assert_eq!(children.len(), 2, "literal + rule ref, got {:?}", root.kind);
+    assert!(
+        plan.normal_form(children[1]).rule_ref.is_some(),
+        "second summand must carry rule_ref, got {:?}",
+        plan.normal_form(children[1])
+    );
+}

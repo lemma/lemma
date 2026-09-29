@@ -74,8 +74,8 @@ fn serialized_magnitude(value: &ValueKind) -> String {
 }
 
 fn measure_unit_name(lemma_type: &LemmaType) -> Option<String> {
-    if let Some(binding) = lemma_type.measure_binding_unit.as_ref() {
-        return Some(binding.clone());
+    if let Some(binding) = lemma_type.unit() {
+        return Some(binding.to_string());
     }
     lemma_type
         .measure_runtime_signature()

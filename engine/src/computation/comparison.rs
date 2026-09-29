@@ -61,12 +61,7 @@ pub fn comparison_operation(
 
         (ValueKind::Range(range_left, range_right), _) => {
             let endpoint_type = range_endpoint_type_for_runtime_span(left_type);
-            let measure = super::range::compute_span(
-                range_left.as_ref(),
-                &endpoint_type,
-                range_right.as_ref(),
-                &endpoint_type,
-            );
+            let measure = super::range::compute_span(range_left.as_ref(), range_right.as_ref());
             // Prefer the same endpoint type used for the span (includes injected
             // decomposition for anonymous measure ranges).
             let span_type = if left_type.is_date_range() || left_type.is_time_range() {
@@ -114,7 +109,9 @@ pub fn comparison_operation(
 
         (ValueKind::Measure(l), ValueKind::Measure(r)) => {
             let identical = left_type.as_ref() == right_type.as_ref()
-                || (left_type.specifications == right_type.specifications
+                || (left_type
+                    .specifications
+                    .equal_ignoring_unit(&right_type.specifications)
                     && left_type.name == right_type.name
                     && left_type.extends == right_type.extends);
             let same_family = left_type.same_measure_family(right_type);

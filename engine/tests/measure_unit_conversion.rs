@@ -1096,8 +1096,8 @@ fn eval_rule_measure_magnitude(
         let unit = rule
             .rule
             .rule_type
-            .measure_binding_unit
-            .clone()
+            .unit()
+            .map(str::to_string)
             .filter(|u| measure.contains_key(u))
             .or_else(|| {
                 rule.result().and_then(|display| {

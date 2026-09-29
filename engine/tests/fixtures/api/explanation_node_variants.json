@@ -19,7 +19,6 @@
       "type": "conversion",
       "expression": "fee_usd + subtotal",
       "steps": [
-        { "role": "source", "text": "27.00 usd" },
         { "role": "rule", "text": "1 usd is 0.91 eur" },
         { "role": "outcome", "text": "24.57 eur" }
       ],

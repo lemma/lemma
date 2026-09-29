@@ -176,7 +176,11 @@ pub fn parse_data_value(
     let (kind, binding_unit) = match (input, type_spec) {
         (RunDataValue::String(s), _) => {
             let parsed = parse_value_from_string(s, type_spec, source)?;
-            let kind = parser_value_to_value_kind(&parsed, type_spec).map_err(to_err)?;
+            let resolve = |unit: &str| {
+                resolve_passed_unit(unit, lemma_type.as_ref(), unit_index, named_types)
+            };
+            let kind =
+                parser_value_to_value_kind(&parsed, type_spec, Some(&resolve)).map_err(to_err)?;
             let binding = match binding_unit_from_parser_value(&parsed) {
                 Some(written) => Some(
                     resolve_passed_unit(&written, lemma_type.as_ref(), unit_index, named_types)
@@ -225,8 +229,15 @@ pub fn parse_data_value(
     };
 
     let typed_type = match binding_unit {
-        Some(unit) => Arc::new(lemma_type.as_ref().clone().with_measure_binding_unit(unit)),
-        None => Arc::clone(lemma_type),
+        Some(unit)
+            if matches!(
+                &lemma_type.specifications,
+                TypeSpecification::Measure { .. } | TypeSpecification::Ratio { .. }
+            ) =>
+        {
+            Arc::new(lemma_type.as_ref().clone().with_unit(unit))
+        }
+        Some(_) | None => Arc::clone(lemma_type),
     };
     Ok(TypedLiteral {
         value: kind,
@@ -517,11 +528,7 @@ impl RunData {
                 data_path.clone(),
                 OperationResult::from_bound(crate::planning::semantics::BoundValueKind {
                     value: typed.value.clone(),
-                    measure_binding_unit: typed
-                        .lemma_type
-                        .measure_binding_unit
-                        .as_deref()
-                        .map(std::sync::Arc::from),
+                    unit: typed.lemma_type.unit().map(std::sync::Arc::from),
                 }),
             );
         }
@@ -579,6 +586,7 @@ mod tests {
                 ]),
                 traits: Vec::new(),
                 decomposition: None,
+                unit: None,
                 help: String::new(),
             },
             TypeExtends::Primitive,
@@ -608,6 +616,7 @@ mod tests {
                         suggestion_magnitude: None,
                     },
                 ]),
+                unit: None,
                 help: String::new(),
             },
             TypeExtends::Primitive,

@@ -92,7 +92,6 @@ pub struct Cause {
 pub enum ConversionTraceRole {
     Outcome,
     Rule,
-    Source,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]

@@ -784,10 +784,7 @@ rule use_shift: shift
         ("n_band", "The lower and upper bound of the number range."),
         ("label", "A text value."),
         ("amount", "A numeric amount in one of this type's units."),
-        (
-            "band",
-            "The lower and upper bound of the measure range in the same unit.",
-        ),
+        ("band", "The lower and upper bound of the measure range."),
         (
             "rate",
             "A ratio in one of this type's units (e.g. percent).",

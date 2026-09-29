@@ -277,14 +277,25 @@ fn eval_kind(
                 now_date(ctx),
             ))
         }
-        NormalFormKind::RangeLiteral(left, right) => {
-            evaluate_binary(*left, *right, plan, ctx, |left_result, right_result| {
-                OperationResult::from_literal(LiteralValue::range(
-                    borrow_value(left_result, "left endpoint").to_literal(),
-                    borrow_value(right_result, "right endpoint").to_literal(),
-                ))
-            })
-        }
+        NormalFormKind::RangeLiteral(left_id, right_id) => evaluate_binary(
+            *left_id,
+            *right_id,
+            plan,
+            ctx,
+            |left_result, right_result| {
+                let left_bound = borrow_value(left_result, "left endpoint");
+                let right_bound = borrow_value(right_result, "right endpoint");
+                let left_typed = crate::planning::semantics::typed_literal_from_bound(
+                    left_bound,
+                    plan.result_type(*left_id),
+                );
+                let right_typed = crate::planning::semantics::typed_literal_from_bound(
+                    right_bound,
+                    plan.result_type(*right_id),
+                );
+                OperationResult::from_literal(LiteralValue::range(left_typed, right_typed))
+            },
+        ),
         NormalFormKind::PastFutureRange(kind, inner) => {
             let value = eval(*inner, plan, ctx)?;
             if value.vetoed() {

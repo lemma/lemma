@@ -4,16 +4,11 @@ use crate::computation::arithmetic::SignatureIndex;
 use crate::computation::operation_result::{OperationResult, VetoType};
 use crate::computation::rational::{rational_abs, rational_zero, RationalInteger};
 use crate::planning::semantics::{
-    ArithmeticComputation, ComparisonComputation, LemmaType, LiteralValue, ValueKind,
+    ArithmeticComputation, ComparisonComputation, LemmaType, LiteralValue, TypedLiteral, ValueKind,
 };
 
-pub fn compute_span(
-    left: &LiteralValue,
-    left_type: &Arc<LemmaType>,
-    right: &LiteralValue,
-    right_type: &Arc<LemmaType>,
-) -> OperationResult {
-    let (signed, span_type) = compute_signed_span(left, left_type, right, right_type);
+pub fn compute_span(left: &TypedLiteral, right: &TypedLiteral) -> OperationResult {
+    let (signed, span_type) = compute_signed_span(left, right);
     absolute_span(signed, &span_type)
 }
 
@@ -32,11 +27,11 @@ pub fn span_result_type(range_type: &LemmaType) -> Arc<LemmaType> {
 }
 
 fn compute_signed_span(
-    left: &LiteralValue,
-    left_type: &Arc<LemmaType>,
-    right: &LiteralValue,
-    right_type: &Arc<LemmaType>,
+    left: &TypedLiteral,
+    right: &TypedLiteral,
 ) -> (OperationResult, Arc<LemmaType>) {
+    let left_type = &left.lemma_type;
+    let right_type = &right.lemma_type;
     match (&left.value, &right.value) {
         (ValueKind::Date(left_date), ValueKind::Date(right_date)) => {
             let left_chrono = match super::datetime::semantic_datetime_to_chrono(left_date) {
@@ -260,10 +255,16 @@ mod tests {
 
     #[test]
     fn compute_span_is_absolute_for_reversed_number_range() {
-        let five = LiteralValue::number(rational_new(5, 1));
-        let three = LiteralValue::number(rational_new(3, 1));
-        let number_ty = primitive_number_arc();
-        let OperationResult::Value(span) = compute_span(&five, number_ty, &three, number_ty) else {
+        let number_ty = primitive_number_arc().clone();
+        let five = TypedLiteral {
+            value: ValueKind::Number(rational_new(5, 1)),
+            lemma_type: Arc::clone(&number_ty),
+        };
+        let three = TypedLiteral {
+            value: ValueKind::Number(rational_new(3, 1)),
+            lemma_type: Arc::clone(&number_ty),
+        };
+        let OperationResult::Value(span) = compute_span(&five, &three) else {
             panic!("expected span value");
         };
         match &span.value {

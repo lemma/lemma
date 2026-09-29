@@ -650,7 +650,7 @@ rule in_grams: w as gram
     assert_eq!(children[0]["type"], "conversion");
     let steps = children[0]["steps"].as_array().unwrap();
     assert!(steps.iter().any(|s| s["role"] == "outcome"));
-    assert!(steps.iter().any(|s| s["role"] == "source"));
+    assert!(steps.iter().all(|s| s["role"] != "source"));
     assert!(steps
         .iter()
         .any(|s| s["role"] == "rule" && s["text"].as_str().unwrap().contains("1000")));
@@ -1034,6 +1034,339 @@ out: 6
    ├─ a: 1
    ├─ b: 2
    └─ c: 3"
+    );
+}
+
+fn assert_literal_nary_add(
+    json: &Value,
+    formatted: &str,
+    body: &str,
+    result: &str,
+    literals: &[&str],
+) {
+    assert_eq!(json["body"], body);
+    let children = json["children"].as_array().expect("children");
+    assert_eq!(
+        children.len(),
+        1,
+        "rule child is the add compose, got: {json}"
+    );
+    let operands = assert_operation_compose(&children[0], "add", body);
+    assert_eq!(
+        operands.len(),
+        literals.len(),
+        "n-ary add operands, got: {json}"
+    );
+    for (operand, literal) in operands.iter().zip(literals) {
+        assert_empty_operand_compose(operand, literal);
+    }
+    assert_eq!(formatted, format!("out: {result}\n└─ {body}"));
+}
+
+#[test]
+fn explanation_right_grouped_literal_sum_flattens() {
+    let (json, formatted) = run_explained(
+        r#"
+spec t
+rule out: 2 + (3 + 5)
+"#,
+        "t",
+        "out",
+    );
+    assert_literal_nary_add(&json, &formatted, "2 + 3 + 5", "10", &["2", "3", "5"]);
+}
+
+#[test]
+fn explanation_left_chain_literal_sum_flattens() {
+    let (json, formatted) = run_explained(
+        r#"
+spec t
+rule out: 2 + 3 + 5
+"#,
+        "t",
+        "out",
+    );
+    assert_literal_nary_add(&json, &formatted, "2 + 3 + 5", "10", &["2", "3", "5"]);
+}
+
+#[test]
+fn explanation_literal_sum_canonical_order() {
+    let (json, formatted) = run_explained(
+        r#"
+spec t
+rule out: 5 + (1 + 3)
+"#,
+        "t",
+        "out",
+    );
+    assert_literal_nary_add(&json, &formatted, "1 + 3 + 5", "9", &["1", "3", "5"]);
+}
+
+#[test]
+fn explanation_deep_literal_sum_flattens() {
+    let (json, formatted) = run_explained(
+        r#"
+spec t
+rule out: 2 + (3 + (4 + 5))
+"#,
+        "t",
+        "out",
+    );
+    assert_literal_nary_add(
+        &json,
+        &formatted,
+        "2 + 3 + 4 + 5",
+        "14",
+        &["2", "3", "4", "5"],
+    );
+}
+
+#[test]
+fn explanation_right_grouped_literal_product_keeps_source_order() {
+    let (json, formatted) = run_explained(
+        r#"
+spec t
+rule out: 5 * (1 * 3)
+"#,
+        "t",
+        "out",
+    );
+    assert_eq!(json["body"], "5 * 1 * 3");
+    let children = json["children"].as_array().expect("children");
+    assert_eq!(
+        children.len(),
+        1,
+        "rule child is the multiply compose, got: {json}"
+    );
+    let operands = assert_operation_compose(&children[0], "multiply", "5 * 1 * 3");
+    assert_eq!(operands.len(), 3, "n-ary multiply operands, got: {json}");
+    assert_empty_operand_compose(&operands[0], "5");
+    assert_empty_operand_compose(&operands[1], "1");
+    assert_empty_operand_compose(&operands[2], "3");
+    assert_eq!(
+        formatted,
+        "\
+out: 15
+└─ 5 * 1 * 3"
+    );
+}
+
+#[test]
+fn explanation_literal_sum_with_data_keeps_sibling_operands() {
+    let (json, formatted) = run_explained(
+        r#"
+spec t
+data x: 7
+rule out: (2 + 3) + x
+"#,
+        "t",
+        "out",
+    );
+    assert_eq!(json["body"], "2 + 3 + x");
+    let children = json["children"].as_array().expect("children");
+    assert_eq!(
+        children.len(),
+        1,
+        "rule child is the add compose, got: {json}"
+    );
+    let operands = assert_operation_compose(&children[0], "add", "2 + 3 + x");
+    assert_eq!(operands.len(), 3, "literal + data addends, got: {json}");
+    assert_empty_operand_compose(&operands[0], "2");
+    assert_empty_operand_compose(&operands[1], "3");
+    assert_data_operand(&operands[2], "x", "7");
+    assert_eq!(
+        formatted,
+        "\
+out: 12
+└─ 2 + 3 + x
+   └─ x: 7"
+    );
+}
+
+#[test]
+fn explanation_literal_sum_keeps_identity_zero() {
+    let (json, formatted) = run_explained(
+        r#"
+spec t
+rule out: (2 + 3) + 0
+"#,
+        "t",
+        "out",
+    );
+    assert_literal_nary_add(&json, &formatted, "2 + 3 + 0", "5", &["2", "3", "0"]);
+}
+
+#[test]
+fn explanation_literal_product_keeps_identity_one() {
+    let (json, formatted) = run_explained(
+        r#"
+spec t
+rule out: (2 * 3) * 1
+"#,
+        "t",
+        "out",
+    );
+    assert_eq!(json["body"], "2 * 3 * 1");
+    let children = json["children"].as_array().expect("children");
+    assert_eq!(
+        children.len(),
+        1,
+        "rule child is the multiply compose, got: {json}"
+    );
+    let operands = assert_operation_compose(&children[0], "multiply", "2 * 3 * 1");
+    assert_eq!(operands.len(), 3, "n-ary multiply operands, got: {json}");
+    assert_empty_operand_compose(&operands[0], "2");
+    assert_empty_operand_compose(&operands[1], "3");
+    assert_empty_operand_compose(&operands[2], "1");
+    assert_eq!(
+        formatted,
+        "\
+out: 6
+└─ 2 * 3 * 1"
+    );
+}
+
+#[test]
+fn explanation_sum_of_folded_add_and_subtract_flattens() {
+    let (json, formatted) = run_explained(
+        r#"
+spec t
+rule out: 1 + (2 + (3 - 5))
+"#,
+        "t",
+        "out",
+    );
+    assert_eq!(json["body"], "3 - 5 + 1 + 2");
+    let children = json["children"].as_array().expect("children");
+    assert_eq!(
+        children.len(),
+        1,
+        "rule child is the add compose, got: {json}"
+    );
+    let operands = assert_operation_compose(&children[0], "add", "3 - 5 + 1 + 2");
+    assert_eq!(operands.len(), 3, "subtract + literals, got: {json}");
+    let sub = assert_operation_compose(&operands[0], "subtract", "3 - 5");
+    assert_eq!(sub.len(), 2);
+    assert_empty_operand_compose(&sub[0], "3");
+    assert_empty_operand_compose(&sub[1], "5");
+    assert_empty_operand_compose(&operands[1], "1");
+    assert_empty_operand_compose(&operands[2], "2");
+    assert_eq!(
+        formatted,
+        "\
+out: 1
+└─ 3 - 5 + 1 + 2
+   └─ 3 - 5"
+    );
+}
+
+#[test]
+fn explanation_product_of_folded_multiply_and_divide_flattens() {
+    let (json, formatted) = run_explained(
+        r#"
+spec t
+rule out: 2 * (3 * (4 / 5))
+"#,
+        "t",
+        "out",
+    );
+    assert_eq!(json["body"], "2 * 3 * (4 / 5)");
+    let children = json["children"].as_array().expect("children");
+    assert_eq!(
+        children.len(),
+        1,
+        "rule child is the multiply compose, got: {json}"
+    );
+    let operands = assert_operation_compose(&children[0], "multiply", "2 * 3 * (4 / 5)");
+    assert_eq!(operands.len(), 3, "literals + divide, got: {json}");
+    assert_empty_operand_compose(&operands[0], "2");
+    assert_empty_operand_compose(&operands[1], "3");
+    let div = assert_operation_compose(&operands[2], "divide", "4 / 5");
+    assert_eq!(div.len(), 2);
+    assert_empty_operand_compose(&div[0], "4");
+    assert_empty_operand_compose(&div[1], "5");
+    assert_eq!(
+        formatted,
+        "\
+out: 4.8
+└─ 2 * 3 * (4 / 5)
+   └─ 4 / 5"
+    );
+}
+
+#[test]
+fn explanation_sum_with_subtract_keeps_subtract_as_one_summand() {
+    let (json, formatted) = run_explained(
+        r#"
+spec t
+rule out: 2 + (3 - 5)
+"#,
+        "t",
+        "out",
+    );
+    // Outer sum constant-folds; subtract stays one summand (not 3 and -5).
+    // Canonical sum order puts the negative term first.
+    assert_eq!(json["body"], "3 - 5 + 2");
+    let children = json["children"].as_array().expect("children");
+    assert_eq!(
+        children.len(),
+        1,
+        "rule child is the add compose, got: {json}"
+    );
+    let operands = assert_operation_compose(&children[0], "add", "3 - 5 + 2");
+    assert_eq!(operands.len(), 2, "subtract + literal, got: {json}");
+    let sub = assert_operation_compose(&operands[0], "subtract", "3 - 5");
+    assert_eq!(sub.len(), 2);
+    assert_empty_operand_compose(&sub[0], "3");
+    assert_empty_operand_compose(&sub[1], "5");
+    assert_empty_operand_compose(&operands[1], "2");
+    assert_eq!(
+        formatted,
+        "\
+out: 0
+└─ 3 - 5 + 2
+   └─ 3 - 5"
+    );
+}
+
+#[test]
+fn explanation_sum_with_rule_ref_stays_binary() {
+    let (json, formatted) = run_explained(
+        r#"
+spec t
+rule inner: 3 + 5
+rule out: 2 + inner
+"#,
+        "t",
+        "out",
+    );
+    assert_eq!(json["body"], "2 + inner");
+    let children = json["children"].as_array().expect("children");
+    assert_eq!(
+        children.len(),
+        1,
+        "rule child is the add compose, got: {json}"
+    );
+    let operands = assert_operation_compose(&children[0], "add", "2 + inner");
+    assert_eq!(operands.len(), 2, "literal + rule ref, got: {json}");
+    assert_empty_operand_compose(&operands[0], "2");
+    assert_eq!(operands[1]["type"], "rule");
+    assert_eq!(operands[1]["name"], "inner");
+    assert_eq!(operands[1]["result"], "8");
+    assert_eq!(operands[1]["body"], "3 + 5");
+    let inner_children = operands[1]["children"].as_array().expect("inner children");
+    assert_eq!(inner_children.len(), 1);
+    let inner_ops = assert_operation_compose(&inner_children[0], "add", "3 + 5");
+    assert_eq!(inner_ops.len(), 2);
+    assert_empty_operand_compose(&inner_ops[0], "3");
+    assert_empty_operand_compose(&inner_ops[1], "5");
+    assert_eq!(
+        formatted,
+        "\
+out: 10
+└─ 2 + inner
+   └─ inner: 8
+      └─ 3 + 5"
     );
 }
 

@@ -699,7 +699,7 @@ Each `->` row on a `data` declaration is a **data command**. Built-in primitives
 | `number range`  | The lower and upper bound of the number range.                   |
 | `text`          | A text value.                                                    |
 | `measure`       | A numeric amount in one of this type's units.                    |
-| `measure range` | The lower and upper bound of the measure range in the same unit. |
+| `measure range` | The lower and upper bound of the measure range. |
 | `ratio`         | A ratio in one of this type's units (e.g. percent).              |
 | `ratio range`   | The lower and upper bound of the ratio range.                    |
 | `date`          | A date, or a date and time with optional timezone.               |

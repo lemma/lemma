@@ -536,9 +536,9 @@ fn rule_ratio(
                 .and_then(|m| {
                     rr.rule
                         .rule_type
-                        .measure_binding_unit
-                        .as_ref()
-                        .and_then(|u| m.contains_key(u).then(|| u.clone()))
+                        .unit()
+                        .filter(|u| m.contains_key(*u))
+                        .map(str::to_string)
                         .or_else(|| m.keys().next().cloned())
                 }),
         ),

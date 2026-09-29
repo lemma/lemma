@@ -194,7 +194,7 @@ rule upper: (18 year...67 year) + 2 year"#;
         )
         .expect("Should evaluate");
     let rule = response.results.get("upper").expect("upper");
-    assert_eq!(rule.result().expect("result"), "216 month...828 month");
+    assert_eq!(rule.result().expect("result"), "18 year...69 year");
 }
 
 #[test]

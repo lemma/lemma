@@ -557,6 +557,8 @@ pub enum TypeSpecification {
         /// are assigned `Some({measure_name: 1})` by the pass. `Some(empty_map)` means resolved
         /// to dimensionless (e.g. `kg/kg`).
         decomposition: Option<BaseMeasureVector>,
+        /// Written unit for this measure value (`100 eur`, `as usd`). Schema types use `None`.
+        unit: Option<String>,
         help: String,
     },
     Number {
@@ -577,6 +579,8 @@ pub enum TypeSpecification {
         maximum: Option<RationalInteger>,
         decimals: Option<u8>,
         units: RatioUnits,
+        /// Written unit for this ratio value (`25%`, `as percent`). Schema types use `None`.
+        unit: Option<String>,
         help: String,
     },
     RatioRange {
@@ -673,6 +677,70 @@ impl TypeSpecification {
             | Self::RatioRange { help, .. }
             | Self::MeasureRange { help, .. } => help.as_str(),
             Self::Veto { .. } | Self::Undetermined => "",
+        }
+    }
+
+    /// Schema equality that ignores written [`unit`](Self::Measure::unit) /
+    /// [`unit`](Self::Ratio::unit). Used when comparing declared types that may
+    /// carry a value-specific written unit.
+    #[must_use]
+    pub fn equal_ignoring_unit(&self, other: &Self) -> bool {
+        match (self, other) {
+            (
+                Self::Measure {
+                    minimum: a_min,
+                    maximum: a_max,
+                    decimals: a_dec,
+                    units: a_units,
+                    traits: a_traits,
+                    decomposition: a_decomp,
+                    help: a_help,
+                    unit: _,
+                },
+                Self::Measure {
+                    minimum: b_min,
+                    maximum: b_max,
+                    decimals: b_dec,
+                    units: b_units,
+                    traits: b_traits,
+                    decomposition: b_decomp,
+                    help: b_help,
+                    unit: _,
+                },
+            ) => {
+                a_min == b_min
+                    && a_max == b_max
+                    && a_dec == b_dec
+                    && a_units == b_units
+                    && a_traits == b_traits
+                    && a_decomp == b_decomp
+                    && a_help == b_help
+            }
+            (
+                Self::Ratio {
+                    minimum: a_min,
+                    maximum: a_max,
+                    decimals: a_dec,
+                    units: a_units,
+                    help: a_help,
+                    unit: _,
+                },
+                Self::Ratio {
+                    minimum: b_min,
+                    maximum: b_max,
+                    decimals: b_dec,
+                    units: b_units,
+                    help: b_help,
+                    unit: _,
+                },
+            ) => {
+                a_min == b_min
+                    && a_max == b_max
+                    && a_dec == b_dec
+                    && a_units == b_units
+                    && a_help == b_help
+            }
+            _ => self == other,
         }
     }
 }
@@ -909,22 +977,65 @@ pub fn range_type_specification_from_endpoints(
     left.specifications.range_from_element()
 }
 
-/// Lift a parser literal range endpoint to a [`LiteralValue`] with the element's primitive type.
+/// Resolves a written unit token to a bare declared unit name.
+pub type UnitTokenResolver<'a> = dyn Fn(&str) -> Result<String, String> + 'a;
+
+/// Declared bare unit name on a measure or ratio element type for `token`.
+fn bare_declared_unit_on_element(
+    element_spec: &TypeSpecification,
+    token: &str,
+) -> Result<String, String> {
+    match element_spec {
+        TypeSpecification::Measure { units, .. } => Ok(units.get(token)?.name.clone()),
+        TypeSpecification::Ratio { units, .. } => Ok(units.get(token)?.name.clone()),
+        other => panic!("BUG: bare_declared_unit_on_element on non-measure/ratio element {other}"),
+    }
+}
+
+/// Resolve a written unit token to a bare declared name on `element_spec`.
+///
+/// Tries an exact declared name first. When that fails and `resolve_unit` is
+/// provided, resolves through the unit index and checks the bare name is declared
+/// on the element.
+pub fn resolve_endpoint_unit_token(
+    token: &str,
+    element_spec: &TypeSpecification,
+    resolve_unit: Option<&UnitTokenResolver<'_>>,
+) -> Result<String, String> {
+    match bare_declared_unit_on_element(element_spec, token) {
+        Ok(bare) => Ok(bare),
+        Err(declared_err) => {
+            let Some(resolve) = resolve_unit else {
+                return Err(declared_err);
+            };
+            let bare = resolve(token)?;
+            bare_declared_unit_on_element(element_spec, &bare).map_err(|_| {
+                format!("Unit '{token}' resolves to '{bare}', which is not declared on this type")
+            })
+        }
+    }
+}
+
+/// Lift a parser literal range endpoint to a [`TypedLiteral`] with the element's primitive type.
 /// Routes [`Value::NumberWithUnit`] through [`parser_value_to_value_kind`] so ratio endpoints
 /// (e.g. `10%` in a `ratio range`) canonicalize to ratios, not anonymous quantities.
-fn lift_range_endpoint(
+///
+/// When `resolve_unit` is set, qualified tokens are resolved to bare declared names before bind.
+pub(crate) fn lift_range_endpoint(
     value: &crate::parsing::ast::Value,
     element_spec: &TypeSpecification,
+    resolve_unit: Option<&UnitTokenResolver<'_>>,
 ) -> Result<TypedLiteral, String> {
     use crate::parsing::ast::Value;
     match value {
-        Value::NumberWithUnit(_, unit_name) => {
-            let kind = parser_value_to_value_kind(value, element_spec)?;
+        Value::NumberWithUnit(magnitude, unit_token) => {
+            let bare = resolve_endpoint_unit_token(unit_token, element_spec, resolve_unit)?;
+            let rewritten = Value::NumberWithUnit(*magnitude, bare.clone());
+            let kind = parser_value_to_value_kind(&rewritten, element_spec, None)?;
             let lemma_type = match &kind {
-                ValueKind::Measure(_) | ValueKind::Ratio(_) => Arc::new(
-                    LemmaType::primitive(element_spec.clone())
-                        .with_measure_binding_unit(unit_name.clone()),
-                ),
+                ValueKind::Measure(_) | ValueKind::Ratio(_) => {
+                    Arc::new(LemmaType::primitive(element_spec.clone()).with_unit(bare))
+                }
                 _ => Arc::new(LemmaType::primitive(element_spec.clone())),
             };
             Ok(TypedLiteral {
@@ -1360,7 +1471,7 @@ pub fn default_help_for_primitive(kind: PrimitiveKind) -> &'static str {
         NumberRange => "The lower and upper bound of the number range.",
         Text => "A text value.",
         Measure => "A numeric amount in one of this type's units.",
-        MeasureRange => "The lower and upper bound of the measure range in the same unit.",
+        MeasureRange => "The lower and upper bound of the measure range.",
         Ratio => "A ratio in one of this type's units (e.g. percent).",
         RatioRange => "The lower and upper bound of the ratio range.",
         Date => "A date, or a date and time with optional timezone.",
@@ -1384,6 +1495,7 @@ impl TypeSpecification {
             units: MeasureUnits::new(),
             traits: Vec::new(),
             decomposition: None,
+            unit: None,
             help: default_help_for_primitive(PrimitiveKind::Measure).to_string(),
         }
     }
@@ -1425,6 +1537,7 @@ impl TypeSpecification {
                     suggestion_magnitude: None,
                 },
             ]),
+            unit: None,
             help: default_help_for_primitive(PrimitiveKind::Ratio).to_string(),
         }
     }
@@ -1517,6 +1630,7 @@ impl TypeSpecification {
                 units: units.clone(),
                 traits: Vec::new(),
                 decomposition: decomposition.clone(),
+                unit: None,
                 help: String::new(),
             }),
             TypeSpecification::DateRange { lower, upper, .. } => Some(TypeSpecification::Date {
@@ -1539,6 +1653,7 @@ impl TypeSpecification {
                 maximum: upper.clone(),
                 decimals: None,
                 units: units.clone(),
+                unit: None,
                 help: String::new(),
             }),
             _ => None,
@@ -1668,6 +1783,7 @@ impl TypeSpecification {
         args: &[CommandArg],
         declared_suggestion: &mut Option<RawSuggestion>,
         declared_fill: &mut Option<RawSuggestion>,
+        resolve_unit: Option<&UnitTokenResolver<'_>>,
     ) -> Result<(), String> {
         if command == TypeConstraintCommand::Trait
             && !matches!(&self, TypeSpecification::Measure { .. })
@@ -1935,8 +2051,8 @@ impl TypeSpecification {
                         );
                     }
                     *target = Some(RawSuggestion::Value(ValueKind::Range(
-                        Box::new(left.to_literal()),
-                        Box::new(right.to_literal()),
+                        Box::new(left),
+                        Box::new(right),
                     )));
                 }
                 _ => {
@@ -1951,6 +2067,7 @@ impl TypeSpecification {
                 minimum,
                 maximum,
                 units,
+                unit: _,
                 help,
             } => match command {
                 TypeConstraintCommand::Decimals => {
@@ -2034,9 +2151,10 @@ impl TypeSpecification {
                                 minimum: minimum.clone(),
                                 maximum: maximum.clone(),
                                 units: units.clone(),
+                                unit: None,
                                 help: help.clone(),
                             };
-                            let value = parser_value_to_value_kind(lit, &element_spec)?;
+                            let value = parser_value_to_value_kind(lit, &element_spec, None)?;
                             sync_ratio_suggestion_units(units, &value)?;
                             *target = Some(RawSuggestion::UnitBound {
                                 value,
@@ -2142,28 +2260,18 @@ impl TypeSpecification {
                     }
                     .element_from_range()
                     .expect("BUG: RatioRange must define element_from_range");
-                    let left = lift_range_endpoint(left, &element_spec)?;
-                    let right = lift_range_endpoint(right, &element_spec)?;
+                    let left = lift_range_endpoint(left, &element_spec, resolve_unit)?;
+                    let right = lift_range_endpoint(right, &element_spec, resolve_unit)?;
                     if !left.lemma_type.is_ratio() || !right.lemma_type.is_ratio() {
                         return Err(
                             "Please provide a ratio range, for example `-> suggest 10%...50%`."
                                 .to_string(),
                         );
                     }
-                    let value =
-                        ValueKind::Range(Box::new(left.to_literal()), Box::new(right.to_literal()));
-                    *target = match (
-                        left.lemma_type.measure_binding_unit.as_ref(),
-                        right.lemma_type.measure_binding_unit.as_ref(),
-                    ) {
-                        (Some(left_unit), Some(right_unit)) if left_unit == right_unit => {
-                            Some(RawSuggestion::UnitBound {
-                                value,
-                                unit_name: left_unit.clone(),
-                            })
-                        }
-                        _ => Some(RawSuggestion::Value(value)),
-                    };
+                    *target = Some(RawSuggestion::Value(ValueKind::Range(
+                        Box::new(left),
+                        Box::new(right),
+                    )));
                 }
                 _ => {
                     return Err(format!(
@@ -2322,8 +2430,8 @@ impl TypeSpecification {
                         );
                     }
                     *target = Some(RawSuggestion::Value(ValueKind::Range(
-                        Box::new(left.to_literal()),
-                        Box::new(right.to_literal()),
+                        Box::new(left),
+                        Box::new(right),
                     )));
                 }
                 _ => {
@@ -2425,8 +2533,8 @@ impl TypeSpecification {
                         );
                     }
                     *target = Some(RawSuggestion::Value(ValueKind::Range(
-                        Box::new(left.to_literal()),
-                        Box::new(right.to_literal()),
+                        Box::new(left),
+                        Box::new(right),
                     )));
                 }
                 _ => {
@@ -2532,16 +2640,16 @@ impl TypeSpecification {
                     }
                     .element_from_range()
                     .expect("BUG: MeasureRange must define element_from_range");
-                    let left = lift_range_endpoint(left, &element_spec)?;
-                    let right = lift_range_endpoint(right, &element_spec)?;
+                    let left = lift_range_endpoint(left, &element_spec, resolve_unit)?;
+                    let right = lift_range_endpoint(right, &element_spec, resolve_unit)?;
                     if !left.lemma_type.is_measure() || !right.lemma_type.is_measure() {
                         return Err(format!(
                             "Please provide a range with units valid for '{type_name}', for example `-> suggest 30 kilogram...35 kilogram`."
                         ));
                     }
                     *target = Some(RawSuggestion::Value(ValueKind::Range(
-                        Box::new(left.to_literal()),
-                        Box::new(right.to_literal()),
+                        Box::new(left),
+                        Box::new(right),
                     )));
                 }
                 _ => {
@@ -2976,28 +3084,23 @@ pub enum RawSuggestion {
 
 /// Canonical suggestion/fill value plus the written measure unit when one was declared.
 ///
-/// `measure_binding_unit` is the unit from `-> suggest 100 inr` / `-> fill 5 eur`; Show
+/// `unit` is the unit from `-> suggest 100 inr` / `-> fill 5 eur`; Show
 /// display stamps it so the one-liner matches the written unit, not the type's first unit.
 /// Shared via [`Arc`] so value-table clones bump a refcount instead of allocating.
+/// For ranges this stays `None`; each endpoint carries its own unit on its type.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct BoundValueKind {
     pub value: ValueKind,
-    pub measure_binding_unit: Option<Arc<str>>,
+    pub unit: Option<Arc<str>>,
 }
 
 impl BoundValueKind {
     pub fn unbound(value: ValueKind) -> Self {
-        Self {
-            value,
-            measure_binding_unit: None,
-        }
+        Self { value, unit: None }
     }
 
-    pub fn with_binding(value: ValueKind, measure_binding_unit: Option<Arc<str>>) -> Self {
-        Self {
-            value,
-            measure_binding_unit,
-        }
+    pub fn with_binding(value: ValueKind, unit: Option<Arc<str>>) -> Self {
+        Self { value, unit }
     }
 
     pub fn to_literal(&self) -> LiteralValue {
@@ -3032,7 +3135,7 @@ pub fn bound_value_kind_from_raw_suggestion(
         RawSuggestion::Value(vk) => Ok(BoundValueKind::unbound(vk)),
         RawSuggestion::UnitBound { value, unit_name } => Ok(BoundValueKind {
             value,
-            measure_binding_unit: Some(Arc::from(unit_name)),
+            unit: Some(Arc::from(unit_name)),
         }),
         RawSuggestion::Measure {
             magnitude,
@@ -3048,13 +3151,15 @@ pub fn bound_value_kind_from_raw_suggestion(
             )?;
             Ok(BoundValueKind {
                 value: ValueKind::Measure(canonical),
-                measure_binding_unit: Some(Arc::from(unit_name)),
+                unit: Some(Arc::from(unit_name)),
             })
         }
     }
 }
 
 /// Display one-liner unit: `as` / schema > settled > fill > suggest > none (first declared).
+///
+/// Range schemas are skipped: endpoint units live on each endpoint type.
 #[must_use]
 pub fn display_binding_unit(
     schema: &LemmaType,
@@ -3062,23 +3167,27 @@ pub fn display_binding_unit(
     fill: Option<&BoundValueKind>,
     suggestion: Option<&BoundValueKind>,
 ) -> Option<String> {
-    if let Some(unit) = schema.measure_binding_unit.clone() {
-        return Some(unit);
+    if schema.is_measure_range() || schema.is_ratio_range() {
+        return None;
     }
-    if let Some(unit) = settled.and_then(|bound| bound.measure_binding_unit.as_ref()) {
+    if let Some(unit) = schema.unit() {
         return Some(unit.to_string());
     }
-    if let Some(unit) = fill.and_then(|bound| bound.measure_binding_unit.as_ref()) {
+    if let Some(unit) = settled.and_then(|bound| bound.unit.as_ref()) {
+        return Some(unit.to_string());
+    }
+    if let Some(unit) = fill.and_then(|bound| bound.unit.as_ref()) {
         return Some(unit.to_string());
     }
     suggestion
-        .and_then(|bound| bound.measure_binding_unit.as_ref())
+        .and_then(|bound| bound.unit.as_ref())
         .map(|unit| unit.to_string())
 }
 
 /// Schema type stamped with [`display_binding_unit`] when a binding wins.
 ///
 /// Clones only when the winning unit differs from what `schema` already carries.
+/// Range types are returned unchanged.
 #[must_use]
 pub fn lemma_type_with_display_binding(
     schema: &LemmaType,
@@ -3086,10 +3195,11 @@ pub fn lemma_type_with_display_binding(
     fill: Option<&BoundValueKind>,
     suggestion: Option<&BoundValueKind>,
 ) -> LemmaType {
+    if schema.is_measure_range() || schema.is_ratio_range() {
+        return schema.clone();
+    }
     match display_binding_unit(schema, settled, fill, suggestion) {
-        Some(unit) if schema.measure_binding_unit.as_deref() != Some(unit.as_str()) => {
-            schema.clone().with_measure_binding_unit(unit)
-        }
+        Some(unit) if schema.unit() != Some(unit.as_str()) => schema.clone().with_unit(unit),
         Some(_) | None => schema.clone(),
     }
 }
@@ -3102,16 +3212,46 @@ pub fn lemma_type_arc_with_display_binding(
     fill: Option<&BoundValueKind>,
     suggestion: Option<&BoundValueKind>,
 ) -> Arc<LemmaType> {
+    if schema.is_measure_range() || schema.is_ratio_range() {
+        return Arc::clone(schema);
+    }
     match display_binding_unit(schema.as_ref(), settled, fill, suggestion) {
-        Some(unit) if schema.measure_binding_unit.as_deref() != Some(unit.as_str()) => {
-            Arc::new(schema.as_ref().clone().with_measure_binding_unit(unit))
+        Some(unit) if schema.unit() != Some(unit.as_str()) => {
+            Arc::new(schema.as_ref().clone().with_unit(unit))
         }
         Some(_) | None => Arc::clone(schema),
     }
 }
 
-/// Value payload (shape of a literal). No type attached.
-/// Measure unit is required; Ratio unit is optional (see plan ratio-units-optional.md).
+/// Build a [`TypedLiteral`] from an eval bound and the plan type for that cell.
+///
+/// Stamps `bound.unit` onto measure/ratio types. Range values already carry
+/// typed endpoints inside [`ValueKind::Range`].
+#[must_use]
+pub fn typed_literal_from_bound(
+    bound: &BoundValueKind,
+    lemma_type: &Arc<LemmaType>,
+) -> TypedLiteral {
+    let lemma_type = match (&bound.unit, &lemma_type.specifications) {
+        (Some(unit), TypeSpecification::Measure { .. } | TypeSpecification::Ratio { .. })
+            if lemma_type.unit() != Some(unit.as_ref()) =>
+        {
+            Arc::new(lemma_type.as_ref().clone().with_unit(unit.as_ref()))
+        }
+        _ => Arc::clone(lemma_type),
+    };
+    TypedLiteral {
+        value: bound.value.clone(),
+        lemma_type,
+    }
+}
+
+/// Value payload (shape of a literal).
+///
+/// Scalar variants are type-free: type lives on `NormalForm.result_type` /
+/// `DataDefinition`. The [`ValueKind::Range`] arm is the exception — each
+/// endpoint keeps a [`TypedLiteral`] so a mixed-unit range (`10 eur...20 usd`)
+/// retains both written units.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ValueKind {
     Number(RationalInteger),
@@ -3127,7 +3267,8 @@ pub enum ValueKind {
     Boolean(bool),
     /// Ratio: canonical magnitude. Display unit comes from the node/`DataDefinition` type.
     Ratio(RationalInteger),
-    Range(Box<LiteralValue>, Box<LiteralValue>),
+    /// Range endpoints carry their own type (and written unit for measure/ratio).
+    Range(Box<TypedLiteral>, Box<TypedLiteral>),
 }
 
 impl ValueKind {
@@ -3519,10 +3660,6 @@ pub struct LemmaType {
     pub specifications: TypeSpecification,
     /// What this type extends (primitive or custom from a spec)
     pub extends: TypeExtends,
-    /// Bound display/arithmetic unit for measure values (from literal bind or
-    /// signature-index hit). When set, [`LemmaType::measure_runtime_signature`]
-    /// returns `[(this, 1)]` instead of the type's canonical unit.
-    pub measure_binding_unit: Option<String>,
 }
 
 impl LemmaType {
@@ -3540,7 +3677,6 @@ impl LemmaType {
             name,
             specifications,
             extends,
-            measure_binding_unit,
         } = self;
         let specifications = match specifications {
             TypeSpecification::Measure {
@@ -3550,6 +3686,7 @@ impl LemmaType {
                 units,
                 traits,
                 decomposition,
+                unit,
                 help,
             } => {
                 let (units, decomposition) = f(units, decomposition);
@@ -3560,6 +3697,7 @@ impl LemmaType {
                     units,
                     traits,
                     decomposition,
+                    unit,
                     help,
                 }
             }
@@ -3569,7 +3707,6 @@ impl LemmaType {
             name,
             specifications,
             extends,
-            measure_binding_unit,
         }
     }
 
@@ -3579,7 +3716,6 @@ impl LemmaType {
             name: Some(name),
             specifications,
             extends,
-            measure_binding_unit: None,
         }
     }
 
@@ -3589,7 +3725,6 @@ impl LemmaType {
             name: None,
             specifications,
             extends,
-            measure_binding_unit: None,
         }
     }
 
@@ -3599,15 +3734,36 @@ impl LemmaType {
             name: None,
             specifications,
             extends: TypeExtends::Primitive,
-            measure_binding_unit: None,
         }
     }
 
     /// Prefer `unit_name` for [`measure_runtime_signature`] (bind / signature-index hit).
+    ///
+    /// Writes `unit` onto `Measure` or `Ratio` specifications. Any other variant panics.
     #[must_use]
-    pub fn with_measure_binding_unit(mut self, unit_name: impl Into<String>) -> Self {
-        self.measure_binding_unit = Some(unit_name.into());
+    pub fn with_unit(mut self, unit_name: impl Into<String>) -> Self {
+        let unit_name = unit_name.into();
+        match &mut self.specifications {
+            TypeSpecification::Measure { unit, .. } | TypeSpecification::Ratio { unit, .. } => {
+                *unit = Some(unit_name);
+            }
+            other => panic!(
+                "BUG: with_unit called on non-measure/non-ratio type {}",
+                other
+            ),
+        }
         self
+    }
+
+    /// Written unit on a measure or ratio specification, if any.
+    #[must_use]
+    pub fn unit(&self) -> Option<&str> {
+        match &self.specifications {
+            TypeSpecification::Measure { unit, .. } | TypeSpecification::Ratio { unit, .. } => {
+                unit.as_deref()
+            }
+            _ => None,
+        }
     }
 
     /// Get the type name, or a default based on the type specification
@@ -4016,8 +4172,8 @@ impl LemmaType {
     /// - Anonymous / no units: decomposition converted to signature form.
     #[must_use]
     pub fn measure_runtime_signature(&self) -> Vec<(String, i32)> {
-        if let Some(binding) = &self.measure_binding_unit {
-            return vec![(binding.clone(), 1)];
+        if let Some(binding) = self.unit() {
+            return vec![(binding.to_string(), 1)];
         }
         match &self.specifications {
             TypeSpecification::Measure {
@@ -4093,10 +4249,10 @@ impl LemmaType {
                 units: crate::literals::MeasureUnits::new(),
                 traits: Vec::new(),
                 decomposition: Some(decomposition),
+                unit: None,
                 help: String::new(),
             },
             extends: TypeExtends::Primitive,
-            measure_binding_unit: None,
         }
     }
 
@@ -4355,6 +4511,7 @@ pub(crate) fn ratio_element_type_for_api(lemma_type: &LemmaType) -> LemmaType {
                 maximum: None,
                 decimals,
                 units,
+                unit: None,
                 help: String::new(),
             })
         }
@@ -4573,7 +4730,7 @@ impl LiteralValue {
         )
     }
 
-    pub fn range(left: LiteralValue, right: LiteralValue) -> Self {
+    pub fn range(left: TypedLiteral, right: TypedLiteral) -> Self {
         Self {
             value: ValueKind::Range(Box::new(left), Box::new(right)),
         }
@@ -4599,14 +4756,7 @@ impl LiteralValue {
             }
             ValueKind::Ratio(n) => format_ratio_canonical_for_display(n, lemma_type),
             ValueKind::Range(left, right) => {
-                let endpoint_ty = range_element_type_specification(&lemma_type.specifications)
-                    .map(LemmaType::primitive)
-                    .unwrap_or_else(|| lemma_type.clone());
-                format!(
-                    "{}...{}",
-                    left.display_value_with_type(&endpoint_ty),
-                    right.display_value_with_type(&endpoint_ty)
-                )
+                format!("{}...{}", left.display_value(), right.display_value())
             }
             _ => format!("{}", self.value),
         }
@@ -4641,7 +4791,7 @@ impl LiteralValue {
                 )
             }
             ValueKind::Ratio(n) => {
-                if let Some(unit_name) = lemma_type.measure_binding_unit.as_deref() {
+                if let Some(unit_name) = lemma_type.unit() {
                     Some(
                         lemma_type
                             .try_ratio_canonical_as_decimal_in_unit(n, unit_name)
@@ -4804,12 +4954,7 @@ impl TypedLiteral {
     ) -> Self {
         Self::measure_with_type(
             n,
-            Arc::new(
-                lemma_type
-                    .as_ref()
-                    .clone()
-                    .with_measure_binding_unit(unit_name),
-            ),
+            Arc::new(lemma_type.as_ref().clone().with_unit(unit_name)),
         )
     }
 
@@ -4944,12 +5089,7 @@ impl TypedLiteral {
     ) -> Self {
         Self::ratio_with_type(
             r,
-            Arc::new(
-                lemma_type
-                    .as_ref()
-                    .clone()
-                    .with_measure_binding_unit(unit_name),
-            ),
+            Arc::new(lemma_type.as_ref().clone().with_unit(unit_name)),
         )
     }
 
@@ -4963,7 +5103,7 @@ impl TypedLiteral {
                 });
 
         Self {
-            value: ValueKind::Range(Box::new(left.to_literal()), Box::new(right.to_literal())),
+            value: ValueKind::Range(Box::new(left), Box::new(right)),
             lemma_type: Arc::new(LemmaType::primitive(specifications)),
         }
     }
@@ -5278,9 +5418,13 @@ pub fn refresh_measure_literal_canonical_magnitude(
 }
 
 /// Convert parser [`Value`] to [`ValueKind`] using the target type (canonicalizes ratio at bind).
+///
+/// When `resolve_unit` is set, qualified range-endpoint unit tokens are resolved to bare
+/// declared names before bind.
 pub fn parser_value_to_value_kind(
     value: &crate::literals::Value,
     type_spec: &TypeSpecification,
+    resolve_unit: Option<&UnitTokenResolver<'_>>,
 ) -> Result<ValueKind, String> {
     use crate::computation::rational::decimal_to_rational;
     use crate::literals::Value;
@@ -5332,12 +5476,9 @@ pub fn parser_value_to_value_kind(
             let endpoint = range_element_type_specification(range_spec).ok_or_else(|| {
                 "BUG: range_element_type_specification missing arm for range type".to_string()
             })?;
-            let left_lit = lift_range_endpoint(left, &endpoint)?;
-            let right_lit = lift_range_endpoint(right, &endpoint)?;
-            Ok(ValueKind::Range(
-                Box::new(left_lit.to_literal()),
-                Box::new(right_lit.to_literal()),
-            ))
+            let left_lit = lift_range_endpoint(left, &endpoint, resolve_unit)?;
+            let right_lit = lift_range_endpoint(right, &endpoint, resolve_unit)?;
+            Ok(ValueKind::Range(Box::new(left_lit), Box::new(right_lit)))
         }
         (value, type_spec) => Err(parser_value_type_mismatch(value, type_spec)),
     }
@@ -5603,7 +5744,7 @@ fn format_measure_canonical_for_display(
     if let TypeSpecification::Measure { units, .. } = &lemma_type.specifications {
         if !units.is_empty() {
             // Binding (`as` / suggest / fill) must name a declared unit; otherwise first declared.
-            let unit = match lemma_type.measure_binding_unit.as_deref() {
+            let unit = match lemma_type.unit() {
                 Some(binding) => units
                     .iter()
                     .find(|unit| unit.name == binding)
@@ -5645,8 +5786,7 @@ fn format_ratio_canonical_for_display(
     use crate::computation::rational::{checked_mul, rational_new};
 
     let display_unit = lemma_type
-        .measure_binding_unit
-        .as_deref()
+        .unit()
         .or_else(|| lemma_type.ratio_primary_unit());
 
     match display_unit {
@@ -5946,6 +6086,7 @@ pub(crate) mod tests {
                 }]),
                 traits: vec![MeasureTrait::Duration],
                 decomposition: None,
+                unit: None,
                 help: String::new(),
             },
             TypeExtends::Primitive,
@@ -5988,12 +6129,7 @@ pub(crate) mod tests {
         assert_eq!(LiteralValue::from_bool(false).display_value(), "false");
 
         // 0.10 ratio with "percent" binding displays as 10% (unit conversion applied)
-        let ratio_ty = Arc::new(
-            primitive_ratio_arc()
-                .as_ref()
-                .clone()
-                .with_measure_binding_unit("percent"),
-        );
+        let ratio_ty = Arc::new(primitive_ratio_arc().as_ref().clone().with_unit("percent"));
         let ten_percent_ratio = LiteralValue::ratio(
             crate::literals::rational_from_parsed_decimal(Decimal::new(1, 1))
                 .expect("ratio decimal"),
@@ -6034,10 +6170,10 @@ pub(crate) mod tests {
                 }]),
                 traits: Vec::new(),
                 decomposition: None,
+                unit: None,
                 help: String::new(),
             },
             extends: TypeExtends::Primitive,
-            measure_binding_unit: None,
         };
         let money_type = Arc::new(money_type);
         let val = LiteralValue::measure_with_type(
@@ -6070,10 +6206,10 @@ pub(crate) mod tests {
                 }]),
                 traits: Vec::new(),
                 decomposition: None,
+                unit: None,
                 help: String::new(),
             },
             extends: TypeExtends::Primitive,
-            measure_binding_unit: None,
         });
         let val_any = LiteralValue::measure_with_type(
             decimal_to_rational(Decimal::from_str("42.50").unwrap()).unwrap(),
@@ -6285,6 +6421,7 @@ pub(crate) mod tests {
                 &[month_suggestion_arg()],
                 &mut default,
                 &mut None,
+                None,
             )
             .unwrap_err();
         assert!(err.contains("Unit 'month' is for calendar data"));
@@ -6301,6 +6438,7 @@ pub(crate) mod tests {
                 &unit_factor_arg("second", 1),
                 &mut None,
                 &mut None,
+                None,
             )
             .unwrap();
         specs
@@ -6310,6 +6448,7 @@ pub(crate) mod tests {
                 &unit_factor_arg("week", 604_800),
                 &mut None,
                 &mut None,
+                None,
             )
             .unwrap();
         specs
@@ -6319,6 +6458,7 @@ pub(crate) mod tests {
                 &[CommandArg::Label("duration".to_string())],
                 &mut None,
                 &mut None,
+                None,
             )
             .unwrap();
         let mut default = None;
@@ -6329,6 +6469,7 @@ pub(crate) mod tests {
                 &[month_suggestion_arg()],
                 &mut default,
                 &mut None,
+                None,
             )
             .unwrap_err();
         assert!(err.contains("Unit 'month' is for calendar data"));
@@ -6346,6 +6487,7 @@ pub(crate) mod tests {
                 &unit_factor_arg("second", 1),
                 &mut None,
                 &mut None,
+                None,
             )
             .unwrap();
         specs
@@ -6355,6 +6497,7 @@ pub(crate) mod tests {
                 &unit_factor_arg("week", 604_800),
                 &mut None,
                 &mut None,
+                None,
             )
             .unwrap();
         specs
@@ -6364,6 +6507,7 @@ pub(crate) mod tests {
                 &[CommandArg::Label("duration".to_string())],
                 &mut None,
                 &mut None,
+                None,
             )
             .unwrap();
         let mut default = None;
@@ -6377,6 +6521,7 @@ pub(crate) mod tests {
                 ))],
                 &mut default,
                 &mut None,
+                None,
             )
             .unwrap();
         assert!(matches!(
@@ -6398,6 +6543,7 @@ pub(crate) mod tests {
                 &unit_factor_arg("second", 1),
                 &mut None,
                 &mut None,
+                None,
             )
             .unwrap();
         specs
@@ -6407,6 +6553,7 @@ pub(crate) mod tests {
                 &[CommandArg::Label("duration".to_string())],
                 &mut None,
                 &mut None,
+                None,
             )
             .unwrap();
         let mut default = None;
@@ -6420,6 +6567,7 @@ pub(crate) mod tests {
                 ))],
                 &mut default,
                 &mut None,
+                None,
             )
             .unwrap_err();
         assert!(err.contains("fortnight"));
@@ -6459,6 +6607,7 @@ pub(crate) mod tests {
                 ]),
                 traits: Vec::new(),
                 decomposition: None,
+                unit: None,
                 help: String::new(),
             },
             TypeExtends::Primitive,
@@ -6636,6 +6785,7 @@ pub(crate) mod tests {
                 ]),
                 traits: vec![MeasureTrait::Calendar],
                 decomposition: Some(calendar_decomposition()),
+                unit: None,
                 help: String::new(),
             },
             TypeExtends::Primitive,
@@ -6692,6 +6842,7 @@ pub(crate) mod tests {
                 ]),
                 traits: Vec::new(),
                 decomposition: None,
+                unit: None,
                 help: String::new(),
             },
             TypeExtends::Primitive,
@@ -6718,6 +6869,7 @@ pub(crate) mod tests {
             units,
             traits: Vec::new(),
             decomposition: None,
+            unit: None,
             help: String::new(),
         }
     }
@@ -6725,7 +6877,7 @@ pub(crate) mod tests {
     #[test]
     fn parser_value_to_value_kind_rejects_bare_number_for_measure() {
         let ten = Value::Number(Decimal::from(10));
-        let err = parser_value_to_value_kind(&ten, &measure_type_with_kilogram())
+        let err = parser_value_to_value_kind(&ten, &measure_type_with_kilogram(), None)
             .expect_err("bare number must not bind to measure");
         assert!(
             err.contains("kilogram"),
@@ -6736,7 +6888,7 @@ pub(crate) mod tests {
     #[test]
     fn parser_value_to_value_kind_accepts_number_with_unit_for_measure() {
         let ten_kg = Value::NumberWithUnit(Decimal::from(10), "kilogram".to_string());
-        let kind = parser_value_to_value_kind(&ten_kg, &measure_type_with_kilogram())
+        let kind = parser_value_to_value_kind(&ten_kg, &measure_type_with_kilogram(), None)
             .expect("10 kilogram must bind to measure");
         assert!(matches!(kind, ValueKind::Measure(_)));
     }
@@ -6744,8 +6896,8 @@ pub(crate) mod tests {
     #[test]
     fn parser_value_to_value_kind_accepts_bare_number_for_ratio() {
         let ten = Value::Number(Decimal::from(10));
-        let kind =
-            parser_value_to_value_kind(&ten, &TypeSpecification::ratio()).expect("number -> ratio");
+        let kind = parser_value_to_value_kind(&ten, &TypeSpecification::ratio(), None)
+            .expect("number -> ratio");
         assert!(matches!(kind, ValueKind::Ratio(_)));
     }
 
@@ -6765,6 +6917,7 @@ pub(crate) mod tests {
                 &unit_factor_arg("eur", 1),
                 &mut None,
                 &mut None,
+                None,
             )
             .expect("seed eur");
         let err = specs
@@ -6777,6 +6930,7 @@ pub(crate) mod tests {
                 ],
                 &mut None,
                 &mut None,
+                None,
             )
             .expect_err("must not change inherited unit factor");
         assert!(err.contains("eur"), "error must name unit, got: {err}");
@@ -6796,6 +6950,7 @@ pub(crate) mod tests {
                 &unit_factor_arg("eur", 1),
                 &mut None,
                 &mut None,
+                None,
             )
             .expect("seed eur");
         specs
@@ -6805,6 +6960,7 @@ pub(crate) mod tests {
                 &unit_factor_arg("usd", 1),
                 &mut None,
                 &mut None,
+                None,
             )
             .expect("add usd");
         match &specs {
@@ -6823,6 +6979,7 @@ pub(crate) mod tests {
                 &unit_factor_arg("eur", 1),
                 &mut None,
                 &mut None,
+                None,
             )
             .expect("seed eur");
         specs
@@ -6832,6 +6989,7 @@ pub(crate) mod tests {
                 &unit_factor_arg("eur", 1),
                 &mut None,
                 &mut None,
+                None,
             )
             .expect("idempotent eur");
         match &specs {

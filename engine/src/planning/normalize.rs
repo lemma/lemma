@@ -461,7 +461,8 @@ pub(crate) struct Typed {
 /// Cons key: algebraic Kind, optional rule-ref identity, and stamped result
 /// type. Type is part of the key so a shared interner across temporal slices
 /// never collapses DataPath leaves that differ only in resolved type (Literal
-/// leaves already distinguish via [`LiteralValue::lemma_type`] inside Kind).
+/// leaves already distinguish via payload identity inside Kind; range endpoints
+/// carry [`crate::planning::semantics::TypedLiteral`] types on [`crate::planning::semantics::ValueKind::Range`]).
 type ConsKey = (NormalFormKind, Option<RulePath>, Arc<LemmaType>);
 
 /// Build-local table + origin-free cons. Ship via [`Self::extract_reachable`].

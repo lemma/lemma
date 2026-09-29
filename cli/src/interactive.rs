@@ -376,6 +376,7 @@ fn prompt_value_for_type(
                 units: units.clone(),
                 traits: traits.clone(),
                 decomposition: decomposition.clone(),
+                unit: None,
                 help: help.clone(),
             };
             let constraints = NumericConstraints {
@@ -427,6 +428,7 @@ fn prompt_value_for_type(
                 maximum: maximum.clone(),
                 decimals: *decimals,
                 units: units.clone(),
+                unit: None,
                 help: help.clone(),
             };
             let constraints = NumericConstraints {

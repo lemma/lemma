@@ -49,22 +49,12 @@ pub(crate) fn resolve_anonymous_measure(
     }
     let signature = ty.measure_runtime_signature();
     if let Some((unit_name, named)) = scope.signature_index.get(&signature) {
-        return Arc::new(
-            named
-                .as_ref()
-                .clone()
-                .with_measure_binding_unit(unit_name.clone()),
-        );
+        return Arc::new(named.as_ref().clone().with_unit(unit_name.clone()));
     }
     let owners = [ty.as_ref()];
     let expanded = expand_signature_to_base_units(&signature, scope.unit_index, &owners);
     if let Some((unit_name, named)) = scope.signature_index.get(&expanded) {
-        return Arc::new(
-            named
-                .as_ref()
-                .clone()
-                .with_measure_binding_unit(unit_name.clone()),
-        );
+        return Arc::new(named.as_ref().clone().with_unit(unit_name.clone()));
     }
     if let Some(decomposition) = ty.measure_type_decomposition() {
         if !decomposition.is_empty() {
@@ -468,7 +458,6 @@ pub(crate) fn range_span_type(range_type: &LemmaType) -> Arc<LemmaType> {
                 name: range_type.name.clone(),
                 specifications: element_spec,
                 extends: range_type.extends.clone(),
-                measure_binding_unit: None,
             })
         }
         _ => Arc::new(LemmaType::undetermined_type()),
@@ -611,12 +600,7 @@ pub(crate) fn unit_conversion_type(
         SemanticConversionTarget::Unit {
             unit_name,
             owning_type,
-        } => Arc::new(
-            owning_type
-                .as_ref()
-                .clone()
-                .with_measure_binding_unit(unit_name.clone()),
-        ),
+        } => Arc::new(owning_type.as_ref().clone().with_unit(unit_name.clone())),
         SemanticConversionTarget::Type(_) => Arc::new(LemmaType::undetermined_type()),
     }
 }

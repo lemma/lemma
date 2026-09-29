@@ -949,6 +949,120 @@ fn unit_scoped_measure_range_endpoint_keeps_unit() {
 }
 
 #[test]
+fn mixed_unit_measure_range_keeps_each_endpoint_unit() {
+    let engine = load_engine(
+        r#"
+spec band
+uses lemma units
+data money: measure
+  -> unit eur: 1.00
+  -> unit usd: 0.92
+data window: money range -> suggest 10 eur...20 usd
+rule band: window
+"#,
+        "mixed_band.lemma",
+    );
+    let show = plan_interface_show(&engine, "band");
+    let entry = show.data.get("window").expect("window");
+    let suggestion = entry.suggestion.as_ref().expect("suggestion");
+    let display = suggestion
+        .result
+        .as_deref()
+        .expect("suggestion display string");
+    assert!(
+        display.contains("eur") && display.contains("usd"),
+        "display must keep both written units, got {display}"
+    );
+    assert!(
+        display.contains("10") && display.contains("20"),
+        "display must keep written magnitudes, got {display}"
+    );
+
+    let json = serde_json::to_value(lemma::api::ShowData::from(entry)).expect("ShowData JSON");
+    let suggestion_json = &json["suggestion"];
+    let from = suggestion_json["range"]["from"]["measure"]
+        .as_object()
+        .expect("from measure map");
+    let to = suggestion_json["range"]["to"]["measure"]
+        .as_object()
+        .expect("to measure map");
+    assert_eq!(
+        from.get("eur").and_then(|v| v.as_str()).map(decimal_lit),
+        Some(decimal_lit("10"))
+    );
+    assert_eq!(
+        to.get("usd").and_then(|v| v.as_str()).map(decimal_lit),
+        Some(decimal_lit("20"))
+    );
+    assert_eq!(
+        suggestion_json["range"]["from"]["unit"].as_str(),
+        Some("eur")
+    );
+    assert_eq!(suggestion_json["range"]["to"]["unit"].as_str(), Some("usd"));
+    assert!(
+        suggestion_json.get("unit").is_none(),
+        "outer range value must not carry unit, got {suggestion_json}"
+    );
+
+    let type_json =
+        serde_json::to_value(lemma::api::LemmaType::from(&entry.lemma_type)).expect("type JSON");
+    assert!(
+        type_json.get("unit").is_none(),
+        "range type must not carry a single unit field, got {type_json}"
+    );
+}
+
+#[test]
+fn mixed_unit_qualified_measure_range_suggest_resolves_bare_units() {
+    let engine = load_engine(
+        r#"
+spec band
+uses lemma units
+data money: measure
+  -> unit eur: 1.00
+  -> unit usd: 0.92
+data window: money range -> suggest 10 money.eur...20 money.usd
+rule band: window
+"#,
+        "qualified_mixed_band.lemma",
+    );
+    let show = plan_interface_show(&engine, "band");
+    let entry = show.data.get("window").expect("window");
+    let json = serde_json::to_value(lemma::api::ShowData::from(entry)).expect("ShowData JSON");
+    let suggestion = &json["suggestion"];
+    assert_eq!(suggestion["range"]["from"]["unit"].as_str(), Some("eur"));
+    assert_eq!(suggestion["range"]["to"]["unit"].as_str(), Some("usd"));
+    let display = suggestion["result"].as_str().expect("display");
+    assert!(
+        display.contains("eur") && display.contains("usd"),
+        "display must use bare units, got {display}"
+    );
+}
+
+#[test]
+fn unknown_unit_on_measure_range_suggest_is_planning_error() {
+    let mut engine = Engine::new();
+    let err = engine
+        .load([(
+            path_source("bad_unit_band.lemma"),
+            r#"
+spec band
+data money: measure
+  -> unit eur: 1.00
+data window: money range -> suggest 10 eur...20 bogons
+rule band: window
+"#
+            .to_string(),
+        )])
+        .expect_err("unknown unit on range suggest must be a planning error");
+    let msg = format!("{err:?}");
+    assert!(
+        msg.contains("bogons") || msg.to_lowercase().contains("unknown unit"),
+        "expected unknown unit error, got {msg}"
+    );
+}
+
+#[test]
 fn ratio_without_unit_emits_json_null_not_empty_string() {
     let bare = LiteralValue::ratio_from_decimal(decimal_lit("0.5"));
     let json =
@@ -974,9 +1088,14 @@ fn ratio_with_unit_emits_unit_string() {
         "percent",
         std::sync::Arc::new(LemmaType::primitive(TypeSpecification::ratio())),
     );
-    assert_eq!(
-        with_unit.lemma_type.measure_binding_unit.as_deref(),
-        Some("percent")
+    assert_eq!(with_unit.lemma_type.unit(), Some("percent"));
+    let type_json =
+        serde_json::to_value(lemma::api::LemmaType::from(with_unit.lemma_type.as_ref()))
+            .expect("LemmaType JSON");
+    assert_eq!(type_json["unit"].as_str(), Some("percent"));
+    assert!(
+        type_json.get("measure_binding_unit").is_none(),
+        "legacy measure_binding_unit key must not appear: {type_json}"
     );
 }
 

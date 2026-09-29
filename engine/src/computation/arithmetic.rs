@@ -7,7 +7,7 @@ use crate::computation::rational::{
 };
 use crate::planning::semantics::{
     primitive_number_arc, ArithmeticComputation, BoundValueKind, LemmaType, LiteralValue,
-    SemanticCalendarUnit, ValueKind,
+    SemanticCalendarUnit, TypedLiteral, ValueKind,
 };
 use indexmap::IndexMap;
 use std::sync::Arc;
@@ -354,28 +354,10 @@ pub fn arithmetic_operation(
             ArithmeticComputation::Add | ArithmeticComputation::Subtract
         ) =>
         {
-            let left_endpoint = left_type
-                .specifications
-                .element_from_range()
-                .map(|element| Arc::new(LemmaType::primitive(element)))
-                .unwrap_or_else(|| Arc::clone(left_type));
-            let right_endpoint = right_type
-                .specifications
-                .element_from_range()
-                .map(|element| Arc::new(LemmaType::primitive(element)))
-                .unwrap_or_else(|| Arc::clone(right_type));
-            let left_measure = super::range::compute_span(
-                left_range_left.as_ref(),
-                &left_endpoint,
-                left_range_right.as_ref(),
-                &left_endpoint,
-            );
-            let right_measure = super::range::compute_span(
-                right_range_left.as_ref(),
-                &right_endpoint,
-                right_range_right.as_ref(),
-                &right_endpoint,
-            );
+            let left_measure =
+                super::range::compute_span(left_range_left.as_ref(), left_range_right.as_ref());
+            let right_measure =
+                super::range::compute_span(right_range_left.as_ref(), right_range_right.as_ref());
             let left_span_ty = super::range::span_result_type(left_type);
             let right_span_ty = super::range::span_result_type(right_type);
             operate_on_operation_results(
@@ -395,17 +377,7 @@ pub fn arithmetic_operation(
                 ArithmeticComputation::Add | ArithmeticComputation::Subtract
             ) =>
         {
-            let endpoint = left_type
-                .specifications
-                .element_from_range()
-                .map(|element| Arc::new(LemmaType::primitive(element)))
-                .unwrap_or_else(|| Arc::clone(left_type));
-            let measure = super::range::compute_span(
-                range_left.as_ref(),
-                &endpoint,
-                range_right.as_ref(),
-                &endpoint,
-            );
+            let measure = super::range::compute_span(range_left.as_ref(), range_right.as_ref());
             let span_ty = super::range::span_result_type(left_type);
             operate_with_left_result(
                 measure,
@@ -424,17 +396,7 @@ pub fn arithmetic_operation(
                 ArithmeticComputation::Add | ArithmeticComputation::Subtract
             ) =>
         {
-            let endpoint = right_type
-                .specifications
-                .element_from_range()
-                .map(|element| Arc::new(LemmaType::primitive(element)))
-                .unwrap_or_else(|| Arc::clone(right_type));
-            let measure = super::range::compute_span(
-                range_left.as_ref(),
-                &endpoint,
-                range_right.as_ref(),
-                &endpoint,
-            );
+            let measure = super::range::compute_span(range_left.as_ref(), range_right.as_ref());
             let span_ty = super::range::span_result_type(right_type);
             operate_with_right_result(
                 left,
@@ -497,7 +459,7 @@ pub fn arithmetic_operation(
             | ArithmeticComputation::Modulo => match number_ratio_arithmetic(r, op, n) {
                 Ok(rational) => OperationResult::from_bound(BoundValueKind {
                     value: ValueKind::Ratio(rational),
-                    measure_binding_unit: left.measure_binding_unit.clone(),
+                    unit: left.unit.clone(),
                 }),
                 Err(failure) => OperationResult::Veto(VetoType::computation(failure.message())),
             },
@@ -511,9 +473,9 @@ pub fn arithmetic_operation(
         (ValueKind::Ratio(l), ValueKind::Ratio(r)) => match number_arithmetic(l, op, r) {
             Ok(rational) => OperationResult::from_bound(BoundValueKind {
                 value: ValueKind::Ratio(rational),
-                measure_binding_unit: BoundValueKind::agree_or_left_binding(
-                    left.measure_binding_unit.as_ref(),
-                    right.measure_binding_unit.as_ref(),
+                unit: BoundValueKind::agree_or_left_binding(
+                    left.unit.as_ref(),
+                    right.unit.as_ref(),
                 ),
             }),
             Err(failure) => OperationResult::Veto(VetoType::computation(failure.message())),
@@ -669,7 +631,9 @@ pub fn arithmetic_operation(
                     let anonymous_compatible =
                         left_type.compatible_with_anonymous_measure(right_type);
                     let identical_measure = left_type.as_ref() == right_type.as_ref()
-                        || (left_type.specifications == right_type.specifications
+                        || (left_type
+                            .specifications
+                            .equal_ignoring_unit(&right_type.specifications)
                             && left_type.name == right_type.name
                             && left_type.extends == right_type.extends);
                     if !identical_measure && !same_family && !anonymous_compatible {
@@ -682,9 +646,9 @@ pub fn arithmetic_operation(
                     match measure_add_subtract(l_val, op, r_val) {
                         Ok(rational) => OperationResult::from_bound(BoundValueKind {
                             value: ValueKind::Measure(rational),
-                            measure_binding_unit: BoundValueKind::agree_or_left_binding(
-                                left.measure_binding_unit.as_ref(),
-                                right.measure_binding_unit.as_ref(),
+                            unit: BoundValueKind::agree_or_left_binding(
+                                left.unit.as_ref(),
+                                right.unit.as_ref(),
                             ),
                         }),
                         Err(failure) => {
@@ -742,7 +706,7 @@ pub fn arithmetic_operation(
             match measure_ratio_arithmetic(q_val.clone(), op, r.clone()) {
                 Ok(rational) => OperationResult::from_bound(BoundValueKind {
                     value: ValueKind::Measure(rational),
-                    measure_binding_unit: left.measure_binding_unit.clone(),
+                    unit: left.unit.clone(),
                 }),
                 Err(failure) => OperationResult::Veto(VetoType::computation(failure.message())),
             }
@@ -753,7 +717,7 @@ pub fn arithmetic_operation(
                 match measure_ratio_arithmetic(q_val.clone(), op, r.clone()) {
                     Ok(rational) => OperationResult::from_bound(BoundValueKind {
                         value: ValueKind::Measure(rational),
-                        measure_binding_unit: right.measure_binding_unit.clone(),
+                        unit: right.unit.clone(),
                     }),
                     Err(failure) => OperationResult::Veto(VetoType::computation(failure.message())),
                 }
@@ -800,7 +764,7 @@ pub fn arithmetic_operation(
             };
             OperationResult::from_bound(BoundValueKind {
                 value: ValueKind::Measure(rational),
-                measure_binding_unit: left.measure_binding_unit.clone(),
+                unit: left.unit.clone(),
             })
         }
         // Number op Measure → Measure for multiply; for divide, negate signature if anonymous measure.
@@ -808,7 +772,7 @@ pub fn arithmetic_operation(
             ArithmeticComputation::Multiply => match number_arithmetic(n, op, measure_val) {
                 Ok(rational) => OperationResult::from_bound(BoundValueKind {
                     value: ValueKind::Measure(rational),
-                    measure_binding_unit: right.measure_binding_unit.clone(),
+                    unit: right.unit.clone(),
                 }),
                 Err(failure) => OperationResult::Veto(VetoType::computation(failure.message())),
             },
@@ -1091,8 +1055,8 @@ fn operate_with_right_result(
 }
 
 fn shift_date_range_right_endpoint(
-    range_left: &LiteralValue,
-    range_right: &LiteralValue,
+    range_left: &TypedLiteral,
+    range_right: &TypedLiteral,
     calendar_value: &RationalInteger,
     calendar_unit: &SemanticCalendarUnit,
     add: bool,
@@ -1117,7 +1081,7 @@ fn shift_date_range_right_endpoint(
         ArithmeticComputation::Subtract
     };
     let shifted_right = match super::datetime::datetime_arithmetic(
-        range_right,
+        &range_right.to_literal(),
         date_type,
         &op,
         &calendar_literal,
@@ -1127,12 +1091,18 @@ fn shift_date_range_right_endpoint(
         OperationResult::Veto(reason) => return OperationResult::Veto(reason),
     };
 
-    OperationResult::from_literal(LiteralValue::range(range_left.clone(), shifted_right))
+    OperationResult::from_literal(LiteralValue::range(
+        range_left.clone(),
+        TypedLiteral {
+            value: shifted_right.value,
+            lemma_type: Arc::clone(&range_right.lemma_type),
+        },
+    ))
 }
 
 fn shift_calendar_range_right_endpoint(
-    range_left: &LiteralValue,
-    range_right: &LiteralValue,
+    range_left: &TypedLiteral,
+    range_right: &TypedLiteral,
     calendar_value: &RationalInteger,
     calendar_unit: &SemanticCalendarUnit,
     add: bool,
@@ -1171,7 +1141,13 @@ fn shift_calendar_range_right_endpoint(
         OperationResult::Veto(reason) => return OperationResult::Veto(reason),
     };
 
-    OperationResult::from_literal(LiteralValue::range(range_left.clone(), shifted_right))
+    OperationResult::from_literal(LiteralValue::range(
+        range_left.clone(),
+        TypedLiteral {
+            value: shifted_right.value,
+            lemma_type: Arc::clone(&range_right.lemma_type),
+        },
+    ))
 }
 
 fn type_name(lemma_type: &LemmaType) -> String {

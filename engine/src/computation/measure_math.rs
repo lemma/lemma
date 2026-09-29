@@ -86,7 +86,7 @@ pub fn measure_magnitude_math(
 
     OperationResult::from_bound(BoundValueKind {
         value: ValueKind::Measure(new_canonical),
-        measure_binding_unit: value.measure_binding_unit.clone(),
+        unit: value.unit.clone(),
     })
 }
 

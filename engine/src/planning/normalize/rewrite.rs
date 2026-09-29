@@ -193,6 +193,11 @@ fn is_numeric_only(cells: &Cells<'_>, id: NormalFormId) -> bool {
 /// Merge a nested Sum into its Sum parent (same for Product).
 /// Recovers the n-ary cell the source chain already had; not a semantic rewrite,
 /// so the flat cell carries no fold origin.
+///
+/// A child that is already a live Sum/Product of the same operator is spliced
+/// directly. A child that is only a folded literal whose origin is such a Sum/
+/// Product (origin unset on that pre-image) is spliced the same way: post-order
+/// constant-fold otherwise hides the nest from this pass.
 fn flatten_associative(
     n: &mut Normalizer<'_>,
     id: NormalFormId,
@@ -212,13 +217,44 @@ fn flatten_associative(
                 flat.extend_from_slice(inner);
                 flattened = true;
             }
-            _ => flat.push(child),
+            _ => match folded_associative_operands(&n.cells, child, operator) {
+                Some(inner) => {
+                    flat.extend_from_slice(inner);
+                    flattened = true;
+                }
+                None => flat.push(child),
+            },
         }
     }
     if !flattened {
         return Ok(None);
     }
     Ok(Some(n.cells.intern_empty(operator.wrap(flat))))
+}
+
+/// Operands of a same-operator Sum/Product that exists only as this cell's fold
+/// origin (constant-fold or identity elim). `None` when the child is not that
+/// shape: keeps subtract/divide expansions (origin still set on the pre-image)
+/// and rule references opaque.
+fn folded_associative_operands<'a>(
+    cells: &'a Cells<'_>,
+    child: NormalFormId,
+    operator: Associative,
+) -> Option<&'a [NormalFormId]> {
+    let cell = cells.get(child);
+    if cell.rule_ref.is_some() {
+        return None;
+    }
+    let origin = cell.origin?;
+    let origin_cell = cells.get(origin);
+    if origin_cell.rule_ref.is_some() || origin_cell.origin.is_some() {
+        return None;
+    }
+    let (inner_operator, inner) = Associative::split(&origin_cell.kind)?;
+    if inner_operator != operator {
+        return None;
+    }
+    Some(inner)
 }
 
 /// The two associative arithmetic operators whose n-ary cells flatten and sort.

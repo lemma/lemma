@@ -340,6 +340,9 @@
         "help": {
           "type": "string"
         },
+        "unit": {
+          "type": "string"
+        },
         "extends": {
           "$ref": "#/$defs/TypeExtends"
         }
@@ -528,6 +531,9 @@
           }
         },
         "help": {
+          "type": "string"
+        },
+        "unit": {
           "type": "string"
         },
         "extends": {
@@ -1007,6 +1013,9 @@
         },
         "calendar": {
           "$ref": "#/$defs/CalendarResult"
+        },
+        "unit": {
+          "type": "string"
         }
       }
     },
@@ -1063,6 +1072,9 @@
         },
         "calendar": {
           "$ref": "#/$defs/CalendarResult"
+        },
+        "unit": {
+          "type": "string"
         },
         "range": {
           "$ref": "#/$defs/RangeResult"
@@ -1911,6 +1923,9 @@
         "calendar": {
           "$ref": "#/$defs/CalendarResult"
         },
+        "unit": {
+          "type": "string"
+        },
         "range": {
           "$ref": "#/$defs/RangeResult"
         },
@@ -2222,8 +2237,7 @@
         "role": {
           "enum": [
             "outcome",
-            "rule",
-            "source"
+            "rule"
           ]
         },
         "text": {
@@ -2296,6 +2310,9 @@
         },
         "calendar": {
           "$ref": "#/$defs/CalendarResult"
+        },
+        "unit": {
+          "type": "string"
         },
         "range": {
           "$ref": "#/$defs/RangeResult"
@@ -2399,6 +2416,9 @@
         },
         "calendar": {
           "$ref": "#/$defs/CalendarResult"
+        },
+        "unit": {
+          "type": "string"
         },
         "range": {
           "$ref": "#/$defs/RangeResult"

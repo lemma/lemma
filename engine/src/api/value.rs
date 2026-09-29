@@ -127,6 +127,8 @@ pub struct RuleResultValue {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub calendar: Option<CalendarResult>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unit: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub range: Option<Box<RangeResult>>,
 }
 
@@ -142,6 +144,7 @@ impl From<&DomainRuleResultValue> for RuleResultValue {
             date: value.date.clone(),
             time: value.time.clone(),
             calendar: value.calendar.as_ref().map(CalendarResult::from),
+            unit: value.unit.clone(),
             range: value
                 .range
                 .as_ref()

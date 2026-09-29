@@ -115,16 +115,21 @@ public sealed interface RuleResultValue {
      *
      * @param result display or null
      * @param measure unit map
+     * @param unit written unit or null
      */
-    record Measure(@Nullable String result, Map<String, BigDecimal> measure) implements Endpoint {}
+    record Measure(
+        @Nullable String result, Map<String, BigDecimal> measure, @Nullable String unit)
+        implements Endpoint {}
 
     /**
      * Ratio endpoint.
      *
      * @param result display or null
      * @param ratio unit map
+     * @param unit written unit or null
      */
-    record Ratio(@Nullable String result, Map<String, BigDecimal> ratio) implements Endpoint {}
+    record Ratio(@Nullable String result, Map<String, BigDecimal> ratio, @Nullable String unit)
+        implements Endpoint {}
 
     /**
      * Calendar endpoint.
@@ -152,6 +157,7 @@ public sealed interface RuleResultValue {
       LocalDate date = null;
       LocalTime time = null;
       CalendarResult calendar = null;
+      String unit = null;
       while (p.nextToken() != JsonToken.END_OBJECT) {
         String field = p.currentName();
         p.nextToken();
@@ -165,6 +171,7 @@ public sealed interface RuleResultValue {
           case "date" -> date = JsonReading.readLocalDate(p);
           case "time" -> time = JsonReading.readLocalTime(p);
           case "calendar" -> calendar = CalendarResult.read(p);
+          case "unit" -> unit = JsonReading.readString(p);
           default -> JsonReading.unknownField(field, "RuleResultValueEndpoint");
         }
       }
@@ -184,10 +191,10 @@ public sealed interface RuleResultValue {
         return new Time(result, time);
       }
       if (measure != null) {
-        return new Measure(result, measure);
+        return new Measure(result, measure, unit);
       }
       if (ratio != null) {
-        return new Ratio(result, ratio);
+        return new Ratio(result, ratio, unit);
       }
       if (calendar != null) {
         return new Calendar(result, calendar);
@@ -278,8 +285,10 @@ public sealed interface RuleResultValue {
    *
    * @param result display or null
    * @param measure unit map
+   * @param unit written unit or null
    */
-  record Measure(@Nullable String result, Map<String, BigDecimal> measure)
+  record Measure(
+      @Nullable String result, Map<String, BigDecimal> measure, @Nullable String unit)
       implements RuleResultValue {}
 
   /**
@@ -287,8 +296,10 @@ public sealed interface RuleResultValue {
    *
    * @param result display or null
    * @param ratio unit map
+   * @param unit written unit or null
    */
-  record Ratio(@Nullable String result, Map<String, BigDecimal> ratio) implements RuleResultValue {}
+  record Ratio(@Nullable String result, Map<String, BigDecimal> ratio, @Nullable String unit)
+      implements RuleResultValue {}
 
   /**
    * Calendar value.
@@ -332,6 +343,7 @@ public sealed interface RuleResultValue {
     LocalTime time = null;
     CalendarResult calendar = null;
     RangeResult range = null;
+    String unit = null;
     while (p.nextToken() != JsonToken.END_OBJECT) {
       String field = p.currentName();
       p.nextToken();
@@ -345,6 +357,7 @@ public sealed interface RuleResultValue {
         case "date" -> date = JsonReading.readLocalDate(p);
         case "time" -> time = JsonReading.readLocalTime(p);
         case "calendar" -> calendar = CalendarResult.read(p);
+        case "unit" -> unit = JsonReading.readString(p);
         case "range" -> range = RangeResult.read(p);
         default -> JsonReading.unknownField(field, "RuleResultValue");
       }
@@ -365,10 +378,10 @@ public sealed interface RuleResultValue {
       return new Time(result, time);
     }
     if (measure != null) {
-      return new Measure(result, measure);
+      return new Measure(result, measure, unit);
     }
     if (ratio != null) {
-      return new Ratio(result, ratio);
+      return new Ratio(result, ratio, unit);
     }
     if (calendar != null) {
       return new Calendar(result, calendar);

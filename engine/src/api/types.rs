@@ -230,6 +230,8 @@ pub enum TypeSpecification {
         traits: Vec<MeasureTrait>,
         #[serde(default)]
         decomposition: Option<BaseMeasureVector>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        unit: Option<String>,
         help: String,
     },
     Number {
@@ -258,6 +260,8 @@ pub enum TypeSpecification {
         maximum: Option<Decimal>,
         decimals: Option<u8>,
         units: Vec<RatioUnit>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        unit: Option<String>,
         help: String,
     },
     RatioRange {
@@ -336,6 +340,7 @@ impl From<&DomainTypeSpecification> for TypeSpecification {
                 units,
                 traits,
                 decomposition,
+                unit,
                 help,
             } => Self::Measure {
                 minimum: optional_named_bound(minimum),
@@ -344,6 +349,7 @@ impl From<&DomainTypeSpecification> for TypeSpecification {
                 units: measure_units_from(units),
                 traits: traits.iter().copied().map(MeasureTrait::from).collect(),
                 decomposition: decomposition.clone(),
+                unit: unit.clone(),
                 help: help.clone(),
             },
             DomainTypeSpecification::Number {
@@ -375,12 +381,14 @@ impl From<&DomainTypeSpecification> for TypeSpecification {
                 maximum,
                 decimals,
                 units,
+                unit,
                 help,
             } => Self::Ratio {
                 minimum: optional_decimal_bound(minimum),
                 maximum: optional_decimal_bound(maximum),
                 decimals: *decimals,
                 units: ratio_units_from(units),
+                unit: unit.clone(),
                 help: help.clone(),
             },
             DomainTypeSpecification::RatioRange {
@@ -482,8 +490,6 @@ pub struct LemmaType {
     #[serde(flatten)]
     pub specifications: TypeSpecification,
     pub extends: TypeExtends,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub measure_binding_unit: Option<String>,
 }
 
 impl From<&DomainLemmaType> for LemmaType {
@@ -492,7 +498,6 @@ impl From<&DomainLemmaType> for LemmaType {
             name: lemma_type.name.clone(),
             specifications: TypeSpecification::from(&lemma_type.specifications),
             extends: TypeExtends::from(&lemma_type.extends),
-            measure_binding_unit: lemma_type.measure_binding_unit.clone(),
         }
     }
 }

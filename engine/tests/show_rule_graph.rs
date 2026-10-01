@@ -288,6 +288,7 @@ fn every_depends_on_rules_and_rule_leaf_is_a_show_key() {
             | ShowExpression::DateRelative { operand, .. }
             | ShowExpression::DateCalendar { operand, .. }
             | ShowExpression::PastFutureRange { operand, .. }
+            | ShowExpression::RangeBound { operand, .. }
             | ShowExpression::IsVeto { operand } => walk(operand, keys),
             ShowExpression::Literal(_)
             | ShowExpression::Data { .. }

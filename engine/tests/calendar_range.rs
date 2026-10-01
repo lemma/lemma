@@ -177,7 +177,7 @@ data band: units.calendar
 fn range_plus_calendar_shifts_upper() {
     let code = r#"spec shift
 uses lemma units
-rule upper: (18 year...67 year) + 2 year"#;
+rule shifted: (18 year...67 year) + 2 year"#;
     let mut engine = Engine::new();
     engine
         .load([(source(), code.to_string())])
@@ -189,11 +189,11 @@ rule upper: (18 year...67 year) + 2 year"#;
             "shift",
             Some(&effective),
             HashMap::new(),
-            Some(&["upper".to_string()]),
+            Some(&["shifted".to_string()]),
             true,
         )
         .expect("Should evaluate");
-    let rule = response.results.get("upper").expect("upper");
+    let rule = response.results.get("shifted").expect("shifted");
     assert_eq!(rule.result().expect("result"), "18 year...69 year");
 }
 

@@ -41,14 +41,14 @@ LLVM version: 21.1.3
 
 | Metric | Covered | Total | Percent |
 |--------|--------:|------:|--------:|
-| Lines | 40543 | 47762 | 84.89% |
-| Functions | 3122 | 3592 | 86.92% |
-| Regions | 58887 | 70324 | 83.74% |
+| Lines | 40863 | 48105 | 84.95% |
+| Functions | 3141 | 3611 | 86.98% |
+| Regions | 59396 | 70866 | 83.81% |
 
 ## Test run
 
-- Total: 2734
-- Passed: 2734
+- Total: 2752
+- Passed: 2752
 - Skipped: 0
 - Failed: 0
 
@@ -64,7 +64,7 @@ Sorted by line coverage ascending (weakest first). Only files under `src/` for t
 | `computation/operation_result.rs` | 48.00 | 50.00 | 47.65 | 48/100 |
 | `computation/decimal_math.rs` | 48.15 | 100.00 | 40.18 | 26/54 |
 | `computation/bigint/signed.rs` | 60.82 | 57.14 | 57.08 | 177/291 |
-| `api/show.rs` | 64.03 | 81.82 | 63.86 | 89/139 |
+| `api/show.rs` | 62.24 | 81.82 | 62.02 | 89/143 |
 | `computation/comparison.rs` | 70.56 | 85.71 | 67.29 | 127/180 |
 | `mcp/tools.rs` | 70.95 | 60.00 | 68.59 | 232/327 |
 | `computation/arithmetic.rs` | 73.40 | 72.73 | 68.80 | 734/1000 |
@@ -76,44 +76,44 @@ Sorted by line coverage ascending (weakest first). Only files under `src/` for t
 | `snapshot.rs` | 79.21 | 77.78 | 81.19 | 160/202 |
 | `computation/units.rs` | 79.62 | 100.00 | 77.61 | 168/211 |
 | `evaluation/run_data.rs` | 80.72 | 75.00 | 81.93 | 427/529 |
-| `planning/graph.rs` | 80.72 | 86.15 | 81.58 | 7699/9538 |
+| `planning/graph.rs` | 80.78 | 86.15 | 81.64 | 7739/9580 |
 | `planning/execution_plan.rs` | 80.85 | 75.00 | 77.37 | 2069/2559 |
 | `evaluation/expression.rs` | 81.54 | 100.00 | 86.02 | 53/65 |
-| `planning/semantics.rs` | 81.78 | 82.13 | 82.26 | 3937/4814 |
-| `computation/range.rs` | 82.23 | 93.75 | 80.41 | 199/242 |
-| `parsing/ast.rs` | 82.36 | 88.51 | 74.39 | 1097/1332 |
-| `planning/typing.rs` | 82.57 | 100.00 | 78.74 | 308/373 |
+| `planning/semantics.rs` | 81.83 | 82.33 | 82.29 | 3940/4815 |
+| `computation/range.rs` | 82.47 | 94.12 | 80.34 | 207/251 |
 | `computation/bigint/biguint.rs` | 83.53 | 89.80 | 81.61 | 431/516 |
 | `literals.rs` | 83.59 | 78.50 | 84.33 | 606/725 |
-| `parsing/parser.rs` | 84.19 | 87.42 | 80.47 | 1911/2270 |
+| `planning/typing.rs` | 83.61 | 100.00 | 79.88 | 347/415 |
+| `parsing/ast.rs` | 83.73 | 88.59 | 77.43 | 1122/1340 |
+| `parsing/parser.rs` | 84.28 | 87.01 | 80.54 | 1935/2296 |
 | `computation/rational.rs` | 84.89 | 96.00 | 78.68 | 764/900 |
 | `computation/datetime.rs` | 85.53 | 80.43 | 83.87 | 975/1140 |
 | `spec_set_id.rs` | 87.72 | 100.00 | 95.52 | 50/57 |
 | `api/types.rs` | 87.90 | 95.00 | 88.45 | 218/248 |
 | `planning/ordered_dispatch.rs` | 88.19 | 90.24 | 87.65 | 418/474 |
-| `parsing/lexer.rs` | 88.35 | 100.00 | 84.97 | 637/721 |
+| `parsing/lexer.rs` | 88.22 | 100.00 | 84.80 | 644/730 |
 | `planning/normalize/rewrite.rs` | 88.58 | 89.02 | 87.25 | 1047/1182 |
-| `planning/normalize.rs` | 89.26 | 88.20 | 88.29 | 2087/2338 |
+| `planning/normalize.rs` | 89.00 | 88.20 | 87.88 | 2096/2355 |
 | `evaluation/explanations.rs` | 89.45 | 100.00 | 89.09 | 246/275 |
 | `string_distance.rs` | 90.48 | 83.33 | 93.22 | 57/63 |
 | `planning/unit_index.rs` | 90.74 | 94.23 | 91.68 | 500/551 |
-| `evaluation/narration.rs` | 90.94 | 87.88 | 92.06 | 472/519 |
+| `evaluation/narration.rs` | 90.77 | 87.88 | 91.95 | 472/520 |
 | `formatting/mod.rs` | 92.33 | 100.00 | 91.29 | 903/978 |
+| `parsing/mod.rs` | 92.36 | 99.03 | 89.04 | 1511/1636 |
 | `registry.rs` | 92.45 | 97.44 | 94.47 | 968/1047 |
-| `parsing/mod.rs` | 92.69 | 98.96 | 89.72 | 1382/1491 |
 | `evaluation/conversion_trace.rs` | 92.86 | 100.00 | 93.26 | 130/140 |
-| `quality.rs` | 93.12 | 96.77 | 89.24 | 907/974 |
+| `quality.rs` | 93.03 | 96.77 | 89.15 | 907/975 |
 | `limits.rs` | 93.27 | 100.00 | 85.40 | 97/104 |
 | `planning/discovery.rs` | 93.34 | 97.06 | 94.16 | 1233/1321 |
 | `engine.rs` | 93.48 | 92.43 | 94.25 | 2165/2316 |
 | `planning/mod.rs` | 93.66 | 96.15 | 94.61 | 1358/1450 |
 | `evaluation/mod.rs` | 94.46 | 86.36 | 94.56 | 307/325 |
+| `evaluation/tree.rs` | 96.07 | 100.00 | 94.29 | 440/458 |
 | `deps.rs` | 96.23 | 100.00 | 96.47 | 51/53 |
-| `evaluation/tree.rs` | 96.23 | 100.00 | 94.54 | 408/424 |
 | `planning/spec_set.rs` | 96.50 | 95.24 | 98.23 | 138/143 |
 | `planning/unit_family.rs` | 96.65 | 96.77 | 95.78 | 375/388 |
 | `evaluation/branch_semantics.rs` | 96.77 | 100.00 | 90.18 | 90/93 |
-| `planning/show_expression.rs` | 97.14 | 100.00 | 96.18 | 102/105 |
+| `planning/show_expression.rs` | 97.25 | 100.00 | 96.32 | 106/109 |
 | `parsing/assignment_continuation_tests.rs` | 97.39 | 100.00 | 93.26 | 261/268 |
 | `evaluation/response.rs` | 98.84 | 94.59 | 98.37 | 599/606 |
 | `api/response.rs` | 100.00 | 100.00 | 100.00 | 22/22 |
@@ -126,4 +126,4 @@ Sorted by line coverage ascending (weakest first). Only files under `src/` for t
 - [Engine integration test catalog](../../../engine/tests/README.md) — qualitative map of scenarios and subsystem overlap clusters
 - [CLI test coverage](cli.md)
 - [Engine benchmarks](../benchmarks/engine.md)
-<!-- coverage-input-digest: 5a3646aa9e4b47f4 -->
+<!-- coverage-input-digest: 499fe2846dd7ca43 -->

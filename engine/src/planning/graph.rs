@@ -20,7 +20,7 @@ use crate::planning::semantics::{
 };
 use crate::planning::typing::{
     comparison_type, date_predicate_type, logical_and_type, logical_not_type, math_op_type,
-    measure_range_matches_measure, past_future_range_type, piecewise_type,
+    measure_range_matches_measure, past_future_range_type, piecewise_type, range_bound_result_type,
     range_matches_measure_type, range_matches_range_measure, range_span_type, result_is_veto_type,
     unit_conversion_type, MeasureScope,
 };
@@ -1511,6 +1511,7 @@ fn expression_has_source_locations(expr: &ast::Expression) -> bool {
         | ast::ExpressionKind::UnitConversion(e, _)
         | ast::ExpressionKind::LogicalNegation(e, _)
         | ast::ExpressionKind::MathematicalComputation(_, e)
+        | ast::ExpressionKind::RangeBound(_, e)
         | ast::ExpressionKind::ResultIsVeto(e) => expression_has_source_locations(e),
         ast::ExpressionKind::RangeLiteral(l, r)
         | ast::ExpressionKind::RangeContainment(l, r)
@@ -3264,6 +3265,15 @@ impl<'a> GraphBuilder<'a> {
                 ))
             }
 
+            ast::ExpressionKind::RangeBound(bound, operand) => {
+                let converted_operand =
+                    self.convert_expression_and_extract_dependencies(operand, ctx)?;
+                Some(Expression::with_source(
+                    ExpressionKind::RangeBound(*bound, Arc::new(converted_operand)),
+                    expr.source_location.clone(),
+                ))
+            }
+
             ast::ExpressionKind::Literal(value) => {
                 let semantic_value = match value {
                     Value::NumberWithUnit(magnitude, unit) => {
@@ -3643,6 +3653,21 @@ fn infer_expression_type_uncached(
             let operand_type =
                 infer_expression_type(operand, graph, computed_rule_types, resolved_types, spec);
             math_op_type(op, &operand_type, &arithmetic_scope(resolved_types, graph))
+        }
+
+        ExpressionKind::RangeBound(_, operand) => {
+            let operand_type =
+                infer_expression_type(operand, graph, computed_rule_types, resolved_types, spec);
+            if operand_type.vetoed() {
+                return Arc::new(LemmaType::veto_type());
+            }
+            if operand_type.is_undetermined() {
+                return Arc::new(LemmaType::undetermined_type());
+            }
+            range_bound_result_type(
+                operand_type.as_ref(),
+                &arithmetic_scope(resolved_types, graph),
+            )
         }
 
         ExpressionKind::Veto(_) => Arc::new(LemmaType::veto_type()),
@@ -5194,6 +5219,31 @@ fn check_expression(
                 check_mathematical_operand(graph, op, &operand_type, expr_source),
                 &mut errors,
             );
+        }
+
+        ExpressionKind::RangeBound(bound, operand) => {
+            collect(
+                check_expression(operand, graph, inferred_types, resolved_types, spec),
+                &mut errors,
+            );
+
+            let operand_type =
+                infer_expression_type(operand, graph, inferred_types, resolved_types, spec);
+            if !operand_type.vetoed() && !operand_type.is_undetermined() && !operand_type.is_range()
+            {
+                let expr_source = expression
+                    .source_location
+                    .as_ref()
+                    .expect("BUG: expression missing source in check_expression");
+                errors.push(engine_error_at_graph(
+                    graph,
+                    expr_source,
+                    format!(
+                        "'{bound}' requires a range, got type '{}'",
+                        operand_type.name()
+                    ),
+                ));
+            }
         }
 
         ExpressionKind::Veto(_) => {}

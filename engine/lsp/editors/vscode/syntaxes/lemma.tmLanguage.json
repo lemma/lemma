@@ -113,7 +113,7 @@
           "name": "keyword.operator.arithmetic.lemma"
         },
         {
-          "match": "\\b(sqrt|sin|cos|tan|asin|acos|atan|log|exp|abs|floor|ceil|round)\\b",
+          "match": "\\b(sqrt|sin|cos|tan|asin|acos|atan|log|exp|abs|floor|ceil|round|lower|upper)\\b",
           "name": "support.function.math.lemma"
         }
       ]

@@ -2,6 +2,16 @@
 
 Releases cover the Lemma engine, `lemma` CLI, OpenAPI crate, LSP, SDKs and VS Code extension. They all follow the same version everywhere. The release version is `[workspace.package] version` in the root `Cargo.toml`. Git tags follow `lemma-v{version}` (for example `lemma-v0.8.20`); releases before the rename used `cli-v{version}`. Draft notes for the next version quickly by running `cargo changelog` to print `git diff` / `git log` since the latest release tag (`xtask` `versions-diff`). Tip: feed that into an LLM to create a summary for this changelog.
 
+## [Unreleased]
+
+### Added
+
+- **Range endpoints**: `lower` and `upper` return the ordered ends of a range. `lower` is included; `upper` is excluded. `lower 5...10` is `5` because `...` binds tighter. A `money range` yields `money`, and the endpoint keeps its written unit. `lower` and `upper` are reserved names. `-> lower` and `-> upper` are unchanged as constraint commands.
+
+### Changed
+
+- **Prefix operators take one range operand**: `floor x + 1` is `(floor x) + 1`, `floor x as gram` is `(floor x) as gram`, and `sqrt x ^ 2` is `(sqrt x) ^ 2`. Parentheses widen the operand (`floor (x + 1)`). `past` / `future` are unchanged.
+
 ## [0.9.11] - 2026-09-22
 
 `show` now names where imported data and rules live. The result string field is `result`, not `display`. Bare `uses` takes the target name as the alias.

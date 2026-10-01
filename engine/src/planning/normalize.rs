@@ -12,14 +12,14 @@ use crate::planning::semantics::{
     primitive_boolean_arc, primitive_date_arc, primitive_number_arc, primitive_ratio_arc,
     primitive_text_arc, primitive_time_arc, ArithmeticComputation, ComparisonComputation,
     DataDefinition, DataPath, Expression, ExpressionKind, LemmaType, LiteralValue,
-    MathematicalComputation, ReferenceEnd, RulePath, SemanticConversionTarget, Source,
+    MathematicalComputation, RangeBound, ReferenceEnd, RulePath, SemanticConversionTarget, Source,
     TypedLiteral, ValueKind, VetoExpression,
 };
 use crate::planning::typing::{
     comparison_type, compute_arithmetic_result_type, date_predicate_type,
     infer_range_type_from_endpoint_types, logical_and_type, logical_not_type, math_op_type,
-    past_future_range_type, piecewise_type, result_is_veto_type, unit_conversion_type,
-    MeasureScope,
+    past_future_range_type, piecewise_type, range_bound_result_type, result_is_veto_type,
+    unit_conversion_type, MeasureScope,
 };
 use crate::Error;
 use indexmap::IndexMap;
@@ -316,6 +316,7 @@ pub(crate) enum NormalFormKind {
     RangeLiteral(NormalFormId, NormalFormId),
     PastFutureRange(DateRelativeKind, NormalFormId),
     RangeContainment(NormalFormId, NormalFormId),
+    RangeBound(RangeBound, NormalFormId),
     ResultIsVeto(NormalFormId),
     Now,
     Piecewise(Vec<(NormalFormId, NormalFormId)>),
@@ -355,6 +356,7 @@ impl NormalFormKind {
             | NormalFormKind::DateRelative(_, x)
             | NormalFormKind::DateCalendar(_, _, x)
             | NormalFormKind::PastFutureRange(_, x)
+            | NormalFormKind::RangeBound(_, x)
             | NormalFormKind::ResultIsVeto(x) => vec![*x],
             NormalFormKind::Piecewise(arms) => arms
                 .iter()
@@ -406,6 +408,7 @@ impl NormalFormKind {
             NormalFormKind::PastFutureRange(kind, x) => {
                 NormalFormKind::PastFutureRange(*kind, map(*x))
             }
+            NormalFormKind::RangeBound(bound, x) => NormalFormKind::RangeBound(*bound, map(*x)),
             NormalFormKind::ResultIsVeto(x) => NormalFormKind::ResultIsVeto(map(*x)),
             NormalFormKind::Now => NormalFormKind::Now,
             NormalFormKind::Piecewise(arms) => NormalFormKind::Piecewise(
@@ -950,6 +953,10 @@ impl Cells<'_> {
                 past_future_range_type(self.result_type(*offset)),
                 Vec::new(),
             ),
+            NormalFormKind::RangeBound(_, operand) => (
+                range_bound_result_type(self.result_type(*operand), &self.measure_scope),
+                Vec::new(),
+            ),
             NormalFormKind::Piecewise(arms) => (
                 piecewise_type(
                     arms.iter()
@@ -994,6 +1001,7 @@ impl Cells<'_> {
                 | NormalFormKind::MathOp(_, x)
                 | NormalFormKind::UnitConversion(x, _)
                 | NormalFormKind::PastFutureRange(_, x)
+                | NormalFormKind::RangeBound(_, x)
                 | NormalFormKind::ResultIsVeto(x) => self.result_type(*x).is_undetermined(),
                 NormalFormKind::Piecewise(arms) => arms.iter().any(|(condition, body)| {
                     self.result_type(*condition).is_undetermined()
@@ -1124,6 +1132,10 @@ fn to_normal_form(expr: &Expression, cells: &mut Cells<'_>, lower: &LowerCtx<'_>
             let inner_id = to_normal_form(inner, cells, lower);
             cells.intern_empty(NormalFormKind::PastFutureRange(*kind, inner_id))
         }
+        ExpressionKind::RangeBound(bound, inner) => {
+            let inner_id = to_normal_form(inner, cells, lower);
+            cells.intern_empty(NormalFormKind::RangeBound(*bound, inner_id))
+        }
         ExpressionKind::RangeContainment(left, right) => {
             let left_id = to_normal_form(left, cells, lower);
             let right_id = to_normal_form(right, cells, lower);
@@ -1165,9 +1177,9 @@ fn normal_form_precedence(kind: &NormalFormKind) -> u8 {
         | NormalFormKind::Reciprocal(_) => arithmetic_precedence(&ArithmeticComputation::Multiply),
         NormalFormKind::Power(..) => arithmetic_precedence(&ArithmeticComputation::Power),
         NormalFormKind::UnitConversion(..) => 8,
-        NormalFormKind::RangeLiteral(..) => 9,
-        NormalFormKind::Leaf(_)
-        | NormalFormKind::MathOp(..)
+        NormalFormKind::MathOp(..) | NormalFormKind::RangeBound(..) => 9,
+        NormalFormKind::RangeLiteral(..)
+        | NormalFormKind::Leaf(_)
         | NormalFormKind::Veto(_)
         | NormalFormKind::Now
         | NormalFormKind::PastFutureRange(..)
@@ -1434,6 +1446,13 @@ fn explanation_display_inner(forms: &[NormalForm], id: NormalFormId) -> String {
                 explain_child(forms, *x, prec, OperandSide::Right, None)
             )
         }
+        NormalFormKind::RangeBound(bound, x) => {
+            let prec = normal_form_precedence(&nf.kind);
+            format!(
+                "{bound} {}",
+                explain_child(forms, *x, prec, OperandSide::Right, None)
+            )
+        }
         NormalFormKind::RangeContainment(value, range) => {
             let prec = normal_form_precedence(&nf.kind);
             format!(
@@ -1673,6 +1692,9 @@ mod tests {
             ),
             NormalFormKind::PastFutureRange(kind, x) => {
                 ExpressionKind::PastFutureRange(*kind, Arc::new(to_expression(forms, *x, source)))
+            }
+            NormalFormKind::RangeBound(bound, x) => {
+                ExpressionKind::RangeBound(*bound, Arc::new(to_expression(forms, *x, source)))
             }
             NormalFormKind::RangeContainment(a, b) => ExpressionKind::RangeContainment(
                 Arc::new(to_expression(forms, *a, source.clone())),

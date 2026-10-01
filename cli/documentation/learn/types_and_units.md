@@ -113,7 +113,7 @@ rule sine_value: sin angle
 rule log_value: log 10
 ```
 
-Prefix operators (parentheses optional): `sqrt`, `sin`, `cos`, `tan`, `log`, `exp`, `abs`, `floor`, `ceil`, `round`
+Prefix operators (parentheses optional): `sqrt`, `sin`, `cos`, `tan`, `log`, `exp`, `abs`, `floor`, `ceil`, `round`, `lower`, `upper`. The operand is one range operand, so `floor total + 1` is `(floor total) + 1`. `lower` and `upper` read a range's endpoints (see [Ranges](#ranges)).
 
 ## Standard library: `uses lemma units`
 
@@ -171,7 +171,7 @@ Strip to a bare number with a chained cast: `amount as eur as number`. See [Type
 
 ## Ranges
 
-Intervals use `lo...hi` (lower inclusive, upper exclusive). Test membership with `in`; project width with `(lo...hi) as <unit>`. Range slots use `number range`, `date range`, `time range`, `measure range`, `ratio range`, or a named `<type> range`. Constrain endpoints with `-> lower` / `-> upper` and span width with `-> minimum` / `-> maximum`:
+Intervals use `lo...hi` (lower inclusive, upper exclusive). Test membership with `in`; project width with `(lo...hi) as <unit>`. Read an endpoint with `lower` / `upper`: `lower` is the included end, `upper` is the excluded end (`upper (5...10)` is `10`, and `10` is not `in` the range). `...` binds tighter, so `lower 5...10` is the lower end of that range. Range slots use `number range`, `date range`, `time range`, `measure range`, `ratio range`, or a named `<type> range`. Constrain endpoints with `-> lower` / `-> upper` and span width with `-> minimum` / `-> maximum`. Those commands are not the operators, and `lower` / `upper` cannot be data or rule names:
 
 ```lemma
 spec eligibility
@@ -192,6 +192,8 @@ rule in_working_age: age in 18 year...67 year
 rule in_band: score in 0...100
 
 rule days_in_q2: (2024-04-01...2024-07-01) as day
+
+rule window_start: lower window
 ```
 
 See [Ranges in the language reference](../reference/readme.md#ranges) and [Data commands](../reference/readme.md#data-commands).

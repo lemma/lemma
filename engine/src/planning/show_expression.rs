@@ -5,7 +5,7 @@
 
 use crate::parsing::ast::{
     ArithmeticComputation, CalendarPeriodUnit, ComparisonComputation, DateCalendarKind,
-    DateRelativeKind, MathematicalComputation, PrimitiveKind, VetoExpression,
+    DateRelativeKind, MathematicalComputation, PrimitiveKind, RangeBound, VetoExpression,
 };
 use crate::planning::semantics::{
     Expression, ExpressionKind, SemanticConversionTarget, TypedLiteral,
@@ -103,6 +103,10 @@ pub enum ShowExpression {
         value: Box<ShowExpression>,
         range: Box<ShowExpression>,
     },
+    RangeBound {
+        bound: RangeBound,
+        operand: Box<ShowExpression>,
+    },
     IsVeto {
         operand: Box<ShowExpression>,
     },
@@ -177,6 +181,10 @@ pub fn show_expression_from(
         ExpressionKind::RangeContainment(value, range) => ShowExpression::RangeContainment {
             value: Box::new(show_expression_from(value, show_keys)),
             range: Box::new(show_expression_from(range, show_keys)),
+        },
+        ExpressionKind::RangeBound(bound, operand) => ShowExpression::RangeBound {
+            bound: *bound,
+            operand: Box::new(show_expression_from(operand, show_keys)),
         },
         ExpressionKind::ResultIsVeto(operand) => ShowExpression::IsVeto {
             operand: Box::new(show_expression_from(operand, show_keys)),

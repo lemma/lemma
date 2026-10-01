@@ -19,7 +19,8 @@ use crate::planning::execution_plan::{ExecutionPlan, RuleIndex};
 use crate::planning::normalize::{LeafKind, NormalFormId, NormalFormKind};
 use crate::planning::ordered_dispatch::{region_count, region_of_scrutinee, DispatchKey};
 use crate::planning::semantics::{
-    ArithmeticComputation, ComparisonComputation, LemmaType, LiteralValue, ValueKind,
+    ArithmeticComputation, BoundValueKind, ComparisonComputation, LemmaType, LiteralValue,
+    RangeBound, ValueKind,
 };
 use std::sync::Arc;
 
@@ -296,6 +297,47 @@ fn eval_kind(
                 OperationResult::from_literal(LiteralValue::range(left_typed, right_typed))
             },
         ),
+        NormalFormKind::RangeBound(bound, inner) => {
+            let value = eval(*inner, plan, ctx)?;
+            if value.vetoed() {
+                return Ok(value);
+            }
+            let range_literal = borrow_value(&value, "range operand");
+            match &range_literal.value {
+                ValueKind::Range(left, right) => {
+                    let endpoint_type = plan
+                        .result_type(*inner)
+                        .specifications
+                        .element_from_range()
+                        .map(|element| Arc::new(LemmaType::primitive(element)))
+                        .expect("BUG: lower/upper requires a range result type");
+                    match crate::computation::range::ordered_endpoints(
+                        &left.value,
+                        &right.value,
+                        &endpoint_type,
+                    ) {
+                        Ok((lo, hi)) => {
+                            let picked = match bound {
+                                RangeBound::Lower => lo,
+                                RangeBound::Upper => hi,
+                            };
+                            let chosen = if std::ptr::eq(picked, &left.value) {
+                                left.as_ref()
+                            } else {
+                                right.as_ref()
+                            };
+                            let unit = chosen.lemma_type.unit().map(Arc::<str>::from);
+                            Ok(OperationResult::from_bound(BoundValueKind::with_binding(
+                                chosen.value.clone(),
+                                unit,
+                            )))
+                        }
+                        Err(veto) => Ok(OperationResult::Veto(veto)),
+                    }
+                }
+                other => panic!("BUG: lower/upper expected a range value, got {other:?}"),
+            }
+        }
         NormalFormKind::PastFutureRange(kind, inner) => {
             let value = eval(*inner, plan, ctx)?;
             if value.vetoed() {

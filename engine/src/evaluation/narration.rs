@@ -285,6 +285,7 @@ fn narrate_shape(id: NormalFormId, plan: &ExecutionPlan, ctx: &EvaluationContext
         | NormalFormKind::DateRelative(_, x)
         | NormalFormKind::DateCalendar(_, _, x)
         | NormalFormKind::PastFutureRange(_, x)
+        | NormalFormKind::RangeBound(_, x)
         | NormalFormKind::ResultIsVeto(x) => compose(id, &[*x], plan, ctx),
         NormalFormKind::UnitConversion(inner, target) => {
             let expression = explanation_display(forms, id);
@@ -668,6 +669,7 @@ fn condition_statement(
         | NormalFormKind::Veto(_)
         | NormalFormKind::RangeLiteral(..)
         | NormalFormKind::PastFutureRange(..)
+        | NormalFormKind::RangeBound(..)
         | NormalFormKind::Leaf(LeafKind::Literal(_)) => {
             unreachable!("BUG: non-boolean condition in condition_statement")
         }

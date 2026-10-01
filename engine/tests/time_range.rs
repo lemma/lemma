@@ -133,12 +133,17 @@ fn declared_time_range_default_and_containment() {
     let code = r#"spec test
 data window: time range -> suggest 09:00...17:00
 rule inside: 12:30 in window
-rule lower: 09:00 in window
+rule includes_start: 09:00 in window
 rule upper_excluded: 17:00 in window"#;
     let mut data = HashMap::new();
     data.insert("window".to_string(), "09:00...17:00".into());
     assert!(eval_bool_with_data(code, "test", "inside", data.clone()));
-    assert!(eval_bool_with_data(code, "test", "lower", data.clone()));
+    assert!(eval_bool_with_data(
+        code,
+        "test",
+        "includes_start",
+        data.clone()
+    ));
     assert!(!eval_bool_with_data(code, "test", "upper_excluded", data));
 }
 

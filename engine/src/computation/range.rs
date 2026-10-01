@@ -193,16 +193,14 @@ fn comparison_boolean_result(result: OperationResult, context: &str) -> Result<b
     }
 }
 
-/// Half-open interval `[lo, hi)` where `lo` and `hi` are the ordered range endpoints.
-/// Returns `OperationResult::from_literal(Boolean)` or propagates a Veto from inner comparisons.
-pub fn check_containment(
-    value: &ValueKind,
-    value_type: &Arc<LemmaType>,
-    range_left: &ValueKind,
-    range_right: &ValueKind,
+/// Smaller endpoint first. Written order is not normalized, so `10...5` orders as `(5, 10)`.
+/// Equal endpoints come back swapped; the two values are equal.
+pub fn ordered_endpoints<'a>(
+    range_left: &'a ValueKind,
+    range_right: &'a ValueKind,
     endpoint_type: &Arc<LemmaType>,
-) -> OperationResult {
-    let (lo, hi) = match comparison_boolean_result(
+) -> Result<(&'a ValueKind, &'a ValueKind), VetoType> {
+    match comparison_boolean_result(
         super::comparison_operation(
             range_left,
             endpoint_type,
@@ -212,9 +210,24 @@ pub fn check_containment(
         ),
         "range endpoint ordering",
     ) {
-        Ok(true) => (range_left, range_right),
-        Ok(false) => (range_right, range_left),
-        Err(v) => return OperationResult::Veto(v),
+        Ok(true) => Ok((range_left, range_right)),
+        Ok(false) => Ok((range_right, range_left)),
+        Err(veto) => Err(veto),
+    }
+}
+
+/// Half-open interval `[lo, hi)` where `lo` and `hi` are the ordered range endpoints.
+/// Returns `OperationResult::from_literal(Boolean)` or propagates a Veto from inner comparisons.
+pub fn check_containment(
+    value: &ValueKind,
+    value_type: &Arc<LemmaType>,
+    range_left: &ValueKind,
+    range_right: &ValueKind,
+    endpoint_type: &Arc<LemmaType>,
+) -> OperationResult {
+    let (lo, hi) = match ordered_endpoints(range_left, range_right, endpoint_type) {
+        Ok(pair) => pair,
+        Err(veto) => return OperationResult::Veto(veto),
     };
 
     let lower_ok = match comparison_boolean_result(

@@ -436,6 +436,7 @@ fn walk_expr_for_ambiguous_and(
         | ExpressionKind::UnitConversion(inner, _)
         | ExpressionKind::LogicalNegation(inner, _)
         | ExpressionKind::MathematicalComputation(_, inner)
+        | ExpressionKind::RangeBound(_, inner)
         | ExpressionKind::ResultIsVeto(inner) => {
             walk_expr_for_ambiguous_and(repository, spec, rule, inner, out);
         }

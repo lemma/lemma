@@ -26,7 +26,10 @@ mod assignment_continuation_tests;
 
 #[cfg(test)]
 mod tests {
-    use super::{parse, ArithmeticComputation, Expression, ExpressionKind};
+    use super::{
+        parse, ArithmeticComputation, DataValue, Expression, ExpressionKind,
+        MathematicalComputation, RangeBound, TypeConstraintCommand,
+    };
     use crate::formatting::format_parse_result;
     use crate::Error;
     use crate::ResourceLimits;
@@ -1951,6 +1954,213 @@ data y: 2"#;
         assert!(
             result.is_err(),
             "rule named ratio (type keyword) must be rejected"
+        );
+    }
+
+    fn assert_reserved_name(source: &str) {
+        let result = parse(
+            source,
+            crate::parsing::source::SourceType::Volatile,
+            &ResourceLimits::default(),
+        );
+        let message = result
+            .expect_err("reserved name must not parse")
+            .to_string();
+        assert!(
+            message.contains("reserved keyword"),
+            "expected reserved-keyword error, got: {message}"
+        );
+    }
+
+    #[test]
+    fn parse_rejects_lower_and_upper_as_names() {
+        assert_reserved_name("spec s\ndata lower: 1");
+        assert_reserved_name("spec s\ndata upper: 1");
+        assert_reserved_name("spec s\nrule lower: 1");
+        assert_reserved_name("spec s\nrule upper: 1");
+    }
+
+    #[test]
+    fn parse_constraint_lower_and_upper_still_parse() {
+        let parsed = parse(
+            r#"spec window
+data period: date range
+  -> lower 2020-01-01
+  -> upper 2030-12-31
+"#,
+            crate::parsing::source::SourceType::Volatile,
+            &ResourceLimits::default(),
+        )
+        .expect("-> lower / -> upper are constraint commands");
+        let spec = parsed.flatten_specs().into_iter().next().expect("one spec");
+        let period = spec
+            .data
+            .iter()
+            .find(|data| data.reference.name == "period")
+            .expect("period");
+        let DataValue::Definition {
+            constraints: Some(rows),
+            ..
+        } = &period.value
+        else {
+            panic!("expected constraints, got {:?}", period.value);
+        };
+        let commands: Vec<_> = rows.iter().map(|row| row.command).collect();
+        assert_eq!(
+            commands,
+            vec![TypeConstraintCommand::Lower, TypeConstraintCommand::Upper]
+        );
+    }
+
+    fn prefix_kind(source: &str) -> ExpressionKind {
+        rule_expression(source, "out").kind
+    }
+
+    #[test]
+    fn parse_prefix_operand_is_one_range_operand() {
+        let floor_plus = prefix_kind(
+            r#"spec test
+data x: 1
+rule out: floor x + 1"#,
+        );
+        let ExpressionKind::Arithmetic(left, ArithmeticComputation::Add, _) = &floor_plus else {
+            panic!("floor x + 1 must be add, got {floor_plus:?}");
+        };
+        assert!(
+            matches!(
+                left.kind,
+                ExpressionKind::MathematicalComputation(MathematicalComputation::Floor, _)
+            ),
+            "floor must bind tighter than +, got {floor_plus:?}"
+        );
+
+        let floor_sum = prefix_kind(
+            r#"spec test
+data x: 1
+rule out: floor (x + 1)"#,
+        );
+        let ExpressionKind::MathematicalComputation(MathematicalComputation::Floor, operand) =
+            &floor_sum
+        else {
+            panic!("floor (x + 1) must be floor of a sum, got {floor_sum:?}");
+        };
+        assert!(matches!(operand.kind, ExpressionKind::Arithmetic(..)));
+
+        let floor_as = prefix_kind(
+            r#"spec test
+uses lemma units
+data x: 1
+rule out: floor x as gram"#,
+        );
+        let ExpressionKind::UnitConversion(inner, _) = &floor_as else {
+            panic!("floor x as gram must convert the floored value, got {floor_as:?}");
+        };
+        assert!(matches!(
+            inner.kind,
+            ExpressionKind::MathematicalComputation(MathematicalComputation::Floor, _)
+        ));
+
+        let sqrt_pow = prefix_kind(
+            r#"spec test
+data x: 4
+rule out: sqrt x ^ 2"#,
+        );
+        let ExpressionKind::Arithmetic(left, ArithmeticComputation::Power, _) = &sqrt_pow else {
+            panic!("sqrt x ^ 2 must be power, got {sqrt_pow:?}");
+        };
+        assert!(matches!(
+            left.kind,
+            ExpressionKind::MathematicalComputation(MathematicalComputation::Sqrt, _)
+        ));
+
+        let lower_range = prefix_kind(
+            r#"spec test
+rule out: lower 5...10"#,
+        );
+        let ExpressionKind::RangeBound(RangeBound::Lower, operand) = &lower_range else {
+            panic!("lower 5...10 must be lower of a range, got {lower_range:?}");
+        };
+        assert!(matches!(operand.kind, ExpressionKind::RangeLiteral(..)));
+        assert_eq!(
+            rule_expression(
+                r#"spec test
+rule out: lower 5...10"#,
+                "out"
+            )
+            .to_string(),
+            "lower 5...10"
+        );
+
+        let lower_extended = prefix_kind(
+            r#"spec test
+data a: 1
+data b: 2
+rule out: lower a...b + 1"#,
+        );
+        let ExpressionKind::RangeBound(RangeBound::Lower, operand) = &lower_extended else {
+            panic!("expected lower of a range, got {lower_extended:?}");
+        };
+        let ExpressionKind::RangeLiteral(_, right) = &operand.kind else {
+            panic!("+ must stay inside the range, got {operand:?}");
+        };
+        assert!(matches!(
+            right.kind,
+            ExpressionKind::Arithmetic(_, ArithmeticComputation::Add, _)
+        ));
+
+        let lower_plus = prefix_kind(
+            r#"spec test
+data p: number range
+rule out: lower p + 1"#,
+        );
+        let ExpressionKind::Arithmetic(left, ArithmeticComputation::Add, _) = &lower_plus else {
+            panic!("lower p + 1 must add outside lower, got {lower_plus:?}");
+        };
+        assert!(matches!(
+            left.kind,
+            ExpressionKind::RangeBound(RangeBound::Lower, _)
+        ));
+    }
+
+    #[test]
+    fn format_prefix_operand_round_trips() {
+        let source = r#"spec test
+data x: 1.00
+rule tight: (floor x) + 1
+rule wide: floor (x + 1)
+rule ends: lower 5...10
+rule edge: (lower x)...(upper x)
+"#;
+        let formatted =
+            crate::formatting::format_source(source, crate::parsing::source::SourceType::Volatile)
+                .expect("format");
+        let again = crate::formatting::format_source(
+            &formatted,
+            crate::parsing::source::SourceType::Volatile,
+        )
+        .expect("reformat");
+        assert_eq!(formatted, again, "format must be stable");
+
+        for rule in ["tight", "wide", "ends", "edge"] {
+            let original = rule_expression(source, rule);
+            let reparsed = rule_expression(&formatted, rule);
+            assert_eq!(
+                original.to_string(),
+                reparsed.to_string(),
+                "{rule} changed meaning across format/parse"
+            );
+        }
+
+        let tight = rule_expression(&formatted, "tight");
+        let ExpressionKind::Arithmetic(left, ArithmeticComputation::Add, _) = &tight.kind else {
+            panic!("(floor x) + 1 must stay an addition, got {}", tight);
+        };
+        assert!(
+            matches!(
+                left.kind,
+                ExpressionKind::MathematicalComputation(MathematicalComputation::Floor, _)
+            ),
+            "(floor x) + 1 must stay floor-then-add, got {tight}"
         );
     }
 }

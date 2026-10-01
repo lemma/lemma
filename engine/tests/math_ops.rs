@@ -226,3 +226,18 @@ fn test_nested_math_ops() -> Result<(), lemma::Errors> {
     assert_eq!(run(code, "c")?, "2");
     Ok(())
 }
+
+#[test]
+fn test_prefix_binds_tighter_than_arithmetic() -> Result<(), lemma::Errors> {
+    let code = r#"
+    spec test
+    data x: 1.2
+    rule tight: floor x + 0.5
+    rule wide: floor (x + 0.5)
+    rule scaled: sqrt 16 * 2
+    "#;
+    assert_eq!(run(code, "tight")?, "1.5");
+    assert_eq!(run(code, "wide")?, "1");
+    assert_eq!(run(code, "scaled")?, "8");
+    Ok(())
+}

@@ -1243,7 +1243,9 @@ impl Parser {
         &mut self,
     ) -> Result<(TypeConstraintCommand, Vec<CommandArg>, bool), Error> {
         let name_tok = self.next()?;
-        if !can_be_label(&name_tok.kind) {
+        if !can_be_label(&name_tok.kind)
+            && !matches!(name_tok.kind, TokenKind::Lower | TokenKind::Upper)
+        {
             return Err(self.error_at_token(
                 &name_tok,
                 format!("Expected a command name, found {}", name_tok.kind),
@@ -1253,7 +1255,7 @@ impl Parser {
             self.error_at_token(
                 &name_tok,
                 format!(
-                    "Unknown constraint command '{}'. Valid commands: help, suggest, fill, unit, trait, minimum, maximum, decimals, option, options, length",
+                    "Unknown constraint command '{}'. Valid commands: help, suggest, fill, unit, trait, minimum, maximum, lower, upper, decimals, option, options, length",
                     name_tok.text
                 ),
             )
@@ -2686,9 +2688,11 @@ impl Parser {
     fn parse_primary_or_math(&mut self) -> Result<Expression, Error> {
         let peeked = self.peek()?;
 
-        // Math functions
         if is_math_function(&peeked.kind) {
             return self.parse_math_function();
+        }
+        if matches!(peeked.kind, TokenKind::Lower | TokenKind::Upper) {
+            return self.parse_range_bound();
         }
 
         self.parse_primary()
@@ -2716,7 +2720,7 @@ impl Parser {
         };
 
         self.check_depth()?;
-        let operand = self.parse_repository_expression()?;
+        let operand = self.parse_range_operand()?;
         self.depth_tracker.pop_depth();
 
         let end_span = operand
@@ -2728,6 +2732,32 @@ impl Parser {
 
         self.new_expression(
             ExpressionKind::MathematicalComputation(operator, Arc::new(operand)),
+            self.make_source(span),
+        )
+    }
+
+    fn parse_range_bound(&mut self) -> Result<Expression, Error> {
+        let bound_tok = self.next()?;
+        let start_span = bound_tok.span.clone();
+        let bound = match bound_tok.kind {
+            TokenKind::Lower => RangeBound::Lower,
+            TokenKind::Upper => RangeBound::Upper,
+            _ => unreachable!("BUG: only lower and upper should reach parse_range_bound"),
+        };
+
+        self.check_depth()?;
+        let operand = self.parse_range_operand()?;
+        self.depth_tracker.pop_depth();
+
+        let end_span = operand
+            .source_location
+            .as_ref()
+            .map(|s| s.span.clone())
+            .unwrap_or_else(|| start_span.clone());
+        let span = self.span_covering(&start_span, &end_span);
+
+        self.new_expression(
+            ExpressionKind::RangeBound(bound, Arc::new(operand)),
             self.make_source(span),
         )
     }

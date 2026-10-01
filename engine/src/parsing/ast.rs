@@ -429,6 +429,8 @@ pub enum ExpressionKind {
     PastFutureRange(DateRelativeKind, Arc<Expression>),
     /// Range containment: `{value_expr} in {range_expr}`
     RangeContainment(Arc<Expression>, Arc<Expression>),
+    /// Ordered endpoint of a range: `lower` (included) or `upper` (excluded).
+    RangeBound(RangeBound, Arc<Expression>),
     LogicalAnd(Arc<Expression>, Arc<Expression>),
     Arithmetic(Arc<Expression>, ArithmeticComputation, Arc<Expression>),
     Comparison(Arc<Expression>, ComparisonComputation, Arc<Expression>),
@@ -585,6 +587,23 @@ pub enum MathematicalComputation {
     Floor,
     Ceil,
     Round,
+}
+
+/// Which endpoint of a range `lower` / `upper` reads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RangeBound {
+    Lower,
+    Upper,
+}
+
+impl fmt::Display for RangeBound {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            RangeBound::Lower => write!(f, "lower"),
+            RangeBound::Upper => write!(f, "upper"),
+        }
+    }
 }
 
 /// A spec reference written in source.
@@ -1191,8 +1210,11 @@ impl fmt::Display for LemmaRule {
 /// Higher values bind tighter. Used by `Expression::Display` and the formatter
 /// to insert parentheses only where needed.
 ///
-/// `RangeLiteral` (type construction via `...`) binds above all arithmetic; only atoms bind
-/// above range. Parser climb in [`crate::parsing::parser::Parser`] must match this table.
+/// `...` binds tighter than prefix operators, so `lower 5...10` is `lower` of the
+/// range and prints without parentheses. A prefix that is itself a range endpoint
+/// prints in parentheses: `(lower start)...(upper start)`.
+/// Prefix operators bind tighter than `as` and arithmetic.
+/// Parser climb in [`crate::parsing::parser::Parser`] must match this table.
 pub fn expression_precedence(kind: &ExpressionKind) -> u8 {
     match kind {
         ExpressionKind::LogicalAnd(..) => 2,
@@ -1202,10 +1224,10 @@ pub fn expression_precedence(kind: &ExpressionKind) -> u8 {
         ExpressionKind::DateRelative(..) | ExpressionKind::DateCalendar(..) => 4,
         ExpressionKind::Arithmetic(_, op, _) => arithmetic_precedence(op),
         ExpressionKind::UnitConversion(..) => 8,
-        ExpressionKind::RangeLiteral(..) => 9,
-        ExpressionKind::MathematicalComputation(..) => 10,
-        ExpressionKind::PastFutureRange(..) => 10,
-        ExpressionKind::Literal(..)
+        ExpressionKind::MathematicalComputation(..) | ExpressionKind::RangeBound(..) => 9,
+        ExpressionKind::RangeLiteral(..)
+        | ExpressionKind::PastFutureRange(..)
+        | ExpressionKind::Literal(..)
         | ExpressionKind::Reference(..)
         | ExpressionKind::Now
         | ExpressionKind::Veto(..) => 10,
@@ -1337,7 +1359,12 @@ impl fmt::Display for Expression {
             }
             ExpressionKind::MathematicalComputation(op, operand) => {
                 let my_prec = expression_precedence(&self.kind);
-                write!(f, "{} ", op)?;
+                write!(f, "{op} ")?;
+                write_expression_child(f, operand, my_prec, OperandSide::Right, None)
+            }
+            ExpressionKind::RangeBound(bound, operand) => {
+                let my_prec = expression_precedence(&self.kind);
+                write!(f, "{bound} ")?;
                 write_expression_child(f, operand, my_prec, OperandSide::Right, None)
             }
             ExpressionKind::Veto(veto) => match &veto.message {
@@ -1843,7 +1870,8 @@ pub(crate) fn canonicalize_expression(expression: &mut Expression) {
         ExpressionKind::LogicalNegation(expression, _) => {
             canonicalize_expression(Arc::make_mut(expression));
         }
-        ExpressionKind::MathematicalComputation(_, expression) => {
+        ExpressionKind::MathematicalComputation(_, expression)
+        | ExpressionKind::RangeBound(_, expression) => {
             canonicalize_expression(Arc::make_mut(expression));
         }
         ExpressionKind::Veto(_) => {}

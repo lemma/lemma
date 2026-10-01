@@ -671,6 +671,16 @@ pub fn api_v1_schema() -> Value {
                 },
                 {
                     "type": "object",
+                    "required": ["type", "bound", "operand"],
+                    "additionalProperties": false,
+                    "properties": {
+                        "type": {"const": "range_bound"},
+                        "bound": {"type": "string", "enum": ["lower", "upper"]},
+                        "operand": {"$ref": "#/$defs/ShowExpression"}
+                    }
+                },
+                {
+                    "type": "object",
                     "required": ["type", "operand"],
                     "additionalProperties": false,
                     "properties": {

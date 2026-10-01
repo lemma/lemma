@@ -7,7 +7,7 @@
 // serialization) import these from `planning::semantics`, never from `parsing` directly.
 pub use crate::parsing::ast::{
     ArithmeticComputation, ComparisonComputation, MathematicalComputation, NegationType,
-    VetoExpression,
+    RangeBound, VetoExpression,
 };
 pub use crate::parsing::source::Source;
 
@@ -3503,6 +3503,8 @@ pub enum ExpressionKind {
     RangeLiteral(Arc<Expression>, Arc<Expression>),
     PastFutureRange(DateRelativeKind, Arc<Expression>),
     RangeContainment(Arc<Expression>, Arc<Expression>),
+    /// Ordered endpoint of a range (`lower` included, `upper` excluded).
+    RangeBound(RangeBound, Arc<Expression>),
     /// Whether evaluating the operand produced a veto (no value). Parses as `is veto` syntax.
     ResultIsVeto(Arc<Expression>),
     /// Unless structure: (condition, result) pairs in source order; last true condition wins.
@@ -3531,7 +3533,8 @@ impl ExpressionKind {
             ExpressionKind::UnitConversion(inner, _)
             | ExpressionKind::LogicalNegation(inner, _)
             | ExpressionKind::MathematicalComputation(_, inner)
-            | ExpressionKind::PastFutureRange(_, inner) => {
+            | ExpressionKind::PastFutureRange(_, inner)
+            | ExpressionKind::RangeBound(_, inner) => {
                 inner.collect_data_paths(data);
             }
             ExpressionKind::DateRelative(_, date_expr) => {

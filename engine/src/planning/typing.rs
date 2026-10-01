@@ -6,7 +6,7 @@ use crate::planning::semantics::{
     calendar_decomposition, combine_decompositions, duration_decomposition, primitive_boolean_arc,
     primitive_date_range_arc, primitive_number_arc, primitive_text_arc,
     range_type_specification_from_endpoints, ArithmeticComputation, BaseMeasureVector, LemmaType,
-    MathematicalComputation, SemanticConversionTarget, TypeSpecification,
+    MathematicalComputation, SemanticConversionTarget, TypeExtends, TypeSpecification,
 };
 use crate::planning::unit_index::UnitIndex;
 use std::collections::HashMap;
@@ -440,27 +440,85 @@ pub(crate) fn infer_range_type_from_endpoint_types(
         .unwrap_or_else(|| Arc::new(LemmaType::undetermined_type()))
 }
 
+fn named_range_element_type(range_type: &LemmaType) -> Arc<LemmaType> {
+    let element_spec = range_type
+        .specifications
+        .element_from_range()
+        .expect("BUG: MeasureRange and RatioRange always define element_from_range");
+    Arc::new(LemmaType {
+        name: range_type.name.clone(),
+        specifications: element_spec,
+        extends: range_type.extends.clone(),
+    })
+}
+
 pub(crate) fn range_span_type(range_type: &LemmaType) -> Arc<LemmaType> {
     match &range_type.specifications {
-        TypeSpecification::DateRange { .. } => Arc::new(LemmaType::anonymous_for_decomposition(
-            duration_decomposition(),
-        )),
-        TypeSpecification::TimeRange { .. } => Arc::new(LemmaType::anonymous_for_decomposition(
-            duration_decomposition(),
-        )),
+        TypeSpecification::DateRange { .. } | TypeSpecification::TimeRange { .. } => Arc::new(
+            LemmaType::anonymous_for_decomposition(duration_decomposition()),
+        ),
         TypeSpecification::NumberRange { .. } => primitive_number_arc().clone(),
         TypeSpecification::MeasureRange { .. } | TypeSpecification::RatioRange { .. } => {
-            let element_spec = range_type
-                .specifications
-                .element_from_range()
-                .expect("BUG: MeasureRange and RatioRange always define element_from_range");
-            Arc::new(LemmaType {
-                name: range_type.name.clone(),
-                specifications: element_spec,
-                extends: range_type.extends.clone(),
-            })
+            named_range_element_type(range_type)
         }
         _ => Arc::new(LemmaType::undetermined_type()),
+    }
+}
+
+/// Result type of `lower` / `upper`, including anonymous-measure promotion.
+///
+/// Promotion may pin a canonical unit (`year` → `month`). That pin is cleared so the
+/// endpoint's written unit, carried on the value, is what display uses.
+pub(crate) fn range_bound_result_type(
+    range_type: &LemmaType,
+    scope: &MeasureScope<'_>,
+) -> Arc<LemmaType> {
+    let endpoint = range_endpoint_type(range_type);
+    let anonymous = endpoint.is_anonymous_measure();
+    let resolved = resolve_anonymous_measure(&endpoint, scope);
+    if anonymous && resolved.unit().is_some() {
+        let mut cleared = resolved.as_ref().clone();
+        if let TypeSpecification::Measure { unit, .. } = &mut cleared.specifications {
+            *unit = None;
+        }
+        return Arc::new(cleared);
+    }
+    resolved
+}
+
+/// Endpoint type of `lower` / `upper`.
+///
+/// Measure and ratio ranges keep the element spec and `extends`. A slot such as
+/// `data band: money range` is named after the element (`money`), not the slot.
+/// Date, time, and number ranges use the element primitive. Anonymous measures
+/// are promoted by the caller via [`resolve_anonymous_measure`].
+pub(crate) fn range_endpoint_type(range_type: &LemmaType) -> Arc<LemmaType> {
+    if range_type.vetoed() {
+        return Arc::new(LemmaType::veto_type());
+    }
+    if range_type.is_undetermined() {
+        return Arc::new(LemmaType::undetermined_type());
+    }
+    match &range_type.specifications {
+        TypeSpecification::MeasureRange { .. } | TypeSpecification::RatioRange { .. } => {
+            let element = named_range_element_type(range_type);
+            match &range_type.extends {
+                TypeExtends::Custom { parent, .. } => {
+                    let Some(element_name) = parent.strip_suffix(" range") else {
+                        return element;
+                    };
+                    let mut named = element.as_ref().clone();
+                    named.name = Some(element_name.to_string());
+                    Arc::new(named)
+                }
+                TypeExtends::Primitive => element,
+            }
+        }
+        _ => range_type
+            .specifications
+            .element_from_range()
+            .map(|spec| Arc::new(LemmaType::primitive(spec)))
+            .unwrap_or_else(|| Arc::new(LemmaType::undetermined_type())),
     }
 }
 

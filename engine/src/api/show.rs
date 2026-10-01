@@ -5,7 +5,7 @@ use crate::api::value::RuleResultValue;
 use crate::literals::Value;
 use crate::parsing::ast::{
     ArithmeticComputation, CalendarPeriodUnit, ComparisonComputation, DateCalendarKind,
-    DateRelativeKind, DateTimeValue, MathematicalComputation, PrimitiveKind,
+    DateRelativeKind, DateTimeValue, MathematicalComputation, PrimitiveKind, RangeBound,
 };
 use crate::parsing::source::SourceType;
 use crate::planning::execution_plan::{
@@ -162,6 +162,10 @@ pub enum ShowExpression {
         value: Box<ShowExpression>,
         range: Box<ShowExpression>,
     },
+    RangeBound {
+        bound: RangeBound,
+        operand: Box<ShowExpression>,
+    },
     IsVeto {
         operand: Box<ShowExpression>,
     },
@@ -240,6 +244,10 @@ impl From<&DomainShowExpression> for ShowExpression {
             DomainShowExpression::RangeContainment { value, range } => Self::RangeContainment {
                 value: Box::new(ShowExpression::from(value.as_ref())),
                 range: Box::new(ShowExpression::from(range.as_ref())),
+            },
+            DomainShowExpression::RangeBound { bound, operand } => Self::RangeBound {
+                bound: *bound,
+                operand: Box::new(ShowExpression::from(operand.as_ref())),
             },
             DomainShowExpression::IsVeto { operand } => Self::IsVeto {
                 operand: Box::new(ShowExpression::from(operand.as_ref())),

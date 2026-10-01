@@ -47,7 +47,7 @@ data outbound_handling_per_pallet: units.money
 
 rule storage_cost_per_pallet:
   storage_per_pallet_per_week
-  * ceil storage_duration as week as Number
+  * ceil (storage_duration as week as number)
 
 rule total_logistics_per_pallet:
   interbranch_transport_per_pallet

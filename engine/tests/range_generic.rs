@@ -297,14 +297,14 @@ rule ok: ((0...100) + 50) >= 149"#;
 #[test]
 fn p18_range_through_rules() {
     let code = r#"spec test
-data lower: number -> suggest 0
-data upper: number -> suggest 100
+data low: number -> suggest 0
+data high: number -> suggest 100
 data value: number -> suggest 50
-rule bounds: lower...upper
+rule bounds: low...high
 rule check: value in bounds"#;
     let mut data = HashMap::new();
-    data.insert("lower".to_string(), "0".into());
-    data.insert("upper".to_string(), "100".into());
+    data.insert("low".to_string(), "0".into());
+    data.insert("high".to_string(), "100".into());
     data.insert("value".to_string(), "50".into());
     assert!(eval_bool_with_data(code, "test", "check", data));
 }
@@ -312,10 +312,10 @@ rule check: value in bounds"#;
 #[test]
 fn p19_adjusted_range_through_rules() {
     let code = r#"spec test
-data lower: 0
-data upper: 100
+data low: 0
+data high: 100
 data adjustment: 25
-rule bounds: lower...upper
+rule bounds: low...high
 rule adjusted: bounds + adjustment"#;
     assert_eq!(eval_rule(code, "test", "adjusted"), "125");
 }
@@ -488,10 +488,10 @@ data band_low: 3000 gram
 data band_high: 35 kilogram
 rule band: band_low...band_high
 rule inside: 3200 gram in band
-rule lower: 3000 gram in band
+rule at_low: 3000 gram in band
 rule upper_excluded: 35 kilogram in band"#;
     assert!(eval_bool(code, "test", "inside"));
-    assert!(eval_bool(code, "test", "lower"));
+    assert!(eval_bool(code, "test", "at_low"));
     assert!(!eval_bool(code, "test", "upper_excluded"));
 }
 

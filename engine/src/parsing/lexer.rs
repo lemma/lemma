@@ -54,6 +54,10 @@ pub enum TokenKind {
     Ceil,
     Round,
 
+    // Range endpoint operators
+    Lower,
+    Upper,
+
     Permille,
 
     // Comparison keyword operators
@@ -140,6 +144,8 @@ impl std::fmt::Display for TokenKind {
             TokenKind::Floor => write!(f, "'floor'"),
             TokenKind::Ceil => write!(f, "'ceil'"),
             TokenKind::Round => write!(f, "'round'"),
+            TokenKind::Lower => write!(f, "'lower'"),
+            TokenKind::Upper => write!(f, "'upper'"),
             TokenKind::Permille => write!(f, "'permille'"),
             TokenKind::Is => write!(f, "'is'"),
             TokenKind::Plus => write!(f, "'+'"),
@@ -688,6 +694,8 @@ fn keyword_from_identifier(text: &str) -> TokenKind {
         s if s.eq_ignore_ascii_case("floor") => TokenKind::Floor,
         s if s.eq_ignore_ascii_case("ceil") => TokenKind::Ceil,
         s if s.eq_ignore_ascii_case("round") => TokenKind::Round,
+        s if s.eq_ignore_ascii_case("lower") => TokenKind::Lower,
+        s if s.eq_ignore_ascii_case("upper") => TokenKind::Upper,
         s if s.eq_ignore_ascii_case("is") => TokenKind::Is,
         s if s.eq_ignore_ascii_case("permille") => TokenKind::Permille,
         _ => TokenKind::Identifier,
@@ -728,6 +736,8 @@ pub fn is_keyword(kind: &TokenKind) -> bool {
             | TokenKind::Floor
             | TokenKind::Ceil
             | TokenKind::Round
+            | TokenKind::Lower
+            | TokenKind::Upper
             | TokenKind::True
             | TokenKind::False
             | TokenKind::Yes
@@ -1173,6 +1183,15 @@ mod tests {
                 TokenKind::Ceil,
                 TokenKind::Round,
             ]
+        );
+    }
+
+    #[test]
+    fn lex_range_bound_keywords() {
+        let kinds = lex_kinds("lower upper LOWER").unwrap();
+        assert_eq!(
+            &kinds[..3],
+            &[TokenKind::Lower, TokenKind::Upper, TokenKind::Lower,]
         );
     }
 

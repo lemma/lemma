@@ -136,7 +136,7 @@ There is no `or` operator. Express disjunction with `unless` chains or separate 
 
 ### Mathematical
 
-Prefix operators, not functions, so parentheses are optional (`sqrt value` or `sqrt(value)`). All require a **number** operand except `abs`, `ceil`, `floor`, and `round`, which also accept a **measure**: the unit is preserved and the operator applies to the magnitude in the operand's bound unit.
+Prefix operators, not functions, so parentheses are optional (`sqrt value` or `sqrt(value)`). The operand is one range operand: `floor x + 1` is `(floor x) + 1`, `floor x as gram` is `(floor x) as gram`, and `sqrt x ^ 2` is `(sqrt x) ^ 2`. Parentheses widen the operand (`floor (x + 1)`). `sqrt`, `sin`, `cos`, `tan`, `asin`, `acos`, `atan`, `log`, and `exp` require a **number**. `abs`, `ceil`, `floor`, and `round` also accept a **measure**: the unit is preserved and the operator applies to the magnitude in the operand's bound unit. `lower` and `upper` require a **range** (see [Range endpoints](#range-endpoints)).
 
 
 | Operator | Description                     | Example                         |
@@ -154,6 +154,8 @@ Prefix operators, not functions, so parentheses are optional (`sqrt value` or `s
 | `floor`  | Round down (quantities too)     | `floor(value)` or `floor value` |
 | `ceil`   | Round up (quantities too)       | `ceil(value)` or `ceil value`   |
 | `round`  | Round nearest (quantities too)  | `round(value)` or `round value` |
+| `lower`  | Smaller endpoint of a range     | `lower (5...10)` or `lower period` |
+| `upper`  | Larger endpoint of a range (excluded) | `upper (5...10)` or `upper period` |
 
 
 
@@ -194,11 +196,14 @@ Lower binds looser. Use parentheses when an operand would otherwise bind too tig
 | | `*`, `/`, `%` |
 | | `^` |
 | | `as` |
+| | Prefix operators (`sqrt`, `floor`, `lower`, `upper`, …) |
 | | `...` (range literal) |
-| Highest | Atoms, math prefixes (`sqrt`, …), `veto`, `now`, `past`/`future` windows |
+| Highest | Atoms, `veto`, `now`, `past`/`future` windows |
 
 
 So `balance / rate as month` parses as `balance / (rate as month)`, and `rate * a...b` parses as `rate * (a...b)` because `...` binds tighter than `*`. Write `(rate * a)...b` when the product should be a range endpoint.
+
+`...` also binds tighter than a prefix operator, so `lower 5...10` is the lower end of `5...10`, not a range from `lower 5`. `past` / `future` are not prefix operators: `past 7 day + 1 day` still includes the sum.
 
 ## Using other Specs
 
@@ -581,6 +586,26 @@ rule span_days: ((2024-02-15...2024-03-15) + 1 day) as day
 ```
 
 **Span arithmetic** (adding to the width of an interval, not shifting an endpoint) requires parentheses around the range, as in `span_days` above.
+
+### Range endpoints
+
+`lower` and `upper` are prefix operators. `lower` returns the smaller endpoint (included). `upper` returns the larger endpoint, which is still excluded: `upper (18 year...67 year)` is `67 year`, and that value is not `in` the range.
+
+Written order is not the stored order. `lower (10...5)` is `5` and `upper (10...5)` is `10`, the same order `in` uses.
+
+The result has the endpoint's type. A `date range` gives a `date`, a `time range` a `time`, a `number range` a `number`. A `money range` gives `money`, and the endpoint keeps the unit it was written in (`lower (10 eur...40 eur)` is `10 eur`).
+
+```lemma
+spec employment
+
+data period: date range
+
+rule starts: lower period
+
+rule ends: upper period
+```
+
+`lower` and `upper` are reserved names. They remain valid as the constraint commands `-> lower` and `-> upper`, which limit which endpoints a range slot may hold. Those commands are not the operators.
 
 Date endpoints can be built from separate `date` values: `hire_date...today`.
 

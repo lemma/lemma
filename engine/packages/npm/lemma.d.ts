@@ -566,6 +566,11 @@ export type ShowExpression =
       value: ShowExpression;
       range: ShowExpression;
     }
+  | {
+      type: "range_bound";
+      bound: "lower" | "upper";
+      operand: ShowExpression;
+    }
   | { type: "is_veto"; operand: ShowExpression };
 
 /** One arm of a rule's flat last-match table. Default arm omits condition. */

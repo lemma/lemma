@@ -1331,6 +1331,139 @@ rule fee: c.base_fee
     assert_rule_value(&eval(&engine, "invoice", &date(2025, 6, 1)), "fee", "150");
 }
 
+#[test]
+fn removing_resolved_dep_version_replans_consumer() {
+    let mut engine = Engine::new();
+
+    engine
+        .load([(
+            lemma::SourceType::Path(std::sync::Arc::new(std::path::PathBuf::from("dep.lemma"))),
+            r#"
+spec dep 2024-01-01
+rule r: "fixed"
+
+spec dep 2025-01-01
+rule r: 1
+"#
+            .to_string(),
+        )])
+        .unwrap();
+    engine
+        .load([(
+            lemma::SourceType::Path(std::sync::Arc::new(std::path::PathBuf::from(
+                "consumer.lemma",
+            ))),
+            r#"
+spec consumer 2025-03-01
+uses d: dep
+rule c: d.r + 1
+"#
+            .to_string(),
+        )])
+        .unwrap();
+    assert_rule_value(&eval(&engine, "consumer", &date(2025, 6, 1)), "c", "2");
+
+    let err = engine
+        .remove(None, "dep", Some(&date(2025, 1, 1)))
+        .expect_err("consumer now resolves dep 2024, whose 'r' is text");
+    assert_eq!(err.message(), "Cannot apply '+' to text and number.");
+    let source = err.location().expect("type error has a source");
+    assert_eq!(source.source_type.to_string(), "consumer.lemma");
+    assert_eq!(source.span.line, 4);
+
+    assert_rule_value(&eval(&engine, "consumer", &date(2025, 6, 1)), "c", "2");
+}
+
+#[test]
+fn removing_dep_version_replans_the_remaining_version() {
+    let mut engine = Engine::new();
+
+    engine
+        .load([(
+            lemma::SourceType::Path(std::sync::Arc::new(std::path::PathBuf::from("dep.lemma"))),
+            r#"
+spec dep 2024-01-01
+rule r: 1
+
+spec dep 2025-01-01
+rule r: 2
+"#
+            .to_string(),
+        )])
+        .unwrap();
+    engine
+        .load([(
+            lemma::SourceType::Path(std::sync::Arc::new(std::path::PathBuf::from(
+                "consumer.lemma",
+            ))),
+            r#"
+spec consumer 2025-03-01
+uses d: dep
+rule c: d.r + 1
+"#
+            .to_string(),
+        )])
+        .unwrap();
+    assert_rule_value(&eval(&engine, "consumer", &date(2025, 6, 1)), "c", "3");
+
+    engine
+        .remove(None, "dep", Some(&date(2025, 1, 1)))
+        .expect("dep 2024 has the same interface");
+
+    assert_rule_value(&eval(&engine, "consumer", &date(2025, 6, 1)), "c", "2");
+}
+
+#[test]
+fn adding_dep_version_in_consumer_range_replans_consumer() {
+    let mut engine = Engine::new();
+
+    engine
+        .load([(
+            lemma::SourceType::Path(std::sync::Arc::new(std::path::PathBuf::from("dep.lemma"))),
+            r#"
+spec dep 2024-01-01
+rule r: 1
+"#
+            .to_string(),
+        )])
+        .unwrap();
+    engine
+        .load([(
+            lemma::SourceType::Path(std::sync::Arc::new(std::path::PathBuf::from(
+                "consumer.lemma",
+            ))),
+            r#"
+spec consumer 2025-03-01
+uses d: dep
+rule c: d.r + 1
+"#
+            .to_string(),
+        )])
+        .unwrap();
+    assert_rule_value(&eval(&engine, "consumer", &date(2025, 6, 1)), "c", "2");
+
+    let err = engine
+        .load([(
+            lemma::SourceType::Path(std::sync::Arc::new(std::path::PathBuf::from(
+                "dep_2025.lemma",
+            ))),
+            r#"
+spec dep 2025-02-01
+rule r: "fixed"
+"#
+            .to_string(),
+        )])
+        .expect_err("consumer now resolves dep 2025-02, whose 'r' is text");
+    let errors: Vec<_> = err.iter().collect();
+    assert_eq!(errors.len(), 1, "{errors:?}");
+    assert_eq!(errors[0].message(), "Cannot apply '+' to text and number.");
+    let source = errors[0].location().expect("type error has a source");
+    assert_eq!(source.source_type.to_string(), "consumer.lemma");
+    assert_eq!(source.span.line, 4);
+
+    assert_rule_value(&eval(&engine, "consumer", &date(2025, 6, 1)), "c", "2");
+}
+
 /// Dep changes data interface across time (number → text). Dependent adds temporal specs
 /// so each era only binds to the matching dep slice. Target: load + eval succeed; if not,
 /// validation is too strict (e.g. one consumer spec checked against every dep slice).
@@ -1516,7 +1649,7 @@ data y: 5
         r#"
 spec consumer 2025-01-01
 uses d: skipping_dep
-rule sy: d.y
+rule sx: d.x
 "#
         .to_string(),
     )]);
@@ -1533,7 +1666,7 @@ rule sy: d.y
         .collect::<Vec<_>>()
         .join(" | ");
     assert!(
-        joined.contains("changed its interface between temporal slices"),
+        joined.contains("without pinning an effective date"),
         "Error must come from SliceInterface validation. Got: {}",
         joined
     );
@@ -1600,7 +1733,7 @@ rule sy: b.y
         .collect::<Vec<_>>()
         .join(" | ");
     assert!(
-        joined.contains("changed its interface between temporal slices"),
+        joined.contains("without pinning an effective date"),
         "Error must come from SliceInterface validation. Got: {}",
         joined
     );
@@ -1663,7 +1796,7 @@ rule result: d.main_val
         .collect::<Vec<_>>()
         .join(" | ");
     assert!(
-        joined.contains("changed its interface between temporal slices"),
+        joined.contains("without pinning an effective date"),
         "Error must come from SliceInterface validation. Got: {}",
         joined
     );
@@ -1737,20 +1870,215 @@ rule val: s.compute
         .to_string(),
     )]);
 
+    let errs = result.expect_err("svc v2 no longer has rule 'compute' that caller references");
+    let errors: Vec<_> = errs.iter().collect();
+    assert_eq!(errors.len(), 1, "{errors:?}");
     assert!(
-        result.is_err(),
-        "Must reject: svc v2 no longer has rule 'compute' that caller references"
+        errors[0].message().contains("compute"),
+        "error must name the missing rule 'compute'. Got: {}",
+        errors[0].message()
     );
-    let errs = result.unwrap_err();
-    let joined = errs
-        .iter()
-        .map(|e| e.to_string())
-        .collect::<Vec<_>>()
-        .join(" | ");
-    assert!(
-        joined.contains("compute"),
-        "Error should mention the missing rule 'compute'. Got: {}",
-        joined
+    let source = errors[0]
+        .location()
+        .expect("missing rule error has a source");
+    assert_eq!(source.source_type.to_string(), "caller.lemma");
+    assert_eq!(source.span.line, 4);
+}
+
+#[test]
+fn slice_drift_retyped_data_names_member_and_rows() {
+    let mut engine = Engine::new();
+
+    engine
+        .load([(
+            lemma::SourceType::Path(std::sync::Arc::new(std::path::PathBuf::from(
+                "amounts.lemma",
+            ))),
+            r#"
+spec amounts
+data amount: 100
+
+spec amounts 2025-06-01
+data amount: "later"
+"#
+            .to_string(),
+        )])
+        .unwrap();
+
+    let err = engine
+        .load([(
+            lemma::SourceType::Path(std::sync::Arc::new(std::path::PathBuf::from("shop.lemma"))),
+            r#"
+spec shop 2025-01-01
+uses a: amounts
+rule total: a.amount
+"#
+            .to_string(),
+        )])
+        .expect_err("amount changes from number to text");
+    let errors: Vec<_> = err.iter().collect();
+    assert_eq!(errors.len(), 1, "{errors:?}");
+    assert_eq!(
+        errors[0].message(),
+        "'shop' depends on 'amounts' without pinning an effective date, but data 'amount' has type number in amounts and text in amounts 2025-06-01"
+    );
+    let source = errors[0].location().expect("drift error has a source");
+    assert_eq!(source.source_type.to_string(), "shop.lemma");
+    assert_eq!(source.span.line, 3);
+}
+
+#[test]
+fn slice_drift_retyped_rule_names_member_and_rows() {
+    let mut engine = Engine::new();
+
+    engine
+        .load([(
+            lemma::SourceType::Path(std::sync::Arc::new(std::path::PathBuf::from("calc.lemma"))),
+            r#"
+spec calc
+rule fee: 1
+
+spec calc 2025-06-01
+rule fee: "waived"
+"#
+            .to_string(),
+        )])
+        .unwrap();
+
+    let err = engine
+        .load([(
+            lemma::SourceType::Path(std::sync::Arc::new(std::path::PathBuf::from(
+                "invoice.lemma",
+            ))),
+            r#"
+spec invoice 2025-01-01
+uses c: calc
+rule total: c.fee
+"#
+            .to_string(),
+        )])
+        .expect_err("fee changes from number to text");
+    let errors: Vec<_> = err.iter().collect();
+    assert_eq!(errors.len(), 1, "{errors:?}");
+    assert_eq!(
+        errors[0].message(),
+        "'invoice' depends on 'calc' without pinning an effective date, but rule 'fee' has type number in calc and text in calc 2025-06-01"
+    );
+    let source = errors[0].location().expect("drift error has a source");
+    assert_eq!(source.source_type.to_string(), "invoice.lemma");
+    assert_eq!(source.span.line, 3);
+}
+
+fn load_amounts_then_shop(amounts: &str, shop: &str) -> Result<(), lemma::Errors> {
+    let mut engine = Engine::new();
+    engine
+        .load([(
+            lemma::SourceType::Path(std::sync::Arc::new(std::path::PathBuf::from(
+                "amounts.lemma",
+            ))),
+            amounts.to_string(),
+        )])
+        .expect("amounts loads on its own");
+    engine.load([(
+        lemma::SourceType::Path(std::sync::Arc::new(std::path::PathBuf::from("shop.lemma"))),
+        shop.to_string(),
+    )])
+}
+
+#[test]
+fn slice_drift_ignores_help_change_on_type_consumer_does_not_read() {
+    load_amounts_then_shop(
+        r#"
+spec amounts
+data money: number -> help "Amount"
+data amount: 100
+
+spec amounts 2025-06-01
+data money: number -> help "Amount in euros"
+data amount: 100
+"#,
+        r#"
+spec shop 2025-01-01
+uses a: amounts
+rule total: a.amount
+"#,
+    )
+    .expect("shop never reads money");
+}
+
+#[test]
+fn slice_drift_ignores_maximum_change_on_type_consumer_does_not_read() {
+    load_amounts_then_shop(
+        r#"
+spec amounts
+data cap: number -> maximum 10
+data amount: 100
+
+spec amounts 2025-06-01
+data cap: number -> maximum 20
+data amount: 100
+"#,
+        r#"
+spec shop 2025-01-01
+uses a: amounts
+rule total: a.amount
+"#,
+    )
+    .expect("shop never reads cap");
+}
+
+#[test]
+fn slice_drift_help_change_on_imported_type_fails() {
+    let err = load_amounts_then_shop(
+        r#"
+spec amounts
+data money: number -> help "Amount"
+
+spec amounts 2025-06-01
+data money: number -> help "Amount in euros"
+"#,
+        r#"
+spec shop 2025-01-01
+uses a: amounts
+data price: a.money
+rule total: price
+"#,
+    )
+    .expect_err("shop imports money, whose help changed");
+    let errors: Vec<_> = err.iter().collect();
+    assert_eq!(errors.len(), 1, "{errors:?}");
+    assert_eq!(
+        errors[0].message(),
+        "'shop' depends on 'amounts' without pinning an effective date, but type 'money' changed between amounts and amounts 2025-06-01"
+    );
+    let source = errors[0].location().expect("drift error has a source");
+    assert_eq!(source.source_type.to_string(), "shop.lemma");
+    assert_eq!(source.span.line, 3);
+}
+
+#[test]
+fn slice_drift_maximum_change_on_bound_data_fails() {
+    let err = load_amounts_then_shop(
+        r#"
+spec amounts
+data cap: number -> maximum 10
+
+spec amounts 2025-06-01
+data cap: number -> maximum 20
+"#,
+        r#"
+spec shop 2025-01-01
+uses a: amounts
+  -> with cap: 5
+rule total: a.cap
+"#,
+    )
+    .expect_err("shop binds cap, whose maximum changed");
+    let errors: Vec<_> = err.iter().collect();
+    assert_eq!(errors.len(), 1, "{errors:?}");
+    assert_eq!(
+        errors[0].message(),
+        "'shop' depends on 'amounts' without pinning an effective date, but data 'cap' changed between amounts and amounts 2025-06-01"
     );
 }
 

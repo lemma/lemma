@@ -61,7 +61,7 @@ rule sy: b.y
     );
 
     assert!(
-        joined.contains("changed its interface between temporal slices"),
+        joined.contains("without pinning an effective date"),
         "2025 row must still report unstable_dep's interface change; a \
          MissingRepository error on the 2024 row must not disable interface \
          validation for the whole spec name. Got: {joined}"

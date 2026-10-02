@@ -2593,6 +2593,58 @@ rule total: helper.value + price"#
     }
 
     #[test]
+    fn failed_apply_leaves_list_source_and_run_unchanged() {
+        let mut engine = Engine::new();
+        engine
+            .load([(
+                SourceType::Volatile,
+                "spec price\ndata amount: number\nrule total: amount\n".to_string(),
+            )])
+            .expect("load");
+        let before_list = engine.list();
+        let before_source = engine.source(None, Some("price"), None).expect("source");
+        let now = DateTimeValue::now();
+        let before = engine
+            .run(
+                None,
+                "price",
+                Some(&now),
+                [("amount".to_string(), "4".to_string())]
+                    .into_iter()
+                    .collect(),
+                None,
+                false,
+            )
+            .expect("run");
+        let failed = engine.load([(
+            SourceType::Volatile,
+            "spec price\ndata amount: number\nrule total: amount +\n".to_string(),
+        )]);
+        assert!(failed.is_err(), "invalid spec must fail planning");
+        assert_eq!(engine.list(), before_list);
+        assert_eq!(
+            engine.source(None, Some("price"), None).expect("source"),
+            before_source
+        );
+        let after = engine
+            .run(
+                None,
+                "price",
+                Some(&now),
+                [("amount".to_string(), "4".to_string())]
+                    .into_iter()
+                    .collect(),
+                None,
+                false,
+            )
+            .expect("run after failed load");
+        assert_eq!(
+            after.results.get("total").expect("total").result,
+            before.results.get("total").expect("total").result
+        );
+    }
+
+    #[test]
     fn update_empty_path_prunes_all_specs_of_source() {
         let mut engine = Engine::new();
         let st = path_st("t.lemma");

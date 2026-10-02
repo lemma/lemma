@@ -41,14 +41,14 @@ LLVM version: 21.1.3
 
 | Metric | Covered | Total | Percent |
 |--------|--------:|------:|--------:|
-| Lines | 40863 | 48105 | 84.95% |
-| Functions | 3141 | 3611 | 86.98% |
-| Regions | 59396 | 70866 | 83.81% |
+| Lines | 41110 | 48363 | 85.00% |
+| Functions | 3156 | 3626 | 87.04% |
+| Regions | 59764 | 71239 | 83.89% |
 
 ## Test run
 
-- Total: 2752
-- Passed: 2752
+- Total: 2768
+- Passed: 2768
 - Skipped: 0
 - Failed: 0
 
@@ -76,10 +76,10 @@ Sorted by line coverage ascending (weakest first). Only files under `src/` for t
 | `snapshot.rs` | 79.21 | 77.78 | 81.19 | 160/202 |
 | `computation/units.rs` | 79.62 | 100.00 | 77.61 | 168/211 |
 | `evaluation/run_data.rs` | 80.72 | 75.00 | 81.93 | 427/529 |
-| `planning/graph.rs` | 80.78 | 86.15 | 81.64 | 7739/9580 |
-| `planning/execution_plan.rs` | 80.85 | 75.00 | 77.37 | 2069/2559 |
+| `planning/execution_plan.rs` | 80.83 | 75.00 | 77.37 | 2066/2556 |
+| `planning/graph.rs` | 80.86 | 86.18 | 81.71 | 7753/9588 |
 | `evaluation/expression.rs` | 81.54 | 100.00 | 86.02 | 53/65 |
-| `planning/semantics.rs` | 81.83 | 82.33 | 82.29 | 3940/4815 |
+| `planning/semantics.rs` | 81.85 | 82.33 | 82.35 | 3941/4815 |
 | `computation/range.rs` | 82.47 | 94.12 | 80.34 | 207/251 |
 | `computation/bigint/biguint.rs` | 83.53 | 89.80 | 81.61 | 431/516 |
 | `literals.rs` | 83.59 | 78.50 | 84.33 | 606/725 |
@@ -98,14 +98,14 @@ Sorted by line coverage ascending (weakest first). Only files under `src/` for t
 | `string_distance.rs` | 90.48 | 83.33 | 93.22 | 57/63 |
 | `planning/unit_index.rs` | 90.74 | 94.23 | 91.68 | 500/551 |
 | `evaluation/narration.rs` | 90.77 | 87.88 | 91.95 | 472/520 |
-| `formatting/mod.rs` | 92.33 | 100.00 | 91.29 | 903/978 |
 | `parsing/mod.rs` | 92.36 | 99.03 | 89.04 | 1511/1636 |
 | `registry.rs` | 92.45 | 97.44 | 94.47 | 968/1047 |
+| `formatting/mod.rs` | 92.54 | 100.00 | 91.72 | 905/978 |
 | `evaluation/conversion_trace.rs` | 92.86 | 100.00 | 93.26 | 130/140 |
+| `planning/discovery.rs` | 92.95 | 97.53 | 94.00 | 1423/1531 |
 | `quality.rs` | 93.03 | 96.77 | 89.15 | 907/975 |
 | `limits.rs` | 93.27 | 100.00 | 85.40 | 97/104 |
-| `planning/discovery.rs` | 93.34 | 97.06 | 94.16 | 1233/1321 |
-| `engine.rs` | 93.48 | 92.43 | 94.25 | 2165/2316 |
+| `engine.rs` | 93.60 | 92.47 | 94.37 | 2208/2359 |
 | `planning/mod.rs` | 93.66 | 96.15 | 94.61 | 1358/1450 |
 | `evaluation/mod.rs` | 94.46 | 86.36 | 94.56 | 307/325 |
 | `evaluation/tree.rs` | 96.07 | 100.00 | 94.29 | 440/458 |
@@ -126,4 +126,4 @@ Sorted by line coverage ascending (weakest first). Only files under `src/` for t
 - [Engine integration test catalog](../../../engine/tests/README.md) — qualitative map of scenarios and subsystem overlap clusters
 - [CLI test coverage](cli.md)
 - [Engine benchmarks](../benchmarks/engine.md)
-<!-- coverage-input-digest: 499fe2846dd7ca43 -->
+<!-- coverage-input-digest: 2974615ccc3e6654 -->

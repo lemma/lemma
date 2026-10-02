@@ -253,7 +253,7 @@ rule heavy: item_weight > 100.0 kg
         .collect::<Vec<_>>()
         .join("; ");
     assert!(
-        combined.contains("changed its interface"),
+        combined.contains("without pinning an effective date"),
         "Error should mention interface change, got: {combined}"
     );
 }
@@ -401,7 +401,7 @@ rule doubled: price * 2
         .collect::<Vec<_>>()
         .join("; ");
     assert!(
-        combined.contains("changed its interface"),
+        combined.contains("without pinning an effective date"),
         "Error should mention interface change, got: {combined}"
     );
 }

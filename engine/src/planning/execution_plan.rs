@@ -293,6 +293,9 @@ pub(crate) fn build_execution_plan(
     let show_keys: HashSet<String> = reachable.iter().map(|path| path.input_key()).collect();
 
     for rule_path in rule_order {
+        if !reachable.contains(rule_path) {
+            continue;
+        }
         let rule_node = graph.rules().get(rule_path).expect(
             "bug: rule from topological sort not in graph - validation should have caught this",
         );
@@ -334,20 +337,15 @@ pub(crate) fn build_execution_plan(
         );
         completed_rules.insert(rule_path.clone(), body);
 
-        if reachable.contains(rule_path) {
-            show_rules.insert(
-                rule_path.clone(),
-                ShowRule {
-                    lemma_type: family_units.rule_type_for_show(rule_node.rule_type.as_ref()),
-                    path: rule_path.segments.clone(),
-                    branches: show_branches_from(&rule_node.branches, &show_keys),
-                    depends_on_rules: project_depends_on_rules(
-                        &rule_node.depends_on_rules,
-                        &show_keys,
-                    ),
-                },
-            );
-        }
+        show_rules.insert(
+            rule_path.clone(),
+            ShowRule {
+                lemma_type: family_units.rule_type_for_show(rule_node.rule_type.as_ref()),
+                path: rule_path.segments.clone(),
+                branches: show_branches_from(&rule_node.branches, &show_keys),
+                depends_on_rules: project_depends_on_rules(&rule_node.depends_on_rules, &show_keys),
+            },
+        );
 
         rules.insert(
             rule_path.clone(),

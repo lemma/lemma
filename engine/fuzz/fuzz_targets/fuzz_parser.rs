@@ -17,8 +17,11 @@ fuzz_target!(|data: &[u8]| {
                 .list()
                 .iter()
                 .find(|r| r.repository.is_none())
-                .map(|r| r.specs.iter().map(|ls| ls.name.clone()).collect())
-                .unwrap_or_default();
+                .expect("BUG: default repository must exist in list()")
+                .specs
+                .iter()
+                .map(|ls| ls.name.clone())
+                .collect();
             for name in spec_names {
                 let _ = engine.run(None, &name, Some(&now), HashMap::new(), None, false);
             }

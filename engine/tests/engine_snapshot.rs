@@ -131,6 +131,14 @@ fn restored_engine_accepts_update_and_remove() {
     let engine = rich_workspace();
     let bytes = engine.snapshot().expect("snapshot");
     let mut restored = Engine::from_snapshot(&bytes).expect("restore");
+    assert_eq!(
+        restored
+            .source(None, Some("pricing"), Some(&effective_2024()))
+            .expect("restored source"),
+        engine
+            .source(None, Some("pricing"), Some(&effective_2024()))
+            .expect("writer source")
+    );
     restored
         .update(
             None,
@@ -161,6 +169,37 @@ rule line_total: qty * unit_price
             SourceType::Volatile,
         )
         .expect("update must succeed");
+    restored
+        .update(
+            None,
+            r#"
+spec money
+data currency: measure
+  -> unit eur: 1
+  -> unit cent: 0.01
+data note: text
+
+spec pricing 2024-01-01
+data amount: money.currency
+rule doubled: amount * 2
+
+spec pricing 2025-01-01
+data amount: money.currency
+rule doubled: amount * 3
+
+spec checkout 2024-01-01
+uses p: pricing
+uses m: money
+
+data qty: number
+data unit_price: m.currency
+
+rule line_total: qty * unit_price
+"#
+            .to_string(),
+            SourceType::Volatile,
+        )
+        .expect("consumer replans from its stored spec when money's interface changes");
     restored
         .remove(None, "checkout", Some(&effective_2024()))
         .expect("remove must succeed");

@@ -11,6 +11,14 @@ Releases cover the Lemma engine, `lemma` CLI, OpenAPI crate, LSP, SDKs and VS Co
 ### Changed
 
 - **Prefix operators take one range operand**: `floor x + 1` is `(floor x) + 1`, `floor x as gram` is `(floor x) as gram`, and `sqrt x ^ 2` is `(sqrt x) ^ 2`. Parentheses widen the operand (`floor (x + 1)`). `past` / `future` are unchanged.
+- **Unpinned `uses` checks only what the consumer reads**: across the dependency rows that overlap the consumer, planning compares the names the consumer writes after the alias (rule expressions, `data x: alias.type`, `-> with` paths and reference targets). A later row may change `help`, `maximum`, units or types on names the consumer does not read, and may add names. A read name that changes still fails planning.
+- **Drift errors name the member and both rows**: `'shop' depends on 'amounts' without pinning an effective date, but data 'amount' has type number in amounts and text in amounts 2025-06-01`. When only constraints or help differ: `type 'money' changed between finance 2025-01-01 and finance 2025-07-01`. A dependency with no row active during the consumer gets its own message: `no row of 'dep' is active during ...`. A `uses` row plus `data x: alias.type` on the same alias reports one error, not two.
+- **Faster planning on large workspaces**: execution plans normalize only rules reachable from the spec's own rules, not every imported rule. Logistics ladder load: carrier 819 ms to 664 ms, enterprise 20.2 s to 16.5 s. Snapshots shrink accordingly (enterprise 181.4 MiB to 167.6 MiB, restore 1157 ms to 1082 ms). Unreachable imported rules are still type checked. Engine snapshots from earlier versions are rejected as before.
+
+### Fixed
+
+- **`-> with` literal into a literal slot**: `-> with weight: 10` against `data weight: 5 kilogram` is rejected with "cannot use 10 as measure". Binding text into a number slot is rejected too. A foreign unit lists the slot type's valid units. `10 kilogram` is accepted.
+- **`-> with` errors follow binding order**: multiple binding type errors on one `uses` row are reported in the order the bindings are written, not the order the target spec declares the data.
 
 ## [0.9.11] - 2026-09-22
 

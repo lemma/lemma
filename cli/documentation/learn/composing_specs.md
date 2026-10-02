@@ -189,13 +189,13 @@ Fix: add an earlier `spec dep` row, move the consumer's `effective_from` later, 
 
 ### Interface compatibility (contract changes)
 
-When unpinned imports span multiple rows of the same dependency, every row the consumer touches must expose compatible types for the same names (Rule result types, Data types, compatible measure units, etc.). New names only in a later row are fine if the consumer does not use them.
+When unpinned imports span multiple rows of the same dependency, every name the consumer reads through the import must have the same type in each of those rows. A name is read when the consumer writes it after the alias: in a rule (`f.total`), as a type (`data price: f.money`), or in `-> with` on the `uses` row. Type sameness covers units, constraints such as `maximum`, and `help` text. Names the consumer does not read may change freely, and new names in a later row are fine.
 
-Incompatible example: `money` gains a `usd` unit in a later `finance` row while `shop` still has unpinned `uses finance` and `data price: finance.money`. Planning reports that the dependency changed its interface between temporal slices.
+Incompatible example: `money` gains a `usd` unit in a later `finance` row while `shop` still has unpinned `uses f: finance` and `data money: f.money`. Planning names the member and both rows: `'shop' depends on 'finance' without pinning an effective date, but type 'money' changed between finance 2025-01-01 and finance 2025-07-01`. When the base type itself changes, the message shows both types, for example `rule 'fee' has type number in calc and text in calc 2025-06-01`.
 
 Fix: pin `uses f: finance 2025-02-01`, or add a new temporal row of `shop` written for the new finance body.
 
-Coverage is presence on the timeline; interface validation is type sameness across slices the consumer needs.
+Coverage is presence on the timeline; interface validation is type sameness, across those rows, of what the consumer reads.
 
 ### Same name, different bodies
 

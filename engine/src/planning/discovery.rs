@@ -1,7 +1,7 @@
 use crate::engine::Context;
 use crate::parsing::ast::{
-    DataValue, DateTimeValue, EffectiveDate, LemmaRepository, LemmaSpec, ParentType,
-    RepositoryQualifier, SpecRef,
+    DataValue, DateTimeValue, EffectiveDate, Expression, ExpressionKind, LemmaRepository,
+    LemmaSpec, ParentType, Reference, RepositoryQualifier, SpecRef, WithRhs,
 };
 use crate::parsing::source::Source;
 use crate::planning::semantics::{DataDefinition, LemmaType};
@@ -343,6 +343,18 @@ pub(crate) struct DependencyEdge {
     pub explicit_repository_qualifier: Option<RepositoryQualifier>,
     pub explicit_effective: Option<DateTimeValue>,
     pub source: Source,
+    /// Name the consumer writes before `.` to reach the dependency.
+    pub alias: String,
+    pub origin: DependencyEdgeOrigin,
+}
+
+/// Which row of the consumer spec produced a [`DependencyEdge`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DependencyEdgeOrigin {
+    /// `uses alias: dep`
+    Uses,
+    /// `data x: alias.type`
+    QualifiedType,
 }
 
 impl DependencyEdge {
@@ -365,33 +377,42 @@ pub(crate) fn dependency_edges(
     let mut errors: Vec<Error> = Vec::new();
 
     let mut push_edge =
-        |spec_ref: &SpecRef, source: &Source| match resolve_spec_ref_after_expanding_uses_aliases(
-            context,
-            spec_ref,
-            Some(source),
-            spec.name.as_str(),
-            Some(spec),
-        ) {
-            Ok((resolved, effective_ref)) => {
-                let dep_repository = match &resolved.repository {
-                    Some(r) => Arc::clone(r),
-                    None => Arc::clone(consumer_repository),
-                };
-                out.push(DependencyEdge {
-                    dep_repository,
-                    dep_name: resolved.name,
-                    explicit_repository_qualifier: effective_ref.repository.clone(),
-                    explicit_effective: resolved.effective,
-                    source: source.clone(),
-                });
+        |spec_ref: &SpecRef, source: &Source, alias: &str, origin: DependencyEdgeOrigin| {
+            match resolve_spec_ref_after_expanding_uses_aliases(
+                context,
+                spec_ref,
+                Some(source),
+                spec.name.as_str(),
+                Some(spec),
+            ) {
+                Ok((resolved, effective_ref)) => {
+                    let dep_repository = match &resolved.repository {
+                        Some(r) => Arc::clone(r),
+                        None => Arc::clone(consumer_repository),
+                    };
+                    out.push(DependencyEdge {
+                        dep_repository,
+                        dep_name: resolved.name,
+                        explicit_repository_qualifier: effective_ref.repository.clone(),
+                        explicit_effective: resolved.effective,
+                        source: source.clone(),
+                        alias: alias.to_string(),
+                        origin,
+                    });
+                }
+                Err(e) => errors.push(e),
             }
-            Err(e) => errors.push(e),
         };
 
     for data in &spec.data {
         match &data.value {
             DataValue::Import { spec_ref, .. } => {
-                push_edge(spec_ref, &data.source_location);
+                push_edge(
+                    spec_ref,
+                    &data.source_location,
+                    &data.reference.name,
+                    DependencyEdgeOrigin::Uses,
+                );
             }
             DataValue::Definition {
                 base: Some(ParentType::Qualified { spec_alias, .. }),
@@ -400,6 +421,8 @@ pub(crate) fn dependency_edges(
                 push_edge(
                     &SpecRef::same_repository(spec_alias.clone()),
                     &data.source_location,
+                    spec_alias,
+                    DependencyEdgeOrigin::QualifiedType,
                 );
             }
             _ => {}
@@ -585,6 +608,172 @@ pub(crate) fn plan_breakpoints(
 // Unqualified dep interface validation
 // ---------------------------------------------------------------------------
 
+/// Members a consumer spec names through one alias, keyed like
+/// [`crate::planning::semantics::DataPath::input_key`] relative to the dependency.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct AliasReads {
+    /// Data or rule members: `alias.x` in rule expressions, `-> with` paths, and
+    /// `-> with` reference targets.
+    members: HashSet<String>,
+    /// Named types: `data x: alias.money` (also under `range`).
+    types: HashSet<String>,
+}
+
+fn alias_reads(spec: &LemmaSpec, alias: &str) -> AliasReads {
+    let mut reads = AliasReads::default();
+    for rule in &spec.rules {
+        collect_alias_expression_reads(&rule.expression, alias, &mut reads.members);
+        for clause in &rule.unless_clauses {
+            collect_alias_expression_reads(&clause.condition, alias, &mut reads.members);
+            collect_alias_expression_reads(&clause.result, alias, &mut reads.members);
+        }
+    }
+    for data in &spec.data {
+        if !data.reference.is_local() {
+            continue;
+        }
+        match &data.value {
+            DataValue::Definition {
+                base: Some(base), ..
+            } => {
+                if let Some(type_name) = qualified_type_read(base, alias) {
+                    reads.types.insert(type_name.to_string());
+                }
+            }
+            DataValue::Definition { base: None, .. } => {}
+            DataValue::Import { bindings, .. } => {
+                for binding in bindings {
+                    if data.reference.name == alias {
+                        reads
+                            .members
+                            .insert(member_key(&binding.path.segments, &binding.path.name));
+                    }
+                    if let WithRhs::Reference { target } = &binding.rhs {
+                        collect_alias_reference_read(target, alias, &mut reads.members);
+                    }
+                }
+            }
+        }
+    }
+    reads
+}
+
+fn member_key(segments: &[String], name: &str) -> String {
+    let mut key = String::new();
+    for segment in segments {
+        key.push_str(segment);
+        key.push('.');
+    }
+    key.push_str(name);
+    key
+}
+
+fn collect_alias_reference_read(reference: &Reference, alias: &str, out: &mut HashSet<String>) {
+    if let Some((first, rest)) = reference.segments.split_first() {
+        if first == alias {
+            out.insert(member_key(rest, &reference.name));
+        }
+    }
+}
+
+fn collect_alias_expression_reads(expression: &Expression, alias: &str, out: &mut HashSet<String>) {
+    match &expression.kind {
+        ExpressionKind::Reference(reference) => {
+            collect_alias_reference_read(reference, alias, out);
+        }
+        ExpressionKind::DateRelative(_, inner)
+        | ExpressionKind::DateCalendar(_, _, inner)
+        | ExpressionKind::PastFutureRange(_, inner)
+        | ExpressionKind::UnitConversion(inner, _)
+        | ExpressionKind::LogicalNegation(inner, _)
+        | ExpressionKind::MathematicalComputation(_, inner)
+        | ExpressionKind::RangeBound(_, inner)
+        | ExpressionKind::ResultIsVeto(inner) => {
+            collect_alias_expression_reads(inner, alias, out);
+        }
+        ExpressionKind::RangeLiteral(left, right)
+        | ExpressionKind::RangeContainment(left, right)
+        | ExpressionKind::LogicalAnd(left, right)
+        | ExpressionKind::Arithmetic(left, _, right)
+        | ExpressionKind::Comparison(left, _, right) => {
+            collect_alias_expression_reads(left, alias, out);
+            collect_alias_expression_reads(right, alias, out);
+        }
+        ExpressionKind::Literal(_) | ExpressionKind::Now | ExpressionKind::Veto(_) => {}
+    }
+}
+
+/// Type name read from `alias` by a data row's parent type, if any.
+fn qualified_type_read<'p>(base: &'p ParentType, alias: &str) -> Option<&'p str> {
+    match base {
+        ParentType::Qualified { spec_alias, inner } if spec_alias == alias => {
+            match inner.as_ref() {
+                ParentType::Custom { name } => Some(name.as_str()),
+                ParentType::Primitive { .. }
+                | ParentType::Qualified { .. }
+                | ParentType::Ranged { .. } => None,
+            }
+        }
+        ParentType::Ranged { inner } => qualified_type_read(inner, alias),
+        ParentType::Qualified { .. } | ParentType::Primitive { .. } | ParentType::Custom { .. } => {
+            None
+        }
+    }
+}
+
+fn dep_row_label(dep_qualified: &str, at: &EffectiveDate) -> String {
+    match at {
+        EffectiveDate::Origin => dep_qualified.to_string(),
+        EffectiveDate::DateTimeValue(datetime) => format!("{dep_qualified} {datetime}"),
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum MemberKind {
+    Data,
+    Rule,
+    Type,
+}
+
+impl MemberKind {
+    fn label(self) -> &'static str {
+        match self {
+            MemberKind::Data => "data",
+            MemberKind::Rule => "rule",
+            MemberKind::Type => "type",
+        }
+    }
+}
+
+/// Type of an interface member as seen in one dependency row.
+struct MemberRow<'a> {
+    lemma_type: &'a LemmaType,
+    at: EffectiveDate,
+}
+
+fn interface_member_drift_message(
+    consumer: &str,
+    dep_qualified: &str,
+    kind: &str,
+    name: &str,
+    earlier: &MemberRow<'_>,
+    later: &MemberRow<'_>,
+) -> String {
+    let earlier_row = dep_row_label(dep_qualified, &earlier.at);
+    let later_row = dep_row_label(dep_qualified, &later.at);
+    let earlier_label = earlier.lemma_type.specifications.to_string();
+    let later_label = later.lemma_type.specifications.to_string();
+    if earlier_label == later_label {
+        format!(
+            "'{consumer}' depends on '{dep_qualified}' without pinning an effective date, but {kind} '{name}' changed between {earlier_row} and {later_row}"
+        )
+    } else {
+        format!(
+            "'{consumer}' depends on '{dep_qualified}' without pinning an effective date, but {kind} '{name}' has type {earlier_label} in {earlier_row} and {later_label} in {later_row}"
+        )
+    }
+}
+
 /// For each spec with unqualified deps, verify that the dep's interface
 /// (schema) is type-compatible across all dep specs active within the
 /// consumer's effective range. Qualified deps are pinned and skip this check.
@@ -635,8 +824,20 @@ pub fn validate_dependency_interfaces<'a>(
                     }
                 };
 
-                for edge in edges {
+                let uses_aliases: HashSet<&str> = edges
+                    .iter()
+                    .filter(|edge| edge.origin == DependencyEdgeOrigin::Uses)
+                    .map(|edge| edge.alias.as_str())
+                    .collect();
+
+                for edge in &edges {
                     if edge.explicit_effective.is_some() {
+                        continue;
+                    }
+                    // The `uses` row for this alias already checks every member read through it.
+                    if edge.origin == DependencyEdgeOrigin::QualifiedType
+                        && uses_aliases.contains(edge.alias.as_str())
+                    {
                         continue;
                     }
 
@@ -686,13 +887,13 @@ pub fn validate_dependency_interfaces<'a>(
                         );
                     };
 
-                    let mut data_types: HashMap<String, &LemmaType> = HashMap::new();
-                    let mut rule_types: HashMap<String, &LemmaType> = HashMap::new();
-                    let mut interface_drift = false;
+                    let reads = alias_reads(spec, &edge.alias);
+                    let mut seen: HashMap<(MemberKind, String), MemberRow<'_>> = HashMap::new();
+                    let mut member_drift: Option<String> = None;
                     let mut saw_overlapping_plan = false;
 
                     let mut dep_iter = dep_plans.iter().peekable();
-                    'dep_plans: while let Some((_effective, plan)) = dep_iter.next() {
+                    'dep_plans: while let Some((effective, plan)) = dep_iter.next() {
                         let window_from = plan.effective.as_ref().cloned();
                         let window_to = dep_iter
                             .peek()
@@ -703,6 +904,7 @@ pub fn validate_dependency_interfaces<'a>(
                         }
                         saw_overlapping_plan = true;
 
+                        let mut observed: Vec<(MemberKind, String, &LemmaType)> = Vec::new();
                         for (path, data) in &plan.data {
                             let Some(lemma_type) = data.schema_type() else {
                                 continue;
@@ -711,54 +913,85 @@ pub fn validate_dependency_interfaces<'a>(
                                 continue;
                             }
                             let input_key = path.input_key();
-                            match data_types.get(&input_key) {
-                                Some(existing) if **existing != *lemma_type => {
-                                    interface_drift = true;
-                                    break 'dep_plans;
-                                }
-                                None => {
-                                    data_types.insert(input_key, lemma_type);
-                                }
-                                _ => {}
+                            if reads.members.contains(&input_key) {
+                                observed.push((MemberKind::Data, input_key, lemma_type));
                             }
                         }
-
-                        if interface_drift {
-                            break;
-                        }
-
                         for rule in plan.rules.values() {
-                            if !rule.path.segments.is_empty() {
-                                continue;
+                            if rule.path.segments.is_empty() && reads.members.contains(rule.name())
+                            {
+                                observed.push((
+                                    MemberKind::Rule,
+                                    rule.name().to_string(),
+                                    rule.rule_type.as_ref(),
+                                ));
                             }
-                            match rule_types.get(rule.name()) {
-                                Some(existing) if **existing != *rule.rule_type => {
-                                    interface_drift = true;
+                        }
+                        for (type_name, lemma_type) in &plan.resolved_types.resolved {
+                            if reads.types.contains(type_name) {
+                                observed.push((
+                                    MemberKind::Type,
+                                    type_name.clone(),
+                                    lemma_type.as_ref(),
+                                ));
+                            }
+                        }
+
+                        for (kind, key, lemma_type) in observed {
+                            let row = MemberRow {
+                                lemma_type,
+                                at: effective.clone(),
+                            };
+                            match seen.get(&(kind, key.clone())) {
+                                Some(earlier) if earlier.lemma_type != lemma_type => {
+                                    member_drift = Some(interface_member_drift_message(
+                                        &spec.name,
+                                        &dep_qualified,
+                                        kind.label(),
+                                        &key,
+                                        earlier,
+                                        &row,
+                                    ));
                                     break 'dep_plans;
                                 }
+                                Some(_) => {}
                                 None => {
-                                    rule_types
-                                        .insert(rule.name().to_string(), rule.rule_type.as_ref());
+                                    seen.insert((kind, key), row);
                                 }
-                                _ => {}
                             }
                         }
                     }
 
-                    if interface_drift || !saw_overlapping_plan {
+                    if let Some(message) = member_drift {
+                        errors.push((
+                            Arc::clone(&consumer_repository),
+                            consumer_spec_name.clone(),
+                            spec,
+                            Error::validation_with_context(
+                                message,
+                                Some(edge.source.clone()),
+                                Some(format!(
+                                    "Pin '{dep_qualified}' to a specific effective date, or make '{dep_qualified}' interface-compatible across specs."
+                                )),
+                                Some(spec),
+                                None,
+                            ),
+                        ));
+                    } else if !saw_overlapping_plan {
                         errors.push((
                             Arc::clone(&consumer_repository),
                             consumer_spec_name.clone(),
                             spec,
                             Error::validation_with_context(
                                 format!(
-                                    "'{}' depends on '{}' without pinning an effective date, but '{}' changed its interface between temporal slices",
-                                    spec.name, dep_qualified, dep_qualified
+                                    "'{}' depends on '{dep_qualified}' without pinning an effective date, but no row of '{dep_qualified}' is active during {}",
+                                    spec.name,
+                                    consumer_identity(spec)
                                 ),
                                 Some(edge.source.clone()),
                                 Some(format!(
-                                    "Pin '{}' to a specific effective date, or make '{}' interface-compatible across specs.",
-                                    dep_qualified, dep_qualified
+                                    "Add '{dep_qualified}' with an effective date covering {}, or pin the import.",
+                                    consumer_identity(spec)
                                 )),
                                 Some(spec),
                                 None,
@@ -1779,6 +2012,57 @@ data v: 99
                 EffectiveDate::DateTimeValue(date(2025, 12, 1)),
             ],
             "breakpoints must be clipped to this spec version's validity range"
+        );
+    }
+
+    #[test]
+    fn alias_reads_collects_every_member_named_through_alias() {
+        let source = r#"
+spec shop
+uses a: amounts
+  -> with rate: b.base
+  -> with lines.count: 3
+uses b: other
+data price: a.money
+data window: a.span range
+data own: number
+rule total: a.amount + own
+ unless a.lines.flag then a.waiver
+ unless b.skip then 0
+rule start: lower a.period
+"#;
+        let specs = crate::parse(
+            source,
+            crate::parsing::source::SourceType::Volatile,
+            &crate::ResourceLimits::default(),
+        )
+        .expect("parse")
+        .into_flattened_specs();
+        let shop = &specs[0];
+
+        let strings = |names: &[&str]| -> HashSet<String> {
+            names.iter().map(|name| (*name).to_string()).collect()
+        };
+        assert_eq!(
+            alias_reads(shop, "a"),
+            AliasReads {
+                members: strings(&[
+                    "rate",
+                    "lines.count",
+                    "amount",
+                    "lines.flag",
+                    "waiver",
+                    "period",
+                ]),
+                types: strings(&["money", "span"]),
+            }
+        );
+        assert_eq!(
+            alias_reads(shop, "b"),
+            AliasReads {
+                members: strings(&["base", "skip"]),
+                types: HashSet::new(),
+            }
         );
     }
 }

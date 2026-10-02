@@ -80,7 +80,7 @@ fn clear_infer_expression_type_cache() {
 /// are applied correctly regardless of spec ref bindings.
 ///
 /// Example: `data employee.salary: 7500` in the root spec produces key `["employee", "salary"]`.
-type DataBindings = HashMap<Vec<String>, (BindingValue, Source)>;
+type DataBindings = IndexMap<Vec<String>, (BindingValue, Source)>;
 
 /// Binding value stored in [`DataBindings`]. Only two forms are valid for a
 /// cross-spec binding: a literal value, or a reference to another data or rule.
@@ -1832,7 +1832,7 @@ impl<'a> GraphBuilder<'a> {
             main_spec,
             repository,
             Vec::new(),
-            HashMap::new(),
+            IndexMap::new(),
             effective,
             type_resolver,
         )?;
@@ -2092,7 +2092,7 @@ impl<'a> GraphBuilder<'a> {
         current_segments: &[PathSegment],
         effective: &EffectiveDate,
     ) -> Result<DataBindings, Vec<Error>> {
-        let mut bindings: DataBindings = HashMap::new();
+        let mut bindings: DataBindings = IndexMap::new();
         let mut errors: Vec<Error> = Vec::new();
 
         for import_row in &spec.data {
@@ -2229,6 +2229,50 @@ impl<'a> GraphBuilder<'a> {
         Ok(bindings)
     }
 
+    /// Apply `-> with` bindings whose key is a slot of this spec, in source order.
+    fn apply_bindings_in_source_order(
+        &mut self,
+        current_spec: &LemmaSpec,
+        current_segments: &[PathSegment],
+        bindings: &DataBindings,
+        used_binding_keys: &mut HashSet<Vec<String>>,
+    ) {
+        let prefix: Vec<&str> = current_segments
+            .iter()
+            .map(|segment| segment.uses.as_str())
+            .collect();
+        for (key, (value, source)) in bindings {
+            let Some((name, key_prefix)) = key.split_last() else {
+                continue;
+            };
+            if key_prefix.len() != prefix.len()
+                || key_prefix
+                    .iter()
+                    .zip(&prefix)
+                    .any(|(key_segment, prefix_segment)| key_segment != prefix_segment)
+            {
+                continue;
+            }
+            let path = DataPath {
+                segments: current_segments.to_vec(),
+                data: name.clone(),
+            };
+            let Some(existing) = self.data.get(&path).cloned() else {
+                continue;
+            };
+            used_binding_keys.insert(key.clone());
+            let schema = match &existing {
+                DataDefinition::TypeDeclaration { resolved_type, .. }
+                | DataDefinition::Value { resolved_type, .. }
+                | DataDefinition::Reference { resolved_type, .. } => {
+                    Some(Arc::clone(resolved_type))
+                }
+                DataDefinition::Import { .. } => None,
+            };
+            self.add_data_from_binding(path, value.clone(), source.clone(), schema, current_spec);
+        }
+    }
+
     /// Add a single local data to the graph.
     ///
     /// Determines the effective value by checking `data_bindings` for an entry at
@@ -2238,9 +2282,7 @@ impl<'a> GraphBuilder<'a> {
         &mut self,
         data: &LemmaData,
         current_segments: &[PathSegment],
-        data_bindings: &DataBindings,
         current_spec: &LemmaSpec,
-        used_binding_keys: &mut HashSet<Vec<String>>,
         effective: &EffectiveDate,
     ) {
         let data_path = DataPath {
@@ -2271,22 +2313,6 @@ impl<'a> GraphBuilder<'a> {
             return;
         }
 
-        // Build the binding key for this data: segment uses aliases + data name
-        let binding_key: Vec<String> = current_segments
-            .iter()
-            .map(|s| s.uses.clone())
-            .chain(std::iter::once(data.reference.name.clone()))
-            .collect();
-
-        // A binding (if any) overrides the data's own RHS. We track the binding
-        // separately from the data's own value because `BindingValue` (resolved)
-        // and `ParsedDataValue` (raw AST) are different types.
-        let binding_override: Option<(BindingValue, Source)> =
-            data_bindings.get(&binding_key).map(|(v, s)| {
-                used_binding_keys.insert(binding_key.clone());
-                (v.clone(), s.clone())
-            });
-
         let (original_schema_type, original_declared_suggestion, original_declared_fill) = if matches!(
             &data.value,
             ParsedDataValue::Definition { .. }
@@ -2316,17 +2342,6 @@ impl<'a> GraphBuilder<'a> {
         } else {
             (None, None, None)
         };
-
-        if let Some((binding_value, binding_source)) = binding_override {
-            self.add_data_from_binding(
-                data_path,
-                binding_value,
-                binding_source,
-                original_schema_type,
-                current_spec,
-            );
-            return;
-        }
 
         let effective_source = data.source_location.clone();
 
@@ -2867,7 +2882,7 @@ impl<'a> GraphBuilder<'a> {
             Ok(bindings) => bindings,
             Err(errors) => {
                 self.errors.extend(errors);
-                HashMap::new()
+                IndexMap::new()
             }
         };
 
@@ -2899,15 +2914,14 @@ impl<'a> GraphBuilder<'a> {
             if matches!(&data.value, ParsedDataValue::Import { .. }) {
                 continue;
             }
-            self.add_data(
-                data,
-                &current_segments,
-                &effective_bindings,
-                spec,
-                &mut used_binding_keys,
-                effective,
-            );
+            self.add_data(data, &current_segments, spec, effective);
         }
+        self.apply_bindings_in_source_order(
+            spec,
+            &current_segments,
+            &effective_bindings,
+            &mut used_binding_keys,
+        );
 
         for data in &spec.data {
             if !data.reference.segments.is_empty() {
@@ -2923,14 +2937,7 @@ impl<'a> GraphBuilder<'a> {
                             continue;
                         }
                     };
-                self.add_data(
-                    data,
-                    &current_segments,
-                    &effective_bindings,
-                    spec,
-                    &mut used_binding_keys,
-                    effective,
-                );
+                self.add_data(data, &current_segments, spec, effective);
                 let mut nested_segments = current_segments.clone();
                 nested_segments.push(PathSegment {
                     uses: data.reference.name.clone(),

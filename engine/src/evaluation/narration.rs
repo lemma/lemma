@@ -340,6 +340,29 @@ fn narrate_shape(id: NormalFormId, plan: &ExecutionPlan, ctx: &EvaluationContext
         NormalFormKind::OrderedDispatch { .. } => {
             unreachable!("BUG: OrderedDispatch always carries its Piecewise pre-image as origin")
         }
+        NormalFormKind::SpecMember {
+            base,
+            member,
+            targets,
+        } => {
+            let base_result = slot(*base, plan, ctx);
+            if base_result.vetoed() {
+                return narrate(*base, plan, ctx);
+            }
+            let instance = match &borrow_value(&base_result, "spec member").value {
+                ValueKind::Spec(instance) => instance.clone(),
+                other => panic!("BUG: spec member base was {other}, not a spec instance"),
+            };
+            let (_, target) = targets
+                .iter()
+                .find(|(candidate, _)| candidate == &instance)
+                .unwrap_or_else(|| {
+                    panic!("BUG: spec member instance {instance} is not a candidate")
+                });
+            let mut narrated = narrate(*target, plan, ctx);
+            narrated.body = format!("{instance}.{member}");
+            narrated
+        }
     }
 }
 
@@ -670,7 +693,8 @@ fn condition_statement(
         | NormalFormKind::RangeLiteral(..)
         | NormalFormKind::PastFutureRange(..)
         | NormalFormKind::RangeBound(..)
-        | NormalFormKind::Leaf(LeafKind::Literal(_)) => {
+        | NormalFormKind::Leaf(LeafKind::Literal(_))
+        | NormalFormKind::SpecMember { .. } => {
             unreachable!("BUG: non-boolean condition in condition_statement")
         }
     }

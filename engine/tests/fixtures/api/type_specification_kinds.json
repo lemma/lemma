@@ -164,5 +164,12 @@
     "decomposition": { "length": 1 },
     "help": "",
     "extends": { "kind": "primitive" }
+  },
+  "spec": {
+    "name": null,
+    "kind": "spec",
+    "spec": "tax_bracket",
+    "effective": "",
+    "extends": { "kind": "primitive" }
   }
 }

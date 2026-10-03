@@ -780,6 +780,7 @@ fn type_help(lemma_type: &LemmaType) -> String {
         TypeSpecification::TimeRange { help, .. } => help.clone(),
         TypeSpecification::Time { help, .. } => help.clone(),
         TypeSpecification::Veto { .. } => String::new(),
+        TypeSpecification::Spec { spec } => spec.to_string(),
         TypeSpecification::Undetermined => unreachable!(
             "BUG: type_help called with Undetermined sentinel type; this type must never reach OpenAPI generation"
         ),

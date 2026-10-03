@@ -54,6 +54,7 @@ rule has_discount:
 - `uses alias: target_spec`: imports spec in same file.
 - Reference members: `alias.field` or `alias.rule_name`.
 - Under `uses`, `  -> with path: value` sets imported data (path relative to imported spec). Do not use `data alias.field`. Standalone `with alias.field: …` is deprecated (still parses; `quality` recommends block form). Local slots use `data`.
+- A rule may return a `uses` alias (`rule chosen: basic unless flag then higher`). Dot on that rule reads the chosen instance (`chosen.rate`). All `unless` branches must be the same spec and resolved version. Do not add, compare, or `with` a spec instance; `is veto` is allowed. The result JSON includes `spec` (name, effective, instance path, `data` run-data texts, `rules`). Feeding `data` back into that spec at the same effective instant reproduces the rules. A bare alias reads the whole imported spec for unpinned drift checks.
 
 **LemmaBase: shared repositories**
 

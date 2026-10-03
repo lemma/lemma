@@ -15,9 +15,10 @@ use crate::planning::semantics::{
     value_to_semantic, ArithmeticComputation, BaseMeasureVector, BoundValueKind,
     ComparisonComputation, DataDefinition, DataPath, Expression, ExpressionKind, LemmaType,
     LiteralValue, PathSegment, RawSuggestion, ReferenceEnd, ReferenceTarget, RulePath,
-    SemanticConversionTarget, TypeDefiningSpec, TypeExtends, TypeSpecification, TypedLiteral,
-    UnitTokenResolver, ValueKind,
+    SemanticConversionTarget, SpecIdentity, SpecInstance, SpecMemberEnd, SpecMemberTarget,
+    TypeDefiningSpec, TypeExtends, TypeSpecification, TypedLiteral, UnitTokenResolver, ValueKind,
 };
+use crate::planning::spec_value::RulePresence;
 use crate::planning::typing::{
     comparison_type, date_predicate_type, logical_and_type, logical_not_type, math_op_type,
     measure_range_matches_measure, past_future_range_type, piecewise_type, range_bound_result_type,
@@ -107,6 +108,8 @@ pub(crate) struct Graph<'a> {
     main_spec: &'a LemmaSpec,
     data: IndexMap<DataPath, DataDefinition>,
     rules: BTreeMap<RulePath, RuleNode<'a>>,
+    /// Rules whose expression conversion failed. Each has an error in `graph_errors`.
+    dropped_rules: BTreeSet<RulePath>,
     /// Rules in dependency order (topo).
     rule_order: Vec<RulePath>,
     /// Data→data references in dependency order (topo). Targets before dependents
@@ -125,6 +128,16 @@ impl<'a> Graph<'a> {
 
     pub(crate) fn rules(&self) -> &BTreeMap<RulePath, RuleNode<'a>> {
         &self.rules
+    }
+
+    pub(crate) fn rule_presence(&self, path: &RulePath) -> RulePresence {
+        if self.rules.contains_key(path) {
+            RulePresence::Present
+        } else if self.dropped_rules.contains(path) {
+            RulePresence::Dropped
+        } else {
+            RulePresence::Absent
+        }
     }
 
     pub(crate) fn rules_mut(&mut self) -> &mut BTreeMap<RulePath, RuleNode<'a>> {
@@ -166,7 +179,7 @@ impl<'a> Graph<'a> {
         let mut declared_fills: HashMap<DataPath, BoundValueKind> = HashMap::new();
         let mut values: HashMap<DataPath, LiteralValue> = HashMap::new();
         let mut value_sources: HashMap<DataPath, Source> = HashMap::new();
-        let mut import_targets: HashMap<DataPath, String> = HashMap::new();
+        let mut import_targets: HashMap<DataPath, SpecIdentity> = HashMap::new();
         let mut references: HashMap<DataPath, PendingReference> = HashMap::new();
 
         for (path, rfv) in self.data.iter() {
@@ -194,8 +207,20 @@ impl<'a> Graph<'a> {
                         declared_fills.insert(path.clone(), dv.clone());
                     }
                 }
-                DataDefinition::Import { target_name, .. } => {
-                    import_targets.insert(path.clone(), target_name.clone());
+                DataDefinition::Import {
+                    target_name,
+                    repository,
+                    effective,
+                    ..
+                } => {
+                    import_targets.insert(
+                        path.clone(),
+                        SpecIdentity {
+                            repository: repository.clone(),
+                            spec: target_name.clone(),
+                            effective: effective.clone(),
+                        },
+                    );
                 }
                 DataDefinition::Reference {
                     target,
@@ -266,11 +291,13 @@ impl<'a> Graph<'a> {
         let mut data = IndexMap::new();
         for (path, rfv) in &self.data {
             let source = rfv.source().clone();
-            if let Some(target_name) = import_targets.remove(path) {
+            if let Some(identity) = import_targets.remove(path) {
                 data.insert(
                     path.clone(),
                     DataDefinition::Import {
-                        target_name,
+                        target_name: identity.spec,
+                        repository: identity.repository,
+                        effective: identity.effective,
                         source,
                     },
                 );
@@ -676,16 +703,36 @@ impl<'a> Graph<'a> {
             };
 
             let Some(target_type) = computed_rule_types.get(target_rule_path) else {
+                match self.rule_presence(target_rule_path) {
+                    RulePresence::Dropped => {}
+                    RulePresence::Present => {
+                        panic!("BUG: rule type not inferred before dependent in topological order")
+                    }
+                    RulePresence::Absent => {
+                        errors.push(reference_error(
+                            self.main_spec,
+                            source,
+                            format!(
+                                "Data reference '{}' target rule '{}' does not exist",
+                                reference_path, target_rule_path
+                            ),
+                        ));
+                    }
+                }
+                continue;
+            };
+
+            if target_type.is_spec() {
                 errors.push(reference_error(
                     self.main_spec,
                     source,
                     format!(
-                        "Data reference '{}' target rule '{}' does not exist",
-                        reference_path, target_rule_path
+                        "cannot supply spec instance '{}' as a value",
+                        target_rule_path.rule
                     ),
                 ));
                 continue;
-            };
+            }
 
             // A target rule whose inferred type is `veto` carries no concrete
             // schema kind, so a LHS declared type cannot be checked against
@@ -903,9 +950,11 @@ impl<'a> Graph<'a> {
         }
 
         for (rule_path, target) in updates {
-            if let Some(node) = self.rules.get_mut(&rule_path) {
-                node.depends_on_rules.insert(target);
-            }
+            self.rules
+                .get_mut(&rule_path)
+                .expect("BUG: rule from iteration missing in graph")
+                .depends_on_rules
+                .insert(target);
         }
     }
 
@@ -1063,6 +1112,130 @@ impl<'a> Graph<'a> {
         Ok(result)
     }
 
+    /// Candidate instances of spec-valued rules, field targets of `rule.field`,
+    /// and the rule edges those need. Repeats the sort until those edges stop
+    /// growing, so a spec-valued rule field is linked after the rule it reads.
+    fn link_spec_values(&mut self) -> Result<Vec<Error>, Vec<Error>> {
+        use crate::planning::spec_value::{
+            assert_expression_candidates_linked, expression_candidates, fill_spec_members,
+            rule_under_instance,
+        };
+
+        let rule_paths: HashSet<RulePath> = self.rules.keys().cloned().collect();
+        let dropped_rules = self.dropped_rules.clone();
+        let presence = |rule: &RulePath| {
+            if rule_paths.contains(rule) {
+                RulePresence::Present
+            } else if dropped_rules.contains(rule) {
+                RulePresence::Dropped
+            } else {
+                RulePresence::Absent
+            }
+        };
+        loop {
+            let order = self.topological_sort()?;
+            let mut rule_candidates: HashMap<RulePath, Vec<SpecInstance>> = HashMap::new();
+            let mut member_errors = Vec::new();
+            let mut grew = false;
+
+            for path in order {
+                let mut candidates = Vec::new();
+                let node = self
+                    .rules
+                    .get(&path)
+                    .expect("BUG: rule from topological sort not in graph");
+                for (_, result) in &node.branches {
+                    for candidate in
+                        expression_candidates(result, &rule_candidates, &self.data, &presence)
+                    {
+                        if !candidates.contains(&candidate) {
+                            candidates.push(candidate);
+                        }
+                    }
+                }
+                rule_candidates.insert(path.clone(), candidates.clone());
+
+                let mut branches = std::mem::take(
+                    &mut self
+                        .rules
+                        .get_mut(&path)
+                        .expect("BUG: rule from topological sort not in graph")
+                        .branches,
+                );
+                let mut extra_deps = BTreeSet::new();
+                let mut branch_errors = Vec::new();
+                for (condition, result) in &mut branches {
+                    if let Some(condition) = condition {
+                        let (deps, errors) =
+                            fill_spec_members(condition, &rule_candidates, &self.data, &presence);
+                        extra_deps.extend(deps);
+                        branch_errors.extend(errors);
+                    }
+                    let (deps, errors) =
+                        fill_spec_members(result, &rule_candidates, &self.data, &presence);
+                    extra_deps.extend(deps);
+                    branch_errors.extend(errors);
+                }
+                let node = self
+                    .rules
+                    .get_mut(&path)
+                    .expect("BUG: rule from topological sort not in graph");
+                node.branches = branches;
+                let before = node.depends_on_rules.len();
+                node.depends_on_rules.extend(extra_deps);
+                if !candidates.is_empty() {
+                    let under: Vec<RulePath> = rule_paths
+                        .iter()
+                        .filter(|rule| {
+                            *rule != &path
+                                && candidates
+                                    .iter()
+                                    .any(|instance| rule_under_instance(rule, instance))
+                        })
+                        .cloned()
+                        .collect();
+                    node.depends_on_rules.extend(under);
+                }
+                if node.depends_on_rules.len() != before {
+                    grew = true;
+                }
+                let main_spec = self.main_spec;
+                for (source, message) in branch_errors {
+                    let source = source
+                        .unwrap_or_else(|| panic!("BUG: spec member expression missing source"));
+                    member_errors.push(Error::validation_with_context(
+                        message,
+                        Some(source),
+                        None::<String>,
+                        Some(main_spec),
+                        None,
+                    ));
+                }
+            }
+            if !grew {
+                for node in self.rules.values() {
+                    for (condition, result) in &node.branches {
+                        if let Some(condition) = condition {
+                            assert_expression_candidates_linked(
+                                condition,
+                                &rule_candidates,
+                                &self.data,
+                                &presence,
+                            );
+                        }
+                        assert_expression_candidates_linked(
+                            result,
+                            &rule_candidates,
+                            &self.data,
+                            &presence,
+                        );
+                    }
+                }
+                return Ok(member_errors);
+            }
+        }
+    }
+
     fn topological_sort(&self) -> Result<Vec<RulePath>, Vec<Error>> {
         let mut in_degree: BTreeMap<RulePath, usize> = BTreeMap::new();
         let mut dependents: BTreeMap<RulePath, Vec<RulePath>> = BTreeMap::new();
@@ -1076,12 +1249,19 @@ impl<'a> Graph<'a> {
 
         for (rule_path, rule_node) in &self.rules {
             for dependency in &rule_node.depends_on_rules {
-                if self.rules.contains_key(dependency) {
-                    if let Some(degree) = in_degree.get_mut(rule_path) {
-                        *degree += 1;
+                match self.rule_presence(dependency) {
+                    RulePresence::Present => {
+                        *in_degree
+                            .get_mut(rule_path)
+                            .expect("BUG: rule missing from in_degree") += 1;
+                        dependents
+                            .get_mut(dependency)
+                            .expect("BUG: rule missing from dependents")
+                            .push(rule_path.clone());
                     }
-                    if let Some(deps) = dependents.get_mut(dependency) {
-                        deps.push(rule_path.clone());
+                    RulePresence::Dropped => {}
+                    RulePresence::Absent => {
+                        panic!("BUG: rule '{dependency}' neither in graph nor dropped")
                     }
                 }
             }
@@ -1096,14 +1276,16 @@ impl<'a> Graph<'a> {
         while let Some(rule_path) = queue.pop_front() {
             result.push(rule_path.clone());
 
-            if let Some(dependent_rules) = dependents.get(&rule_path) {
-                for dependent in dependent_rules {
-                    if let Some(degree) = in_degree.get_mut(dependent) {
-                        *degree -= 1;
-                        if *degree == 0 {
-                            queue.push_back(dependent.clone());
-                        }
-                    }
+            for dependent in dependents
+                .get(&rule_path)
+                .expect("BUG: rule missing from dependents")
+            {
+                let degree = in_degree
+                    .get_mut(dependent)
+                    .expect("BUG: rule missing from in_degree");
+                *degree -= 1;
+                if *degree == 0 {
+                    queue.push_back(dependent.clone());
                 }
             }
         }
@@ -1197,10 +1379,11 @@ type RuleReferenceUpdate = (
     Option<BoundValueKind>,
 );
 
-/// Ok payload of [`GraphBuilder::build`]: data, rules, soft errors, resolved types.
+/// Ok payload of [`GraphBuilder::build`]: data, rules, dropped rules, soft errors, resolved types.
 type GraphBuildOk<'a> = (
     IndexMap<DataPath, DataDefinition>,
     BTreeMap<RulePath, RuleNode<'a>>,
+    BTreeSet<RulePath>,
     Vec<Error>,
     ResolvedTypesMap<'a>,
 );
@@ -1208,6 +1391,7 @@ type GraphBuildOk<'a> = (
 struct GraphBuilder<'a> {
     data: IndexMap<DataPath, DataDefinition>,
     rules: BTreeMap<RulePath, RuleNode<'a>>,
+    dropped_rules: BTreeSet<RulePath>,
     context: &'a Context,
     local_types: ResolvedTypesMap<'a>,
     errors: Vec<Error>,
@@ -1588,7 +1772,7 @@ impl<'a> Graph<'a> {
             errors.extend(type_resolver.register_all(&node.repository, node.spec));
         }
 
-        let (data, rules, graph_errors, local_types) = GraphBuilder::build(
+        let (data, rules, dropped_rules, graph_errors, local_types) = GraphBuilder::build(
             context,
             repository,
             main_spec,
@@ -1600,6 +1784,7 @@ impl<'a> Graph<'a> {
         let mut graph = Graph {
             data,
             rules,
+            dropped_rules,
             rule_order: Vec::new(),
             data_reference_order: Vec::new(),
             reference_ends: IndexMap::new(),
@@ -1670,6 +1855,14 @@ impl<'a> Graph<'a> {
         // This must happen before topological_sort so cycles through reference
         // paths are detected.
         self.add_rule_reference_dependency_edges();
+
+        match self.link_spec_values() {
+            Ok(member_errors) => errors.extend(member_errors),
+            Err(cycle_errors) => {
+                errors.extend(cycle_errors);
+                return Err(errors);
+            }
+        }
 
         let rule_order = match self.topological_sort() {
             Ok(order) => order,
@@ -1820,6 +2013,7 @@ impl<'a> GraphBuilder<'a> {
         let mut builder = GraphBuilder {
             data: IndexMap::new(),
             rules: BTreeMap::new(),
+            dropped_rules: BTreeSet::new(),
             context,
             local_types: Vec::new(),
             errors: Vec::new(),
@@ -1840,6 +2034,7 @@ impl<'a> GraphBuilder<'a> {
         Ok((
             builder.data,
             builder.rules,
+            builder.dropped_rules,
             builder.errors,
             builder.local_types,
         ))
@@ -2011,6 +2206,21 @@ impl<'a> GraphBuilder<'a> {
                 return None;
             }
             if is_data {
+                if matches!(
+                    containing_data_map
+                        .get(&reference.name)
+                        .map(|data| &data.value),
+                    Some(ParsedDataValue::Import { .. })
+                ) {
+                    self.errors.push(self.engine_error(
+                        format!(
+                            "cannot supply spec instance '{}' as a value",
+                            reference.name
+                        ),
+                        reference_source,
+                    ));
+                    return None;
+                }
                 return Some(ReferenceTarget::Data(DataPath {
                     segments: containing_segments,
                     data: reference.name.clone(),
@@ -2063,6 +2273,20 @@ impl<'a> GraphBuilder<'a> {
             return None;
         }
         if is_data {
+            if target_spec.data.iter().any(|field| {
+                field.reference.name == reference.name
+                    && field.reference.segments.is_empty()
+                    && matches!(field.value, ParsedDataValue::Import { .. })
+            }) {
+                self.errors.push(self.engine_error(
+                    format!(
+                        "cannot supply spec instance '{}' as a value",
+                        reference.name
+                    ),
+                    reference_source,
+                ));
+                return None;
+            }
             return Some(ReferenceTarget::Data(DataPath {
                 segments: resolved_segments,
                 data: reference.name.clone(),
@@ -2423,13 +2647,13 @@ impl<'a> GraphBuilder<'a> {
                 let consumer_repository =
                     discovery::lookup_owning_repository(self.context, current_spec)
                         .unwrap_or_else(|| Arc::clone(&self.main_repository));
-                let effective_spec = match self.resolve_spec_ref(
+                let (resolved_repository, effective_spec) = match self.resolve_spec_ref(
                     spec_ref,
                     effective,
                     current_spec,
                     &consumer_repository,
                 ) {
-                    Ok((_, arc)) => arc,
+                    Ok(pair) => pair,
                     Err(e) => {
                         self.errors.push(e);
                         return;
@@ -2440,6 +2664,8 @@ impl<'a> GraphBuilder<'a> {
                     data_path,
                     DataDefinition::Import {
                         target_name: effective_spec.name.clone(),
+                        repository: resolved_repository.name.clone(),
+                        effective: effective_spec.effective_from.clone(),
                         source: effective_source,
                     },
                 );
@@ -3045,11 +3271,15 @@ impl<'a> GraphBuilder<'a> {
             depends_on_rules: &mut depends_on_rules,
         };
 
+        let errors_before = self.errors.len();
         let converted_expression = match self
             .convert_expression_and_extract_dependencies(&rule.expression, &mut convert_ctx)
         {
             Some(expr) => expr,
-            None => return,
+            None => {
+                self.drop_unconverted_rule(rule_path, errors_before);
+                return;
+            }
         };
         branches.push((None, converted_expression));
 
@@ -3059,14 +3289,20 @@ impl<'a> GraphBuilder<'a> {
                 &mut convert_ctx,
             ) {
                 Some(expr) => expr,
-                None => return,
+                None => {
+                    self.drop_unconverted_rule(rule_path, errors_before);
+                    return;
+                }
             };
             let converted_result = match self.convert_expression_and_extract_dependencies(
                 &unless_clause.result,
                 &mut convert_ctx,
             ) {
                 Some(expr) => expr,
-                None => return,
+                None => {
+                    self.drop_unconverted_rule(rule_path, errors_before);
+                    return;
+                }
             };
             branches.push((Some(converted_condition), converted_result));
         }
@@ -3080,6 +3316,13 @@ impl<'a> GraphBuilder<'a> {
         };
 
         self.rules.insert(rule_path, rule_node);
+    }
+
+    fn drop_unconverted_rule(&mut self, rule_path: RulePath, errors_before: usize) {
+        if self.errors.len() <= errors_before {
+            panic!("BUG: add_rule conversion failed without an error");
+        }
+        self.dropped_rules.insert(rule_path);
     }
 
     /// Converts left and right expressions and accumulates rule dependencies.
@@ -3110,6 +3353,24 @@ impl<'a> GraphBuilder<'a> {
         match &expr.kind {
             ast::ExpressionKind::Reference(r) => {
                 let expr_source = expr_src;
+                if let Some((head, rest)) = r.segments.split_first() {
+                    if ctx.rule_names.contains(head.as_str()) && !ctx.data_map.contains_key(head) {
+                        let base = RulePath {
+                            segments: ctx.segments.to_vec(),
+                            rule: head.clone(),
+                        };
+                        ctx.depends_on_rules.insert(base.clone());
+                        return Some(Expression::with_source(
+                            ExpressionKind::SpecMember {
+                                base,
+                                path: rest.to_vec(),
+                                name: r.name.clone(),
+                                targets: Vec::new(),
+                            },
+                            expr.source_location.clone(),
+                        ));
+                    }
+                }
                 let (segments, target_arc_opt) = if r.segments.is_empty() {
                     (ctx.segments.to_vec(), None)
                 } else {
@@ -3163,6 +3424,35 @@ impl<'a> GraphBuilder<'a> {
                         segments,
                         data: r.name.clone(),
                     };
+                    if let Some(DataDefinition::Import {
+                        target_name,
+                        repository,
+                        effective,
+                        ..
+                    }) = self.data.get(&data_path)
+                    {
+                        let mut prefix = data_path.segments.clone();
+                        prefix.push(PathSegment {
+                            uses: data_path.data.clone(),
+                            repository: repository.clone(),
+                            spec: target_name.clone(),
+                        });
+                        let identity = SpecIdentity {
+                            repository: repository.clone(),
+                            spec: target_name.clone(),
+                            effective: effective.clone(),
+                        };
+                        let typed = TypedLiteral {
+                            value: ValueKind::Spec(SpecInstance { prefix }),
+                            lemma_type: Arc::new(LemmaType::primitive(TypeSpecification::Spec {
+                                spec: identity,
+                            })),
+                        };
+                        return Some(Expression::with_source(
+                            ExpressionKind::Literal(Box::new(typed)),
+                            expr.source_location.clone(),
+                        ));
+                    }
                     return Some(Expression::with_source(
                         ExpressionKind::DataPath(data_path),
                         expr.source_location.clone(),
@@ -3558,6 +3848,25 @@ fn anonymous_rule_boundary_error(
 // Phase 1: Pure type inference (no validation, no error collection)
 // =============================================================================
 
+fn inferred_or_dropped(
+    graph: &Graph,
+    computed_rule_types: &HashMap<RulePath, Arc<LemmaType>>,
+    rule_path: &RulePath,
+) -> Arc<LemmaType> {
+    if let Some(lemma_type) = computed_rule_types.get(rule_path) {
+        return Arc::clone(lemma_type);
+    }
+    match graph.rule_presence(rule_path) {
+        RulePresence::Dropped => Arc::new(LemmaType::undetermined_type()),
+        RulePresence::Present => {
+            panic!("BUG: rule type not inferred before dependent in topological order")
+        }
+        RulePresence::Absent => {
+            panic!("BUG: rule '{rule_path}' neither in graph nor dropped")
+        }
+    }
+}
+
 /// Infer the type of an expression without performing any validation.
 /// Returns `LemmaType::undetermined_type()` when a type cannot be determined (e.g. unknown data).
 fn infer_expression_type(
@@ -3605,10 +3914,9 @@ fn infer_expression_type_uncached(
             infer_data_type(data_path, graph, computed_rule_types)
         }
 
-        ExpressionKind::RulePath(rule_path) => computed_rule_types
-            .get(rule_path)
-            .cloned()
-            .unwrap_or_else(|| Arc::new(LemmaType::undetermined_type())),
+        ExpressionKind::RulePath(rule_path) => {
+            inferred_or_dropped(graph, computed_rule_types, rule_path)
+        }
 
         ExpressionKind::LogicalAnd(left, right) => {
             let left_type =
@@ -3730,6 +4038,17 @@ fn infer_expression_type_uncached(
             past_future_range_type(&offset_type)
         }
 
+        ExpressionKind::SpecMember { base, targets, .. } => {
+            if targets.is_empty() {
+                return Arc::new(LemmaType::undetermined_type());
+            }
+            let base_type = inferred_or_dropped(graph, computed_rule_types, base);
+            if !base_type.is_spec() && !base_type.is_undetermined() && !base_type.vetoed() {
+                return Arc::new(LemmaType::undetermined_type());
+            }
+            spec_member_type(targets, graph, computed_rule_types)
+        }
+
         ExpressionKind::Piecewise(arms) => {
             let mut result_type: Option<Arc<LemmaType>> = None;
             for (condition, result) in arms {
@@ -3790,10 +4109,7 @@ fn infer_data_type(
             if !resolved_type.is_undetermined() {
                 Arc::clone(resolved_type)
             } else {
-                computed_rule_types
-                    .get(target_rule)
-                    .cloned()
-                    .unwrap_or_else(|| Arc::new(LemmaType::undetermined_type()))
+                inferred_or_dropped(graph, computed_rule_types, target_rule)
             }
         }
         DataDefinition::Reference { resolved_type, .. } => Arc::clone(resolved_type),
@@ -3888,6 +4204,67 @@ fn check_logical_operand(
     }
 }
 
+fn spec_member_end_type(
+    end: &SpecMemberEnd,
+    graph: &Graph,
+    computed_rule_types: &HashMap<RulePath, Arc<LemmaType>>,
+) -> Arc<LemmaType> {
+    match end {
+        SpecMemberEnd::Rule(path) => inferred_or_dropped(graph, computed_rule_types, path),
+        SpecMemberEnd::Data(path) => infer_data_type(path, graph, computed_rule_types),
+        SpecMemberEnd::Instance { identity, .. } => {
+            Arc::new(LemmaType::primitive(TypeSpecification::Spec {
+                spec: identity.clone(),
+            }))
+        }
+    }
+}
+
+fn spec_member_type(
+    targets: &[SpecMemberTarget],
+    graph: &Graph,
+    computed_rule_types: &HashMap<RulePath, Arc<LemmaType>>,
+) -> Arc<LemmaType> {
+    let mut chosen: Option<Arc<LemmaType>> = None;
+    for target in targets {
+        let member_type = spec_member_end_type(&target.end, graph, computed_rule_types);
+        if member_type.vetoed() || member_type.is_undetermined() {
+            continue;
+        }
+        match &chosen {
+            None => chosen = Some(member_type),
+            Some(existing) if existing.same_value_type(member_type.as_ref()) => {}
+            Some(_) => return Arc::new(LemmaType::undetermined_type()),
+        }
+    }
+    chosen.unwrap_or_else(|| Arc::new(LemmaType::undetermined_type()))
+}
+
+fn spec_value_not_operable(
+    graph: &Graph,
+    left_type: &LemmaType,
+    right_type: &LemmaType,
+    source: &Source,
+) -> Option<Error> {
+    let spec_type = if left_type.is_spec() {
+        Some(left_type)
+    } else if right_type.is_spec() {
+        Some(right_type)
+    } else {
+        None
+    };
+    spec_type.map(|spec_type| {
+        engine_error_at_graph(
+            graph,
+            source,
+            format!(
+                "spec instance is not a value here (got {}); read a field or use `is veto`",
+                spec_type.name()
+            ),
+        )
+    })
+}
+
 fn check_comparison_types(
     graph: &Graph,
     left_type: &LemmaType,
@@ -3897,6 +4274,9 @@ fn check_comparison_types(
 ) -> Result<(), Vec<Error>> {
     if left_type.vetoed() || right_type.vetoed() {
         return Ok(());
+    }
+    if let Some(error) = spec_value_not_operable(graph, left_type, right_type, source) {
+        return Err(vec![error]);
     }
     let is_equality_only = matches!(op, ComparisonComputation::Is | ComparisonComputation::IsNot);
 
@@ -4110,6 +4490,9 @@ fn check_arithmetic_types(
 ) -> Result<(), Vec<Error>> {
     if left_type.vetoed() || right_type.vetoed() {
         return Ok(());
+    }
+    if let Some(error) = spec_value_not_operable(graph, left_type, right_type, source) {
+        return Err(vec![error]);
     }
 
     if left_type.is_range() || right_type.is_range() {
@@ -4563,6 +4946,16 @@ fn check_unit_conversion_types(
     if source_type.vetoed() {
         return Ok(());
     }
+    if source_type.is_spec() {
+        return Err(vec![engine_error_at_graph(
+            graph,
+            source_loc,
+            format!(
+                "spec instance is not a value here (got {}); read a field or use `is veto`",
+                source_type.name()
+            ),
+        )]);
+    }
     let unit_index = find_types_by_spec(resolved_types, spec)
         .map(|dt| &dt.unit_index)
         .expect("BUG: spec types missing during unit conversion check");
@@ -4773,6 +5166,16 @@ fn check_mathematical_operand(
     if operand_type.vetoed() {
         return Ok(());
     }
+    if operand_type.is_spec() {
+        return Err(vec![engine_error_at_graph(
+            graph,
+            source,
+            format!(
+                "spec instance is not a value here (got {}); read a field or use `is veto`",
+                operand_type.name()
+            ),
+        )]);
+    }
     if operand_type.is_number() {
         return Ok(());
     }
@@ -4794,18 +5197,20 @@ fn check_mathematical_operand(
 /// Check that all rule references in the graph point to existing rules.
 fn check_all_rule_references_exist(graph: &Graph) -> Result<(), Vec<Error>> {
     let mut errors = Vec::new();
-    let existing_rules: HashSet<&RulePath> = graph.rules().keys().collect();
     for (rule_path, rule_node) in graph.rules() {
         for dependency in &rule_node.depends_on_rules {
-            if !existing_rules.contains(dependency) {
-                errors.push(engine_error_at_graph(
-                    graph,
-                    &rule_node.source,
-                    format!(
-                        "Rule '{}' references non-existent rule '{}'",
-                        rule_path.rule, dependency.rule
-                    ),
-                ));
+            match graph.rule_presence(dependency) {
+                RulePresence::Present | RulePresence::Dropped => {}
+                RulePresence::Absent => {
+                    errors.push(engine_error_at_graph(
+                        graph,
+                        &rule_node.source,
+                        format!(
+                            "Rule '{}' references non-existent rule '{}'",
+                            rule_path.rule, dependency.rule
+                        ),
+                    ));
+                }
             }
         }
     }
@@ -4907,6 +5312,54 @@ fn check_expression(
         }
 
         ExpressionKind::RulePath(_) => {}
+
+        ExpressionKind::SpecMember {
+            base,
+            targets,
+            name,
+            ..
+        } => {
+            let expr_source = expression
+                .source_location
+                .as_ref()
+                .expect("BUG: expression missing source in check_expression");
+            let base_type = inferred_or_dropped(graph, inferred_types, base);
+            if !base_type.is_spec() && !base_type.is_undetermined() && !base_type.vetoed() {
+                errors.push(engine_error_at_graph(
+                    graph,
+                    expr_source,
+                    format!("rule '{base}' does not return a spec"),
+                ));
+            } else if targets.is_empty() && base_type.is_spec() {
+                errors.push(engine_error_at_graph(
+                    graph,
+                    expr_source,
+                    format!("no data or rule '{name}' on spec {}", base_type.name()),
+                ));
+            } else if targets.len() > 1 {
+                let first = spec_member_end_type(&targets[0].end, graph, inferred_types);
+                for target in targets.iter().skip(1) {
+                    let other = spec_member_end_type(&target.end, graph, inferred_types);
+                    if !first.vetoed()
+                        && !other.vetoed()
+                        && !first.is_undetermined()
+                        && !other.is_undetermined()
+                        && !first.same_value_type(other.as_ref())
+                    {
+                        errors.push(engine_error_at_graph(
+                            graph,
+                            expr_source,
+                            format!(
+                                "field '{name}' has type {} on one instance and {} on another",
+                                first.name(),
+                                other.name()
+                            ),
+                        ));
+                        break;
+                    }
+                }
+            }
+        }
 
         ExpressionKind::LogicalAnd(left, right) => {
             collect(
@@ -12231,6 +12684,7 @@ pub fn validate_type_specifications(
         TypeSpecification::Undetermined => unreachable!(
             "BUG: validate_type_specification_constraints called with Undetermined sentinel type; this type exists only during type inference"
         ),
+        TypeSpecification::Spec { .. } => {}
     }
 
     errors

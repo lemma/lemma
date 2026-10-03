@@ -228,6 +228,9 @@
         },
         {
           "$ref": "#/$defs/LemmaTypeMeasureRange"
+        },
+        {
+          "$ref": "#/$defs/LemmaTypeSpec"
         }
       ]
     },
@@ -960,6 +963,40 @@
         }
       }
     },
+    "LemmaTypeSpec": {
+      "type": "object",
+      "required": [
+        "name",
+        "kind",
+        "spec",
+        "effective",
+        "extends"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "kind": {
+          "const": "spec"
+        },
+        "spec": {
+          "type": "string"
+        },
+        "effective": {
+          "type": "string"
+        },
+        "repository": {
+          "type": "string"
+        },
+        "extends": {
+          "$ref": "#/$defs/TypeExtends"
+        }
+      }
+    },
     "CalendarResult": {
       "type": "object",
       "required": [
@@ -1035,6 +1072,67 @@
         }
       }
     },
+    "SpecRuleResult": {
+      "type": "object",
+      "required": [
+        "vetoed",
+        "rule_type"
+      ],
+      "additionalProperties": false,
+      "description": "One rule of a spec instance, or one evaluated data slot of a spec instance. A spec-valued rule nests SpecResult in result.spec.",
+      "properties": {
+        "vetoed": {
+          "type": "boolean"
+        },
+        "veto_reason": {
+          "type": "string"
+        },
+        "rule_type": {
+          "type": "string"
+        },
+        "result": {
+          "$ref": "#/$defs/RuleResultValue"
+        }
+      }
+    },
+    "SpecResult": {
+      "type": "object",
+      "required": [
+        "spec",
+        "effective",
+        "instance",
+        "data",
+        "rules"
+      ],
+      "additionalProperties": false,
+      "description": "Spec instance returned by a rule. data holds one evaluated entry per data slot, keyed relative to the spec; unbound slots are omitted.",
+      "properties": {
+        "repository": {
+          "type": "string"
+        },
+        "spec": {
+          "type": "string"
+        },
+        "effective": {
+          "type": "string"
+        },
+        "instance": {
+          "type": "string"
+        },
+        "data": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/SpecRuleResult"
+          }
+        },
+        "rules": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/SpecRuleResult"
+          }
+        }
+      }
+    },
     "RuleResultValue": {
       "type": "object",
       "additionalProperties": false,
@@ -1078,6 +1176,9 @@
         },
         "range": {
           "$ref": "#/$defs/RangeResult"
+        },
+        "spec": {
+          "$ref": "#/$defs/SpecResult"
         }
       }
     },
@@ -1633,6 +1734,26 @@
               "$ref": "#/$defs/ShowExpression"
             }
           }
+        },
+        {
+          "type": "object",
+          "required": [
+            "type",
+            "base",
+            "member"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "type": {
+              "const": "spec_member"
+            },
+            "base": {
+              "type": "string"
+            },
+            "member": {
+              "type": "string"
+            }
+          }
         }
       ]
     },
@@ -1952,6 +2073,9 @@
         },
         "range": {
           "$ref": "#/$defs/RangeResult"
+        },
+        "spec": {
+          "$ref": "#/$defs/SpecResult"
         },
         "vetoed": {
           "type": "boolean"
@@ -2341,6 +2465,9 @@
         "range": {
           "$ref": "#/$defs/RangeResult"
         },
+        "spec": {
+          "$ref": "#/$defs/SpecResult"
+        },
         "type": {
           "const": "rule"
         },
@@ -2446,6 +2573,9 @@
         },
         "range": {
           "$ref": "#/$defs/RangeResult"
+        },
+        "spec": {
+          "$ref": "#/$defs/SpecResult"
         },
         "type": {
           "const": "data"

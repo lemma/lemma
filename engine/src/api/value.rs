@@ -59,6 +59,9 @@ impl From<&DomainValueKind> for ValueKind {
                 from: Box::new(ValueKind::from(&from.value)),
                 to: Box::new(ValueKind::from(&to.value)),
             },
+            DomainValueKind::Spec(_) => {
+                unreachable!("BUG: spec values are rule results, not nested ValueKind payloads")
+            }
         }
     }
 }
@@ -130,6 +133,8 @@ pub struct RuleResultValue {
     pub unit: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub range: Option<Box<RangeResult>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spec: Option<Box<crate::result_value::SpecResult>>,
 }
 
 impl From<&DomainRuleResultValue> for RuleResultValue {
@@ -149,6 +154,7 @@ impl From<&DomainRuleResultValue> for RuleResultValue {
                 .range
                 .as_ref()
                 .map(|range| Box::new(RangeResult::from(range.as_ref()))),
+            spec: value.spec.clone(),
         }
     }
 }

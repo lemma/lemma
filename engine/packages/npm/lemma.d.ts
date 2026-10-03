@@ -218,8 +218,26 @@ export interface RuleResultValueEndpoint {
  * range value. A range endpoint (`range.from`/`range.to`) never itself carries a
  * `range` field.
  */
+export interface SpecRuleResult {
+  vetoed: boolean;
+  veto_reason?: string;
+  rule_type: string;
+  result?: RuleResultValue;
+}
+
+/** Spec instance returned by a rule. `data` holds one evaluated entry per data slot, relative to the spec. */
+export interface SpecResult {
+  repository?: string;
+  spec: string;
+  effective: string;
+  instance: string;
+  data: Record<string, SpecRuleResult>;
+  rules: Record<string, SpecRuleResult>;
+}
+
 export interface RuleResultValue extends RuleResultValueEndpoint {
   range?: { from: RuleResultValueEndpoint; to: RuleResultValueEndpoint };
+  spec?: SpecResult;
 }
 
 /** Where a custom type's extension chain is rooted: local to this spec, or imported. */
@@ -349,6 +367,12 @@ export type LemmaType =
         units: MeasureUnit[];
         decomposition: Record<string, number> | null;
         help: string;
+      }
+    | {
+        kind: "spec";
+        spec: string;
+        effective: string;
+        repository?: string;
       }
   );
 
@@ -571,7 +595,8 @@ export type ShowExpression =
       bound: "lower" | "upper";
       operand: ShowExpression;
     }
-  | { type: "is_veto"; operand: ShowExpression };
+  | { type: "is_veto"; operand: ShowExpression }
+  | { type: "spec_member"; base: string; member: string };
 
 /** One arm of a rule's flat last-match table. Default arm omits condition. */
 export interface ShowBranch {

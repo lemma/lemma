@@ -272,10 +272,12 @@ fn cast_to_number(value: &ValueKind, value_type: &LemmaType) -> OperationResult 
                 primitive_number_arc().clone(),
             ))
         }
-        ValueKind::Text(_) | ValueKind::Date(_) | ValueKind::Time(_) => unreachable!(
-            "BUG: cast to number from {:?} should be rejected at planning",
-            value_type.name()
-        ),
+        ValueKind::Text(_) | ValueKind::Date(_) | ValueKind::Time(_) | ValueKind::Spec(_) => {
+            unreachable!(
+                "BUG: cast to number from {:?} should be rejected at planning",
+                value_type.name()
+            )
+        }
     }
 }
 

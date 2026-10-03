@@ -331,6 +331,13 @@ pub(crate) enum NormalFormKind {
         /// Exactly [`region_count`] entries; see [`crate::planning::ordered_dispatch`].
         regions: Vec<NormalFormId>,
     },
+    /// Read one field of the spec instance produced by `base`.
+    /// `targets` pairs each candidate instance with the cell for that instance's field.
+    SpecMember {
+        base: NormalFormId,
+        member: String,
+        targets: Vec<(crate::planning::semantics::SpecInstance, NormalFormId)>,
+    },
 }
 
 impl NormalFormKind {
@@ -366,6 +373,9 @@ impl NormalFormKind {
                 scrutinee, regions, ..
             } => std::iter::once(*scrutinee)
                 .chain(regions.iter().copied())
+                .collect(),
+            NormalFormKind::SpecMember { base, targets, .. } => std::iter::once(*base)
+                .chain(targets.iter().map(|(_, target)| *target))
                 .collect(),
         }
     }
@@ -424,6 +434,18 @@ impl NormalFormKind {
                 scrutinee: map(*scrutinee),
                 boundaries: boundaries.clone(),
                 regions: regions.iter().copied().map(map).collect(),
+            },
+            NormalFormKind::SpecMember {
+                base,
+                member,
+                targets,
+            } => NormalFormKind::SpecMember {
+                base: map(*base),
+                member: member.clone(),
+                targets: targets
+                    .iter()
+                    .map(|(instance, target)| (instance.clone(), map(*target)))
+                    .collect(),
             },
         }
     }
@@ -833,6 +855,9 @@ fn literal_value_default_result_type(value: &ValueKind) -> Arc<LemmaType> {
         ValueKind::Range(_, _) => {
             panic!("BUG: Range literal result_type must be stamped from expression/endpoint types")
         }
+        ValueKind::Spec(_) => {
+            panic!("BUG: Spec literal result_type must be stamped from the spec identity")
+        }
     }
 }
 
@@ -862,6 +887,13 @@ impl Cells<'_> {
                 panic!("BUG: DataPath leaf result_type must be stamped from plan.data")
             }
             NormalFormKind::Now => (primitive_date_arc().clone(), Vec::new()),
+            NormalFormKind::SpecMember { targets, .. } => {
+                let result_type = targets
+                    .first()
+                    .map(|(_, target)| Arc::clone(self.result_type(*target)))
+                    .unwrap_or_else(|| Arc::new(LemmaType::undetermined_type()));
+                (result_type, Vec::new())
+            }
             NormalFormKind::Veto(_) => (Arc::new(LemmaType::veto_type()), Vec::new()),
             NormalFormKind::Sum(children) => {
                 let fold_types =
@@ -1007,6 +1039,12 @@ impl Cells<'_> {
                     self.result_type(*condition).is_undetermined()
                         || self.result_type(*body).is_undetermined()
                 }),
+                NormalFormKind::SpecMember { base, targets, .. } => {
+                    self.result_type(*base).is_undetermined()
+                        || targets
+                            .iter()
+                            .any(|(_, target)| self.result_type(*target).is_undetermined())
+                }
             };
             assert!(
                 input_undetermined,
@@ -1041,6 +1079,69 @@ fn to_normal_form(expr: &Expression, cells: &mut Cells<'_>, lower: &LowerCtx<'_>
             } else {
                 cells.intern_data_leaf(p.clone(), data_path_result_type(lower.data, p))
             }
+        }
+        ExpressionKind::SpecMember {
+            base,
+            path,
+            name,
+            targets,
+        } => {
+            let base_body = *lower.completed_rules.get(base).unwrap_or_else(|| {
+                panic!(
+                    "BUG: spec member base '{}' has no completed NormalFormId",
+                    base.rule
+                )
+            });
+            let base_type = Arc::clone(lower.rule_types.get(base).unwrap_or_else(|| {
+                panic!("BUG: spec member base '{}' has no rule type", base.rule)
+            }));
+            let base_cell = cells.intern_rule_ref(base_body, base.clone(), base_type);
+            let mut lowered_targets = Vec::with_capacity(targets.len());
+            for target in targets {
+                let target_cell = match &target.end {
+                    crate::planning::semantics::SpecMemberEnd::Rule(rule) => {
+                        let body = *lower.completed_rules.get(rule).unwrap_or_else(|| {
+                            panic!(
+                                "BUG: spec member rule '{}' has no completed NormalFormId",
+                                rule.rule
+                            )
+                        });
+                        let rule_type =
+                            Arc::clone(lower.rule_types.get(rule).unwrap_or_else(|| {
+                                panic!("BUG: spec member rule '{}' has no rule type", rule.rule)
+                            }));
+                        cells.intern_rule_ref(body, rule.clone(), rule_type)
+                    }
+                    crate::planning::semantics::SpecMemberEnd::Data(data_path) => cells
+                        .intern_data_leaf(
+                            data_path.clone(),
+                            data_path_result_type(lower.data, data_path),
+                        ),
+                    crate::planning::semantics::SpecMemberEnd::Instance { instance, identity } => {
+                        let lemma_type = Arc::new(LemmaType::primitive(
+                            crate::planning::semantics::TypeSpecification::Spec {
+                                spec: identity.clone(),
+                            },
+                        ));
+                        cells.intern_literal_leaf(
+                            LiteralValue::new(ValueKind::Spec(instance.clone())),
+                            lemma_type,
+                        )
+                    }
+                };
+                lowered_targets.push((target.instance.clone(), target_cell));
+            }
+            let mut member = String::new();
+            for segment in path {
+                member.push_str(segment);
+                member.push('.');
+            }
+            member.push_str(name);
+            cells.intern_empty(NormalFormKind::SpecMember {
+                base: base_cell,
+                member,
+                targets: lowered_targets,
+            })
         }
         ExpressionKind::RulePath(path) => {
             let body = *lower.completed_rules.get(path).unwrap_or_else(|| {
@@ -1184,7 +1285,8 @@ fn normal_form_precedence(kind: &NormalFormKind) -> u8 {
         | NormalFormKind::Now
         | NormalFormKind::PastFutureRange(..)
         | NormalFormKind::Piecewise(_)
-        | NormalFormKind::OrderedDispatch { .. } => 10,
+        | NormalFormKind::OrderedDispatch { .. }
+        | NormalFormKind::SpecMember { .. } => 10,
     }
 }
 
@@ -1462,6 +1564,9 @@ fn explanation_display_inner(forms: &[NormalForm], id: NormalFormId) -> String {
             )
         }
         NormalFormKind::Now => "now".to_string(),
+        NormalFormKind::SpecMember { base, member, .. } => {
+            format!("{}.{}", explanation_display_inner(forms, *base), member)
+        }
         NormalFormKind::OrderedDispatch { .. } => unreachable!(
             "BUG: OrderedDispatch always carries its Piecewise pre-image as origin, \
              so the origin return above fires before this arm"
@@ -1713,6 +1818,19 @@ mod tests {
                     })
                     .collect(),
             ),
+            NormalFormKind::SpecMember { member, .. } => {
+                let mut parts: Vec<String> = member.split('.').map(str::to_string).collect();
+                let name = parts.pop().unwrap_or_default();
+                ExpressionKind::SpecMember {
+                    base: crate::planning::semantics::RulePath {
+                        segments: Vec::new(),
+                        rule: "spec".to_string(),
+                    },
+                    path: parts,
+                    name,
+                    targets: Vec::new(),
+                }
+            }
             // A dispatch table has no Expression spelling; its pre-image does.
             NormalFormKind::OrderedDispatch { .. } => nf_to_kind(
                 forms,

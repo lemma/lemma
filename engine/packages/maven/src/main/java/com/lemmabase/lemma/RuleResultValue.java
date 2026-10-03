@@ -318,6 +318,14 @@ public sealed interface RuleResultValue {
   record Range(@Nullable String result, RangeResult range) implements RuleResultValue {}
 
   /**
+   * Spec instance value.
+   *
+   * @param result display or null
+   * @param spec the instance
+   */
+  record Spec(@Nullable String result, RuleResult.SpecResult spec) implements RuleResultValue {}
+
+  /**
    * One-liner only (explanation veto text; no typed magnitude map).
    *
    * @param result one-liner
@@ -344,6 +352,7 @@ public sealed interface RuleResultValue {
     CalendarResult calendar = null;
     RangeResult range = null;
     String unit = null;
+    RuleResult.SpecResult specResult = null;
     while (p.nextToken() != JsonToken.END_OBJECT) {
       String field = p.currentName();
       p.nextToken();
@@ -359,6 +368,7 @@ public sealed interface RuleResultValue {
         case "calendar" -> calendar = CalendarResult.read(p);
         case "unit" -> unit = JsonReading.readString(p);
         case "range" -> range = RangeResult.read(p);
+        case "spec" -> specResult = RuleResult.SpecResult.read(p);
         default -> JsonReading.unknownField(field, "RuleResultValue");
       }
     }
@@ -388,6 +398,9 @@ public sealed interface RuleResultValue {
     }
     if (range != null) {
       return new Range(result, range);
+    }
+    if (specResult != null) {
+      return new Spec(result, specResult);
     }
     throw new LemmaBugError("BUG: RuleResultValue has no typed value field");
   }

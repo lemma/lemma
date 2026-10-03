@@ -186,7 +186,7 @@ fn build_family_entry(unit_index: &UnitIndex, family: &str) -> FamilyUnitEntry {
                 slot.insert(*lemma_type);
             }
             std::collections::hash_map::Entry::Occupied(slot) => {
-                if !std::sync::Arc::ptr_eq(slot.get(), lemma_type) {
+                if slot.get().as_ref() != lemma_type.as_ref() {
                     panic!(
                         "BUG: duplicate type name '{name}' in family '{family}' maps to distinct types"
                     );

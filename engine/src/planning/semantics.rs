@@ -636,27 +636,56 @@ pub enum TypeSpecification {
     /// Propagates through expressions without generating cascading errors.
     /// Must never appear in a successfully validated graph or execution plan.
     Undetermined,
+    /// A spec instance. Identity is repository, spec name, and the resolved
+    /// temporal row (`effective`). Appended so postcard discriminants of earlier
+    /// variants stay stable.
+    Spec {
+        spec: SpecIdentity,
+    },
+}
+
+/// Resolved spec a value or rule result refers to.
+///
+/// `effective` is the resolved row's `effective_from`, not the run instant.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct SpecIdentity {
+    pub repository: Option<String>,
+    pub spec: String,
+    pub effective: crate::parsing::ast::EffectiveDate,
+}
+
+impl fmt::Display for SpecIdentity {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if let Some(repository) = &self.repository {
+            write!(f, "{repository}/")?;
+        }
+        write!(f, "{}", self.spec)?;
+        if let crate::parsing::ast::EffectiveDate::DateTimeValue(at) = &self.effective {
+            write!(f, " {at}")?;
+        }
+        Ok(())
+    }
 }
 
 impl std::fmt::Display for TypeSpecification {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let label = match self {
-            Self::Boolean { .. } => "boolean",
-            Self::Measure { .. } => "measure",
-            Self::MeasureRange { .. } => "measure range",
-            Self::Number { .. } => "number",
-            Self::NumberRange { .. } => "number range",
-            Self::Text { .. } => "text",
-            Self::Date { .. } => "date",
-            Self::DateRange { .. } => "date range",
-            Self::Time { .. } => "time",
-            Self::TimeRange { .. } => "time range",
-            Self::Ratio { .. } => "ratio",
-            Self::RatioRange { .. } => "ratio range",
-            Self::Veto { .. } => "veto",
-            Self::Undetermined => "undetermined",
-        };
-        f.write_str(label)
+        match self {
+            Self::Boolean { .. } => f.write_str("boolean"),
+            Self::Measure { .. } => f.write_str("measure"),
+            Self::MeasureRange { .. } => f.write_str("measure range"),
+            Self::Number { .. } => f.write_str("number"),
+            Self::NumberRange { .. } => f.write_str("number range"),
+            Self::Text { .. } => f.write_str("text"),
+            Self::Date { .. } => f.write_str("date"),
+            Self::DateRange { .. } => f.write_str("date range"),
+            Self::Time { .. } => f.write_str("time"),
+            Self::TimeRange { .. } => f.write_str("time range"),
+            Self::Ratio { .. } => f.write_str("ratio"),
+            Self::RatioRange { .. } => f.write_str("ratio range"),
+            Self::Veto { .. } => f.write_str("veto"),
+            Self::Undetermined => f.write_str("undetermined"),
+            Self::Spec { spec } => write!(f, "{spec}"),
+        }
     }
 }
 
@@ -676,7 +705,7 @@ impl TypeSpecification {
             | Self::Ratio { help, .. }
             | Self::RatioRange { help, .. }
             | Self::MeasureRange { help, .. } => help.as_str(),
-            Self::Veto { .. } | Self::Undetermined => "",
+            Self::Veto { .. } | Self::Undetermined | Self::Spec { .. } => "",
         }
     }
 
@@ -2671,6 +2700,11 @@ impl TypeSpecification {
                     command
                 ));
             }
+            TypeSpecification::Spec { .. } => {
+                return Err(format!(
+                    "Invalid command '{command}' for spec type. A spec instance has no data constraints"
+                ));
+            }
         }
         Ok(())
     }
@@ -2815,6 +2849,9 @@ pub fn parse_value_from_string(
         TypeSpecification::Undetermined => unreachable!(
             "BUG: parse_value_from_string called with Undetermined sentinel type; this type exists only during type inference"
         ),
+        TypeSpecification::Spec { .. } => Err(to_err(
+            "spec values are not run-data scalars".to_string(),
+        )),
     }
 }
 
@@ -3269,6 +3306,8 @@ pub enum ValueKind {
     Ratio(RationalInteger),
     /// Range endpoints carry their own type (and written unit for measure/ratio).
     Range(Box<TypedLiteral>, Box<TypedLiteral>),
+    /// A spec instance. The prefix is the `uses` path in the consumer plan.
+    Spec(SpecInstance),
 }
 
 impl ValueKind {
@@ -3303,6 +3342,7 @@ impl ValueKind {
             ValueKind::Range(left, right) => {
                 left.value.structural_byte_size() + 3 + right.value.structural_byte_size()
             }
+            ValueKind::Spec(instance) => instance.structural_byte_size(),
         }
     }
 }
@@ -3352,6 +3392,7 @@ impl fmt::Display for ValueKind {
             ),
             ValueKind::Boolean(b) => write!(f, "{}", b),
             ValueKind::Range(left, right) => write!(f, "{}...{}", left, right),
+            ValueKind::Spec(instance) => write!(f, "{instance}"),
         }
     }
 }
@@ -3375,6 +3416,58 @@ pub struct PathSegment {
     pub repository: Option<String>,
     /// The spec this hop resolves to (resolved during planning)
     pub spec: String,
+}
+
+/// One spec instance in a consumer plan: the `uses` hops that name it.
+///
+/// `basic` is one segment. A nested instance is the outer hops plus its own.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct SpecInstance {
+    pub prefix: Vec<PathSegment>,
+}
+
+impl SpecInstance {
+    pub fn structural_byte_size(&self) -> usize {
+        self.prefix
+            .iter()
+            .map(|segment| {
+                segment.uses.len()
+                    + segment.spec.len()
+                    + segment.repository.as_ref().map_or(0, String::len)
+            })
+            .sum()
+    }
+}
+
+impl fmt::Display for SpecInstance {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        for (index, segment) in self.prefix.iter().enumerate() {
+            if index > 0 {
+                write!(f, ".")?;
+            }
+            write!(f, "{}", segment.uses)?;
+        }
+        Ok(())
+    }
+}
+
+/// Where a field read on one candidate instance lands.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SpecMemberEnd {
+    Rule(RulePath),
+    Data(DataPath),
+    /// The field is a nested `uses`. The value is that instance.
+    Instance {
+        instance: SpecInstance,
+        identity: SpecIdentity,
+    },
+}
+
+/// One candidate instance of a [`ExpressionKind::SpecMember`], with the field it reads.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SpecMemberTarget {
+    pub instance: SpecInstance,
+    pub end: SpecMemberEnd,
 }
 
 /// Resolved path to a data (created during planning from AST DataReference)
@@ -3507,6 +3600,16 @@ pub enum ExpressionKind {
     RangeBound(RangeBound, Arc<Expression>),
     /// Whether evaluating the operand produced a veto (no value). Parses as `is veto` syntax.
     ResultIsVeto(Arc<Expression>),
+    /// Field of a spec-valued rule: `top_bracket.tax`, or `top_bracket.finance.fee`.
+    ///
+    /// `targets` is filled after candidate instances of `base` are known. Each
+    /// target is one instance the base can yield.
+    SpecMember {
+        base: RulePath,
+        path: Vec<String>,
+        name: String,
+        targets: Vec<SpecMemberTarget>,
+    },
     /// Unless structure: (condition, result) pairs in source order; last true condition wins.
     /// First arm is the default (condition is always-true literal).
     Piecewise(Vec<(Arc<Expression>, Arc<Expression>)>),
@@ -3546,7 +3649,8 @@ impl ExpressionKind {
             ExpressionKind::Literal(_)
             | ExpressionKind::RulePath(_)
             | ExpressionKind::Veto(_)
-            | ExpressionKind::Now => {}
+            | ExpressionKind::Now
+            | ExpressionKind::SpecMember { .. } => {}
             ExpressionKind::ResultIsVeto(operand) => {
                 operand.collect_data_paths(data);
             }
@@ -3923,6 +4027,20 @@ impl LemmaType {
         )
     }
 
+    /// Check if this type is a spec instance.
+    pub fn is_spec(&self) -> bool {
+        matches!(&self.specifications, TypeSpecification::Spec { .. })
+    }
+
+    /// Spec identity when this type is a spec instance.
+    #[must_use]
+    pub fn spec_identity(&self) -> Option<&SpecIdentity> {
+        match &self.specifications {
+            TypeSpecification::Spec { spec } => Some(spec),
+            _ => None,
+        }
+    }
+
     /// Check if this type is veto
     pub fn vetoed(&self) -> bool {
         matches!(&self.specifications, TypeSpecification::Veto { .. })
@@ -3952,6 +4070,7 @@ impl LemmaType {
                 | (RatioRange { .. }, RatioRange { .. })
                 | (Veto { .. }, Veto { .. })
                 | (Undetermined, Undetermined)
+                | (Spec { .. }, Spec { .. })
         )
     }
 
@@ -3996,6 +4115,13 @@ impl LemmaType {
         }
         if self.is_measure() {
             return self.measure_type_decomposition() == other.measure_type_decomposition();
+        }
+        if let (
+            TypeSpecification::Spec { spec: self_spec },
+            TypeSpecification::Spec { spec: other_spec },
+        ) = (&self.specifications, &other.specifications)
+        {
+            return self_spec == other_spec;
         }
         if self.is_measure_range() {
             let self_element = self
@@ -4147,6 +4273,9 @@ impl LemmaType {
             TypeSpecification::RatioRange { .. } => "10%...50%",
             TypeSpecification::Undetermined => unreachable!(
                 "BUG: example_value called on Undetermined sentinel type; this type must never reach user-facing code"
+            ),
+            TypeSpecification::Spec { .. } => unreachable!(
+                "BUG: example_value called on a spec type; spec instances are not prompted data"
             ),
         }
     }
@@ -5169,7 +5298,15 @@ pub enum DataDefinition {
         source: Source,
     },
     /// Import (`uses`): alias for another spec; nested members are flattened onto the plan.
-    Import { target_name: String, source: Source },
+    ///
+    /// `repository` and `effective` are the resolved row, so a rule can return this
+    /// alias as a spec value.
+    Import {
+        target_name: String,
+        repository: Option<String>,
+        effective: crate::parsing::ast::EffectiveDate,
+        source: Source,
+    },
     /// Value-copy reference to another data or a rule result.
     ///
     /// `resolved_type` is the merged type that the copied value must satisfy at
@@ -5354,6 +5491,7 @@ pub(crate) fn value_kind_matches_spec(value: &ValueKind, type_spec: &TypeSpecifi
             )
             | (TypeSpecification::Veto { .. }, _)
             | (TypeSpecification::Undetermined, _)
+            | (TypeSpecification::Spec { .. }, ValueKind::Spec(_))
     )
 }
 
@@ -5880,7 +6018,9 @@ pub(crate) mod tests {
                 | TypeSpecification::DateRange { help, .. }
                 | TypeSpecification::TimeRange { help, .. }
                 | TypeSpecification::Time { help, .. } => help,
-                TypeSpecification::Veto { .. } | TypeSpecification::Undetermined => {
+                TypeSpecification::Veto { .. }
+                | TypeSpecification::Undetermined
+                | TypeSpecification::Spec { .. } => {
                     unreachable!(
                         "BUG: primitive kind {:?} mapped to non-primitive spec",
                         kind
@@ -7053,5 +7193,56 @@ pub(crate) mod tests {
                 "{spec:?} must not define element_from_range"
             );
         }
+    }
+
+    fn spec_type(name: &str, effective: crate::parsing::ast::EffectiveDate) -> LemmaType {
+        LemmaType::primitive(TypeSpecification::Spec {
+            spec: SpecIdentity {
+                repository: None,
+                spec: name.to_string(),
+                effective,
+            },
+        })
+    }
+
+    #[test]
+    fn same_value_type_spec_identity() {
+        use crate::parsing::ast::EffectiveDate;
+        let origin = EffectiveDate::Origin;
+        let dated = EffectiveDate::DateTimeValue(crate::DateTimeValue {
+            year: 2026,
+            month: 1,
+            day: 1,
+            hour: 0,
+            minute: 0,
+            second: 0,
+            microsecond: 0,
+            timezone: None,
+            granularity: crate::literals::DateGranularity::Full,
+        });
+        let tax = spec_type("tax_bracket", origin.clone());
+        let tax_again = spec_type("tax_bracket", origin.clone());
+        let other = spec_type("menu_item", origin);
+        let tax_dated = spec_type("tax_bracket", dated);
+        assert!(tax.same_value_type(&tax_again));
+        assert!(!tax.same_value_type(&other));
+        assert!(!tax.same_value_type(&tax_dated));
+        let mut other_repo = tax.clone();
+        match &mut other_repo.specifications {
+            TypeSpecification::Spec { spec } => spec.repository = Some("@jack/finance".to_string()),
+            other => panic!("expected Spec, got {other:?}"),
+        }
+        assert!(!tax.same_value_type(&other_repo));
+    }
+
+    #[test]
+    fn piecewise_type_keeps_spec_identity() {
+        use crate::parsing::ast::EffectiveDate;
+        let tax = Arc::new(spec_type("tax_bracket", EffectiveDate::Origin));
+        let picked = crate::planning::typing::piecewise_type([
+            Arc::new(LemmaType::veto_type()),
+            Arc::clone(&tax),
+        ]);
+        assert!(picked.same_value_type(&tax));
     }
 }

@@ -22,6 +22,7 @@ defmodule Lemma.RuleResult do
           calendar: map() | nil,
           unit: String.t() | nil,
           range: map() | nil,
+          spec: map() | nil,
           missing_data: [String.t()] | nil,
           explanation: map() | nil
         }
@@ -42,6 +43,7 @@ defmodule Lemma.RuleResult do
     :calendar,
     :unit,
     :range,
+    :spec,
     :missing_data,
     :explanation
   ]
@@ -68,6 +70,7 @@ defmodule Lemma.RuleResult do
       calendar: Map.get(map, "calendar"),
       unit: Map.get(map, "unit"),
       range: Map.get(map, "range"),
+      spec: Map.get(map, "spec"),
       missing_data: Map.get(map, "missing_data"),
       explanation: Map.get(map, "explanation")
     }

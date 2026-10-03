@@ -346,6 +346,14 @@ See [engine/packages/hex/README.md](engine/packages/hex/README.md) and [cli/docu
 
 See [engine/packages/maven/README.md](engine/packages/maven/README.md) and [cli/documentation/tools/java.md](cli/documentation/tools/java.md).
 
+### C# / .NET
+
+```bash
+dotnet add package Lemmabase.Lemma.Engine --version 0.9.11
+```
+
+See [engine/packages/nuget/Lemmabase.Lemma.Engine/README.md](engine/packages/nuget/Lemmabase.Lemma.Engine/README.md) and [cli/documentation/tools/dotnet.md](cli/documentation/tools/dotnet.md).
+
 ### Docker
 
 ```bash
@@ -381,7 +389,7 @@ Lemma is pre-1.0. The language and APIs are stable for most use cases, but break
 
 Contributions welcome! See [Contributing](cli/documentation/community/contributing.md) for setup and workflow.
 
-CI runs **`cargo precommit --fuzz`**. That is the PR bar: same gate as local **`cargo precommit`**, then 30 minutes of fuzz total across [`engine/fuzz`](engine/fuzz) targets. Use bare **`cargo precommit`** as a faster local shortcut (no fuzz). The gate covers **`versions-verify`**, Hex `mix precommit`, VS Code `npm precommit`, `fmt --check`, Clippy (`--all-features`), Nextest (`--all-features`), WASM npm `build.js` + `test.js`, Maven `./mvnw -B verify` (after `lemma_jni` build), cargo-deny, and **`cargo coverage all --check`**. Install [`cargo-nextest`](https://nexte.st/), [`cargo-deny`](https://github.com/EmbarkStudios/cargo-deny), Elixir/Mix, [Node.js](https://nodejs.org/), [`wasm-pack`](https://rustwasm.github.io/wasm-pack/), and a **JDK 21+** first; for `--fuzz` also install nightly (`rustup install nightly`) and [`cargo-fuzz`](https://github.com/rust-fuzz/cargo-fuzz). Regenerate coverage with **`cargo coverage all`** when engine/cli sources change ([`cargo-llvm-cov`](https://github.com/taiki-e/cargo-llvm-cov) required). `cargo nextest` alone is Rust tests only. When bumping the workspace release version, use **`cargo bump <version>`** and **`cargo verify`** (see [`xtask/README.md`](xtask/README.md)).
+CI runs **`cargo precommit --fuzz`**. That is the PR bar: same gate as local **`cargo precommit`**, then 30 minutes of fuzz total across [`engine/fuzz`](engine/fuzz) targets. Use bare **`cargo precommit`** as a faster local shortcut (no fuzz). The gate covers **`versions-verify`**, Hex `mix precommit`, VS Code `npm precommit`, `fmt --check`, Clippy (`--all-features`), Nextest (`--all-features`), WASM npm `build.js` + `test.js`, Maven `./mvnw -B verify` (after `lemma_jni` build), NuGet `dotnet test` (after `lemma_dotnet` + UniFFI generate), cargo-deny, and **`cargo coverage all --check`**. Install [`cargo-nextest`](https://nexte.st/), [`cargo-deny`](https://github.com/EmbarkStudios/cargo-deny), Elixir/Mix, [Node.js](https://nodejs.org/), [`wasm-pack`](https://rustwasm.github.io/wasm-pack/), a **JDK 21+**, and the **.NET 8 SDK** first; for `--fuzz` also install nightly (`rustup install nightly`) and [`cargo-fuzz`](https://github.com/rust-fuzz/cargo-fuzz). Regenerate coverage with **`cargo coverage all`** when engine/cli sources change ([`cargo-llvm-cov`](https://github.com/taiki-e/cargo-llvm-cov) required). `cargo nextest` alone is Rust tests only. When bumping the workspace release version, use **`cargo bump <version>`** and **`cargo verify`** (see [`xtask/README.md`](xtask/README.md)).
 
 ## License
 

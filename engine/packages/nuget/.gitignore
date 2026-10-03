@@ -1,0 +1,7 @@
+# Built host natives and generated UniFFI C# (populated by `cargo run -p xtask -- nuget-natives`)
+Lemmabase.Lemma.Engine/natives/
+Lemmabase.Lemma.Engine/Generated/
+**/bin/
+**/obj/
+*.user
+.vs/

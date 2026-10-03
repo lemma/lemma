@@ -14,7 +14,7 @@ Lemma is pre-1.0. The language and APIs are stable for most use cases, but break
 - **Deterministic and auditable**: opt in to a full explanation tree with `explain: true`
 - **Type-aware**: dates, percentages, units, and automatic conversions are first-class
 - **Composable**: specs extend and reference each other without boilerplate
-- **Multi-platform**: use the engine from Rust, power the CLI/HTTP server, embed via npm (JavaScript/TypeScript), Hex (Elixir), or Maven (Java/Kotlin)
+- **Multi-platform**: use the engine from Rust, power the CLI/HTTP server, embed via npm (JavaScript/TypeScript), Hex (Elixir), Maven (Java/Kotlin), or NuGet (C# / .NET)
 
 ## Quick start
 
@@ -198,6 +198,7 @@ Free function: `lemma::resolve_effective`.
 - **JavaScript / TypeScript**: `npm install @lemmabase/lemma-engine` for browser, Node, and edge runtimes
 - **Elixir**: Hex package `lemma_engine` (precompiled NIFs)
 - **Java / Kotlin**: `com.lemmabase:lemma-engine` on Maven Central (`BigDecimal`-first JNI binding)
+- **C# / .NET**: `Lemmabase.Lemma.Engine` on NuGet (UniFFI + System.Text.Json)
 
 Constraint-style **inversion** (what inputs would yield a given outcome?) is planned; it is not documented as a supported API yet.
 
@@ -247,6 +248,14 @@ Build: `node build.js` (from `engine/packages/npm/`). See [packages/npm/README.m
 ```
 
 Build/test: `cargo build -p lemma_jni` then `./mvnw verify` under `engine/packages/maven/` (also via `cargo precommit`). See [packages/maven/README.md](packages/maven/README.md).
+
+### C# / .NET
+
+```bash
+dotnet add package Lemmabase.Lemma.Engine --version 0.9.11
+```
+
+Build/test: `cargo run -p xtask -- nuget-natives` then `dotnet test` under `engine/packages/nuget/` (also via `cargo precommit`). See [packages/nuget/Lemmabase.Lemma.Engine/README.md](packages/nuget/Lemmabase.Lemma.Engine/README.md).
 
 ### Elixir
 

@@ -15,8 +15,8 @@ Embed Lemma directly in your language:
 - [Elixir](elixir.md)
 - [JavaScript / TypeScript](javascript.md)
 - [Java / Kotlin](java.md)
+- [C# / .NET](dotnet.md)
 - [Python](python.md) (coming soon)
-- [C# / .NET](dotnet.md) (coming soon)
 
 More SDKs are on the way. Precompiled binaries make each new one straightforward to add.
 

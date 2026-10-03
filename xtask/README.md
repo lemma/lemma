@@ -4,7 +4,7 @@ Workspace automation from the repo root.
 
 | Command | Alias | Purpose |
 |---------|-------|---------|
-| `cargo run -p xtask -- [precommit] [--fuzz]` | `cargo precommit [--fuzz]` | `versions-verify`, mix precommit (hex: format, locked deps, `hex.audit`, compile, ExUnit), vscode `npm ci` + compile + vsce package + publish CLI smoke (`@node-rs/crc32`, `ovsx`, `vsce`; npm/Maven warnings are errors), `fmt --check`, clippy host + wasm32 (`-D warnings`), nextest (`--all-features`), npm WASM build+test, Maven `./mvnw -B verify` (after `lemma_jni` build; `-Werror` + `failOnWarnings` + `doclint=all` + `[WARNING]` gate), cargo-deny, `coverage all --check`. With `--fuzz` (CI): 30 minutes total across `engine/fuzz` targets (nightly + `cargo-fuzz`). Bare `cargo precommit` skips fuzz. |
+| `cargo run -p xtask -- [precommit] [--fuzz]` | `cargo precommit [--fuzz]` | `versions-verify`, mix precommit (hex: format, locked deps, `hex.audit`, compile, ExUnit), vscode `npm ci` + compile + vsce package + publish CLI smoke (`@node-rs/crc32`, `ovsx`, `vsce`; npm/Maven warnings are errors), `fmt --check`, clippy host + wasm32 (`-D warnings`), nextest (`--all-features`), npm WASM build+test, Maven `./mvnw -B verify` (after `lemma_jni` build; `-Werror` + `failOnWarnings` + `doclint=all` + `[WARNING]` gate), NuGet `dotnet test` (after `lemma_dotnet` build + UniFFI C# generate), cargo-deny, `coverage all --check`. With `--fuzz` (CI): 30 minutes total across `engine/fuzz` targets (nightly + `cargo-fuzz`). Bare `cargo precommit` skips fuzz. |
 | `cargo run -p xtask -- versions-verify` | `cargo verify` | Ensure release version matches everywhere (see below) |
 | `cargo run -p xtask -- versions-bump <semver>` | `cargo bump <semver>` | Bump `[workspace.package] version` and all mirrored copies, then `cargo generate-lockfile`, `mix deps.get` (hex), `npm install --package-lock-only` (vscode) |
 | `cargo run -p xtask -- versions-diff [semver]` | `cargo changelog [semver]` | `git fetch --tags`, then `git diff --stat`, `git log`, then `git diff`. **No arg:** latest release tag (`lemma-v*`, or legacy `cli-v*`) → **working tree** (includes uncommitted changes); log is `tag..HEAD`. **`versions-diff <semver>`:** previous tag → requested version's tag on history only. |
@@ -15,7 +15,7 @@ Workspace automation from the repo root.
 
 Aliases are in [`.cargo/config.toml`](../.cargo/config.toml) (`-q` on bump/verify/changelog reduces Cargo noise).
 
-**Precommit prerequisites:** [`cargo-nextest`](https://nexte.st/), [`cargo-deny`](https://github.com/EmbarkStudios/cargo-deny), Elixir/Mix, Node.js **24** (VS Code extension `npm ci` in precommit; matches GitHub Actions `node-version: 24` and repo [`.tool-versions`](../../.tool-versions) for asdf), `wasm-pack` exact **0.15.0** (`cargo install wasm-pack --version 0.15.0 --locked`; must match CI `WASM_PACK_VERSION` / crates.io newest), JDK 21+ (Maven wrapper under `engine/packages/maven/`). For `--fuzz` / CI: Rust nightly (`rustup install nightly`) and [`cargo-fuzz`](https://github.com/rust-fuzz/cargo-fuzz). [`cargo-llvm-cov`](https://github.com/taiki-e/cargo-llvm-cov) is only needed to regenerate coverage reports (`cargo coverage all`), not for precommit. Mix, VS Code packaging via xtask, and Maven precommits always run (not path-gated).
+**Precommit prerequisites:** [`cargo-nextest`](https://nexte.st/), [`cargo-deny`](https://github.com/EmbarkStudios/cargo-deny), Elixir/Mix, Node.js **24** (VS Code extension `npm ci` in precommit; matches GitHub Actions `node-version: 24` and repo [`.tool-versions`](../../.tool-versions) for asdf), `wasm-pack` exact **0.15.0** (`cargo install wasm-pack --version 0.15.0 --locked`; must match CI `WASM_PACK_VERSION` / crates.io newest), JDK 21+ (Maven wrapper under `engine/packages/maven/`), .NET 8 SDK + `uniffi-bindgen-cs` tag `v0.11.0+v0.31.0` (NuGet under `engine/packages/nuget/`). For `--fuzz` / CI: Rust nightly (`rustup install nightly`) and [`cargo-fuzz`](https://github.com/rust-fuzz/cargo-fuzz). [`cargo-llvm-cov`](https://github.com/taiki-e/cargo-llvm-cov) is only needed to regenerate coverage reports (`cargo coverage all`), not for precommit. Mix, VS Code packaging via xtask, Maven, and NuGet precommits always run (not path-gated).
 
 Release version must match in:
 
@@ -24,6 +24,7 @@ Release version must match in:
 - `engine/packages/hex/mix.exs` (`@version`)
 - `engine/packages/maven/pom.xml` (project `<version>`)
 - Maven install snippets: root `README.md`, `engine/README.md`, `cli/documentation/tools/java.md`, `engine/packages/maven/README.md` (XML and/or Gradle coords)
+- NuGet install snippets: root `README.md`, `engine/README.md`, `cli/documentation/tools/dotnet.md`, `engine/packages/nuget/Lemmabase.Lemma.Engine/README.md` (`dotnet add package Lemmabase.Lemma.Engine --version {v}`)
 - `engine/README.md` (quick-start `lemma-engine = "…"`)
 - `engine/lsp/editors/vscode/package.json` (`version`)
 

@@ -48,11 +48,11 @@ cargo deny check --config .cargo/deny.toml
    cargo precommit --fuzz
    ```
 
-   That is what CI runs. Bare `cargo precommit` is a faster local shortcut (same gate without fuzz). The gate: versions-verify, Hex `mix precommit`, VS Code `npm precommit`, fmt, clippy (`--all-features`), nextest (including ignored benches), WASM npm build+test, Maven `./mvnw -B verify` (after `lemma_jni` build), cargo-deny, `cargo coverage all --check`, then with `--fuzz` 30 minutes total across `engine/fuzz` targets. Requires `cargo-nextest`, `cargo-deny`, Elixir/Mix, Node.js, `wasm-pack`, and a **JDK 21+**; `--fuzz` also needs nightly and `cargo-fuzz`. Regenerate coverage with `cargo coverage all` when engine/cli sources change (`cargo-llvm-cov` required). `cargo nextest` alone is Rust tests only.
+   That is what CI runs. Bare `cargo precommit` is a faster local shortcut (same gate without fuzz). The gate: versions-verify, Hex `mix precommit`, VS Code `npm precommit`, fmt, clippy (`--all-features`), nextest (including ignored benches), WASM npm build+test, Maven `./mvnw -B verify` (after `lemma_jni` build), NuGet `dotnet test` (after `lemma_dotnet` + UniFFI generate), cargo-deny, `cargo coverage all --check`, then with `--fuzz` 30 minutes total across `engine/fuzz` targets. Requires `cargo-nextest`, `cargo-deny`, Elixir/Mix, Node.js, `wasm-pack`, a **JDK 21+**, and the **.NET 8 SDK** (`uniffi-bindgen-cs` tag `v0.11.0+v0.31.0`); `--fuzz` also needs nightly and `cargo-fuzz`. Regenerate coverage with `cargo coverage all` when engine/cli sources change (`cargo-llvm-cov` required). `cargo nextest` alone is Rust tests only.
 
 ### Release version (maintainers)
 
-The workspace release is `[workspace.package] version` in the root `Cargo.toml`. The same number must appear in path-dep pins, Hex `mix.exs`, Maven `pom.xml`, Maven install snippets in root/`engine`/`cli/documentation/tools` READMEs, `engine/README.md` Cargo example, and the VS Code extension `package.json` (see `xtask/src/versions.rs` module `tracked`).
+The workspace release is `[workspace.package] version` in the root `Cargo.toml`. The same number must appear in path-dep pins, Hex `mix.exs`, Maven `pom.xml`, NuGet `Lemmabase.Lemma.Engine.csproj` / `engine.version`, Maven and NuGet install snippets in root/`engine`/`cli/documentation/tools` READMEs, `engine/README.md` Cargo example, and the VS Code extension `package.json` (see `xtask/src/versions.rs` module `tracked`).
 
 - **`cargo bump <semver>`**: update all locations, then refresh `Cargo.lock` (`cargo generate-lockfile`), Hex `mix.lock` (`mix deps.get`), and VS Code `package-lock.json` (`npm install --package-lock-only`).
 - **`cargo verify`**: confirm everything matches (`versions-verify` is also the first step of `cargo precommit`).

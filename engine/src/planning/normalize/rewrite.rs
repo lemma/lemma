@@ -1165,6 +1165,9 @@ fn ordered_dispatch(
     n: &mut Normalizer<'_>,
     id: NormalFormId,
 ) -> Result<Option<NormalFormId>, Error> {
+    if n.cells.result_type(id).is_spec() {
+        return Ok(None);
+    }
     let NormalFormKind::Piecewise(arms) = &n.cells.get(id).kind else {
         return Ok(None);
     };

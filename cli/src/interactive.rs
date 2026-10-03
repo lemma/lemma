@@ -466,6 +466,9 @@ fn prompt_value_for_type(
         TypeSpecification::Undetermined => unreachable!(
             "BUG: prompt_value_for_type called with Error sentinel type; this type must never reach interactive mode"
         ),
+        TypeSpecification::Spec { .. } => unreachable!(
+            "BUG: prompt_value_for_type called with a spec type; spec instances are not prompted data"
+        ),
     }
 }
 

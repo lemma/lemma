@@ -78,6 +78,41 @@ pub struct RuleResultValue {
     pub unit: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub range: Option<Box<RangeResult>>,
+    /// Set when the value is a spec instance. `data` holds one evaluated entry per
+    /// data slot of that instance, keyed relative to that spec.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spec: Option<Box<SpecResult>>,
+}
+
+/// A spec instance returned by a rule, including the values needed to run it again.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SpecResult {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repository: Option<String>,
+    pub spec: String,
+    /// Resolved row's effective date. Empty when the row is the origin row.
+    pub effective: String,
+    /// `uses` path of this instance in the consumer (`basic`, `basic.finance`).
+    pub instance: String,
+    /// Evaluated data slots, keyed relative to `spec`. A slot with a value carries
+    /// that value; a vetoed slot carries `vetoed` and `veto_reason`. Unbound slots
+    /// are omitted.
+    pub data: BTreeMap<String, SpecRuleResult>,
+    /// Rule results relative to `spec` (`tax`, `finance.fee`).
+    pub rules: BTreeMap<String, SpecRuleResult>,
+}
+
+/// One rule of a [`SpecResult`], or one evaluated data slot of a [`SpecResult`].
+/// A spec-valued rule nests another [`SpecResult`]
+/// in [`RuleResultValue::spec`].
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SpecRuleResult {
+    pub vetoed: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub veto_reason: Option<String>,
+    pub rule_type: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result: Option<RuleResultValue>,
 }
 
 /// Why building a [`RuleResultValue`] from a canonical [`LiteralValue`] failed.
@@ -353,6 +388,26 @@ fn scalar_result_value(
         ValueKind::Range(_, _) => {
             unreachable!("BUG: range must be handled by result_value_from_literal")
         }
+        ValueKind::Spec(instance) => {
+            let identity = result_type.spec_identity().unwrap_or_else(|| {
+                panic!(
+                    "BUG: spec value whose type is not a spec ({})",
+                    result_type.name()
+                )
+            });
+            Ok(RuleResultValue {
+                result: Some(instance.to_string()),
+                spec: Some(Box::new(SpecResult {
+                    repository: identity.repository.clone(),
+                    spec: identity.spec.clone(),
+                    effective: identity.effective.to_string(),
+                    instance: instance.to_string(),
+                    data: BTreeMap::new(),
+                    rules: BTreeMap::new(),
+                })),
+                ..RuleResultValue::default()
+            })
+        }
     }
 }
 
@@ -447,8 +502,34 @@ impl RuleResultValue {
     /// Reconstruct the [`LiteralValue`] from this API value's fields.
     ///
     /// Panics if the fields cannot reconstruct a literal, or if a range endpoint is
-    /// itself a range (ranges do not nest — enforced here, not by convention).
+    /// itself a range (ranges do not nest; enforced here, not by convention).
+    /// A spec instance of more than one `uses` hop is not reconstructed yet.
     pub fn to_literal(&self, rule_type: &LemmaType) -> LiteralValue {
+        if let Some(spec) = &self.spec {
+            let hops: Vec<&str> = spec
+                .instance
+                .split('.')
+                .filter(|hop| !hop.is_empty())
+                .collect();
+            if hops.len() != 1 {
+                todo!(
+                    "rebuilding spec instance '{}' needs each uses hop's spec",
+                    spec.instance
+                );
+            }
+            let identity = rule_type
+                .spec_identity()
+                .unwrap_or_else(|| panic!("BUG: spec result whose rule type is not a spec"));
+            return LiteralValue::new(crate::planning::semantics::ValueKind::Spec(
+                crate::planning::semantics::SpecInstance {
+                    prefix: vec![crate::planning::semantics::PathSegment {
+                        uses: hops[0].to_string(),
+                        repository: identity.repository.clone(),
+                        spec: identity.spec.clone(),
+                    }],
+                },
+            ));
+        }
         if let Some(range) = &self.range {
             if range.from.range.is_some() || range.to.range.is_some() {
                 panic!("BUG: range endpoint must not itself be a range");

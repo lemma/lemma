@@ -143,7 +143,9 @@ pub(crate) fn dispatch_key_of_literal(
             Ok(moment) => Ok(DispatchKey::Time(moment.naive_utc())),
             Err(message) => Err(DispatchKeyBuildError::CalendarFailure(message)),
         },
-        ValueKind::Boolean(_) | ValueKind::Range(_, _) => Err(DispatchKeyBuildError::Unsupported),
+        ValueKind::Boolean(_) | ValueKind::Range(_, _) | ValueKind::Spec(_) => {
+            Err(DispatchKeyBuildError::Unsupported)
+        }
     }
 }
 
@@ -174,7 +176,9 @@ pub(crate) fn dispatch_probe_of(value: &ValueKind) -> DispatchProbeOutcome<'_> {
             Ok(moment) => DispatchProbeOutcome::Probe(DispatchProbe::Time(moment.naive_utc())),
             Err(message) => DispatchProbeOutcome::CalendarFailure(message),
         },
-        ValueKind::Boolean(_) | ValueKind::Range(_, _) => DispatchProbeOutcome::Unsupported,
+        ValueKind::Boolean(_) | ValueKind::Range(_, _) | ValueKind::Spec(_) => {
+            DispatchProbeOutcome::Unsupported
+        }
     }
 }
 
@@ -260,7 +264,7 @@ fn class_for_pair(scrutinee_type: &LemmaType, key: &LiteralValue) -> Option<Disp
             // checks that needed key.lemma_type are deferred to evaluation / planning rejects.
             Some(DispatchClass::Rational)
         }
-        ValueKind::Boolean(_) | ValueKind::Range(_, _) => None,
+        ValueKind::Boolean(_) | ValueKind::Range(_, _) | ValueKind::Spec(_) => None,
     }
 }
 

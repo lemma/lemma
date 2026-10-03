@@ -408,7 +408,7 @@ impl Evaluator {
                 _ => Vec::new(),
             };
 
-            response.add_result(RuleResult::from_operation_result(
+            let mut rule_result = RuleResult::from_operation_result(
                 EvaluatedRule {
                     name: exec_rule.path.input_key(),
                     path: exec_rule.path.clone(),
@@ -420,7 +420,13 @@ impl Evaluator {
                 &plan.family_units,
                 explanation,
                 missing_data,
-            ));
+            );
+            if let Some(spec_result) = response::filled_spec_result(&result, plan, &mut context) {
+                if let Some(value) = rule_result.result.as_mut() {
+                    value.spec = Some(Box::new(spec_result));
+                }
+            }
+            response.add_result(rule_result);
         }
 
         response

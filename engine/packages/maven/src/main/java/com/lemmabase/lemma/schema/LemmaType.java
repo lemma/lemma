@@ -1312,6 +1312,75 @@ public sealed interface LemmaType {
   }
 
   /**
+   * Spec instance type.
+   *
+   * @param name name
+   * @param repository repository or null for the unnamed workspace
+   * @param spec spec name
+   * @param effective resolved row effective date, empty for the origin row
+   * @param extendsType extends
+   */
+  record Spec(
+      @Nullable String name,
+      @Nullable String repository,
+      String spec,
+      String effective,
+      TypeExtends extendsType)
+      implements LemmaType {
+    /** {@inheritDoc} */
+    @Override
+    public String kind() {
+      return "spec";
+    }
+
+    /**
+     * Parses JSON.
+     *
+     * @param p parser at value start
+     * @return parsed value
+     * @throws IOException if JSON IO fails
+     */
+    public static Spec read(JsonParser p) throws IOException {
+      JsonReading.expectStartObject(p, "LemmaType.Spec");
+      String name = null;
+      boolean nameSeen = false;
+      String repository = null;
+      String spec = null;
+      String effective = null;
+      TypeExtends extendsType = null;
+      while (p.nextToken() != JsonToken.END_OBJECT) {
+        String field = p.currentName();
+        p.nextToken();
+        switch (field) {
+          case "name" -> {
+            nameSeen = true;
+            name = JsonReading.readString(p);
+          }
+          case "kind" -> expectKind(p, "spec");
+          case "repository" -> repository = JsonReading.readString(p);
+          case "spec" -> spec = JsonReading.readString(p);
+          case "effective" -> effective = JsonReading.readString(p);
+          case "extends" -> extendsType = TypeExtends.read(p);
+          default -> JsonReading.unknownField(field, "LemmaType.Spec");
+        }
+      }
+      if (!nameSeen) {
+        JsonReading.missingRequired("name", "LemmaType.Spec");
+      }
+      if (spec == null) {
+        JsonReading.missingRequired("spec", "LemmaType.Spec");
+      }
+      if (effective == null) {
+        JsonReading.missingRequired("effective", "LemmaType.Spec");
+      }
+      if (extendsType == null) {
+        JsonReading.missingRequired("extends", "LemmaType.Spec");
+      }
+      return new Spec(name, repository, spec, effective, extendsType);
+    }
+  }
+
+  /**
    * Parses JSON.
    *
    * @param p parser at value start
@@ -1339,6 +1408,7 @@ public sealed interface LemmaType {
         case "time" -> TimeType.read(reader);
         case "timerange" -> TimeRange.read(reader);
         case "measurerange" -> MeasureRange.read(reader);
+        case "spec" -> Spec.read(reader);
         default -> throw new LemmaBugError("BUG: unknown kind value: " + kind);
       };
     }

@@ -80,6 +80,7 @@ rule r: i.x
 
 - `-> with x: 42` sets Data `x` on `inner` to `42`.
 - `-> with x: i` is an error: `i` is a Spec reference, not a value.
+- A rule may return the alias: `rule chosen: i unless flag then other`. `chosen.x` reads `x` on whichever instance was chosen. Both branches must be the same spec.
 - Standalone `with copy: i.x` still parses but is deprecated; use `  -> with` under `uses` (see [Reference](../reference/readme.md#setting-data-on-an-imported-spec-uses-block)).
 
 The binding path must be relative to the imported spec (`x`, not `i.x`). Local slots use `data`. Runtime inputs to `run` can still override bound import paths (e.g. `i.x`) where planning allows.

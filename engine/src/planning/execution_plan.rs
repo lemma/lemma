@@ -937,7 +937,8 @@ pub fn type_detail_lines(spec: &TypeSpecification) -> Vec<String> {
         }
         TypeSpecification::Boolean { .. }
         | TypeSpecification::Veto { .. }
-        | TypeSpecification::Undetermined => {}
+        | TypeSpecification::Undetermined
+        | TypeSpecification::Spec { .. } => {}
     }
     lines
 }
@@ -1388,6 +1389,22 @@ pub(crate) fn reachable_data_paths(
                 }
                 live.extend(live_piecewise_children(arms, decision));
                 live
+            }
+            NormalFormKind::SpecMember { base, targets, .. } => {
+                let chosen = match values.get(base.index()).and_then(|slot| slot.as_ref()) {
+                    Some(OperationResult::Value(bound)) => match &bound.value {
+                        crate::planning::semantics::ValueKind::Spec(instance) => targets
+                            .iter()
+                            .find(|(candidate, _)| candidate == instance)
+                            .map(|(_, target)| *target),
+                        _ => None,
+                    },
+                    Some(OperationResult::Veto(_)) | None => None,
+                };
+                match chosen {
+                    Some(target) => vec![*base, target],
+                    None => vec![*base],
+                }
             }
             NormalFormKind::Leaf(LeafKind::Literal(_))
             | NormalFormKind::Now

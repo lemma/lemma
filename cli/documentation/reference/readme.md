@@ -385,6 +385,37 @@ uses employee: base_employee
 rule employee_summary: employee.name
 ```
 
+### A rule can return a spec instance
+
+A rule body may be a `uses` alias. The result is that instance. Dot on the rule reads the chosen instance's data or rules, the same way dot reads a `uses` alias. Every `unless` branch must be the same spec (the same resolved version). A spec instance is not a number or text: arithmetic, comparison, and `with` reject it. `is veto` is allowed.
+
+```lemma
+spec tax_bracket
+
+data rate: ratio
+
+
+spec income_tax
+
+uses basic: tax_bracket
+  -> with rate: 36%
+
+uses higher: tax_bracket
+  -> with rate: 37%
+
+data high_income: boolean
+
+
+rule top_bracket:
+  basic
+  unless high_income then higher
+
+rule marginal_rate:
+  top_bracket.rate
+```
+
+The API result is the whole instance: spec name, resolved effective date, every data value as run-data text, and every rule result. Running that spec again with those data values at the same effective instant reproduces the rule results. A bare alias counts as reading the whole imported spec, so an unpinned `uses` fails planning if any data or rule of that spec changes type across versions.
+
 Read imported data or rules in expressions without `with` when you do not need to override values:
 
 ```lemma

@@ -2,13 +2,17 @@ use crate::computation::{OperationResult, VetoType};
 use crate::evaluation::explanations::Explanation;
 
 use crate::parsing::ast::DateTimeValue;
-use crate::planning::semantics::{LemmaType, LiteralValue, RulePath, Source};
+use crate::planning::execution_plan::ExecutionPlan;
+use crate::planning::semantics::{
+    DataPath, LemmaType, LiteralValue, PathSegment, RulePath, Source, SpecInstance, ValueKind,
+};
 use crate::planning::unit_family::FamilyUnitCatalog;
 use crate::result_value::{
     rule_result_value_failure_message, rule_result_value_from_literal, RuleResultValue,
-    RuleResultValueFailure,
+    RuleResultValueFailure, SpecResult, SpecRuleResult,
 };
 use indexmap::IndexMap;
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 /// Rule info with resolved expressions for use in evaluation response.
@@ -198,6 +202,203 @@ impl Response {
     pub fn add_result(&mut self, result: RuleResult) {
         self.results.insert(result.rule.name.clone(), result);
     }
+}
+
+/// When `result` is a spec instance, the instance with its data and rules filled.
+pub(crate) fn filled_spec_result(
+    result: &OperationResult,
+    plan: &ExecutionPlan,
+    ctx: &mut crate::evaluation::EvaluationContext,
+) -> Option<SpecResult> {
+    let OperationResult::Value(bound) = result else {
+        return None;
+    };
+    let ValueKind::Spec(instance) = &bound.value else {
+        return None;
+    };
+    let mut stack = Vec::new();
+    Some(spec_result_for_instance(instance, plan, ctx, &mut stack))
+}
+
+fn spec_result_for_instance(
+    instance: &SpecInstance,
+    plan: &ExecutionPlan,
+    ctx: &mut crate::evaluation::EvaluationContext,
+    stack: &mut Vec<SpecInstance>,
+) -> SpecResult {
+    if stack.iter().any(|seen| seen == instance) {
+        panic!("BUG: spec result walked instance '{instance}' twice");
+    }
+    stack.push(instance.clone());
+    let identity = instance_identity(plan, instance);
+    let data = instance_data(plan, ctx, instance);
+    let mut rules = BTreeMap::new();
+    let rule_paths: Vec<RulePath> = plan
+        .rules
+        .keys()
+        .filter(|path| path_under_prefix(&path.segments, &instance.prefix))
+        .cloned()
+        .collect();
+    for path in rule_paths {
+        let exec = plan
+            .rules
+            .get(&path)
+            .expect("BUG: rule path missing from plan");
+        crate::evaluation::tree::ensure_rule_values(plan.rule_index(&path), plan, ctx);
+        let operation = ctx.rule_value(plan, &path).clone();
+        let missing_data = match &operation {
+            OperationResult::Veto(VetoType::MissingData { .. }) => {
+                ctx.missing_data_for_rule(plan, exec.normal_form)
+            }
+            _ => Vec::new(),
+        };
+        let mut entry = spec_entry(
+            &operation,
+            path.input_key(),
+            path.clone(),
+            exec.source.clone(),
+            exec.rule_type.as_ref(),
+            &plan.family_units,
+            missing_data,
+        );
+        if let OperationResult::Value(bound) = &operation {
+            if let ValueKind::Spec(nested) = &bound.value {
+                let nested_result = spec_result_for_instance(nested, plan, ctx, stack);
+                if let Some(value) = entry.result.as_mut() {
+                    value.spec = Some(Box::new(nested_result));
+                }
+            }
+        }
+        let relative = strip_prefix(&path.input_key(), &instance.prefix).unwrap_or_else(|| {
+            panic!(
+                "BUG: rule '{}' is under instance '{instance}' but its key does not start with that path",
+                path.input_key()
+            )
+        });
+        rules.insert(relative, entry);
+    }
+    stack.pop();
+    SpecResult {
+        repository: identity.0,
+        spec: identity.1,
+        effective: identity.2,
+        instance: instance.to_string(),
+        data,
+        rules,
+    }
+}
+
+fn instance_identity(
+    plan: &ExecutionPlan,
+    instance: &SpecInstance,
+) -> (Option<String>, String, String) {
+    let last = instance
+        .prefix
+        .last()
+        .unwrap_or_else(|| panic!("BUG: spec instance '{instance}' has no uses hop"));
+    let import_path = DataPath {
+        segments: instance.prefix[..instance.prefix.len() - 1].to_vec(),
+        data: last.uses.clone(),
+    };
+    let Some(crate::planning::semantics::DataDefinition::Import {
+        repository,
+        target_name,
+        effective,
+        ..
+    }) = plan.data.get(&import_path)
+    else {
+        panic!(
+            "BUG: spec instance '{instance}' is not an import at '{}'",
+            import_path.input_key()
+        );
+    };
+    (
+        repository.clone(),
+        target_name.clone(),
+        effective.to_string(),
+    )
+}
+
+fn spec_entry(
+    operation: &OperationResult,
+    name: String,
+    path: RulePath,
+    source: Source,
+    display_type: &LemmaType,
+    family_units: &FamilyUnitCatalog,
+    missing_data: Vec<String>,
+) -> SpecRuleResult {
+    let built = RuleResult::from_operation_result(
+        EvaluatedRule {
+            name,
+            path,
+            source_location: source,
+            rule_type: Arc::new(display_type.clone()),
+        },
+        operation,
+        display_type,
+        family_units,
+        None,
+        missing_data,
+    );
+    SpecRuleResult {
+        vetoed: built.vetoed,
+        veto_reason: built.veto_reason.clone(),
+        rule_type: built.rule_type.clone(),
+        result: built.result.clone(),
+    }
+}
+
+fn instance_data(
+    plan: &ExecutionPlan,
+    ctx: &crate::evaluation::EvaluationContext,
+    instance: &SpecInstance,
+) -> BTreeMap<String, SpecRuleResult> {
+    let mut data = BTreeMap::new();
+    for (path, definition) in &plan.data {
+        if !path_under_prefix(&path.segments, &instance.prefix) {
+            continue;
+        }
+        if definition.schema_type().is_none() {
+            continue;
+        }
+        let relative = strip_prefix(&path.input_key(), &instance.prefix)
+            .unwrap_or_else(|| panic!("BUG: data '{}' lost its instance prefix", path.input_key()));
+        let Some(slot) = ctx.data_slot(plan, path) else {
+            continue;
+        };
+        if matches!(slot, OperationResult::Veto(VetoType::MissingData { .. })) {
+            continue;
+        }
+        let display_type = ctx.data_display_type(plan, path);
+        let entry = spec_entry(
+            slot,
+            path.input_key(),
+            RulePath {
+                segments: path.segments.clone(),
+                rule: path.data.clone(),
+            },
+            definition.source().clone(),
+            display_type.as_ref(),
+            &plan.family_units,
+            Vec::new(),
+        );
+        data.insert(relative, entry);
+    }
+    data
+}
+
+fn path_under_prefix(segments: &[PathSegment], prefix: &[PathSegment]) -> bool {
+    segments.len() >= prefix.len() && segments[..prefix.len()] == prefix[..]
+}
+
+fn strip_prefix(key: &str, prefix: &[PathSegment]) -> Option<String> {
+    let mut head = String::new();
+    for segment in prefix {
+        head.push_str(&segment.uses);
+        head.push('.');
+    }
+    key.strip_prefix(&head).map(str::to_string)
 }
 
 #[cfg(test)]

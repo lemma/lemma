@@ -2,23 +2,29 @@
 
 Releases cover the Lemma engine, `lemma` CLI, OpenAPI crate, LSP, SDKs and VS Code extension. They all follow the same version everywhere. The release version is `[workspace.package] version` in the root `Cargo.toml`. Git tags follow `lemma-v{version}` (for example `lemma-v0.8.20`); releases before the rename used `cli-v{version}`. Draft notes for the next version quickly by running `cargo changelog` to print `git diff` / `git log` since the latest release tag (`xtask` `versions-diff`). Tip: feed that into an LLM to create a summary for this changelog.
 
-## [Unreleased]
+## [0.9.12] - 2026-10-03
+
+Rules can return a spec instance, ranges get `lower` / `upper`, and unpinned `uses` only checks what the consumer reads.
 
 ### Added
 
-- **Range endpoints**: `lower` and `upper` return the ordered ends of a range. `lower` is included; `upper` is excluded. `lower 5...10` is `5` because `...` binds tighter. A `money range` yields `money`, and the endpoint keeps its written unit. `lower` and `upper` are reserved names. `-> lower` and `-> upper` are unchanged as constraint commands.
+- **Spec-valued rules**: a rule may return a `uses` alias (`rule top_bracket: basic unless high_income then higher`); `top_bracket.rate` reads the chosen instance. Every branch must be the same spec and resolved version. Arithmetic, comparison, and `-> with` reject a spec instance; `is veto` is allowed. Results carry `spec`: repository, spec name, effective date, instance path, every data value as run-data text, and every rule result. Running that spec with those values at the same instant reproduces the rules. Types gain `kind: "spec"`; `show` expressions gain `spec_member`.
+- **Range endpoints**: prefix operators `lower` / `upper` return the included / excluded end of a range, keeping the endpoint's unit. `lower 5...10` is `5` because `...` binds tighter. `show` expressions gain `range_bound`.
+- **Per-endpoint units**: a measure range may mix units (`10 eur...20 usd`); each endpoint keeps its written unit. Result values, range endpoints, and measure / ratio value types expose `unit`.
 
 ### Changed
 
-- **Prefix operators take one range operand**: `floor x + 1` is `(floor x) + 1`, `floor x as gram` is `(floor x) as gram`, and `sqrt x ^ 2` is `(sqrt x) ^ 2`. Parentheses widen the operand (`floor (x + 1)`). `past` / `future` are unchanged.
-- **Unpinned `uses` checks only what the consumer reads**: across the dependency rows that overlap the consumer, planning compares the names the consumer writes after the alias (rule expressions, `data x: alias.type`, `-> with` paths and reference targets). A later row may change `help`, `maximum`, units or types on names the consumer does not read, and may add names. A read name that changes still fails planning.
-- **Drift errors name the member and both rows**: `'shop' depends on 'amounts' without pinning an effective date, but data 'amount' has type number in amounts and text in amounts 2025-06-01`. When only constraints or help differ: `type 'money' changed between finance 2025-01-01 and finance 2025-07-01`. A dependency with no row active during the consumer gets its own message: `no row of 'dep' is active during ...`. A `uses` row plus `data x: alias.type` on the same alias reports one error, not two.
-- **Faster planning on large workspaces**: execution plans normalize only rules reachable from the spec's own rules, not every imported rule. Logistics ladder load: carrier 819 ms to 664 ms, enterprise 20.2 s to 16.5 s. Snapshots shrink accordingly (enterprise 181.4 MiB to 167.6 MiB, restore 1157 ms to 1082 ms). Unreachable imported rules are still type checked. Engine snapshots from earlier versions are rejected as before.
+- **[breaking] Prefix operators take one range operand**: `floor x + 1` is `(floor x) + 1`, `sqrt x ^ 2` is `(sqrt x) ^ 2`. Parentheses widen the operand (`floor (x + 1)`). `past` / `future` are unchanged.
+- **[breaking] `lower` and `upper` are reserved names**. The `-> lower` / `-> upper` constraint commands are unchanged.
+- **[breaking] Conversion traces drop the `source` step**: `ConversionStep.role` is `outcome` or `rule`.
+- **Unpinned `uses` checks only what the consumer reads**: names written after the alias in rules, `data x: alias.type`, and `-> with`. Unread names may change and new names are fine. A bare alias reads the whole spec.
+- **Drift errors name the member and both rows**: `data 'amount' has type number in amounts and text in amounts 2025-06-01`. A dependency with no active row gets its own message; one alias no longer reports the same drift twice.
+- **Faster planning**: only rules reachable from the spec's own rules are normalized (enterprise ladder 20.2 s to 16.5 s, snapshot 181.4 MiB to 167.6 MiB). Unreachable imported rules are still type checked.
 
 ### Fixed
 
-- **`-> with` literal into a literal slot**: `-> with weight: 10` against `data weight: 5 kilogram` is rejected with "cannot use 10 as measure". Binding text into a number slot is rejected too. A foreign unit lists the slot type's valid units. `10 kilogram` is accepted.
-- **`-> with` errors follow binding order**: multiple binding type errors on one `uses` row are reported in the order the bindings are written, not the order the target spec declares the data.
+- **`-> with` literal type checks**: `-> with weight: 10` into a `5 kilogram` slot, or text into a number slot, is rejected; a foreign unit lists the valid units.
+- **`-> with` errors follow binding order**, not the target spec's declaration order.
 
 ## [0.9.11] - 2026-09-22
 

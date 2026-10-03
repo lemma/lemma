@@ -110,6 +110,11 @@ pub enum ShowExpression {
     IsVeto {
         operand: Box<ShowExpression>,
     },
+    /// `rule.field` on a spec-valued rule. `member` is `field` or `alias.field`.
+    SpecMember {
+        base: String,
+        member: String,
+    },
 }
 
 /// Project a resolved planning expression into the Show tree.
@@ -191,6 +196,21 @@ pub fn show_expression_from(
         },
         ExpressionKind::Piecewise(_) => {
             panic!("BUG: piecewise inside a rule branch")
+        }
+        ExpressionKind::SpecMember {
+            base, path, name, ..
+        } => {
+            let key = base.input_key();
+            if !show_keys.contains(&key) {
+                panic!("BUG: spec member base '{key}' not in Show.rules keys");
+            }
+            let mut member = String::new();
+            for segment in path {
+                member.push_str(segment);
+                member.push('.');
+            }
+            member.push_str(name);
+            ShowExpression::SpecMember { base: key, member }
         }
     }
 }

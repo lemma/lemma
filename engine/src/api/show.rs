@@ -169,6 +169,10 @@ pub enum ShowExpression {
     IsVeto {
         operand: Box<ShowExpression>,
     },
+    SpecMember {
+        base: String,
+        member: String,
+    },
 }
 
 impl From<&DomainShowExpression> for ShowExpression {
@@ -251,6 +255,10 @@ impl From<&DomainShowExpression> for ShowExpression {
             },
             DomainShowExpression::IsVeto { operand } => Self::IsVeto {
                 operand: Box::new(ShowExpression::from(operand.as_ref())),
+            },
+            DomainShowExpression::SpecMember { base, member } => Self::SpecMember {
+                base: base.clone(),
+                member: member.clone(),
             },
         }
     }

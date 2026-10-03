@@ -192,6 +192,138 @@ public sealed interface RuleResult {
       implements RuleResult {}
 
   /**
+   * One rule inside a spec instance.
+   *
+   * @param vetoed whether the rule vetoed
+   * @param vetoReason veto text or null
+   * @param ruleType rule type
+   * @param result rule value, or null when absent
+   */
+  record SpecRuleResult(
+      boolean vetoed,
+      @Nullable String vetoReason,
+      String ruleType,
+      @Nullable RuleResultValue result) {
+    /**
+     * Parses JSON.
+     *
+     * @param p parser at value start
+     * @return parsed value
+     * @throws IOException if JSON IO fails
+     */
+    static SpecRuleResult read(JsonParser p) throws IOException {
+      JsonReading.expectStartObject(p, "SpecRuleResult");
+      Boolean vetoed = null;
+      String vetoReason = null;
+      String ruleType = null;
+      RuleResultValue result = null;
+      while (p.nextToken() != JsonToken.END_OBJECT) {
+        String field = p.currentName();
+        p.nextToken();
+        switch (field) {
+          case "vetoed" -> vetoed = JsonReading.readBoolean(p);
+          case "veto_reason" -> vetoReason = JsonReading.readString(p);
+          case "rule_type" -> ruleType = JsonReading.readString(p);
+          case "result" -> {
+            if (p.currentToken() == JsonToken.VALUE_NULL) {
+              result = null;
+            } else {
+              result = RuleResultValue.read(p);
+            }
+          }
+          default -> JsonReading.unknownField(field, "SpecRuleResult");
+        }
+      }
+      if (vetoed == null) {
+        JsonReading.missingRequired("vetoed", "SpecRuleResult");
+      }
+      if (ruleType == null) {
+        JsonReading.missingRequired("rule_type", "SpecRuleResult");
+      }
+      return new SpecRuleResult(vetoed, vetoReason, ruleType, result);
+    }
+  }
+
+  /**
+   * Spec instance carried by a spec-valued rule.
+   *
+   * @param repository repository or null
+   * @param spec spec name
+   * @param effective resolved row effective date
+   * @param instance uses path
+   * @param data evaluated data slots relative to the spec
+   * @param rules rule results relative to the spec
+   */
+  record SpecResult(
+      @Nullable String repository,
+      String spec,
+      String effective,
+      String instance,
+      Map<String, SpecRuleResult> data,
+      Map<String, SpecRuleResult> rules) {
+    /**
+     * Parses JSON.
+     *
+     * @param p parser at value start
+     * @return parsed value
+     * @throws IOException if JSON IO fails
+     */
+    static SpecResult read(JsonParser p) throws IOException {
+      JsonReading.expectStartObject(p, "SpecResult");
+      String repository = null;
+      String spec = null;
+      String effective = null;
+      String instance = null;
+      Map<String, SpecRuleResult> data = null;
+      Map<String, SpecRuleResult> rules = null;
+      while (p.nextToken() != JsonToken.END_OBJECT) {
+        String field = p.currentName();
+        p.nextToken();
+        switch (field) {
+          case "repository" -> repository = JsonReading.readString(p);
+          case "spec" -> spec = JsonReading.readString(p);
+          case "effective" -> effective = JsonReading.readString(p);
+          case "instance" -> instance = JsonReading.readString(p);
+          case "data" -> data = JsonReading.readMap(p, SpecRuleResult::read);
+          case "rules" -> rules = JsonReading.readMap(p, SpecRuleResult::read);
+          default -> JsonReading.unknownField(field, "SpecResult");
+        }
+      }
+      if (spec == null) {
+        JsonReading.missingRequired("spec", "SpecResult");
+      }
+      if (effective == null) {
+        JsonReading.missingRequired("effective", "SpecResult");
+      }
+      if (instance == null) {
+        JsonReading.missingRequired("instance", "SpecResult");
+      }
+      if (data == null) {
+        JsonReading.missingRequired("data", "SpecResult");
+      }
+      if (rules == null) {
+        JsonReading.missingRequired("rules", "SpecResult");
+      }
+      return new SpecResult(repository, spec, effective, instance, data, rules);
+    }
+  }
+
+  /**
+   * Spec-valued rule result.
+   *
+   * @param result display of the instance path
+   * @param spec the instance
+   * @param ruleType rule type
+   * @param explanation explanation or null
+   */
+  record Spec(
+      String result,
+      SpecResult spec,
+      String ruleType,
+      ExplanationNode.@Nullable Rule explanation)
+      implements RuleResult {}
+
+  /**
    * Parses JSON.
    *
    * @param p parser at value start
@@ -210,6 +342,7 @@ public sealed interface RuleResult {
     LocalTime time = null;
     RuleResultValue.CalendarResult calendar = null;
     RuleResultValue.RangeResult range = null;
+    SpecResult spec = null;
     Boolean vetoed = null;
     String vetoReason = null;
     String ruleType = null;
@@ -229,6 +362,8 @@ public sealed interface RuleResult {
         case "time" -> time = JsonReading.readLocalTime(p);
         case "calendar" -> calendar = RuleResultValue.CalendarResult.read(p);
         case "range" -> range = RuleResultValue.RangeResult.read(p);
+        case "spec" -> spec = SpecResult.read(p);
+        case "unit" -> JsonReading.readString(p);
         case "vetoed" -> vetoed = JsonReading.readBoolean(p);
         case "veto_reason" -> vetoReason = JsonReading.readString(p);
         case "rule_type" -> ruleType = JsonReading.readString(p);
@@ -278,6 +413,9 @@ public sealed interface RuleResult {
     }
     if (range != null) {
       return new Range(result, range, ruleType, explanation);
+    }
+    if (spec != null) {
+      return new Spec(result, spec, ruleType, explanation);
     }
     throw new LemmaBugError("BUG: non-veto RuleResult has no typed value field");
   }

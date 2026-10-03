@@ -129,6 +129,11 @@ fn normalize_literal(literal: &LiteralValue, lemma_type: &LemmaType) -> Output {
             value: serde_json::to_string(t).expect("BUG: time is JSON-serializable"),
             unit: None,
         },
+        ValueKind::Spec(instance) => Output {
+            kind: "spec",
+            value: instance.to_string(),
+            unit: None,
+        },
         ValueKind::Range(_, _) => {
             todo!(
                 "range output not yet expected in benchmark fixtures; comparison semantics undefined"

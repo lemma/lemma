@@ -787,4 +787,37 @@ defmodule LemmaTest do
       assert Enum.any?(errors, fn err -> err[:registry_kind] == "network_error" end)
     end
   end
+
+  test "rule result keeps a spec instance" do
+    result =
+      Lemma.RuleResult.from_map(%{
+        "vetoed" => false,
+        "rule_type" => "tax_bracket",
+        "result" => "basic",
+        "spec" => %{
+          "spec" => "tax_bracket",
+          "effective" => "",
+          "instance" => "basic",
+          "data" => %{
+            "income" => %{
+              "vetoed" => false,
+              "rule_type" => "money",
+              "result" => %{"result" => "30000 eur"}
+            }
+          },
+          "rules" => %{
+            "tax" => %{
+              "vetoed" => false,
+              "rule_type" => "money",
+              "result" => %{"result" => "10800 eur"}
+            }
+          }
+        }
+      })
+
+    assert result.spec["spec"] == "tax_bracket"
+    assert result.spec["instance"] == "basic"
+    assert result.spec["data"]["income"]["result"]["result"] == "30000 eur"
+    assert result.rule_type == "tax_bracket"
+  end
 end

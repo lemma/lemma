@@ -264,6 +264,15 @@ pub fn api_v1_schema() -> Value {
         vec![],
     );
 
+    let lemma_type_spec = lemma_type_variant(
+        "spec",
+        vec![
+            ("spec", json!({"type": "string"})),
+            ("effective", json!({"type": "string"})),
+        ],
+        vec![("repository", json!({"type": "string"}))],
+    );
+
     let rule_result_value_fields = json!({
         "result": {"type": "string"},
         "measure": {"type": "object", "additionalProperties": decimal_string()},
@@ -283,6 +292,7 @@ pub fn api_v1_schema() -> Value {
     let mut rule_result_value_properties = rule_result_value_endpoint_properties.clone();
     rule_result_value_properties
         .insert("range".to_string(), json!({"$ref": "#/$defs/RangeResult"}));
+    rule_result_value_properties.insert("spec".to_string(), json!({"$ref": "#/$defs/SpecResult"}));
 
     let response_result_fields = {
         let mut m = rule_result_value_properties.clone();
@@ -389,7 +399,8 @@ pub fn api_v1_schema() -> Value {
                 {"$ref": "#/$defs/LemmaTypeDateRange"},
                 {"$ref": "#/$defs/LemmaTypeTime"},
                 {"$ref": "#/$defs/LemmaTypeTimeRange"},
-                {"$ref": "#/$defs/LemmaTypeMeasureRange"}
+                {"$ref": "#/$defs/LemmaTypeMeasureRange"},
+                {"$ref": "#/$defs/LemmaTypeSpec"}
             ]
         },
         "LemmaTypeBoolean": lemma_type_boolean,
@@ -404,6 +415,7 @@ pub fn api_v1_schema() -> Value {
         "LemmaTypeTime": lemma_type_time,
         "LemmaTypeTimeRange": lemma_type_time_range,
         "LemmaTypeMeasureRange": lemma_type_measure_range,
+        "LemmaTypeSpec": lemma_type_spec,
         "CalendarResult": {
             "type": "object",
             "required": ["value", "unit"],
@@ -426,6 +438,38 @@ pub fn api_v1_schema() -> Value {
             "properties": {
                 "from": {"$ref": "#/$defs/RuleResultValueEndpoint"},
                 "to": {"$ref": "#/$defs/RuleResultValueEndpoint"}
+            }
+        },
+        "SpecRuleResult": {
+            "type": "object",
+            "required": ["vetoed", "rule_type"],
+            "additionalProperties": false,
+            "description": "One rule of a spec instance, or one evaluated data slot of a spec instance. A spec-valued rule nests SpecResult in result.spec.",
+            "properties": {
+                "vetoed": {"type": "boolean"},
+                "veto_reason": {"type": "string"},
+                "rule_type": {"type": "string"},
+                "result": {"$ref": "#/$defs/RuleResultValue"}
+            }
+        },
+        "SpecResult": {
+            "type": "object",
+            "required": ["spec", "effective", "instance", "data", "rules"],
+            "additionalProperties": false,
+            "description": "Spec instance returned by a rule. data holds one evaluated entry per data slot, keyed relative to the spec; unbound slots are omitted.",
+            "properties": {
+                "repository": {"type": "string"},
+                "spec": {"type": "string"},
+                "effective": {"type": "string"},
+                "instance": {"type": "string"},
+                "data": {
+                    "type": "object",
+                    "additionalProperties": {"$ref": "#/$defs/SpecRuleResult"}
+                },
+                "rules": {
+                    "type": "object",
+                    "additionalProperties": {"$ref": "#/$defs/SpecRuleResult"}
+                }
             }
         },
         "RuleResultValue": {
@@ -686,6 +730,16 @@ pub fn api_v1_schema() -> Value {
                     "properties": {
                         "type": {"const": "is_veto"},
                         "operand": {"$ref": "#/$defs/ShowExpression"}
+                    }
+                },
+                {
+                    "type": "object",
+                    "required": ["type", "base", "member"],
+                    "additionalProperties": false,
+                    "properties": {
+                        "type": {"const": "spec_member"},
+                        "base": {"type": "string"},
+                        "member": {"type": "string"}
                     }
                 }
             ]

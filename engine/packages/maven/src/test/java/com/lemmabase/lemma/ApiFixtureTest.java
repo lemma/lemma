@@ -37,6 +37,7 @@ final class ApiFixtureTest {
           "numberrange",
           "ratio",
           "ratiorange",
+          "spec",
           "text",
           "date",
           "daterange",

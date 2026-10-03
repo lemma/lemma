@@ -293,7 +293,8 @@ fn every_depends_on_rules_and_rule_leaf_is_a_show_key() {
             ShowExpression::Literal(_)
             | ShowExpression::Data { .. }
             | ShowExpression::Veto { .. }
-            | ShowExpression::Now => {}
+            | ShowExpression::Now
+            | ShowExpression::SpecMember { .. } => {}
         }
     }
     let keys: std::collections::HashSet<&str> = show.rules.keys().map(String::as_str).collect();

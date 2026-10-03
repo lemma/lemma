@@ -617,15 +617,18 @@ struct AliasReads {
     members: HashSet<String>,
     /// Named types: `data x: alias.money` (also under `range`).
     types: HashSet<String>,
+    /// The alias is used as a spec value (`rule chosen: alias`), so every data
+    /// and rule of the dependency, including nested `uses`, is part of the result.
+    whole: bool,
 }
 
 fn alias_reads(spec: &LemmaSpec, alias: &str) -> AliasReads {
     let mut reads = AliasReads::default();
     for rule in &spec.rules {
-        collect_alias_expression_reads(&rule.expression, alias, &mut reads.members);
+        collect_alias_expression_reads(&rule.expression, alias, &mut reads);
         for clause in &rule.unless_clauses {
-            collect_alias_expression_reads(&clause.condition, alias, &mut reads.members);
-            collect_alias_expression_reads(&clause.result, alias, &mut reads.members);
+            collect_alias_expression_reads(&clause.condition, alias, &mut reads);
+            collect_alias_expression_reads(&clause.result, alias, &mut reads);
         }
     }
     for data in &spec.data {
@@ -676,10 +679,14 @@ fn collect_alias_reference_read(reference: &Reference, alias: &str, out: &mut Ha
     }
 }
 
-fn collect_alias_expression_reads(expression: &Expression, alias: &str, out: &mut HashSet<String>) {
+fn collect_alias_expression_reads(expression: &Expression, alias: &str, reads: &mut AliasReads) {
     match &expression.kind {
         ExpressionKind::Reference(reference) => {
-            collect_alias_reference_read(reference, alias, out);
+            if reference.segments.is_empty() && reference.name == alias {
+                reads.whole = true;
+            } else {
+                collect_alias_reference_read(reference, alias, &mut reads.members);
+            }
         }
         ExpressionKind::DateRelative(_, inner)
         | ExpressionKind::DateCalendar(_, _, inner)
@@ -689,15 +696,15 @@ fn collect_alias_expression_reads(expression: &Expression, alias: &str, out: &mu
         | ExpressionKind::MathematicalComputation(_, inner)
         | ExpressionKind::RangeBound(_, inner)
         | ExpressionKind::ResultIsVeto(inner) => {
-            collect_alias_expression_reads(inner, alias, out);
+            collect_alias_expression_reads(inner, alias, reads);
         }
         ExpressionKind::RangeLiteral(left, right)
         | ExpressionKind::RangeContainment(left, right)
         | ExpressionKind::LogicalAnd(left, right)
         | ExpressionKind::Arithmetic(left, _, right)
         | ExpressionKind::Comparison(left, _, right) => {
-            collect_alias_expression_reads(left, alias, out);
-            collect_alias_expression_reads(right, alias, out);
+            collect_alias_expression_reads(left, alias, reads);
+            collect_alias_expression_reads(right, alias, reads);
         }
         ExpressionKind::Literal(_) | ExpressionKind::Now | ExpressionKind::Veto(_) => {}
     }
@@ -913,18 +920,16 @@ pub fn validate_dependency_interfaces<'a>(
                                 continue;
                             }
                             let input_key = path.input_key();
-                            if reads.members.contains(&input_key) {
+                            if reads.whole || reads.members.contains(&input_key) {
                                 observed.push((MemberKind::Data, input_key, lemma_type));
                             }
                         }
                         for rule in plan.rules.values() {
-                            if rule.path.segments.is_empty() && reads.members.contains(rule.name())
-                            {
-                                observed.push((
-                                    MemberKind::Rule,
-                                    rule.name().to_string(),
-                                    rule.rule_type.as_ref(),
-                                ));
+                            let key = rule.path.input_key();
+                            let named = rule.path.segments.is_empty()
+                                && reads.members.contains(rule.name());
+                            if reads.whole || named {
+                                observed.push((MemberKind::Rule, key, rule.rule_type.as_ref()));
                             }
                         }
                         for (type_name, lemma_type) in &plan.resolved_types.resolved {
@@ -2055,6 +2060,7 @@ rule start: lower a.period
                     "period",
                 ]),
                 types: strings(&["money", "span"]),
+                whole: false,
             }
         );
         assert_eq!(
@@ -2062,6 +2068,7 @@ rule start: lower a.period
             AliasReads {
                 members: strings(&["base", "skip"]),
                 types: HashSet::new(),
+                whole: false,
             }
         );
     }

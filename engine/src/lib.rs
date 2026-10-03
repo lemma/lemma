@@ -63,7 +63,10 @@ pub use planning::explanation::{ConversionTraceRole, SerializedConversionTraceSt
 pub use planning::semantics::{
     DataPath, LemmaType, LiteralValue, PathSegment, TypeSpecification, ValueKind,
 };
-pub use result_value::{CalendarResult, RangeResult, RuleResultValue, RuleResultValueFailure};
+pub use result_value::{
+    CalendarResult, RangeResult, RuleResultValue, RuleResultValueFailure, SpecResult,
+    SpecRuleResult,
+};
 pub use spec_set_id::parse_spec_set_id;
 pub use stdlib::UNITS_LEMMA;
 

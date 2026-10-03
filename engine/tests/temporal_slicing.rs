@@ -1969,6 +1969,49 @@ rule total: c.fee
     assert_eq!(source.span.line, 3);
 }
 
+#[test]
+fn spec_valued_rule_reads_the_whole_unpinned_interface() {
+    let mut engine = Engine::new();
+    engine
+        .load([(
+            lemma::SourceType::Path(std::sync::Arc::new(std::path::PathBuf::from("calc.lemma"))),
+            r#"
+spec calc
+rule fee: 1
+rule extra: 2
+
+spec calc 2025-06-01
+rule fee: 1
+rule extra: "later"
+"#
+            .to_string(),
+        )])
+        .unwrap();
+
+    let err = engine
+        .load([(
+            lemma::SourceType::Path(std::sync::Arc::new(std::path::PathBuf::from(
+                "invoice.lemma",
+            ))),
+            r#"
+spec invoice 2025-01-01
+uses c: calc
+rule chosen: c
+"#
+            .to_string(),
+        )])
+        .expect_err("unread rule extra changes type, but chosen returns the whole instance");
+    let message = err
+        .iter()
+        .map(|error| error.message().to_string())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        message.contains("rule 'extra'") || message.contains("rule extra"),
+        "{message}"
+    );
+}
+
 fn load_amounts_then_shop(amounts: &str, shop: &str) -> Result<(), lemma::Errors> {
     let mut engine = Engine::new();
     engine

@@ -327,6 +327,11 @@ pub enum TypeSpecification {
         message: Option<String>,
     },
     Undetermined,
+    Spec {
+        repository: Option<String>,
+        spec: String,
+        effective: String,
+    },
 }
 
 impl From<&DomainTypeSpecification> for TypeSpecification {
@@ -480,6 +485,11 @@ impl From<&DomainTypeSpecification> for TypeSpecification {
                 message: message.clone(),
             },
             DomainTypeSpecification::Undetermined => Self::Undetermined,
+            DomainTypeSpecification::Spec { spec } => Self::Spec {
+                repository: spec.repository.clone(),
+                spec: spec.spec.clone(),
+                effective: spec.effective.to_string(),
+            },
         }
     }
 }

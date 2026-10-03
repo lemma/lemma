@@ -1,6 +1,7 @@
 package com.lemmabase.lemma;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
 
@@ -73,6 +74,28 @@ final class SchemaIntegrityTest {
 
     for (Map.Entry<String, LemmaType> e : byKind.entrySet()) {
       assertEquals(e.getKey(), e.getValue().kind());
+    }
+  }
+
+  @Test
+  void specRuleResultReadsInstance() throws Exception {
+    String json =
+        """
+        {"vetoed":false,"rule_type":"tax_bracket","result":"basic","spec":{"spec":"tax_bracket","effective":"","instance":"basic","data":{"income":{"vetoed":false,"rule_type":"money","result":{"result":"30000 eur","measure":{"eur":"30000"}}}},"rules":{"tax":{"vetoed":false,"rule_type":"money","result":{"result":"10800 eur","measure":{"eur":"10800"}}}}}}
+        """;
+    try (JsonParser parser = FACTORY.createParser(json)) {
+      parser.nextToken();
+      RuleResult result = RuleResult.read(parser);
+      RuleResult.Spec spec = (RuleResult.Spec) result;
+      assertEquals("tax_bracket", spec.ruleType());
+      assertEquals("tax_bracket", spec.spec().spec());
+      assertEquals("basic", spec.spec().instance());
+      assertEquals(false, spec.spec().data().get("income").vetoed());
+      assertEquals("30000 eur", spec.spec().data().get("income").result().result());
+      assertEquals(false, spec.spec().rules().get("tax").vetoed());
+      RuleResultValue tax = spec.spec().rules().get("tax").result();
+      assertNotNull(tax);
+      assertEquals("10800 eur", tax.result());
     }
   }
 

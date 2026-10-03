@@ -20,7 +20,7 @@ use crate::planning::normalize::{LeafKind, NormalFormId, NormalFormKind};
 use crate::planning::ordered_dispatch::{region_count, region_of_scrutinee, DispatchKey};
 use crate::planning::semantics::{
     ArithmeticComputation, BoundValueKind, ComparisonComputation, LemmaType, LiteralValue,
-    RangeBound, ValueKind,
+    RangeBound, SpecInstance, ValueKind,
 };
 use std::sync::Arc;
 
@@ -144,6 +144,23 @@ fn eval_kind(
             Ok(resolve_data_path_value(path, plan, ctx))
         }
         NormalFormKind::Now => Ok(OperationResult::from_literal(ctx.now().clone())),
+        NormalFormKind::SpecMember { base, targets, .. } => {
+            let base_result = eval(*base, plan, ctx)?;
+            if base_result.vetoed() {
+                return Ok(base_result);
+            }
+            let instance = match &borrow_value(&base_result, "spec member").value {
+                ValueKind::Spec(instance) => instance.clone(),
+                other => panic!("BUG: spec member base was {other}, not a spec instance"),
+            };
+            let Some((_, target)) = targets.iter().find(|(candidate, _)| candidate == &instance)
+            else {
+                let candidates: Vec<&SpecInstance> =
+                    targets.iter().map(|(candidate, _)| candidate).collect();
+                unreachable!("BUG: spec member instance {instance:?} is not among {candidates:?}");
+            };
+            eval(*target, plan, ctx)
+        }
         NormalFormKind::Veto(veto) => Ok(OperationResult::Veto(VetoType::UserDefined {
             message: veto.message.clone().filter(|m| !m.is_empty()),
         })),

@@ -1,7 +1,7 @@
-use lemma::{DateGranularity, ValueKind};
+use indexmap::IndexMap;
+use lemma::{DateGranularity, EvaluateDataValue, ValueKind};
 use lemma::{DateTimeValue, Engine, LiteralValue, TimezoneValue};
 use rust_decimal::Decimal;
-use std::collections::HashMap;
 use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -19,10 +19,7 @@ fn effective(y: i32, m: u32, d: u32, h: u32, min: u32, s: u32) -> DateTimeValue 
         minute: min,
         second: s,
         microsecond: 0,
-        timezone: Some(TimezoneValue {
-            offset_hours: 0,
-            offset_minutes: 0,
-        }),
+        timezone: Some(TimezoneValue { offset_minutes: 0 }),
         granularity: DateGranularity::DateTime,
     }
 }
@@ -36,14 +33,14 @@ fn eval_literal_with_data(
     spec_name: &str,
     rule_name: &str,
     effective: &DateTimeValue,
-    data: HashMap<String, String>,
+    data: IndexMap<String, EvaluateDataValue>,
 ) -> LiteralValue {
     let mut engine = Engine::new();
     engine
         .load([(source(), code.to_string())])
         .expect("Should parse and plan");
     let response = engine
-        .run(
+        .evaluate(
             None,
             spec_name,
             Some(effective),
@@ -83,11 +80,11 @@ fn eval_rule_number(code: &str, spec_name: &str, rule_name: &str) -> Decimal {
         .expect("Should parse and plan");
     let effective = default_effective();
     let response = engine
-        .run(
+        .evaluate(
             None,
             spec_name,
             Some(&effective),
-            HashMap::new(),
+            IndexMap::new(),
             Some(&[rule_name.to_string()]),
             true,
         )
@@ -115,11 +112,11 @@ fn eval_rule_with_effective(
         .load([(source(), code.to_string())])
         .expect("Should parse and plan");
     let response = engine
-        .run(
+        .evaluate(
             None,
             spec_name,
             Some(effective),
-            HashMap::new(),
+            IndexMap::new(),
             Some(&[rule_name.to_string()]),
             true,
         )
@@ -134,7 +131,7 @@ fn eval_rule_with_effective(
 }
 
 fn eval_bool(code: &str, spec_name: &str, rule_name: &str, effective: &DateTimeValue) -> bool {
-    match eval_literal_with_data(code, spec_name, rule_name, effective, HashMap::new()).value {
+    match eval_literal_with_data(code, spec_name, rule_name, effective, IndexMap::new()).value {
         ValueKind::Boolean(val) => val,
         other => panic!("Expected Boolean, got {:?}", other),
     }
@@ -801,7 +798,7 @@ fn l5_user_declared_type() {
 uses lemma units
 data period: date range -> suggest 2024-01-01...2025-01-01
 rule month: period as month as number"#;
-    let mut data = HashMap::new();
+    let mut data = IndexMap::new();
     data.insert("period".to_string(), "2024-01-01...2025-01-01".into());
     let val = eval_literal_with_data(code, "test", "month", &default_effective(), data).to_string();
     assert_contains_all(&val, &["12"]);
@@ -813,7 +810,7 @@ fn l6_user_declared_no_default() {
 data period: date range
 data event: 2024-03-15
 rule check: event in period"#;
-    let mut data = HashMap::new();
+    let mut data = IndexMap::new();
     data.insert("period".to_string(), "2024-01-01...2024-12-31".into());
     let lit = eval_literal_with_data(code, "test", "check", &default_effective(), data);
     match lit.value {
@@ -991,7 +988,7 @@ rule valid: now in start...start + length
 
 #[test]
 fn premium_membership_outside_period() {
-    let mut data = HashMap::new();
+    let mut data = IndexMap::new();
     data.insert("start".to_string(), "2026-07-01".into());
     data.insert("length".to_string(), "10 day".into());
     let val = eval_bool_with_data(
@@ -1006,7 +1003,7 @@ fn premium_membership_outside_period() {
 
 #[test]
 fn premium_membership_inside_period() {
-    let mut data = HashMap::new();
+    let mut data = IndexMap::new();
     data.insert("start".to_string(), "2026-07-01".into());
     data.insert("length".to_string(), "10 day".into());
     let val = eval_bool_with_data(
@@ -1035,7 +1032,7 @@ fn eval_bool_with_data(
     spec_name: &str,
     rule_name: &str,
     effective: &DateTimeValue,
-    data: HashMap<String, String>,
+    data: IndexMap<String, EvaluateDataValue>,
 ) -> bool {
     match eval_literal_with_data(code, spec_name, rule_name, effective, data).value {
         ValueKind::Boolean(val) => val,

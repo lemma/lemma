@@ -17,7 +17,7 @@ A `repo <name>` declaration groups the specs that follow, until the next `repo` 
 
 ### `spec`
 
-`spec <name>` starts a namespace for data and rules. An optional effective datetime on the same line (`spec pricing 2026-01-01`) places that body on a temporal timeline. Names may use `/`, `.`, and `-` segments (`spec employee/contract`, `spec nl.tax.brackets`). Versioning is temporal only: there is no version tag in the name. A file may contain several specs.
+`spec <name>` starts a namespace for data and rules. An optional effective datetime on the same line (`spec pricing 2026-01-01`) places that body on a temporal timeline. A name is one opaque token of `[A-Za-z0-9_./-]` characters (`spec employee/contract`, `spec nl.tax.brackets`); registry qualifiers add a leading `@` (`@iso/countries`). Versioning is temporal only: there is no version tag in the name. A file may contain several specs.
 
 ### Commentary
 
@@ -30,7 +30,9 @@ This spec determines graduation.
 """
 
 data score: number
-rule graduates: score > 5
+
+rule graduates:
+  score > 5
 ```
 
 Commentary after `data`, `rule`, or any other keyword is a parse error.
@@ -44,13 +46,13 @@ spec overtime_pay 2004-08-02
 """
 Maximum average weekly working time.
 """
-
 meta title: "Working time: weekly average"
 meta directive: "Directive 2003/88/EC, Article 6"
 
 data hours_per_week: number
 
-rule within_limit: hours_per_week <= 48
+rule within_limit:
+  hours_per_week <= 48
 ```
 
 The right-hand side is a literal. Duplicate meta keys fail planning.
@@ -73,10 +75,11 @@ spec order_discount
 data quantity: number
 data is_vip:   false
 
-rule discount: 0%
-  unless quantity >= 10  then 10%
-  unless quantity >= 50  then 20%
-  unless is_vip          then 25%
+rule discount:
+  0%
+  unless quantity >= 10 then 10%
+  unless quantity >= 50 then 20%
+  unless is_vip         then 25%
 ```
 
 Overrides stay flat: later rules can change outcomes by conditioning on earlier rules. There is no nesting and no encapsulation. There is no `or` operator; disjunction is expressed with unless chains or separate boolean rules. More patterns: [Conditional logic](../learn/conditional_logic.md).
@@ -96,13 +99,13 @@ The example’s layout makes the `unless` chain read as a flat decision table. L
 | `-`      | Subtraction                                   | `total - discount` |
 | `*`      | Multiplication                                | `price * quantity` |
 | `/`      | Division (exact rational)                     | `total / count`    |
-| `%`      | Modulo (truncates toward zero)                | `value % 10`       |
+| `mod`    | Remainder, floored (sign follows the divisor) | `value mod 10`     |
 | `^`      | Exponentiation                                | `base ^ exponent`  |
 
 
-**Modulo**: `a % b` uses truncation toward zero, so `a == trunc(a / b) * b + (a % b)`. Negative operands: `-7 % 3` = `-1`, `7 % -3` = `1`.
+**Modulo**: `a mod b` is floored: `a == floor(a / b) * b + (a mod b)`. Negative operands: `-7 mod 3` = `2`, `7 mod -3` = `-2`. `%` is the percent suffix only (`50%`), so a number before `%` is a percent literal and `7 % 3` is a parse error.
 
-**Rounding operators** (`round`, `floor`, `ceil`) on measures operate on the magnitude in the operand's declared unit. `round (x as gram)` rounds the gram magnitude, not the original unit's.
+**Rounding operators** (`round`, `floor`, `ceil`) on measures operate on the magnitude in the operand's declared unit. `round(x as gram)` rounds the gram magnitude, not the original unit's.
 
 ### Comparison
 
@@ -129,14 +132,16 @@ See [Veto](../learn/types_and_units.md#veto) to learn more about `veto` with for
 | Operator | Description | Example                       |
 | -------- | ----------- | ----------------------------- |
 | `and`    | Logical AND | `is_valid and not is_blocked` |
-| `not`    | Logical NOT | `not is_suspended`            |
+| `not`    | Logical NOT | `not is_suspended`, `not(score >= 70)` |
 
 
 There is no `or` operator. Express disjunction with `unless` chains or separate boolean rules. Within one condition, use `and` and `not`.
 
+`and` is order-independent. A `false` operand decides the result whatever the other operands are, so a missing or vetoed sibling does not matter. Without a `false` operand, the first missing or vetoed operand in source order decides the result.
+
 ### Mathematical
 
-Prefix operators, not functions, so parentheses are optional (`sqrt value` or `sqrt(value)`). The operand is one range operand: `floor x + 1` is `(floor x) + 1`, `floor x as gram` is `(floor x) as gram`, and `sqrt x ^ 2` is `(sqrt x) ^ 2`. Parentheses widen the operand (`floor (x + 1)`). `sqrt`, `sin`, `cos`, `tan`, `asin`, `acos`, `atan`, `log`, and `exp` require a **number**. `abs`, `ceil`, `floor`, and `round` also accept a **measure**: the unit is preserved and the operator applies to the magnitude in the operand's bound unit. `lower` and `upper` require a **range** (see [Range endpoints](#range-endpoints)).
+Prefix operators (and `not`) take their argument in one of two forms. **Call form** `floor(x)` (a space before `(` is allowed): the argument ends at the matching `)`, and operators after it apply to the result, so `floor(x) + 1` adds to the floored value and `floor (x + 1)` floors the sum. **Bare form** `floor x`: the argument is exactly one operand (a literal, reference, `->` chain, range literal, parenthesised expression, or another bare prefix operator such as `floor abs x`), and only `->`, `then`, `unless`, `)`, `,` or the end of the expression may follow it. `floor x + 1`, `floor x as gram`, `sqrt x ^ 2`, `not x > 3` and `not a and b` are parse errors that suggest both readings (`floor(x + 1)` or `floor(x) + 1`). A bare argument never starts with a sign: write `abs(-1)`. The formatter writes the bare form when it is allowed and the call form otherwise. `sqrt`, `sin`, `cos`, `tan`, `asin`, `acos`, `atan`, `log`, and `exp` require a **number**. `abs`, `ceil`, `floor`, and `round` also accept a **measure**: the unit is preserved and the operator applies to the magnitude in the operand's bound unit. `lower` and `upper` require a **range** (see [Range endpoints](#range-endpoints)).
 
 
 | Operator | Description                     | Example                         |
@@ -154,8 +159,8 @@ Prefix operators, not functions, so parentheses are optional (`sqrt value` or `s
 | `floor`  | Round down (quantities too)     | `floor(value)` or `floor value` |
 | `ceil`   | Round up (quantities too)       | `ceil(value)` or `ceil value`   |
 | `round`  | Round nearest (quantities too)  | `round(value)` or `round value` |
-| `lower`  | Smaller endpoint of a range     | `lower (5...10)` or `lower period` |
-| `upper`  | Larger endpoint of a range (excluded) | `upper (5...10)` or `upper period` |
+| `lower`  | Smaller endpoint of a range     | `lower(5...10)` or `lower period` |
+| `upper`  | Larger endpoint of a range (excluded) | `upper(5...10)` or `upper period` |
 
 
 
@@ -174,7 +179,7 @@ Chained casts nest from left to right: `expr as unit as unit … as number`.
 
 Same-family conversion applies factors (`2 kilogram as gram` → `2000 gram`). Cross-family relabel keeps magnitude (`5 eur as kg` → `5 kg`).
 
-`as` binds tighter than `*`, `/`, and `%`. In `balance / rate as month`, the `as month` applies to `rate`, not to the quotient. To convert the result of an arithmetic expression, use parentheses: `(balance / rate) as month`.
+`as` binds tighter than `*`, `/`, and `mod`. In `balance / rate as month`, the `as month` applies to `rate`, not to the quotient. To convert the result of an arithmetic expression, use parentheses: `(balance / rate) as month`.
 
 Literal quantities and ratios carry an explicit unit, so `10 eur as number` and `25% as number` plan without an extra unit step. Named data references need the full chain: `amount as eur as number`, not `amount as number`.
 
@@ -190,13 +195,13 @@ Lower binds looser. Use parentheses when an operand would otherwise bind too tig
 | Level | Constructs |
 | ----- | ---------- |
 | Lowest | `and` |
-| | `not` |
+| | `not` (see [Mathematical](#mathematical) for its argument) |
 | | Comparisons (`>`, `<`, `>=`, `<=`, `is`, `is not`), `in`, date predicates, `is veto` |
 | | `+`, `-` |
-| | `*`, `/`, `%` |
+| | `*`, `/`, `mod` |
 | | `^` |
 | | `as` |
-| | Prefix operators (`sqrt`, `floor`, `lower`, `upper`, …) |
+| | Prefix operators (`sqrt`, `floor`, `lower`, `upper`, …): call form `floor(x)`, or one bare operand |
 | | `...` (range literal) |
 | Highest | Atoms, `veto`, `now`, `past`/`future` windows |
 
@@ -232,7 +237,8 @@ spec order
 
 uses p: points
 
-rule total: p.base_points
+rule total:
+  p.base_points
 ```
 
 Evaluating `order` before 2025-01-01 uses `base_points: 100`; from 2025-01-01 onward, `120`. See [Composing specs](../learn/composing_specs.md) for unpinned vs pinned imports.
@@ -244,7 +250,7 @@ Evaluating `order` before 2025-01-01 uses `base_points: 100`; from 2025-01-01 on
 | ----------------- | ----------------------------------------------------------------------------- | ----------------------------------------------------------------- |
 | **Spec row**      | `spec points 2025-01-01`                                                      | Declares a body effective from that datetime                      |
 | **Pinned import** | `uses f: finance 2025-06-01` or `uses f: finance 2025`                        | Locks the dependency (and its transitive imports) to that instant |
-| **Run instant**   | `lemma run points --effective 2025-03-01` (CLI) or **Accept-Datetime** (HTTP) | Picks which temporal row of the **root spec** is active           |
+| **Evaluation instant**   | `lemma evaluate points --effective 2025-03-01` (CLI) or **Accept-Datetime** (HTTP) | Picks which temporal row of the **root spec** is active           |
 
 
 Bare year on a pin (`2025`) means that year's Jan 1 00:00, same as datetime literals. HTTP details for Accept-Datetime, `Vary`, and `Memento-Datetime`: [CLI: API Defaults](cli.md#api-defaults).
@@ -257,13 +263,17 @@ bodies by identity, not by bare name):
 
 ```lemma
 spec finance 2026-01-01
+
 data rate: 1
 ```
 
 ```lemma
 spec finance 2027-01-01
+
 uses finance 2026-01-01
-rule ok: finance.rate
+
+rule ok:
+  finance.rate
 ```
 
 Both `uses finance 2026-01-01` (implicit alias) and `uses prev: finance 2026-01-01`
@@ -295,6 +305,7 @@ Local multi-repo workspaces qualify the target with a repository name (no `@`):
 repo accounting
 
 spec invoice
+
 data amount: number
 ```
 
@@ -305,7 +316,8 @@ spec statement
 
 uses inv: accounting invoice
 
-rule total: inv.amount
+rule total:
+  inv.amount
 ```
 
 `uses inv: accounting invoice` imports `invoice` from the `accounting` repository. LemmaBase imports keep the `@` form (`uses iso: @iso/countries alpha2`). See [Composing specs: Repositories](../learn/composing_specs.md#repositories).
@@ -316,7 +328,7 @@ An **unpinned** import (`uses p: policy`) follows the dependency's timeline: pla
 
 ### `uses` and imported types
 
-Bring another spec into scope with `uses <alias>: <target>` (optional effective datetime on the target). Reference data types defined there as a parent type, either qualified (`data x: alias.name`) or bare (`data x: name`) when the name is unambiguous across all imports. When two or more imports export the same type name, qualify to disambiguate. Temporal pins belong on the `uses` line.
+Bring another spec into scope with `uses <alias>: <target>` (optional effective datetime on the target). Reference data types defined there as a parent type with the alias: `data x: alias.name`. A bare name that an import declares is a planning error naming the qualified form(s). Temporal pins belong on the `uses` line.
 
 ```lemma
 spec base_types
@@ -330,7 +342,7 @@ data currency: text
 spec pricing
 
 data rate: ratio
-  -> maximum 100%
+  -> maximum 100 percent
 ```
 
 ```lemma
@@ -342,7 +354,7 @@ uses rates: pricing
 
 data currency: base.currency
 data discount_rate: rates.rate
-  -> maximum 50%
+  -> maximum 50 percent
 ```
 
 Pin which temporal version of a dependency applies for that edge:
@@ -366,23 +378,26 @@ These edges participate in temporal slicing: the engine creates slice boundaries
 
 ### Setting data on an imported spec (`uses` block)
 
-Under a `uses` line, `  -> with path: value` sets a literal or reference on a **data slot of the imported spec**. The path is relative to that import (no alias prefix). Standalone `with alias.field: …` is deprecated (still parses; `quality` recommends the block form); use `data` for local slots.
+Under a `uses` line, `  -> with path: value` sets a literal or reference on a **data slot of the imported spec**. The path is relative to that import (no alias prefix). Several pairs on one line are comma-separated (`-> with name: "Ada", monthly_salary: 7_500`). Standalone `with alias.field: …` is a parse error; nest under `uses`. Use `data` for local slots.
 
 Constraint chains (`-> ...`) on binding values are not allowed; they belong on `data`.
 
 ```lemma
 spec base_employee
-data name: text
+
+data name:           text
 data monthly_salary: number
 ```
 
 ```lemma
 spec specific_employee
+
 uses employee: base_employee
   -> with name: "Alice Smith"
   -> with monthly_salary: 7_500
 
-rule employee_summary: employee.name
+rule employee_summary:
+  employee.name
 ```
 
 ### A rule can return a spec instance
@@ -405,7 +420,6 @@ uses higher: tax_bracket
 
 data high_income: boolean
 
-
 rule top_bracket:
   basic
   unless high_income then higher
@@ -414,19 +428,23 @@ rule marginal_rate:
   top_bracket.rate
 ```
 
-The API result is the whole instance: spec name, resolved effective date, every data value as run-data text, and every rule result. Running that spec again with those data values at the same effective instant reproduces the rule results. A bare alias counts as reading the whole imported spec, so an unpinned `uses` fails planning if any data or rule of that spec changes type across versions.
+The API result is the whole instance: spec name, resolved effective date, every data value as evaluation-data text, and every rule result. Evaluating the spec again with those data values at the same effective instant reproduces the rule results. A bare alias counts as reading the whole imported spec, so an unpinned `uses` fails planning if any data or rule of that spec changes type across versions.
 
 Read imported data or rules in expressions without `with` when you do not need to override values:
 
 ```lemma
 spec inner
+
 data x: 1
 ```
 
 ```lemma
 spec outer
-uses i: inner
-rule r: i.x
+
+uses inner
+
+rule r:
+  inner.x
 ```
 
 
@@ -435,13 +453,17 @@ rule r: i.x
 
 ```lemma
 spec pricing
-data price: 100
+
+data price:    100
 data discount: 0%
-rule final_price: price * (100% - discount)
+
+rule final_price:
+  price * (100% - discount)
 ```
 
 ```lemma
 spec scenarios
+
 uses retail: pricing
   -> with discount: 5%
 
@@ -449,8 +471,11 @@ uses wholesale: pricing
   -> with discount: 15%
   -> with price: 80
 
-rule retail_final: retail.final_price
-rule wholesale_final: wholesale.final_price
+rule retail_final:
+  retail.final_price
+
+rule wholesale_final:
+  wholesale.final_price
 ```
 
 
@@ -461,6 +486,7 @@ When the RHS is a name in the enclosing spec (not a dotted import path), the LHS
 
 ```lemma
 spec inner
+
 data slot: number
   -> minimum 0
   -> maximum 100
@@ -468,10 +494,15 @@ data slot: number
 
 ```lemma
 spec outer
+
 uses i: inner
   -> with slot: src
-data src: number -> suggest 42
-rule r: i.slot
+
+data src: number
+  -> suggest 42
+
+rule r:
+  i.slot
 ```
 
 By contrast, `data x: someident` declares `x` with `someident` as its parent type: it points at another `data` declaration rather than copying that declaration's value.
@@ -513,11 +544,14 @@ data age:   25 year
 data score: 50
 data event: 2024-03-15
 
-rule adult: age in 18 year...67 year
+rule adult:
+  age in 18 year...67 year
 
-rule in_band: score in 0...100
+rule in_band:
+  score in 0...100
 
-rule in_period: event in 2024-01-01...2024-06-15
+rule in_period:
+  event in 2024-01-01...2024-06-15
 ```
 
 At the upper bound, `in` is false (`67 year` is not inside `18 year...67 year`).
@@ -551,7 +585,7 @@ data band: units.calendar range
   -> suggest 18 year...67 year
 
 data window: time range
-  -> suggest 09:00...17:00
+  -> suggest 09:00:00...17:00:00
 
 data period: date range
   -> suggest 2024-01-01...2024-12-31
@@ -560,7 +594,7 @@ data tier: number range
   -> suggest 0...100
 ```
 
-**Data commands** on range types: `help`, `suggest`; `measure range` also accepts `unit` rows like `measure`.
+**Data commands** on range types: `help`, `suggest`. Ranges take no `unit` rows: units belong to a `measure` or `ratio` type, and a range over it is written `<type> range`.
 
 ### Span: `(lo...hi) as <unit>`
 
@@ -571,11 +605,14 @@ spec range_spans
 
 uses lemma units
 
-rule days_between: (2024-06-01...2024-06-15) as day
+rule days_between:
+  2024-06-01...2024-06-15 as day
 
-rule width_kg: (30 kilogram...35 kilogram) as kilogram
+rule width_kg:
+  30 kilogram...35 kilogram as kilogram
 
-rule span_years: (1990-05-20...2024-06-15) as year
+rule span_years:
+  1990-05-20...2024-06-15 as year
 ```
 
 
@@ -585,7 +622,7 @@ rule span_years: (1990-05-20...2024-06-15) as year
 | **time range**                                                     | Duration units only (`hour`, `minute`, `second`, …)         | No calendar units; bare `as number` rejected                          |
 | **number range**                                                   | `number`, duration units                                       |                                                                       |
 | **measure range**                                                  | Same-family measure units (mass, money, duration, calendar, …) | Cross-family span (e.g. mass range `as day`) is rejected at planning |
-| **ratio range**                                                    | Ratio units (`percent`, …)                                     |                                                                       |
+| **ratio range**                                                    | Units of the element ratio type (`percent`, …)                 |                                                                       |
 | **calendar interval** (inline literal or `units.calendar` suggestion) | Same-family calendar units                                     | Span uses month/year arithmetic                                       |
 
 
@@ -602,38 +639,45 @@ spec range_arithmetic
 
 uses lemma units
 
-data start: date
+data start:  date
 data length: units.calendar
 
-rule long_enough: 2024-06-01...2024-06-15 >= 7 day
+rule long_enough:
+  2024-06-01...2024-06-15 >= 7 day
 
-rule shifted: 18 year...67 year + 2 year
+rule shifted:
+  18 year...(67 year + 2 year)
 
-rule extended: 2024-01-01...2024-06-15 + 1 month
+rule extended:
+  2024-01-01...(2024-06-15 + 1 month)
 
-rule membership: now in start...start + length
+rule membership:
+  now in start...(start + length)
 
-rule span_days: ((2024-02-15...2024-03-15) + 1 day) as day
+rule span_days:
+  2024-02-15...2024-03-15 as day + 3 day
 ```
 
-**Span arithmetic** (adding to the width of an interval, not shifting an endpoint) requires parentheses around the range, as in `span_days` above.
+**Span arithmetic** (adding to the width of an interval, not shifting an endpoint) requires parentheses around the range, as in `span_days` above. The `span_days` rule converts the span from a range to a duration, and then adds one day (span_days: 32 day)
 
 ### Range endpoints
 
-`lower` and `upper` are prefix operators. `lower` returns the smaller endpoint (included). `upper` returns the larger endpoint, which is still excluded: `upper (18 year...67 year)` is `67 year`, and that value is not `in` the range.
+`lower` and `upper` are prefix operators. `lower` returns the smaller endpoint (included). `upper` returns the larger endpoint, which is still excluded: `upper(18 year...67 year)` is `67 year`, and that value is not `in` the range.
 
-Written order is not the stored order. `lower (10...5)` is `5` and `upper (10...5)` is `10`, the same order `in` uses.
+Written order is not the stored order. `lower(10...5)` is `5` and `upper(10...5)` is `10`, the same order `in` uses.
 
-The result has the endpoint's type. A `date range` gives a `date`, a `time range` a `time`, a `number range` a `number`. A `money range` gives `money`, and the endpoint keeps the unit it was written in (`lower (10 eur...40 eur)` is `10 eur`).
+The result has the endpoint's type. A `date range` gives a `date`, a `time range` a `time`, a `number range` a `number`. A `money range` gives `money`, and the endpoint keeps the unit it was written in (`lower(10 eur...40 eur)` is `10 eur`).
 
 ```lemma
 spec employment
 
 data period: date range
 
-rule starts: lower period
+rule starts:
+  lower period
 
-rule ends: upper period
+rule ends:
+  upper period
 ```
 
 `lower` and `upper` are reserved names. They remain valid as the constraint commands `-> lower` and `-> upper`, which limit which endpoints a range slot may hold. Those commands are not the operators.
@@ -641,6 +685,86 @@ rule ends: upper period
 Date endpoints can be built from separate `date` values: `hire_date...today`.
 
 For duration quantities, import SI types with `uses lemma units` so literals like `8 hour` and `7 day` resolve. Declare duration slots with `data elapsed: duration` (or qualified `units.duration`). Calendar periods (`25 year`, `18 year...67 year`) use `calendar` (or `units.calendar`).
+
+## Lists
+
+A list is an ordered sequence of rows of one type. See [Lists](../learn/lists.md) in the learn guide for a walkthrough.
+
+### Declarations
+
+| Form | Rows | Overridable |
+|------|------|-------------|
+| `data x: V list` | values of data type `V` (`money list`, `date range list`) | yes, as a whole |
+| `uses x: spec list` | instances of `spec` | yes, as a whole |
+| `rule x: V list -> with ...` | fixed values | no |
+| `rule x: <list expression>` | computed | no |
+
+- `list` follows the complete Spec reference, pin included: `uses brackets: tax_bracket 2024 list`, `uses rates: @carrier/tariffs rate 2025-06-01 list`.
+- `data x: spec list` is a planning error that suggests `uses x: spec list`.
+- A list without rows is empty. A list is never missing data.
+- In a type position, a list alias names the row Spec's types: `data ordered: menu.drink`. In an expression, a dot on a list alias is allowed only inside a command argument, where it names the current row.
+
+### Rows: `-> with`
+
+```lemma
+spec rows
+
+data money: measure
+  -> unit eur: 1.00
+
+data fares: money list
+  -> with 89 eur, 120 eur
+  -> with 64 eur
+```
+
+- On a value list, `-> with` takes comma-separated literals.
+- On an instance list, `-> with field: value, field: value` adds one inline row. Fields are paths relative to the row Spec (`product.price`). A row may also continue over several lines after each comma.
+- `-> with ada, grace` adds named instances, declared with `uses`, as rows. One `-> with` cannot mix field pairs and references.
+- `-> with` only appends; it never replaces a row. In a Rule, `fares -> with 64 eur` appends to the current value of `fares`.
+- A Spec may declare a list of its own rows (`uses components: part list` inside `spec part`). Such a self-list has no source rows. Single-instance self-reference stays an error.
+
+### Keys
+
+- `-> key field, field` (instance lists only, before the first `-> with`) identifies rows by those fields of the row Spec. Dotted key fields are an error.
+- Without `-> key`, rows are numbered `1` to `n` in row order. Value lists are always numbered.
+- In source rows, a duplicate key, or overlapping ranges on a range key, is a planning error. When a key field has options, each row key must be one of those options; options need not all have a row.
+- In evaluation-data rows, a duplicate key, an invalid option or overlapping ranges vetoes the whole list.
+- `find` with no matching row vetoes. A range key matches by containment, with unit conversion as `in` does.
+
+### Commands
+
+List commands are postfix `->` expressions in Rules and `unless` results. On a `data` or `uses` declaration they are a planning error. A command takes its argument bare when the argument is one operand (`staff -> sum bonus`). Otherwise it uses the call form (`lines -> sum(qty * price)`), with several arguments comma-separated inside the parentheses. `->` binds tighter than every binary operator.
+
+| Command | Value list | Instance list | Result |
+|---------|-----------|---------------|--------|
+| `sum`, `avg` | no argument | expression | number, measure or ratio |
+| `product` | no argument | expression | number or ratio |
+| `min`, `max` | no argument | expression | ordered value |
+| `count` | no argument | no argument | number |
+| `any`, `all` | `op value` | condition | boolean |
+| `where` | `op value` | condition | same list type |
+| `sort [asc\|desc]` | no argument | expression | same list type, stable |
+| `top n` | `n` | `n` | same list type, first `n` rows |
+| `find` | row number | one value per key field | row |
+| `first`, `last` | no argument | no argument | row |
+| `with` | values | field pairs | same list type |
+
+- A value-list condition is exactly one comparison with the row value as left operand: `fares -> where >= 100 eur`, `fares -> where in 100 eur...200 eur`, `codes -> any is "A1"`.
+- In an instance-list argument, the row's Data and Rules and the enclosing Spec's names are in scope. A name defined on both sides must be qualified with the list name (`components.quantity`).
+- `top n` takes a literal or a reference of type `number`. A reference that is not a whole number of at least 0 vetoes.
+- Row values are read with a dot: `selected_drink.price`, `(staff -> sort salary desc -> first).bonus`.
+- Veto: `avg`, `product`, `min`, `max`, `first`, `last` on an empty list; `find` with no row. If any row vetoes, the reduction or filter vetoes with the first such row's reason. `sum` over no rows is 0, `count` is 0, `any` is false, `all` is true, `where` gives an empty list.
+
+### Reserved keywords
+
+`list`, `key`, `find`, `first`, `last`, `sum`, `avg`, `product`, `count`, `min`, `max`, `any`, `all`, `where`, `sort`, `top`, `asc`, `desc`, `is`, `past`, `future`, `permille` and `mod` are reserved in any case. They cannot be data, rule, spec, alias or unit names.
+
+### Evaluation data and results
+
+- A list is one input key with an array that replaces every source row: literal strings for a value list, objects keyed by row data names for an instance list. Per-row keys such as `staff.2.salary` are request errors. `name=value` and form bodies cannot carry a list.
+- Missing row fields are reported by row number: `staff.2.salary`, `components.1.components.2.own_cost`.
+- A list result has `list` (one value per row). A row result has `row` (`spec`, `effective`, `instance`, `index`); `index` points into the response's top-level `rows`, which lists each referenced row once with its `data` and `rules`.
+- Show types have `kind: "list"` with `element` and `key` (`"numbered"` or `{"fields": [...]}`).
 
 ## Data
 
@@ -668,17 +792,16 @@ data salary:     75_000
 
 ### Open inputs
 
-Declare a type without a value to leave the slot open for evaluation. Add constraints on the same declaration. Use `-> fill` to set a committed value on a typed slot (same evaluation behavior as a literal; callers may override). Use `-> suggest` for a **suggestion** (UIs may offer it; Enter to accept); suggestions do not commit — the engine still requires the value unless `-> fill` or a literal is present. `-> fill` and `-> suggest` cannot appear on the same declaration.
+Declare a type without a value to leave the slot open for evaluation. Add constraints on the same declaration. Use `-> with` to set a committed value on a typed slot (same evaluation behavior as a literal; callers may override). Use `-> suggest` for a **suggestion** (UIs may offer it; Enter to accept); suggestions do not commit — the engine still requires the value unless `-> with` or a literal is present. `-> with` and `-> suggest` cannot appear on the same declaration.
 
 ```lemma
 spec loan_application
 
 data birth_date: date
-
 data rating: number
   -> minimum 0
   -> maximum 100
-  -> fill 50
+  -> with 50
 
 data status: text
   -> option "active"
@@ -691,9 +814,9 @@ data amount: measure
   -> decimals 2
 ```
 
-A literal on the right-hand side fills the slot. A type alone leaves it open. `-> fill <value>` fills a typed slot. `-> suggest` is only a suggestion for callers or UIs; it does not fill and so the engine still requires the value to be provided.
+A literal on the right-hand side fills the slot. A type alone leaves it open. `-> with <value>` fills a typed slot. `-> suggest` is only a suggestion for callers or UIs; it does not fill and so the engine still requires the value to be provided.
 
-Constraints such as `-> minimum`, `-> maximum`, `-> option`, `-> unit`, `-> decimals`, `-> fill`, `-> suggest`, and `-> help` depend on the primitive: see [Data commands](#data-commands). At evaluation, an open input with no supplied value yields a missing-data veto when the rule needs it; a bad value (wrong type, failed constraint, disallowed option, excess decimals) vetoes that data. Duplicate names that canonicalize to the same identifier (for example `Age` and `age`) are a request error.
+Constraints such as `-> minimum`, `-> maximum`, `-> option`, `-> unit`, `-> decimals`, `-> with`, `-> suggest`, and `-> help` depend on the primitive: see [Data commands](#data-commands). At evaluation, an open input with no supplied value yields a missing-data veto when the rule needs it; a bad value (wrong type, failed constraint, disallowed option, excess decimals) vetoes that data. Duplicate names that canonicalize to the same identifier (for example `Age` and `age`) are a request error.
 
 ### Named types
 
@@ -771,7 +894,7 @@ Each `->` row on a `data` declaration is a **data command**. Built-in primitives
 - `minimum <value>` - Set minimum value
 - `maximum <value>` - Set maximum value
 - `help "<text>"` - Add help text
-- `fill <value>` - Fill the slot with a value (committed; callers may override). Cannot combine with `suggest` on the same declaration
+- `with <value>` - Fill the slot with a value (committed; callers may override). Cannot combine with `suggest` on the same declaration
 - `suggest <value>` - Set suggestion value (UI hint; does not commit)
 
 **For** `ratio`**:**
@@ -780,7 +903,7 @@ Each `->` row on a `data` declaration is a **data command**. Built-in primitives
 - `minimum <value>` - Set minimum value
 - `maximum <value>` - Set maximum value
 - `help "<text>"` - Add help text
-- `fill <value>` - Fill the slot with a value (committed; callers may override). Cannot combine with `suggest` on the same declaration
+- `with <value>` - Fill the slot with a value (committed; callers may override). Cannot combine with `suggest` on the same declaration
 - `suggest <value>` - Set suggestion value (UI hint; does not commit)
 
 In the **show JSON**, `measure` and `ratio` types expose type-level `minimum` / `maximum` in **canonical** form (same as evaluation). Each `units[]` entry may also include `minimum`, `maximum`, and `suggestion` as magnitudes in that unit, so a UI can bind to them without converting on the client.
@@ -788,10 +911,10 @@ In the **show JSON**, `measure` and `ratio` types expose type-level `minimum` / 
 **For** `text`**:**
 
 - `option "<value>"` - Add a single allowed option
-- `options "<value1>" "<value2>" ...` - Add multiple allowed options
+- `options "<value1>", "<value2>", ...` - Add multiple allowed options
 - `length <n>` - Exact string length
 - `help "<text>"` - Add help text
-- `fill "<value>"` - Fill the slot with a value (committed; callers may override). Cannot combine with `suggest` on the same declaration
+- `with "<value>"` - Fill the slot with a value (committed; callers may override). Cannot combine with `suggest` on the same declaration
 - `suggest "<value>"` - Set suggestion value (UI hint; does not commit)
 
 **For** `date` **and** `time`**:**
@@ -799,7 +922,7 @@ In the **show JSON**, `measure` and `ratio` types expose type-level `minimum` / 
 - `minimum <value>` - Minimum date/time
 - `maximum <value>` - Maximum date/time
 - `help "<text>"` - Add help text
-- `fill <value>` - Fill the slot with a value (committed; callers may override). Cannot combine with `suggest` on the same declaration
+- `with <value>` - Fill the slot with a value (committed; callers may override). Cannot combine with `suggest` on the same declaration
 - `suggest <value>` - Set suggestion value (UI hint; does not commit)
 
 **For** `date range`**,** `number range`**,** `measure range`**,** `time range`**, and** `ratio range`**:**
@@ -809,36 +932,36 @@ In the **show JSON**, `measure` and `ratio` types expose type-level `minimum` / 
 - `minimum <value>` - Minimum span width (see span table; not an endpoint envelope)
 - `maximum <value>` - Maximum span width
 - `help "<text>"` - Add help text
-- `fill <lo>...<hi>` - Fill the slot with an interval (half-open; committed). Cannot combine with `suggest` on the same declaration
+- `with <lo>...<hi>` - Fill the slot with an interval (half-open; committed). Cannot combine with `suggest` on the same declaration
 - `suggest <lo>...<hi>` - Suggested interval (half-open; UI hint)
 
 On ranges, `minimum` / `maximum` always mean **width**. Endpoint limits use `lower` / `upper`. Measure and ratio range bounds may use any declaring unit of the type (same mixed-unit model as scalar measure min/max). Date range width may be duration or calendar, but not both on one type; time range width is duration only.
 
-**For** `measure range` **only:** `unit <name> <value>`, same as `measure` (endpoints must share one unit family).
+Ranges take no `unit` rows. Endpoints of a `measure range` share one unit family, the family of its element type.
 
 **For** `boolean`**:**
 
 - `help "<text>"` - Add help text
-- `fill <value>` - Fill the slot with a value (committed; callers may override). Cannot combine with `suggest` on the same declaration
+- `with <value>` - Fill the slot with a value (committed; callers may override). Cannot combine with `suggest` on the same declaration
 - `suggest <value>` - Set suggestion value (UI hint; does not commit)
 
 
 
 ### Qualifying units
 
-Optionally qualify units. A unit name has one declaring type in scope.
+Qualify a unit when its bare name is ambiguous in scope; otherwise qualification is optional.
 
 | Form | Meaning |
 |------|---------|
-| `kilogram` | Bare: the type that declares the unit |
+| `kilogram` | Bare: the one type in scope that declares the unit |
 | `my_weight.kilogram` | Extension (or owning) type |
 | `units.mass.kilogram` | Import alias + type |
 
-Bare literals and `as` targets use the unique declarer. Qualified paths are `Type.unit` or `alias.Type.unit` (not `alias.unit`). A second independent `-> unit` with the same name is a planning error. Extensions inherit units: bare still binds the declarer; use `Type.unit` or cast to bind the extension. The same rule applies to each factor in a compound unit expression.
+Several independent types may declare the same unit name, locally or through imports (`data bag: measure -> unit kilogram: 999` beside `uses lemma units`). Bare literals and `as` targets bind the only declarer in scope; when two or more types declare the name, a bare use is a planning error that lists the qualified forms to write instead. Qualified paths are `Type.unit` or `alias.Type.unit` (not `alias.unit`). Extensions inherit units: bare still binds the declarer; use `Type.unit` or cast to bind the extension. The same rule applies to each factor in a compound unit expression. Types of one family (a type and its extensions, or versions of one spec) must give a shared unit name the same value.
 
-Custom units on `ratio` types follow the same uniqueness rule. Builtin `percent` and `permille` are shared across named ratio types.
+Custom units on `ratio` types follow the same rule. Builtin `percent` and `permille` (`%` / `%%`) are primitive: bare use always binds them (never require `Type.percent`), and they sit on every ratio type's unit list. `as percent` / `as permille` always works; `as` into a uniquely in-scope custom ratio unit (for example `basis_points`) works from any ratio.
 
-In `run` and `show` results, measure unit maps use bare declared names (`eur`, not `price.eur`). Qualification exists only in Lemma source.
+In `evaluate` and `show` results, measure unit maps use bare declared names (`eur`, not `price.eur`). Qualification exists only in Lemma source.
 
 ### Compound units
 
@@ -857,12 +980,35 @@ data rate: measure
   -> unit eur_per_hour: eur/hour
 
 data time_worked: 120 hour
-data wage: 60 eur_per_hour
+data wage:        60 eur_per_hour
 
-rule total: wage * time_worked
+rule total:
+  wage * time_worked
 ```
 
 For `total` you can just multiply the rate by the time worked. Lemma keeps the units consistent, so the product is an amount of money in the currencies you defined. You do not need to write any conversions yourself and you prohibit anyone from accidentally adding money and time together.
+
+A range over a named compound measure is written `<type> range`. The range takes its units from the measure:
+
+```lemma
+spec rates
+
+uses lemma units
+
+data money: measure
+  -> unit eur: 1.00
+
+data rate: measure
+  -> unit eur_per_hour: eur/hour
+
+data wage_band: rate range
+  -> with 10 eur_per_hour...100 eur_per_hour
+
+data wage: 60 eur_per_hour
+
+rule wage_in_band:
+  wage in wage_band
+```
 
 Layer compounds: a later unit may reference an earlier named compound (`eur_per_hour/employee`). Planning checks dimensional consistency.
 
@@ -957,12 +1103,23 @@ uses lemma units
 data event_date: date
 data delivered:  date
 
-rule was_before_now: (event_date in past)
-rule recent:         delivered in past 7 day
-rule this_year:      event_date in calendar year
-rule last_month:     event_date in past calendar month
-rule this_week:      event_date in calendar week
-rule window:         past 7 day
+rule was_before_now:
+  event_date in past
+
+rule recent:
+  delivered in past 7 day
+
+rule this_year:
+  event_date in calendar year
+
+rule last_month:
+  event_date in past calendar month
+
+rule this_week:
+  event_date in calendar week
+
+rule window:
+  past 7 day
 ```
 
 
@@ -977,8 +1134,10 @@ spec veto_example
 data value:               number
 data constraint_violated: boolean
 
-rule result: value
-  unless constraint_violated then veto "Constraint violated"
+rule result:
+  value
+  unless constraint_violated
+    then veto "Constraint violated"
 ```
 
 A veto is not a boolean: it prevents the rule from producing any result at all. If another rule needs a vetoed value, the veto propagates. An `unless` arm that does not evaluate the vetoed dependency can still produce a value (the fallback wins). Probe with `is veto` / `is not veto` without requiring the value. Missing open inputs and failed runtime constraints also surface as veto. See [Veto](../learn/types_and_units.md#veto).
@@ -1024,9 +1183,11 @@ uses lemma units
 data today:    2024-09-30
 data deadline: 2024-12-31
 
-rule days_until: (today...deadline) as day
+rule days_until:
+  today...deadline as day
 
-rule follow_up: deadline + 14 day
+rule follow_up:
+  deadline + 14 day
 ```
 
 **Calendar vs duration:** calendar units (`year`, `month`) use calendar-aware arithmetic; duration units (`day`, `hour`, `second`, …) use fixed length. Adding one month to March 1 yields April 1; adding 30 day always adds exactly 30 × 86400 second.
@@ -1057,8 +1218,8 @@ data error_rate: 2%%
 spec custom_ratios
 
 data discount_ratio: ratio
-  -> minimum 0%
-  -> maximum 100%
+  -> minimum 0 percent
+  -> maximum 100 percent
 
 data discount: 25%
 ```
@@ -1071,9 +1232,11 @@ spec ratio_math
 data price:         100
 data discount_rate: 20%
 
-rule discount_amount: price * discount_rate
+rule discount_amount:
+  price * discount_rate
 
-rule after_discount: price * (100% - discount_rate)
+rule after_discount:
+  price * (100% - discount_rate)
 ```
 
 **Number to ratio conversion:**
@@ -1081,14 +1244,15 @@ rule after_discount: price * (100% - discount_rate)
 ```lemma
 spec number_to_ratio
 
-rule discount_as_percent: 0.25 as percent
+rule discount_as_percent:
+  0.25 as percent
 ```
 
-
+`as percent` / `as permille` always work. When a custom ratio unit is unique in scope, any ratio may convert into it (`margin as basis_points`).
 
 ## Evaluate JSON / explanations
 
-Evaluate responses (`lemma run --json`, HTTP POST, SDK `run`) carry per-rule values, optional `missing_data`, and, when explanations are opted in, a per-rule `explanation` tree. Shape: [`api.v1.json`](../../../engine/schemas/api.v1.json) (root and nested rules use `"type":"rule"` + `"name"`; bound data `"type":"data"`; unused cause paths `"type":"data_unused"`). See [CLI: Explanations](cli.md#api-defaults).
+Evaluate responses (`lemma evaluate --json`, HTTP POST, SDK `evaluate`) carry per-rule values, optional `missing_data`, and, when explanations are opted in, a per-rule `explanation` tree. Shape: [`api.v1.json`](../../../engine/schemas/api.v1.json) (root `"type":"rule"` with a `"rules"` table; nested uses `"type":"rule_ref"` by `id`; bound data `"type":"data"`; unused cause paths `"type":"data_unused"`; list reads `"type":"row"` / `"type":"filter"`). See [CLI: Explanations](cli.md#api-defaults).
 
 ## Test coverage
 

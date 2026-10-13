@@ -1,6 +1,6 @@
+use indexmap::IndexMap;
 use lemma::DateTimeValue;
 use lemma::{Engine, Error};
-use std::collections::HashMap;
 
 /// Test suite for error messages as documented in ERROR_MESSAGES_IMPLEMENTATION.md
 /// Covers parse errors, semantic errors, and runtime errors with proper span tracking
@@ -176,7 +176,7 @@ fn test_runtime_veto_division_by_zero() {
 
     let now = DateTimeValue::now();
     let response = engine
-        .run(None, "test", Some(&now), HashMap::new(), None, false)
+        .evaluate(None, "test", Some(&now), IndexMap::new(), None, false)
         .expect("Division by zero should return Veto, not Error");
 
     let result_rule = response
@@ -370,7 +370,7 @@ fn test_division_by_zero_returns_veto_with_message() {
 
     let now = DateTimeValue::now();
     let response = engine
-        .run(None, "test", Some(&now), HashMap::new(), None, false)
+        .evaluate(None, "test", Some(&now), IndexMap::new(), None, false)
         .expect("Should return Veto, not Error");
 
     let result_rule = response

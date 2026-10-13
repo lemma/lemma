@@ -2,9 +2,9 @@
 //!
 //! Unit-resolution and PerSliceTypeResolver behavior tests live in `src/planning/types.rs`.
 
+use indexmap::IndexMap;
 use lemma::DateTimeValue;
 use lemma::{Engine, Response};
-use std::collections::HashMap;
 
 fn rule_value_str(response: &Response, name: &str) -> String {
     let r = response
@@ -40,13 +40,13 @@ rule quotient: price1 / price2"#;
         .load([(lemma::SourceType::Volatile, code.to_string())])
         .expect("Should parse");
 
-    let mut data = HashMap::new();
+    let mut data = IndexMap::new();
     data.insert("price1".to_string(), "10 eur".into());
     data.insert("price2".to_string(), "5 eur".into());
 
     let now = DateTimeValue::now();
     let response = engine
-        .run(None, "test", Some(&now), data, None, true)
+        .evaluate(None, "test", Some(&now), data, None, true)
         .expect("Should evaluate");
 
     for name in ["total", "difference"] {
@@ -140,13 +140,13 @@ rule divided: price / multiplier"#;
         .load([(lemma::SourceType::Volatile, code.to_string())])
         .expect("Should parse");
 
-    let mut data = HashMap::new();
+    let mut data = IndexMap::new();
     data.insert("price".to_string(), "10 eur".into());
     data.insert("multiplier".to_string(), "2".into());
 
     let now = DateTimeValue::now();
     let response = engine
-        .run(None, "test", Some(&now), data, None, true)
+        .evaluate(None, "test", Some(&now), data, None, true)
         .expect("Should evaluate");
 
     let scaled = rule_value_str(&response, "scaled");
@@ -179,13 +179,13 @@ rule divided: multiplier / price"#;
         .load([(lemma::SourceType::Volatile, code.to_string())])
         .expect("Should parse");
 
-    let mut data = HashMap::new();
+    let mut data = IndexMap::new();
     data.insert("multiplier".to_string(), "2".into());
     data.insert("price".to_string(), "10 eur".into());
 
     let now = DateTimeValue::now();
     let response = engine
-        .run(None, "test", Some(&now), data, None, true)
+        .evaluate(None, "test", Some(&now), data, None, true)
         .expect("Should evaluate");
 
     let scaled = rule_value_str(&response, "scaled");
@@ -214,13 +214,13 @@ rule result: ratio_value * multiplier"#;
         .load([(lemma::SourceType::Volatile, code.to_string())])
         .expect("Should parse");
 
-    let mut data = HashMap::new();
+    let mut data = IndexMap::new();
     data.insert("ratio_value".to_string(), "50%".into());
     data.insert("multiplier".to_string(), "2".into());
 
     let now = DateTimeValue::now();
     let response = engine
-        .run(None, "test", Some(&now), data, None, true)
+        .evaluate(None, "test", Some(&now), data, None, true)
         .expect("Should evaluate");
 
     let s = rule_value_str(&response, "result");
@@ -244,13 +244,13 @@ rule result: ratio_value * price"#;
         .load([(lemma::SourceType::Volatile, code.to_string())])
         .expect("Should parse");
 
-    let mut data = HashMap::new();
+    let mut data = IndexMap::new();
     data.insert("ratio_value".to_string(), "50%".into());
     data.insert("price".to_string(), "10 eur".into());
 
     let now = DateTimeValue::now();
     let response = engine
-        .run(None, "test", Some(&now), data, None, true)
+        .evaluate(None, "test", Some(&now), data, None, true)
         .expect("Should evaluate");
 
     let s = rule_value_str(&response, "result");
@@ -277,13 +277,13 @@ rule result: price * ratio_value"#;
         .load([(lemma::SourceType::Volatile, code.to_string())])
         .expect("Should parse");
 
-    let mut data = HashMap::new();
+    let mut data = IndexMap::new();
     data.insert("price".to_string(), "10 eur".into());
     data.insert("ratio_value".to_string(), "50%".into());
 
     let now = DateTimeValue::now();
     let response = engine
-        .run(None, "test", Some(&now), data, None, true)
+        .evaluate(None, "test", Some(&now), data, None, true)
         .expect("Should evaluate");
 
     let s = rule_value_str(&response, "result");
@@ -311,13 +311,13 @@ rule is_equal: price1 is price2"#;
         .load([(lemma::SourceType::Volatile, code.to_string())])
         .expect("Should parse");
 
-    let mut data = HashMap::new();
+    let mut data = IndexMap::new();
     data.insert("price1".to_string(), "10 eur".into());
     data.insert("price2".to_string(), "5 eur".into());
 
     let now = DateTimeValue::now();
     let response = engine
-        .run(None, "test", Some(&now), data, None, true)
+        .evaluate(None, "test", Some(&now), data, None, true)
         .expect("Should evaluate");
 
     assert_eq!(rule_value_str(&response, "is_greater"), "true");
@@ -340,7 +340,7 @@ data divisor: number
 rule add: a + b
 rule subtract: a - b
 rule divide: a / b
-rule modulo: a % divisor
+rule modulo: a mod divisor
 rule power: a ^ 2"#;
 
     let mut engine = Engine::new();
@@ -348,14 +348,14 @@ rule power: a ^ 2"#;
         .load([(lemma::SourceType::Volatile, code.to_string())])
         .expect("Should parse");
 
-    let mut data = HashMap::new();
+    let mut data = IndexMap::new();
     data.insert("a".to_string(), "10 eur".into());
     data.insert("b".to_string(), "3 eur".into());
     data.insert("divisor".to_string(), "3".into());
 
     let now = DateTimeValue::now();
     let response = engine
-        .run(None, "test", Some(&now), data, None, true)
+        .evaluate(None, "test", Some(&now), data, None, true)
         .expect("Should evaluate");
 
     let add = rule_value_str(&response, "add");
@@ -417,7 +417,7 @@ rule add: a + b
 rule subtract: a - b
 rule multiply: a * b
 rule divide: a / b
-rule modulo: a % b
+rule modulo: a mod b
 rule power: a ^ b"#;
 
     let mut engine = Engine::new();
@@ -425,13 +425,13 @@ rule power: a ^ b"#;
         .load([(lemma::SourceType::Volatile, code.to_string())])
         .expect("Should parse");
 
-    let mut data = HashMap::new();
+    let mut data = IndexMap::new();
     data.insert("a".to_string(), "10".into());
     data.insert("b".to_string(), "3".into());
 
     let now = DateTimeValue::now();
     let response = engine
-        .run(None, "test", Some(&now), data, None, true)
+        .evaluate(None, "test", Some(&now), data, None, true)
         .expect("Should evaluate");
 
     assert_eq!(rule_value_str(&response, "add"), "13");
@@ -467,7 +467,7 @@ rule total: with_tax * quantity"#;
         .load([(lemma::SourceType::Volatile, code.to_string())])
         .expect("Should parse");
 
-    let mut data = HashMap::new();
+    let mut data = IndexMap::new();
     data.insert("base_price".to_string(), "100 eur".into());
     data.insert("discount_ratio".to_string(), "90%".into());
     data.insert("tax_multiplier".to_string(), "1.2".into());
@@ -475,7 +475,7 @@ rule total: with_tax * quantity"#;
 
     let now = DateTimeValue::now();
     let response = engine
-        .run(None, "test", Some(&now), data, None, true)
+        .evaluate(None, "test", Some(&now), data, None, true)
         .expect("Should evaluate");
 
     let disc = rule_value_str(&response, "discounted");
@@ -514,13 +514,13 @@ rule result: measure_value * number_value"#;
         .load([(lemma::SourceType::Volatile, code.to_string())])
         .expect("Should parse");
 
-    let mut data = HashMap::new();
+    let mut data = IndexMap::new();
     data.insert("measure_value".to_string(), "10 eur".into());
     data.insert("number_value".to_string(), "2".into());
 
     let now = DateTimeValue::now();
     let response = engine
-        .run(None, "test", Some(&now), data, None, true)
+        .evaluate(None, "test", Some(&now), data, None, true)
         .expect("Should evaluate");
 
     let s = rule_value_str(&response, "result");

@@ -13,7 +13,6 @@ spec base_config
 
 data tax_rate:          21%
 data standard_discount: 5%
-
 data price: measure
   -> unit eur: 1.00
   -> decimals 2
@@ -43,7 +42,6 @@ data qty: number
   -> minimum 0
   -> suggest 10
 
-
 rule line_total:
   pricing.final_price * qty
 
@@ -53,8 +51,9 @@ rule has_discount:
 
 - `uses alias: target_spec`: imports spec in same file.
 - Reference members: `alias.field` or `alias.rule_name`.
-- Under `uses`, `  -> with path: value` sets imported data (path relative to imported spec). Do not use `data alias.field`. Standalone `with alias.field: …` is deprecated (still parses; `quality` recommends block form). Local slots use `data`.
-- A rule may return a `uses` alias (`rule chosen: basic unless flag then higher`). Dot on that rule reads the chosen instance (`chosen.rate`). All `unless` branches must be the same spec and resolved version. Do not add, compare, or `with` a spec instance; `is veto` is allowed. The result JSON includes `spec` (name, effective, instance path, `data` run-data texts, `rules`). Feeding `data` back into that spec at the same effective instant reproduces the rules. A bare alias reads the whole imported spec for unpinned drift checks.
+- Imported types need the alias: `data country: iso.code`, not bare `code`. A bare name that an import declares is a planning error naming the qualified form(s). Prefer `units.mass` / `units.duration` after `uses lemma units` (see **Units**).
+- Under `uses`, `  -> with path: value` sets imported data (path relative to imported spec). Several pairs on one line are comma-separated (`-> with qty: 3, sku: "latte"`). Do not use `data alias.field`. Standalone `with alias.field: …` is a parse error; nest under `uses`. Local slots use `data`.
+- A rule may return a `uses` alias (`rule chosen: basic unless flag then higher`). Dot on that rule reads the chosen instance (`chosen.rate`). All `unless` branches must be the same spec and resolved version. Do not add, compare, or `with` a spec instance; `is veto` is allowed. The result JSON includes `spec` (name, effective, instance path, `data` evaluation-data texts, `rules`). Feeding `data` back into that spec at the same effective instant reproduces the rules. A bare alias reads the whole imported spec for unpinned drift checks.
 
 **LemmaBase: shared repositories**
 
@@ -71,7 +70,6 @@ data price: measure
   -> unit eur: 1
 
 data country: iso.code
-
 
 rule tariff:
   0 eur

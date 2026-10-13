@@ -2,11 +2,22 @@ use lemma::{parse, Engine, Error, ParseResult, ResourceLimits, SourceType};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
-use tower_lsp::lsp_types::Url;
+use tower_lsp_server::ls_types::Uri;
 
 /// Web virtual dependency docs use `file:///lemma/repo/<hex-utf8>.lemma` (`hex` lowercase per client).
 /// Attributed like [`lemma::SourceType::Dependency`] when loading dependency bundles.
 const VIRTUAL_LEMMA_REPO_PREFIX: &str = "/lemma/repo/";
+
+/// Filesystem path of a `file:` URI. `None` for every other scheme, so `untitled:` and similar
+/// URIs are never mistaken for paths (`Uri::to_file_path` does not check the scheme).
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn file_path_of(uri: &Uri) -> Option<std::borrow::Cow<'_, std::path::Path>> {
+    if uri.scheme().as_str().eq_ignore_ascii_case("file") {
+        uri.to_file_path()
+    } else {
+        None
+    }
+}
 
 /// Result of parsing a single file's content.
 enum ParseOutcome {
@@ -19,7 +30,7 @@ enum ParseOutcome {
 /// A single file tracked by the workspace.
 struct TrackedFile {
     /// The latest URL for this file (used for publishing diagnostics).
-    url: Url,
+    url: Uri,
     /// The latest text content of the file (from the editor buffer or disk).
     text: String,
     /// The parsed outcome: either successfully parsed specs or parse errors.
@@ -29,7 +40,7 @@ struct TrackedFile {
 /// Per-file diagnostic result after a full workspace validation pass.
 pub struct FileDiagnostics {
     /// The URL of the file.
-    pub url: Url,
+    pub url: Uri,
     /// The latest text content (for byte-offset to LSP Range conversion).
     pub text: String,
     /// The source attribute used during parsing (maps to Error source locations).
@@ -115,8 +126,8 @@ impl WorkspaceModel {
     }
 
     /// Canonical dependency id extracted from `/lemma/repo/<hex>.lemma` (RFC `file:` path).
-    fn virtual_bundle_dependency_id(url: &Url) -> Option<String> {
-        let path = url.path();
+    fn virtual_bundle_dependency_id(url: &Uri) -> Option<String> {
+        let path = url.path().as_str();
         let rest = path.strip_prefix(VIRTUAL_LEMMA_REPO_PREFIX)?;
         let seg = rest.strip_suffix(".lemma")?;
         Self::dependency_id_from_hex_segment(seg)
@@ -124,12 +135,12 @@ impl WorkspaceModel {
 
     /// Provenance for [`lemma::Engine::load`]: workspace paths use [`SourceType::Path`];
     /// `lemma_deps/` and virtual bundle URIs use [`SourceType::Dependency`].
-    fn source_type_for_url(&self, url: &Url) -> SourceType {
+    fn source_type_for_url(&self, url: &Uri) -> SourceType {
         if let Some(bundle_id) = Self::virtual_bundle_dependency_id(url) {
             return SourceType::Dependency(bundle_id);
         }
         #[cfg(not(target_arch = "wasm32"))]
-        if let (Some(root), Ok(path)) = (self.workspace_root.as_deref(), url.to_file_path()) {
+        if let (Some(root), Some(path)) = (self.workspace_root.as_deref(), file_path_of(url)) {
             let deps_dir = lemma::deps::lemma_deps_dir(root);
             if path.starts_with(&deps_dir) {
                 let dep_id = lemma::deps::dependency_identifier_from_dependency_path(root, &path);
@@ -140,17 +151,17 @@ impl WorkspaceModel {
     }
 
     /// Derive a stable source attribute from a URL (path or URL string).
-    fn attribute_for_url(url: &Url) -> String {
+    fn attribute_for_url(url: &Uri) -> String {
         #[cfg(not(target_arch = "wasm32"))]
-        if let Ok(path) = url.to_file_path() {
+        if let Some(path) = file_path_of(url) {
             return path.to_string_lossy().to_string();
         }
-        url.to_string()
+        url.as_str().to_owned()
     }
 
     /// Add or update a file in the workspace. Parses immediately.
     /// If a different URL maps to the same attribute (path), the old entry is replaced.
-    pub fn update_file(&mut self, url: Url, text: String) {
+    pub fn update_file(&mut self, url: Uri, text: String) {
         let attribute = Self::attribute_for_url(&url);
         let parse_outcome = match parse(
             &text,
@@ -172,7 +183,7 @@ impl WorkspaceModel {
     }
 
     /// Remove a file from the workspace; engine prune runs on the next validate.
-    pub fn remove_file(&mut self, url: &Url) {
+    pub fn remove_file(&mut self, url: &Uri) {
         let attribute = Self::attribute_for_url(url);
         let source_type = self.source_type_for_url(url);
         self.files.remove(&attribute);
@@ -226,7 +237,7 @@ impl WorkspaceModel {
 
     /// Whether this URL was present in the last successful disk injection.
     #[must_use]
-    pub fn is_disk_backed(&self, url: &Url) -> bool {
+    pub fn is_disk_backed(&self, url: &Uri) -> bool {
         let attribute = Self::attribute_for_url(url);
         self.disk_attributes.contains(&attribute)
     }
@@ -235,12 +246,12 @@ impl WorkspaceModel {
     ///
     /// Called on `textDocument/didSave` so close restores the saved content even when
     /// the filesystem watch does not cover that path.
-    pub fn record_saved_baseline(&mut self, url: &Url) {
+    pub fn record_saved_baseline(&mut self, url: &Uri) {
         let attribute = Self::attribute_for_url(url);
         let Some(tracked) = self.files.get(&attribute) else {
             panic!(
                 "BUG: didSave for untracked URI {}; open/change must precede save",
-                url
+                url.as_str()
             );
         };
         let text = tracked.text.clone();
@@ -251,7 +262,7 @@ impl WorkspaceModel {
     /// Restore tracked text from the last disk injection for this URL.
     ///
     /// Returns false when the URL is not disk-backed.
-    pub fn restore_disk_text(&mut self, url: &Url) -> bool {
+    pub fn restore_disk_text(&mut self, url: &Uri) -> bool {
         let attribute = Self::attribute_for_url(url);
         let Some(text) = self.disk_texts.get(&attribute).cloned() else {
             return false;
@@ -265,7 +276,7 @@ impl WorkspaceModel {
     /// Updates disk metadata for every file in `files`. Applies `update_file` only
     /// for attributes not listed in `open_attributes` (open buffers win). Removes
     /// previously disk-backed entries that are absent from the payload and not open.
-    pub fn apply_disk_files(&mut self, files: &[(Url, String)], open_attributes: &HashSet<String>) {
+    pub fn apply_disk_files(&mut self, files: &[(Uri, String)], open_attributes: &HashSet<String>) {
         let mut next_disk_attributes = HashSet::new();
         let mut next_disk_texts = HashMap::new();
 
@@ -300,12 +311,12 @@ impl WorkspaceModel {
 
     /// Stable attribute string for a URL (path or URL string).
     #[must_use]
-    pub fn attribute_for_url_public(url: &Url) -> String {
+    pub fn attribute_for_url_public(url: &Uri) -> String {
         Self::attribute_for_url(url)
     }
 
     /// Successful parse tree for a tracked file, if any.
-    pub fn parse_success_for_url(&self, url: &Url) -> Option<&ParseResult> {
+    pub fn parse_success_for_url(&self, url: &Uri) -> Option<&ParseResult> {
         let attribute = Self::attribute_for_url(url);
         self.files
             .get(&attribute)
@@ -457,7 +468,7 @@ impl WorkspaceModel {
     }
 
     /// Get the current text content for a file, if tracked.
-    pub fn get_file_text(&self, url: &Url) -> Option<&str> {
+    pub fn get_file_text(&self, url: &Uri) -> Option<&str> {
         let attribute = Self::attribute_for_url(url);
         self.files
             .get(&attribute)
@@ -465,7 +476,7 @@ impl WorkspaceModel {
     }
 
     /// Get the current text content and its source attribute for a file, if tracked.
-    pub fn get_file_text_and_attribute(&self, url: &Url) -> Option<(&str, &str)> {
+    pub fn get_file_text_and_attribute(&self, url: &Uri) -> Option<(&str, &str)> {
         let attribute = Self::attribute_for_url(url);
         self.files
             .get_key_value(&attribute)
@@ -478,14 +489,23 @@ mod tests {
     use super::*;
 
     impl WorkspaceModel {
-        fn contains_file(&self, url: &Url) -> bool {
+        fn contains_file(&self, url: &Uri) -> bool {
             let attribute = Self::attribute_for_url(url);
             self.files.contains_key(&attribute)
         }
     }
 
-    fn url_from_path(path: &str) -> Url {
-        Url::from_file_path(path).expect("valid file path for test URL")
+    #[test]
+    fn non_file_uri_attribute_is_uri_string() {
+        let url: Uri = "untitled:Untitled-1".parse().expect("untitled uri");
+        assert_eq!(
+            WorkspaceModel::attribute_for_url_public(&url),
+            "untitled:Untitled-1"
+        );
+    }
+
+    fn url_from_path(path: &str) -> Uri {
+        Uri::from_file_path(path).expect("valid file path for test URL")
     }
 
     #[test]
@@ -540,7 +560,7 @@ mod tests {
             assert!(
                 result.errors.is_empty(),
                 "batch load must be order-independent; file {} got: {:?}",
-                result.url,
+                result.url.as_str(),
                 result.errors
             );
         }
@@ -576,7 +596,7 @@ mod tests {
             assert!(
                 result.errors.is_empty(),
                 "rename must prune old path before loading new; {} got: {:?}",
-                result.url,
+                result.url.as_str(),
                 result.errors
             );
         }
@@ -607,7 +627,7 @@ mod tests {
             assert!(
                 result.errors.is_empty(),
                 "Expected no errors for file {}, got: {:?}",
-                result.url,
+                result.url.as_str(),
                 result.errors
             );
         }
@@ -753,7 +773,9 @@ mod tests {
     #[test]
     fn deps_lemma_files_use_registry_identity_like_dependency_load() {
         let root = std::env::temp_dir().join("lemma_lsp_deps_workspace_test");
-        let _ = std::fs::remove_dir_all(&root);
+        if root.exists() {
+            std::fs::remove_dir_all(&root).expect("BUG: remove test workspace");
+        }
         let dep_path = lemma::deps::dependency_cache_file(&root, "@iso/countries");
         std::fs::create_dir_all(dep_path.parent().expect("dep parent")).expect("create dep dir");
         std::fs::write(
@@ -770,8 +792,8 @@ mod tests {
 
         let mut workspace = WorkspaceModel::new();
         workspace.set_workspace_root(root.clone());
-        let url_main = Url::from_file_path(&main_path).expect("main url");
-        let url_dep = Url::from_file_path(&dep_path).expect("dep url");
+        let url_main = Uri::from_file_path(&main_path).expect("main url");
+        let url_dep = Uri::from_file_path(&dep_path).expect("dep url");
         workspace.update_file(
             url_main,
             std::fs::read_to_string(&main_path).expect("read main"),
@@ -792,13 +814,17 @@ mod tests {
                 assert!(!msg.contains("not loaded"), "unexpected not loaded: {msg}");
             }
         }
-        let _ = std::fs::remove_dir_all(&root);
+        if root.exists() {
+            std::fs::remove_dir_all(&root).expect("BUG: remove test workspace");
+        }
     }
 
     #[test]
     fn inline_registry_repo_spec_loads_with_dependency_provenance() {
         let root = std::env::temp_dir().join("lemma_lsp_inline_registry_repo_test");
-        let _ = std::fs::remove_dir_all(&root);
+        if root.exists() {
+            std::fs::remove_dir_all(&root).expect("BUG: remove test workspace");
+        }
         let dep_path = lemma::deps::dependency_cache_file(&root, "@user/somedep");
         std::fs::create_dir_all(dep_path.parent().expect("dep parent")).expect("create dep dir");
         let src = "spec consumer\nuses @user/somedep some_spec\ndata x: 1\n\nrepo @user/somedep\nspec some_spec\ndata y: 2\n";
@@ -806,10 +832,10 @@ mod tests {
 
         let mut workspace = WorkspaceModel::new();
         workspace.set_workspace_root(root.clone());
-        let url_dep = Url::from_file_path(&dep_path).expect("dep url");
+        let url_dep = Uri::from_file_path(&dep_path).expect("dep url");
         workspace.update_file(url_dep, src.to_string());
 
-        let _ = workspace.validate_workspace();
+        workspace.validate_workspace();
         let engine = workspace.engine();
         let shown = engine
             .show(Some("@user/somedep"), "some_spec", None)
@@ -820,7 +846,9 @@ mod tests {
             "expected Dependency source_type"
         );
 
-        let _ = std::fs::remove_dir_all(&root);
+        if root.exists() {
+            std::fs::remove_dir_all(&root).expect("BUG: remove test workspace");
+        }
     }
 
     fn hex_utf8_path_segment(s: &str) -> String {
@@ -831,7 +859,9 @@ mod tests {
     fn virtual_bundle_hex_path_scopes_unnamed_repo_like_dependency_load() {
         let dep_id = "@scope/pkg";
         let hex = hex_utf8_path_segment(dep_id);
-        let dep_url = Url::parse(&format!("file:///lemma/repo/{hex}.lemma")).unwrap();
+        let dep_url = format!("file:///lemma/repo/{hex}.lemma")
+            .parse::<Uri>()
+            .expect("dep url");
         let main_url = url_from_path("/tmp/main.lemma");
 
         let mut workspace = WorkspaceModel::new();
@@ -846,7 +876,7 @@ mod tests {
             assert!(
                 result.errors.is_empty(),
                 "file {}: {:?}",
-                result.url,
+                result.url.as_str(),
                 result.errors
             );
         }

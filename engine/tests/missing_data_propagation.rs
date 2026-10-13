@@ -1,6 +1,6 @@
+use indexmap::IndexMap;
 use lemma::DateTimeValue;
 use lemma::Engine;
-use std::collections::HashMap;
 
 /// Test that when a rule in a referenced spec fails due to missing data,
 /// the error message correctly shows "Missing data" instead of "Rule not found"
@@ -44,11 +44,11 @@ rule total: rules.final_total
     let now = DateTimeValue::now();
     // Evaluate with missing quantity data
     let response = engine
-        .run(
+        .evaluate(
             None,
             "rules_and_unless",
             Some(&now),
-            HashMap::new(),
+            IndexMap::new(),
             None,
             false,
         )
@@ -61,16 +61,16 @@ rule total: rules.final_total
         .expect("total rule should be in results");
 
     assert!(total_rule.vetoed, "total should be vetoed");
-    let msg_str = total_rule.veto_reason.as_deref().expect("veto reason");
-    assert!(
-        msg_str.contains("Missing data"),
-        "Veto reason should contain 'Missing data', but got: {}",
-        msg_str
+    assert_eq!(
+        total_rule.missing_data(),
+        &["rules.quantity"],
+        "with binds base_price; quantity stays unbound under uses alias"
     );
-    assert!(
-        !msg_str.contains("not found"),
-        "Veto reason should NOT contain 'not found', but got: {}",
-        msg_str
+    assert_eq!(
+        total_rule.veto_reason.as_deref(),
+        Some("Missing data: rules.quantity"),
+        "got: {:?}",
+        total_rule.veto_reason
     );
 }
 
@@ -91,12 +91,12 @@ rule message: "Order processed"
         .load([(lemma::SourceType::Volatile, spec.to_string())])
         .unwrap();
 
-    let mut data = std::collections::HashMap::new();
+    let mut data = IndexMap::new();
     data.insert("price".to_string(), "10".into());
 
     let now = DateTimeValue::now();
     let response = engine
-        .run(None, "test_spec", Some(&now), data, None, false)
+        .evaluate(None, "test_spec", Some(&now), data, None, false)
         .unwrap();
 
     // subtotal should fail due to missing measure
@@ -156,17 +156,17 @@ rule r: i.slot
 
     let now = DateTimeValue::now();
     let resp = engine
-        .run(None, "outer", Some(&now), HashMap::new(), None, false)
+        .evaluate(None, "outer", Some(&now), IndexMap::new(), None, false)
         .expect("evaluates");
 
     let rr = resp.results.get("r").expect("rule 'r'");
     assert!(rr.vetoed, "expected MissingData veto");
     match rr.veto_detail.as_ref().expect("veto detail") {
         lemma::VetoType::MissingData { data, .. } => {
-            let shown = data.to_string();
-            assert!(
-                shown.contains("slot") || shown.contains("i.slot"),
-                "missing-data veto should name the missing data path; got: {shown}"
+            assert_eq!(
+                data.input_key(),
+                "i.slot",
+                "missing-data veto must name the slot under the import alias"
             );
         }
         other => panic!("expected MissingData veto, got: {:?}", other),
@@ -182,7 +182,7 @@ spec inner
 data denom: 0
 rule divided: 10 / denom
 
-spec top
+spec root_spec
 uses i: inner
 rule out: i.divided
 "#;
@@ -198,7 +198,7 @@ rule out: i.divided
 
     let now = DateTimeValue::now();
     let resp = engine
-        .run(None, "top", Some(&now), HashMap::new(), None, false)
+        .evaluate(None, "root_spec", Some(&now), IndexMap::new(), None, false)
         .expect("evaluator must run; veto is a domain result, not an error");
 
     let rr = resp.results.get("out").expect("rule 'out'");
@@ -233,8 +233,8 @@ rule negated_explained: -b
     let now = DateTimeValue::now();
     for explain in [false, true] {
         let response = engine
-            .run(None, "unary", Some(&now), HashMap::new(), None, explain)
-            .expect("run must not error");
+            .evaluate(None, "unary", Some(&now), IndexMap::new(), None, explain)
+            .expect("evaluate must not error");
         for rule in ["negated", "inverted", "negated_explained"] {
             let result = response.results.get(rule).expect("rule result");
             assert!(

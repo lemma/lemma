@@ -1,6 +1,6 @@
+use indexmap::IndexMap;
 use lemma::{DateGranularity, DateTimeValue, Engine, TimezoneValue, ValueKind};
 use rust_decimal::Decimal;
-use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -22,10 +22,7 @@ fn effective(y: i32, m: u32, d: u32, h: u32, min: u32, s: u32) -> DateTimeValue 
         minute: min,
         second: s,
         microsecond: 0,
-        timezone: Some(TimezoneValue {
-            offset_hours: 0,
-            offset_minutes: 0,
-        }),
+        timezone: Some(TimezoneValue { offset_minutes: 0 }),
         granularity: DateGranularity::DateTime,
     }
 }
@@ -42,7 +39,14 @@ fn eval_literal(
         .load([(source(), code.to_string())])
         .expect("Should parse and plan");
     let response = engine
-        .run(None, spec_name, Some(effective), HashMap::new(), None, true)
+        .evaluate(
+            None,
+            spec_name,
+            Some(effective),
+            IndexMap::new(),
+            None,
+            true,
+        )
         .expect("Should evaluate");
     let rule = response
         .results
@@ -76,7 +80,14 @@ fn eval_rule(
         .load([(source(), code.to_string())])
         .expect("Should parse and plan");
     let response = engine
-        .run(None, spec_name, Some(effective), HashMap::new(), None, true)
+        .evaluate(
+            None,
+            spec_name,
+            Some(effective),
+            IndexMap::new(),
+            None,
+            true,
+        )
         .expect("Should evaluate");
     response
         .results
@@ -100,7 +111,14 @@ fn eval_rule_measure_unit(
         .load([(source(), code.to_string())])
         .expect("Should parse and plan");
     let response = engine
-        .run(None, spec_name, Some(effective), HashMap::new(), None, true)
+        .evaluate(
+            None,
+            spec_name,
+            Some(effective),
+            IndexMap::new(),
+            None,
+            true,
+        )
         .expect("Should evaluate");
     let rule = response
         .results

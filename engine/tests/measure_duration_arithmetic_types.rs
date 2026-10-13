@@ -1,9 +1,9 @@
 //! Tests for Measure/Measure and Duration/Duration arithmetic result types,
 //! Measure*Measure / Duration*Duration rejection, and `as number` conversion.
 
-use lemma::DateTimeValue;
+use indexmap::IndexMap;
 use lemma::Engine;
-use std::collections::HashMap;
+use lemma::{DateTimeValue, EvaluateDataValue};
 
 fn load_ok(code: &str) -> Engine {
     let mut engine = Engine::new();
@@ -24,10 +24,15 @@ fn load_err(code: &str) -> String {
         .join("; ")
 }
 
-fn eval(engine: &Engine, spec: &str, rule: &str, data: HashMap<String, String>) -> String {
+fn eval(
+    engine: &Engine,
+    spec: &str,
+    rule: &str,
+    data: IndexMap<String, EvaluateDataValue>,
+) -> String {
     let now = DateTimeValue::now();
     let response = engine
-        .run(None, spec, Some(&now), data, None, false)
+        .evaluate(None, spec, Some(&now), data, None, false)
         .expect("Should evaluate");
     let result = response
         .results
@@ -57,7 +62,7 @@ data a: 10 eur
 data b: 5 eur
 rule result: a / b"#,
     );
-    let val = eval(&engine, "t", "result", HashMap::new());
+    let val = eval(&engine, "t", "result", IndexMap::new());
     assert_eq!(val, "2", "10 eur / 5 eur = 2 (dimensionless), got: {}", val);
 }
 
@@ -71,7 +76,7 @@ data a: 10 eur
 data b: 5 eur
 rule result: a / b"#,
     );
-    let val = eval(&engine, "t", "result", HashMap::new());
+    let val = eval(&engine, "t", "result", IndexMap::new());
     assert!(
         !val.to_lowercase().contains("eur"),
         "10 eur / 5 eur should be dimensionless, not contain unit, got: {}",
@@ -109,7 +114,7 @@ data a: 10 eur
 data b: 5 eur
 rule result: (a as eur as number) * (b as eur as number)"#,
     );
-    let val = eval(&engine, "t", "result", HashMap::new());
+    let val = eval(&engine, "t", "result", IndexMap::new());
     assert_eq!(val, "50", "10 * 5 = 50, got: {}", val);
 }
 
@@ -126,7 +131,7 @@ data a: 10 hour
 data b: 5 hour
 rule result: a / b"#,
     );
-    let val = eval(&engine, "t", "result", HashMap::new());
+    let val = eval(&engine, "t", "result", IndexMap::new());
     assert_eq!(val, "2", "10 hour / 5 hour = 2, got: {}", val);
 }
 
@@ -139,7 +144,7 @@ data a: 2 hour
 data b: 30 minute
 rule result: a / b"#,
     );
-    let val = eval(&engine, "t", "result", HashMap::new());
+    let val = eval(&engine, "t", "result", IndexMap::new());
     assert_eq!(val, "4", "2 hour / 30 minute = 4, got: {}", val);
 }
 
@@ -152,7 +157,7 @@ data a: 10 hour
 data b: 5 hour
 rule result: a / b"#,
     );
-    let val = eval(&engine, "t", "result", HashMap::new());
+    let val = eval(&engine, "t", "result", IndexMap::new());
     assert!(
         !val.to_lowercase().contains("hour"),
         "Duration / Duration should be dimensionless, got: {}",
@@ -192,7 +197,7 @@ data n: 10
 data d: 5 hour
 rule result: n / d"#,
     );
-    let val = eval(&engine, "t", "result", HashMap::new());
+    let val = eval(&engine, "t", "result", IndexMap::new());
     assert_eq!(val, "2", "10 / 5 hour = 2, got: {}", val);
     assert!(
         !val.to_lowercase().contains("hour"),
@@ -210,7 +215,7 @@ data n: 3
 data d: 5 hour
 rule result: n * d"#,
     );
-    let val = eval(&engine, "t", "result", HashMap::new());
+    let val = eval(&engine, "t", "result", IndexMap::new());
     assert!(val.contains("15"), "3 * 5 hour = 15 hour, got: {}", val);
     assert!(
         val.to_lowercase().contains("hour"),
@@ -232,7 +237,7 @@ data d: 10 hour
 data n: 2
 rule result: d / n"#,
     );
-    let val = eval(&engine, "t", "result", HashMap::new());
+    let val = eval(&engine, "t", "result", IndexMap::new());
     assert!(val.contains("5"), "10 hour / 2 = 5 hour, got: {}", val);
     assert!(
         val.to_lowercase().contains("hour"),
@@ -248,19 +253,19 @@ fn duration_modulo_number_returns_duration() {
 uses lemma units
 data d: 7 hour
 data n: 3
-rule result: d % n"#,
+rule result: d mod n"#,
     );
-    let val = eval(&engine, "t", "result", HashMap::new());
-    assert!(val.contains("1"), "7 hour % 3 = 1 hour, got: {}", val);
+    let val = eval(&engine, "t", "result", IndexMap::new());
+    assert!(val.contains("1"), "7 hour mod 3 = 1 hour, got: {}", val);
     assert!(
         val.to_lowercase().contains("hour"),
-        "duration % number should stay duration, got: {}",
+        "duration mod number should stay duration, got: {}",
         val
     );
 }
 
 // ═══════════════════════════════════════════════════════════════════
-// Measure ^ Ratio and Measure % Ratio → rejected (crash prevention)
+// Measure ^ Ratio and Measure mod Ratio → rejected (crash prevention)
 // ═══════════════════════════════════════════════════════════════════
 
 #[test]
@@ -289,11 +294,11 @@ uses lemma units
 data money: measure -> unit eur: 1.00
 data a: 100 eur
 data r: 25%
-rule result: a % r"#,
+rule result: a mod r"#,
     );
     assert!(
         err.contains("modulo") && err.to_lowercase().contains("ratio"),
-        "Measure % Ratio should be rejected at plan time, got: {err}"
+        "Measure mod Ratio should be rejected at plan time, got: {err}"
     );
 }
 
@@ -310,7 +315,7 @@ data money: measure -> unit eur: 1.00
 data a: 10 eur
 rule result: a as eur as number"#,
     );
-    let val = eval(&engine, "t", "result", HashMap::new());
+    let val = eval(&engine, "t", "result", IndexMap::new());
     assert_eq!(val, "10", "10 eur as number = 10, got: {}", val);
 }
 
@@ -324,7 +329,7 @@ data a: 10 eur
 data b: 5 eur
 rule result: (a as eur as number) * (b as eur as number)"#,
     );
-    let val = eval(&engine, "t", "result", HashMap::new());
+    let val = eval(&engine, "t", "result", IndexMap::new());
     assert_eq!(val, "50", "10 * 5 = 50, got: {}", val);
 }
 
@@ -336,7 +341,7 @@ uses lemma units
 data d: 5 hour
 rule result: d as hour as number"#,
     );
-    let val = eval(&engine, "t", "result", HashMap::new());
+    let val = eval(&engine, "t", "result", IndexMap::new());
     assert_eq!(val, "5", "5 hour as number = 5, got: {}", val);
 }
 
@@ -348,6 +353,6 @@ uses lemma units
 data r: 25%
 rule result: r as number"#,
     );
-    let val = eval(&engine, "t", "result", HashMap::new());
+    let val = eval(&engine, "t", "result", IndexMap::new());
     assert_eq!(val, "0.25", "25% as number = 0.25, got: {}", val);
 }

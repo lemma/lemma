@@ -3,12 +3,12 @@
 //! Parser emits `N label` as `Value::NumberWithUnit`; planning must resolve against
 //! the typedef's `RatioUnits` (same as measure constraints after scale rename).
 
+use indexmap::IndexMap;
 use lemma::DateTimeValue;
 use lemma::Engine;
 use lemma::TypeSpecification;
 use lemma::ValueKind;
 use rust_decimal::Decimal;
-use std::collections::HashMap;
 use std::str::FromStr;
 
 fn decimal_lit(s: &str) -> Decimal {
@@ -207,12 +207,12 @@ fn ratio_minimum_custom_unit_override_enforced() {
     let mut engine = Engine::new();
     load(&mut engine, bps_spec());
 
-    let mut data = HashMap::new();
+    let mut data = IndexMap::new();
     data.insert("r".to_string(), "400 basis_points".into());
 
     let now = DateTimeValue::now();
     let resp = engine
-        .run(None, "s", Some(&now), data, None, true)
+        .evaluate(None, "s", Some(&now), data, None, true)
         .expect("400 bps < 500 bps minimum must complete with veto");
     let rr = resp.results.get("out").expect("rule out");
     assert!(rr.vetoed, "400 bps < 500 bps minimum must veto");
@@ -265,12 +265,12 @@ fn ratio_minimum_custom_unit_override_accepts_at_bound() {
     let mut engine = Engine::new();
     load(&mut engine, bps_spec());
 
-    let mut data = HashMap::new();
+    let mut data = IndexMap::new();
     data.insert("r".to_string(), "500 basis_points".into());
 
     let now = DateTimeValue::now();
     let resp = engine
-        .run(None, "s", Some(&now), data, None, true)
+        .evaluate(None, "s", Some(&now), data, None, true)
         .expect("500 bps meets minimum");
     let rr = resp.results.get("out").expect("rule out");
     if rr.vetoed {

@@ -1,8 +1,13 @@
 //! Integration contracts: explanations narrate everything normalization folds away.
 //! Exact `assert_eq!` on typed Explanation/Cause fields and JSON node paths — never `.contains()`.
 
-use lemma::{DateTimeValue, Engine, Explanation};
-use std::collections::HashMap;
+#[path = "support/explanation_json.rs"]
+mod explanation_json;
+#[path = "support/explanation_json_walk.rs"]
+mod explanation_support;
+
+use indexmap::IndexMap;
+use lemma::{DateTimeValue, Engine, EvaluateDataValue, Explanation};
 
 fn load(code: &str) -> Engine {
     let mut engine = Engine::new();
@@ -15,13 +20,13 @@ fn load(code: &str) -> Engine {
 fn run(
     engine: &Engine,
     spec: &str,
-    data: HashMap<String, String>,
+    data: IndexMap<String, EvaluateDataValue>,
     rules: Option<&[String]>,
     explain: bool,
 ) -> lemma::Response {
     let now = DateTimeValue::now();
     engine
-        .run(None, spec, Some(&now), data, rules, explain)
+        .evaluate(None, spec, Some(&now), data, rules, explain)
         .expect("evaluation must succeed")
 }
 
@@ -74,29 +79,10 @@ fn compose_expressions(value: &serde_json::Value) -> Vec<&str> {
 }
 
 fn rule_names(value: &serde_json::Value) -> Vec<&str> {
-    let mut found = Vec::new();
-    fn walk<'a>(value: &'a serde_json::Value, found: &mut Vec<&'a str>) {
-        match value {
-            serde_json::Value::Object(obj) => {
-                if obj.get("type").and_then(|t| t.as_str()) == Some("rule") {
-                    if let Some(name) = obj.get("name").and_then(|r| r.as_str()) {
-                        found.push(name);
-                    }
-                }
-                for child in obj.values() {
-                    walk(child, found);
-                }
-            }
-            serde_json::Value::Array(arr) => {
-                for child in arr {
-                    walk(child, found);
-                }
-            }
-            _ => {}
-        }
-    }
-    walk(value, &mut found);
-    found
+    explanation_support::json_explained_rules(value)
+        .into_iter()
+        .filter_map(|rule| rule.get("name").and_then(|n| n.as_str()))
+        .collect()
 }
 
 fn conversion_expressions(value: &serde_json::Value) -> Vec<&str> {
@@ -139,7 +125,7 @@ rule out: true
     let response = run(
         &engine,
         "flipped_cmp",
-        HashMap::new(),
+        IndexMap::new(),
         Some(&["out".to_string()]),
         true,
     );
@@ -161,7 +147,7 @@ rule out: 1 unless false then 2
     let response = run(
         &engine,
         "falsified_literal",
-        HashMap::new(),
+        IndexMap::new(),
         Some(&["out".to_string()]),
         true,
     );
@@ -185,7 +171,7 @@ rule out: 1 unless true then 2
     let response = run(
         &engine,
         "held_true",
-        HashMap::new(),
+        IndexMap::new(),
         Some(&["out".to_string()]),
         true,
     );
@@ -209,7 +195,7 @@ rule out: 1 unless 5 > 3 then 2
     let response = run(
         &engine,
         "held_cmp",
-        HashMap::new(),
+        IndexMap::new(),
         Some(&["out".to_string()]),
         true,
     );
@@ -234,7 +220,7 @@ rule out: 1 unless x then 2 unless true then 3
     let response = run(
         &engine,
         "shadowed",
-        HashMap::new(),
+        IndexMap::new(),
         Some(&["out".to_string()]),
         true,
     );
@@ -256,7 +242,7 @@ data x: boolean
 rule out: 1 unless false then 2 unless x then 3
 "#,
     );
-    let data = HashMap::from([("x".into(), "true".into())]);
+    let data = IndexMap::from([("x".into(), "true".into())]);
     let response = run(
         &engine,
         "partial_dead",
@@ -285,7 +271,7 @@ rule out: 1 unless flag and false then 2
     let response = run(
         &engine,
         "and_false_flag",
-        HashMap::new(),
+        IndexMap::new(),
         Some(&["out".to_string()]),
         true,
     );
@@ -318,7 +304,7 @@ rule out: "ok"
   unless a and b then "both"
 "#,
     );
-    let mut data = HashMap::new();
+    let mut data = IndexMap::new();
     data.insert("a".into(), "false".into());
     data.insert("b".into(), "true".into());
     let response = run(&engine, "bound_and", data, Some(&["out".to_string()]), true);
@@ -349,6 +335,81 @@ rule out: "ok"
 }
 
 #[test]
+fn and_false_right_conjunct_decides_over_missing_left_sibling() {
+    let engine = load(
+        r#"
+spec and_missing_sibling
+data flag: boolean
+data model: text
+rule out: 0
+  unless flag and model is "c" then 3
+"#,
+    );
+    let mut data = IndexMap::new();
+    data.insert("model".into(), "b".into());
+    let response = run(
+        &engine,
+        "and_missing_sibling",
+        data,
+        Some(&["out".to_string()]),
+        true,
+    );
+    assert_eq!(
+        response.results.get("out").expect("out").result(),
+        Some("0"),
+        "model is not c decides the and; missing flag must not veto"
+    );
+    let explanation = out_explanation(&response);
+    let formatted = lemma::format_explanation(explanation);
+    assert!(
+        formatted.contains("model"),
+        "explanation names the false conjunct, got {formatted}"
+    );
+    assert!(
+        !formatted.contains("flag"),
+        "explanation must not name the undecided missing sibling, got {formatted}"
+    );
+}
+
+#[test]
+fn and_missing_left_explanation_narrates_deciding_right_operand() {
+    let engine = load(
+        r#"
+spec and_body_narration
+data flag: boolean
+data model: text
+rule r: flag and model is "c"
+"#,
+    );
+    let mut data = IndexMap::new();
+    data.insert("model".into(), "b".into());
+    let response = run(
+        &engine,
+        "and_body_narration",
+        data,
+        Some(&["r".to_string()]),
+        true,
+    );
+    assert_eq!(
+        response.results.get("r").expect("r").result(),
+        Some("false"),
+        "model is c decides the and; missing flag must not veto"
+    );
+    let explanation = response
+        .results
+        .get("r")
+        .expect("r")
+        .explanation
+        .as_ref()
+        .expect("r explanation");
+    let formatted = lemma::format_explanation(explanation);
+    assert!(
+        formatted.contains("model: b"),
+        "the deciding right operand is narrated, got {formatted}"
+    );
+}
+
+#[test]
 fn and_short_circuit_left_fail_omits_right_from_cause() {
     let engine = load(
         r#"
@@ -359,7 +420,7 @@ rule out: "ok"
   unless a and b then "both"
 "#,
     );
-    let mut data = HashMap::new();
+    let mut data = IndexMap::new();
     data.insert("a".into(), "false".into());
     let response = run(&engine, "short_and", data, Some(&["out".to_string()]), true);
     assert_eq!(
@@ -391,7 +452,7 @@ rule can_view: false
   unless active and views_consumed < max_views then true
 "#,
     );
-    let mut data = HashMap::new();
+    let mut data = IndexMap::new();
     data.insert("active".into(), "true".into());
     data.insert("views_consumed".into(), "6".into());
     data.insert("max_views".into(), "5".into());
@@ -441,7 +502,7 @@ rule out: "no"
   unless code is "NL" and amount > 0 then "yes"
 "#,
     );
-    let mut data = HashMap::new();
+    let mut data = IndexMap::new();
     data.insert("code".into(), "BE".into());
     let response = run(&engine, "left_fail", data, Some(&["out".to_string()]), true);
     assert_eq!(
@@ -472,7 +533,7 @@ rule out: 0 unless 1 < 0 then 1 unless true then 2
     let response = run(
         &engine,
         "mixed_static",
-        HashMap::new(),
+        IndexMap::new(),
         Some(&["out".to_string()]),
         true,
     );
@@ -498,7 +559,7 @@ rule out: (sqrt 4) * (sqrt 9)
     let response = run(
         &engine,
         "sqrt_product",
-        HashMap::new(),
+        IndexMap::new(),
         Some(&["out".to_string()]),
         true,
     );
@@ -511,11 +572,11 @@ rule out: (sqrt 4) * (sqrt 9)
     let json = explanation_json(explanation);
     let mut sqrts: Vec<&str> = compose_expressions(&json)
         .into_iter()
-        .filter(|e| *e == "sqrt(4)" || *e == "sqrt(9)")
+        .filter(|e| *e == "sqrt 4" || *e == "sqrt 9")
         .collect();
     sqrts.sort_unstable();
     sqrts.dedup();
-    assert_eq!(sqrts, vec!["sqrt(4)", "sqrt(9)"]);
+    assert_eq!(sqrts, vec!["sqrt 4", "sqrt 9"]);
 }
 
 #[test]
@@ -531,7 +592,7 @@ rule out: a * b
     let response = run(
         &engine,
         "sqrt_rules",
-        HashMap::new(),
+        IndexMap::new(),
         Some(&["out".to_string()]),
         true,
     );
@@ -544,35 +605,17 @@ rule out: a * b
     let mut names = rule_names(&json);
     names.sort_unstable();
     assert_eq!(names, vec!["a", "b", "out"]);
-    let mut bodies: Vec<&str> = Vec::new();
-    fn walk_rule_bodies<'a>(value: &'a serde_json::Value, bodies: &mut Vec<&'a str>) {
-        match value {
-            serde_json::Value::Object(obj) => {
-                if obj.get("type").and_then(|t| t.as_str()) == Some("rule") {
-                    if let Some(body) = obj.get("body").and_then(|b| b.as_str()) {
-                        bodies.push(body);
-                    }
-                }
-                for child in obj.values() {
-                    walk_rule_bodies(child, bodies);
-                }
-            }
-            serde_json::Value::Array(arr) => {
-                for child in arr {
-                    walk_rule_bodies(child, bodies);
-                }
-            }
-            _ => {}
-        }
-    }
-    walk_rule_bodies(&json, &mut bodies);
+    let bodies: Vec<&str> = explanation_support::json_explained_rules(&json)
+        .into_iter()
+        .filter_map(|rule| rule.get("body").and_then(|b| b.as_str()))
+        .collect();
     let mut sqrts: Vec<&str> = bodies
         .into_iter()
-        .filter(|b| *b == "sqrt(4)" || *b == "sqrt(9)")
+        .filter(|b| *b == "sqrt 4" || *b == "sqrt 9")
         .collect();
     sqrts.sort_unstable();
     sqrts.dedup();
-    assert_eq!(sqrts, vec!["sqrt(4)", "sqrt(9)"]);
+    assert_eq!(sqrts, vec!["sqrt 4", "sqrt 9"]);
 }
 
 #[test]
@@ -591,7 +634,7 @@ rule out: 50 eur_per_hour
     let response = run(
         &engine,
         "named_rate",
-        HashMap::new(),
+        IndexMap::new(),
         Some(&["out".to_string()]),
         true,
     );
@@ -614,7 +657,7 @@ rule out: (exp(log(5))) + 0
     let response = run(
         &engine,
         "nested_identity",
-        HashMap::new(),
+        IndexMap::new(),
         Some(&["out".to_string()]),
         true,
     );
@@ -623,7 +666,7 @@ rule out: (exp(log(5))) + 0
         Some("5")
     );
     let explanation = out_explanation(&response);
-    assert_eq!(explanation.body, "exp(log(5))");
+    assert_eq!(explanation.body, "exp log 5");
 }
 
 // ── Suite 3: conversion and order ────────────────────────────────────────
@@ -639,7 +682,7 @@ rule out: 100 as number
     let response = run(
         &engine,
         "as_number",
-        HashMap::new(),
+        IndexMap::new(),
         Some(&["out".to_string()]),
         true,
     );
@@ -659,14 +702,12 @@ fn measure_as_unit_conversion_narrated_when_folded() {
         r#"
 spec measure_as
 uses lemma units
-data mass: measure
-  -> unit kilogram: 1
-  -> unit gram: 0.001
+data mass: units.mass
   -> suggest 2 kilogram
 rule out: mass as gram
 "#,
     );
-    let data = HashMap::from([("mass".into(), "2 kilogram".into())]);
+    let data = IndexMap::from([("mass".into(), "2 kilogram".into())]);
     let response = run(
         &engine,
         "measure_as",
@@ -695,7 +736,7 @@ rule out: 2 + 1
     let response = run(
         &engine,
         "sum_order",
-        HashMap::new(),
+        IndexMap::new(),
         Some(&["out".to_string()]),
         true,
     );
@@ -726,11 +767,17 @@ rule out: true unless 5 < 3 then false
     let without = run(
         &engine,
         "parity_static",
-        HashMap::new(),
+        IndexMap::new(),
         Some(&rules),
         false,
     );
-    let with = run(&engine, "parity_static", HashMap::new(), Some(&rules), true);
+    let with = run(
+        &engine,
+        "parity_static",
+        IndexMap::new(),
+        Some(&rules),
+        true,
+    );
     let left = without.results.get("out").expect("out");
     let right = with.results.get("out").expect("out");
     assert_eq!(left.vetoed, right.vetoed);
@@ -753,7 +800,7 @@ rule out: 1
 "#,
     );
     let rules = ["out".to_string()];
-    let data = HashMap::from([("x".into(), "0".into())]);
+    let data = IndexMap::from([("x".into(), "0".into())]);
     let without = run(&engine, "lower_veto", data.clone(), Some(&rules), false);
     let with = run(&engine, "lower_veto", data, Some(&rules), true);
     let left = without.results.get("out").expect("out");
@@ -783,7 +830,7 @@ rule out: base
     let response = run(
         &engine,
         "chained_ref",
-        HashMap::new(),
+        IndexMap::new(),
         Some(&["out".to_string()]),
         true,
     );
@@ -794,12 +841,14 @@ rule out: base
     let explanation = out_explanation(&response);
     let json = explanation_json(explanation);
     assert_eq!(rule_names(&json), vec!["out", "base"]);
-    let base = json["children"]
+    let base_ref = json["children"]
         .as_array()
         .expect("children")
         .iter()
         .find(|n| n.get("name").and_then(|r| r.as_str()) == Some("base"))
-        .expect("base embed");
+        .expect("base rule_ref");
+    assert_eq!(base_ref["type"], "rule_ref");
+    let base = explanation_json::json_resolve_ref(&json, base_ref);
     assert_eq!(base["causes"][0]["condition"], "false");
     assert_eq!(base["causes"][0]["value"], "false");
 }
@@ -816,7 +865,7 @@ rule out: true unless n < 3 then false
     let response = run(
         &engine,
         "runtime_flip",
-        HashMap::new(),
+        IndexMap::new(),
         Some(&["out".to_string()]),
         true,
     );
@@ -839,7 +888,7 @@ rule out: 0 unless true then 1 unless true then 2
     let response = run(
         &engine,
         "two_true",
-        HashMap::new(),
+        IndexMap::new(),
         Some(&["out".to_string()]),
         true,
     );

@@ -1,5 +1,5 @@
 use std::sync::Arc;
-use tower_lsp::{LspService, Server};
+use tower_lsp_server::{LspService, Server};
 
 use crate::workspace_files::WorkspaceFiles;
 

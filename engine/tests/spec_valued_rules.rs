@@ -1,19 +1,24 @@
 //! A rule may return a spec instance (`uses` alias), and dot reads that instance.
 
+use indexmap::IndexMap;
 use lemma::result_value::{RuleResultValue, SpecResult};
-use lemma::{DateTimeValue, Engine, Error, SourceType};
+use lemma::{DateTimeValue, Engine, Error, EvaluateDataValue, SourceType};
 use rust_decimal::Decimal;
-use std::collections::HashMap;
 
 const BRACKETS: &str = r#"
-spec tax_bracket
+spec finance
 
 data money: measure
   -> unit eur: 1.00
   -> decimals 2
 
-data income: money
-data band:   money range
+
+spec tax_bracket
+
+uses finance
+
+data income: finance.money
+data band:   finance.money range
 data rate:   ratio
 data extra:  number
 
@@ -32,11 +37,9 @@ rule surcharge:
 
 spec income_tax
 
-data money: measure
-  -> unit eur: 1.00
-  -> decimals 2
+uses finance
 
-data income: money
+data income: finance.money
 
 uses basic: tax_bracket
   -> with band: 0 eur...38000 eur
@@ -96,19 +99,19 @@ fn run(
     engine: &Engine,
     spec: &str,
     rule: &str,
-    data: HashMap<String, String>,
+    data: IndexMap<String, EvaluateDataValue>,
 ) -> lemma::RuleResult {
-    run_owned(engine, spec, rule, data)
+    evaluate_owned(engine, spec, rule, data)
 }
 
-fn run_owned(
+fn evaluate_owned(
     engine: &Engine,
     spec: &str,
     rule: &str,
-    data: HashMap<String, String>,
+    data: IndexMap<String, EvaluateDataValue>,
 ) -> lemma::RuleResult {
     let response = engine
-        .run(
+        .evaluate(
             None,
             spec,
             Some(&now()),
@@ -135,12 +138,12 @@ fn load_error(code: &str) -> String {
         .join("\n")
 }
 
-fn income(amount: &str) -> HashMap<String, String> {
-    HashMap::from([("income".to_string(), amount.to_string())])
+fn income(amount: &str) -> IndexMap<String, EvaluateDataValue> {
+    IndexMap::from([("income".to_string(), amount.into())])
 }
 
-fn flag(value: bool) -> HashMap<String, String> {
-    HashMap::from([("pick_high".to_string(), value.to_string())])
+fn flag(value: bool) -> IndexMap<String, EvaluateDataValue> {
+    IndexMap::from([("pick_high".to_string(), value.into())])
 }
 
 fn rule_text<'a>(spec: &'a SpecResult, rule: &str) -> Option<&'a str> {
@@ -292,6 +295,13 @@ rule label:
     assert_eq!(low_spec.spec, "priced");
     assert_eq!(low_spec.instance, "rack.low");
     assert_eq!(rule_text(low_spec, "name"), Some("latte"));
+    let hops: Vec<(&str, &str)> = low_spec
+        .path
+        .iter()
+        .map(|segment| (segment.uses.as_str(), segment.spec.as_str()))
+        .collect();
+    assert_eq!(hops, [("rack", "shelf"), ("low", "priced")]);
+    assert_eq!(low_chosen.to_literal().to_string(), "rack.low");
 
     let high = run(&engine, "order", "label", flag(true));
     assert_eq!(high.result(), Some("mocha"));
@@ -301,15 +311,12 @@ rule label:
     assert_eq!(high_spec.instance, "rack.high");
     assert_eq!(rule_text(high_spec, "name"), Some("mocha"));
 
-    let missing = run(&engine, "order", "label", HashMap::new());
+    let missing = run(&engine, "order", "label", IndexMap::new());
     assert!(missing.vetoed);
-    assert!(
-        missing
-            .missing_data()
-            .iter()
-            .any(|key| key.contains("pick_high")),
-        "missing_data {:?}, expected pick_high",
-        missing.missing_data()
+    assert_eq!(
+        missing.missing_data(),
+        &["pick_high"],
+        "local unbound pick_high, not rack.pick_high"
     );
 }
 
@@ -341,7 +348,7 @@ rule label:
   picked.item.name
 "#;
     let engine = engine(code);
-    let result = run(&engine, "order", "label", HashMap::new());
+    let result = run(&engine, "order", "label", IndexMap::new());
     assert_eq!(result.result(), Some("latte"));
 }
 
@@ -349,15 +356,15 @@ rule label:
 fn missing_income_vetoes_the_spec_and_the_field() {
     let engine = engine(BRACKETS);
     let response = engine
-        .run(
+        .evaluate(
             None,
             "income_tax",
             Some(&now()),
-            HashMap::new(),
+            IndexMap::new(),
             Some(&["top_bracket".to_string(), "top_bracket_tax".to_string()]),
             false,
         )
-        .expect("run");
+        .expect("evaluate");
     for rule in ["top_bracket", "top_bracket_tax"] {
         let result = response.get(rule).expect(rule);
         assert!(result.vetoed, "{rule} should veto");
@@ -373,7 +380,7 @@ fn missing_income_vetoes_the_spec_and_the_field() {
 fn unchosen_instance_missing_data_is_not_reported() {
     let engine = engine(BRACKETS);
     let chosen_basic = engine
-        .run(
+        .evaluate(
             None,
             "income_tax",
             Some(&now()),
@@ -381,7 +388,7 @@ fn unchosen_instance_missing_data_is_not_reported() {
             Some(&["top_bracket_surcharge".to_string()]),
             false,
         )
-        .expect("run");
+        .expect("evaluate");
     let basic = chosen_basic.get("top_bracket_surcharge").expect("rule");
     assert!(
         !basic.vetoed,
@@ -395,7 +402,7 @@ fn unchosen_instance_missing_data_is_not_reported() {
     );
 
     let chosen_higher = engine
-        .run(
+        .evaluate(
             None,
             "income_tax",
             Some(&now()),
@@ -403,16 +410,13 @@ fn unchosen_instance_missing_data_is_not_reported() {
             Some(&["top_bracket_surcharge".to_string()]),
             false,
         )
-        .expect("run");
+        .expect("evaluate");
     let higher = chosen_higher.get("top_bracket_surcharge").expect("rule");
     assert!(higher.vetoed);
-    assert!(
-        higher
-            .missing_data()
-            .iter()
-            .any(|key| key.contains("higher") && key.contains("extra")),
-        "expected higher.extra, got {:?}",
-        higher.missing_data()
+    assert_eq!(
+        higher.missing_data(),
+        &["higher.extra"],
+        "chosen higher instance unbound extra"
     );
 }
 
@@ -420,22 +424,22 @@ fn unchosen_instance_missing_data_is_not_reported() {
 fn spec_value_is_veto_when_the_rule_vetoes() {
     let loaded = engine(BRACKETS);
     let response = loaded
-        .run(
+        .evaluate(
             None,
             "income_tax",
             Some(&now()),
-            HashMap::new(),
+            IndexMap::new(),
             Some(&["top_bracket".to_string()]),
             false,
         )
-        .expect("run");
+        .expect("evaluate");
     let vetoed = response.get("top_bracket").expect("rule");
     assert!(vetoed.vetoed);
 
     let loaded = engine(&format!(
         "{BRACKETS}\nrule bracket_vetoed:\n  top_bracket is veto\n"
     ));
-    let result = run(&loaded, "income_tax", "bracket_vetoed", HashMap::new());
+    let result = run(&loaded, "income_tax", "bracket_vetoed", IndexMap::new());
     assert_eq!(result.result(), Some("true"));
     let present = run(&loaded, "income_tax", "bracket_vetoed", income("30000 eur"));
     assert_eq!(present.result(), Some("false"));
@@ -450,7 +454,7 @@ fn round_trip_runs_the_spec_with_emitted_data() {
     for amount in ["30000 eur", "50000 eur"] {
         let result = run(&engine, "income_tax", "top_bracket", income(amount));
         let spec = spec_of(&result);
-        let mut replay = HashMap::new();
+        let mut replay = IndexMap::new();
         for (name, entry) in &spec.data {
             assert!(
                 !entry.vetoed,
@@ -466,10 +470,10 @@ fn round_trip_runs_the_spec_with_emitted_data() {
             let first = value.to_literal(show_type);
             let again = value.to_literal(show_type);
             assert_eq!(first, again, "{name} to_literal unstable on {amount}");
-            replay.insert(name.clone(), data_entry_input(value));
+            replay.insert(name.clone(), data_entry_input(value).into());
         }
         let again = engine
-            .run(None, "tax_bracket", Some(&now()), replay, None, false)
+            .evaluate(None, "tax_bracket", Some(&now()), replay, None, false)
             .unwrap_or_else(|error| panic!("re-run tax_bracket: {error}"));
         for (name, original) in &spec.rules {
             let replayed = again.get(name).unwrap_or_else(|_| panic!("missing {name}"));
@@ -534,13 +538,18 @@ fn data_entry_input(value: &RuleResultValue) -> String {
 #[test]
 fn vetoed_data_appears_as_a_veto_entry() {
     let code = r#"
-spec item
+spec finance
 
 data money: measure
   -> unit eur: 1.00
   -> decimals 2
 
-data price: money -> minimum 1 eur
+
+spec item
+
+uses finance
+
+data price: finance.money -> minimum 1 eur
 
 rule cost:
   price * 2
@@ -548,11 +557,9 @@ rule cost:
 
 spec cart
 
-data money: measure
-  -> unit eur: 1.00
-  -> decimals 2
+uses finance
 
-data budget: money -> minimum 1 eur
+data budget: finance.money -> minimum 1 eur
 
 uses deal: item
   -> with price: budget
@@ -568,7 +575,7 @@ rule total:
         &engine,
         "cart",
         "chosen",
-        HashMap::from([("budget".to_string(), "0 eur".to_string())]),
+        IndexMap::from([("budget".to_string(), "0 eur".into())]),
     );
     let spec = spec_of(&result);
     let price = spec.data.get("price").expect("price data entry");
@@ -724,7 +731,7 @@ fn explanation_names_the_chosen_instance_and_its_rule() {
         .load([(SourceType::Volatile, BRACKETS.to_string())])
         .expect("load");
     let response = engine
-        .run(
+        .evaluate(
             None,
             "income_tax",
             Some(&now()),
@@ -732,7 +739,7 @@ fn explanation_names_the_chosen_instance_and_its_rule() {
             Some(&["top_bracket_tax".to_string()]),
             true,
         )
-        .expect("run");
+        .expect("evaluate");
     let result = response.get("top_bracket_tax").expect("rule");
     let explanation = format!("{:?}", result.explanation.as_ref().expect("explanation"));
     assert!(

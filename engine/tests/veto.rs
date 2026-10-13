@@ -6,10 +6,10 @@
 //! 3. Unless clauses can provide alternative values, so the veto doesn't apply
 //! 4. Veto in unless clause conditions or results will apply to the dependent rule
 
+use indexmap::IndexMap;
 use lemma::DateTimeValue;
 use lemma::{Engine, LiteralValue};
 use rust_decimal::Decimal;
-use std::collections::HashMap;
 use std::str::FromStr;
 
 #[test]
@@ -29,7 +29,7 @@ rule is_adult: age >= 18
 
     let now = DateTimeValue::now();
     let response = engine
-        .run(None, "age_check", Some(&now), HashMap::new(), None, false)
+        .evaluate(None, "age_check", Some(&now), IndexMap::new(), None, false)
         .unwrap();
     let rule_result = response
         .results
@@ -60,7 +60,7 @@ rule is_valid: value > 0
 
     let now = DateTimeValue::now();
     let response = engine
-        .run(None, "validation", Some(&now), HashMap::new(), None, false)
+        .evaluate(None, "validation", Some(&now), IndexMap::new(), None, false)
         .unwrap();
     let rule_result = response
         .results
@@ -89,7 +89,7 @@ rule is_adult: age >= 18
 
     let now = DateTimeValue::now();
     let response = engine
-        .run(None, "age_check", Some(&now), HashMap::new(), None, false)
+        .evaluate(None, "age_check", Some(&now), IndexMap::new(), None, false)
         .unwrap();
     let rule_result = response
         .results
@@ -126,7 +126,7 @@ rule eligible: age >= 18 and score >= 80
 
     let now = DateTimeValue::now();
     let response = engine
-        .run(None, "validation", Some(&now), HashMap::new(), None, false)
+        .evaluate(None, "validation", Some(&now), IndexMap::new(), None, false)
         .unwrap();
     let rule_result = response
         .results
@@ -159,7 +159,7 @@ rule eligible: age >= 18 and score >= 80
 
     let now = DateTimeValue::now();
     let response = engine
-        .run(None, "validation", Some(&now), HashMap::new(), None, false)
+        .evaluate(None, "validation", Some(&now), IndexMap::new(), None, false)
         .unwrap();
     let rule_result = response
         .results
@@ -191,11 +191,11 @@ rule valid_compensation: salary >= 40000
 
     let now = DateTimeValue::now();
     let response = engine
-        .run(
+        .evaluate(
             None,
             "salary_check",
             Some(&now),
-            HashMap::new(),
+            IndexMap::new(),
             None,
             false,
         )
@@ -233,11 +233,11 @@ rule can_drive: age >= 16
 
     let now = DateTimeValue::now();
     let response = engine
-        .run(
+        .evaluate(
             None,
             "mixed_validation",
             Some(&now),
-            HashMap::new(),
+            IndexMap::new(),
             None,
             false,
         )
@@ -275,11 +275,11 @@ rule can_ship: package_weight <= 50
 
     let now = DateTimeValue::now();
     let response = engine
-        .run(
+        .evaluate(
             None,
             "weight_check",
             Some(&now),
-            HashMap::new(),
+            IndexMap::new(),
             None,
             false,
         )
@@ -313,11 +313,11 @@ rule is_affordable: price <= 1000
 
     let now = DateTimeValue::now();
     let response = engine
-        .run(
+        .evaluate(
             None,
             "pricing_check",
             Some(&now),
-            HashMap::new(),
+            IndexMap::new(),
             None,
             false,
         )
@@ -352,11 +352,11 @@ rule is_valid_date: event_date >= min_date
 
     let now = DateTimeValue::now();
     let response = engine
-        .run(
+        .evaluate(
             None,
             "date_validation",
             Some(&now),
-            HashMap::new(),
+            IndexMap::new(),
             None,
             false,
         )
@@ -390,11 +390,11 @@ rule is_complete: completion >= 95%
 
     let now = DateTimeValue::now();
     let response = engine
-        .run(
+        .evaluate(
             None,
             "completion_check",
             Some(&now),
-            HashMap::new(),
+            IndexMap::new(),
             None,
             false,
         )
@@ -430,7 +430,14 @@ rule eligible: has_permission
 
     let now = DateTimeValue::now();
     let response = engine
-        .run(None, "eligibility", Some(&now), HashMap::new(), None, false)
+        .evaluate(
+            None,
+            "eligibility",
+            Some(&now),
+            IndexMap::new(),
+            None,
+            false,
+        )
         .unwrap();
     let eligible_result = response
         .results
@@ -462,11 +469,11 @@ rule within_budget: expenses < income
 
     let now = DateTimeValue::now();
     let response = engine
-        .run(
+        .evaluate(
             None,
             "budget_check",
             Some(&now),
-            HashMap::new(),
+            IndexMap::new(),
             None,
             false,
         )
@@ -500,11 +507,11 @@ rule is_active: status is "active"
 
     let now = DateTimeValue::now();
     let response = engine
-        .run(
+        .evaluate(
             None,
             "status_check",
             Some(&now),
-            HashMap::new(),
+            IndexMap::new(),
             None,
             false,
         )
@@ -540,7 +547,7 @@ rule double_value: value * 2
 
     let now = DateTimeValue::now();
     let response = engine
-        .run(None, "multi_rule", Some(&now), HashMap::new(), None, false)
+        .evaluate(None, "multi_rule", Some(&now), IndexMap::new(), None, false)
         .unwrap();
 
     let check_positive = response
@@ -596,11 +603,11 @@ rule valid: age >= 18
 
     let now = DateTimeValue::now();
     let response = engine
-        .run(
+        .evaluate(
             None,
             "special_chars",
             Some(&now),
-            HashMap::new(),
+            IndexMap::new(),
             None,
             false,
         )
@@ -639,11 +646,11 @@ rule valid: value > 0
 
     let now = DateTimeValue::now();
     let response = engine
-        .run(
+        .evaluate(
             None,
             "long_message",
             Some(&now),
-            HashMap::new(),
+            IndexMap::new(),
             None,
             false,
         )
@@ -675,11 +682,11 @@ rule check: value > 10
 
     let now = DateTimeValue::now();
     let response = engine
-        .run(
+        .evaluate(
             None,
             "priority_test",
             Some(&now),
-            HashMap::new(),
+            IndexMap::new(),
             None,
             false,
         )
@@ -712,11 +719,11 @@ rule eligible: age >= 18
 
     let now = DateTimeValue::now();
     let response = engine
-        .run(
+        .evaluate(
             None,
             "multi_unless",
             Some(&now),
-            HashMap::new(),
+            IndexMap::new(),
             None,
             false,
         )
@@ -750,11 +757,11 @@ rule can_proceed: true
 
     let now = DateTimeValue::now();
     let response = engine
-        .run(
+        .evaluate(
             None,
             "negation_test",
             Some(&now),
-            HashMap::new(),
+            IndexMap::new(),
             None,
             false,
         )

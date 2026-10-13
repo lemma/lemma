@@ -1,0 +1,335 @@
+{
+  "spec": "coffee_order",
+  "effective": "2026-01-01",
+  "results": {
+    "all_cheap": {
+      "vetoed": false,
+      "rule_type": "boolean",
+      "result": "true",
+      "boolean": true
+    },
+    "any_large": {
+      "vetoed": false,
+      "rule_type": "boolean",
+      "result": "true",
+      "boolean": true
+    },
+    "average": {
+      "vetoed": false,
+      "rule_type": "price",
+      "result": "3 eur",
+      "measure": {
+        "eur": "3"
+      }
+    },
+    "cheapest": {
+      "vetoed": false,
+      "rule_type": "menu_item",
+      "result": "menu.1",
+      "row": {
+        "spec": "menu_item",
+        "effective": "",
+        "instance": "menu.1",
+        "index": 0
+      }
+    },
+    "drink_count": {
+      "vetoed": false,
+      "rule_type": "number",
+      "result": "2",
+      "number": "2"
+    },
+    "extended": {
+      "vetoed": false,
+      "rule_type": "menu_item list",
+      "result": "menu.1, menu.2, appended row 3",
+      "list": [
+        {
+          "result": "menu.1",
+          "row": {
+            "spec": "menu_item",
+            "effective": "",
+            "instance": "menu.1",
+            "index": 0
+          }
+        },
+        {
+          "result": "menu.2",
+          "row": {
+            "spec": "menu_item",
+            "effective": "",
+            "instance": "menu.2",
+            "index": 1
+          }
+        },
+        {
+          "result": "appended row 3",
+          "row": {
+            "spec": "menu_item",
+            "effective": "",
+            "instance": "appended row 3",
+            "index": 2
+          }
+        }
+      ]
+    },
+    "high_fares": {
+      "vetoed": false,
+      "rule_type": "fares",
+      "result": "120 eur",
+      "list": [
+        {
+          "result": "120 eur",
+          "measure": {
+            "eur": "120"
+          },
+          "unit": "eur"
+        }
+      ]
+    },
+    "highest": {
+      "vetoed": false,
+      "rule_type": "price",
+      "result": "3.5 eur",
+      "measure": {
+        "eur": "3.5"
+      }
+    },
+    "large": {
+      "vetoed": false,
+      "rule_type": "menu_item list",
+      "result": "menu.2",
+      "list": [
+        {
+          "result": "menu.2",
+          "row": {
+            "spec": "menu_item",
+            "effective": "",
+            "instance": "menu.2",
+            "index": 1
+          }
+        }
+      ]
+    },
+    "lowest": {
+      "vetoed": false,
+      "rule_type": "price",
+      "result": "2.5 eur",
+      "measure": {
+        "eur": "2.5"
+      }
+    },
+    "more_fares": {
+      "vetoed": false,
+      "rule_type": "fares",
+      "result": "89 eur, 120 eur, 64 eur",
+      "list": [
+        {
+          "result": "89 eur",
+          "measure": {
+            "eur": "89"
+          },
+          "unit": "eur"
+        },
+        {
+          "result": "120 eur",
+          "measure": {
+            "eur": "120"
+          },
+          "unit": "eur"
+        },
+        {
+          "result": "64 eur",
+          "measure": {
+            "eur": "64"
+          },
+          "unit": "eur"
+        }
+      ]
+    },
+    "newest": {
+      "vetoed": false,
+      "rule_type": "menu_item",
+      "result": "menu.2",
+      "row": {
+        "spec": "menu_item",
+        "effective": "",
+        "instance": "menu.2",
+        "index": 1
+      }
+    },
+    "priciest": {
+      "vetoed": false,
+      "rule_type": "menu_item",
+      "result": "menu.2",
+      "row": {
+        "spec": "menu_item",
+        "effective": "",
+        "instance": "menu.2",
+        "index": 1
+      }
+    },
+    "selected": {
+      "vetoed": false,
+      "rule_type": "menu_item",
+      "result": "menu.2",
+      "row": {
+        "spec": "menu_item",
+        "effective": "",
+        "instance": "menu.2",
+        "index": 1
+      }
+    },
+    "selected_price": {
+      "vetoed": false,
+      "rule_type": "price",
+      "result": "3.5 eur",
+      "measure": {
+        "eur": "3.5"
+      },
+      "unit": "eur"
+    },
+    "size_product": {
+      "vetoed": false,
+      "rule_type": "size",
+      "result": "2",
+      "number": "2"
+    },
+    "top_two": {
+      "vetoed": false,
+      "rule_type": "menu_item list",
+      "result": "menu.1, menu.2",
+      "list": [
+        {
+          "result": "menu.1",
+          "row": {
+            "spec": "menu_item",
+            "effective": "",
+            "instance": "menu.1",
+            "index": 0
+          }
+        },
+        {
+          "result": "menu.2",
+          "row": {
+            "spec": "menu_item",
+            "effective": "",
+            "instance": "menu.2",
+            "index": 1
+          }
+        }
+      ]
+    },
+    "total": {
+      "vetoed": false,
+      "rule_type": "price",
+      "result": "6 eur",
+      "measure": {
+        "eur": "6"
+      }
+    }
+  },
+  "rows": [
+    {
+      "spec": "menu_item",
+      "effective": "",
+      "data": {
+        "drink": {
+          "vetoed": false,
+          "rule_type": "drink",
+          "result": {
+            "result": "espresso",
+            "text": "espresso"
+          }
+        },
+        "price": {
+          "vetoed": false,
+          "rule_type": "price",
+          "result": {
+            "result": "2.5 eur",
+            "measure": {
+              "eur": "2.5"
+            },
+            "unit": "eur"
+          }
+        },
+        "size": {
+          "vetoed": false,
+          "rule_type": "size",
+          "result": {
+            "result": "1",
+            "number": "1"
+          }
+        }
+      },
+      "rules": {}
+    },
+    {
+      "spec": "menu_item",
+      "effective": "",
+      "data": {
+        "drink": {
+          "vetoed": false,
+          "rule_type": "drink",
+          "result": {
+            "result": "latte",
+            "text": "latte"
+          }
+        },
+        "price": {
+          "vetoed": false,
+          "rule_type": "price",
+          "result": {
+            "result": "3.5 eur",
+            "measure": {
+              "eur": "3.5"
+            },
+            "unit": "eur"
+          }
+        },
+        "size": {
+          "vetoed": false,
+          "rule_type": "size",
+          "result": {
+            "result": "2",
+            "number": "2"
+          }
+        }
+      },
+      "rules": {}
+    },
+    {
+      "spec": "menu_item",
+      "effective": "",
+      "data": {
+        "drink": {
+          "vetoed": false,
+          "rule_type": "drink",
+          "result": {
+            "result": "mocha",
+            "text": "mocha"
+          }
+        },
+        "price": {
+          "vetoed": false,
+          "rule_type": "price",
+          "result": {
+            "result": "4 eur",
+            "measure": {
+              "eur": "4"
+            }
+          }
+        },
+        "size": {
+          "vetoed": false,
+          "rule_type": "size",
+          "result": {
+            "result": "2",
+            "number": "2"
+          }
+        }
+      },
+      "rules": {}
+    }
+  ]
+}

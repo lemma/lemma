@@ -1,5 +1,5 @@
-use lemma::{DateGranularity, DateTimeValue};
-use std::collections::HashMap;
+use indexmap::IndexMap;
+use lemma::{DateGranularity, DateTimeValue, EvaluateDataValue};
 use std::path::PathBuf;
 
 pub struct Fixture {
@@ -22,16 +22,16 @@ pub fn effective() -> DateTimeValue {
     }
 }
 
-fn shipping_inputs() -> HashMap<String, String> {
-    HashMap::from([
+fn shipping_inputs() -> IndexMap<String, EvaluateDataValue> {
+    IndexMap::from([
         ("weight".into(), "3".into()),
         ("destination".into(), "domestic".into()),
         ("is_member".into(), "false".into()),
     ])
 }
 
-fn pricing_inputs() -> HashMap<String, String> {
-    HashMap::from([
+fn pricing_inputs() -> IndexMap<String, EvaluateDataValue> {
+    IndexMap::from([
         ("product_type".into(), "premium".into()),
         ("quantity".into(), "25".into()),
         ("unit_price".into(), "100".into()),
@@ -43,8 +43,8 @@ fn pricing_inputs() -> HashMap<String, String> {
     ])
 }
 
-fn order_pipeline_inputs() -> HashMap<String, String> {
-    HashMap::from([
+fn order_pipeline_inputs() -> IndexMap<String, EvaluateDataValue> {
+    IndexMap::from([
         ("customer_tier".into(), "gold".into()),
         ("payment_method".into(), "credit".into()),
         ("shipping_zone".into(), "national".into()),
@@ -63,7 +63,7 @@ fn order_pipeline_inputs() -> HashMap<String, String> {
 }
 
 impl Fixture {
-    pub fn inputs(&self) -> HashMap<String, String> {
+    pub fn inputs(&self) -> IndexMap<String, EvaluateDataValue> {
         match self.spec_name {
             "bench_shipping" => shipping_inputs(),
             "bench_pricing" => pricing_inputs(),

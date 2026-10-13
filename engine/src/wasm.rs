@@ -1,5 +1,5 @@
 use crate::error::EngineError;
-use crate::{Engine, Error, ResourceLimits, SourceType};
+use crate::{Engine, Error, EvaluateDataValue, ResourceLimits, SourceType};
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -69,18 +69,18 @@ impl WasmEngine {
     /// Evaluate spec. Returns [`crate::evaluation::Response`] as a JS object. Throws on planning/runtime error.
     ///
     /// Accepts an options object: `{ spec, repository?, effective?, data?, rules?, explain? }`.
-    #[wasm_bindgen(js_name = run)]
-    pub fn run(&self, options: JsValue) -> Result<JsValue, JsValue> {
+    #[wasm_bindgen(js_name = evaluate)]
+    pub fn evaluate(&self, options: JsValue) -> Result<JsValue, JsValue> {
         let data_js = js_sys::Reflect::get(&options, &JsValue::from_str("data"))
             .unwrap_or(JsValue::UNDEFINED);
 
-        let opts: RunOptions = serde_wasm_bindgen::from_value(options)
-            .map_err(|e| js_err(format!("invalid run options: {e}")))?;
+        let opts: EvaluateOptions = serde_wasm_bindgen::from_value(options)
+            .map_err(|e| js_err(format!("invalid evaluate options: {e}")))?;
 
         let effective_dt =
             crate::resolve_effective(opts.effective.as_deref()).map_err(|e| error_to_js(&e))?;
 
-        let data = parse_run_data_js(&data_js).map_err(js_err)?;
+        let data = parse_evaluate_data_js(&data_js).map_err(|e| error_to_js(&e))?;
 
         let repo = opts
             .repository
@@ -88,11 +88,12 @@ impl WasmEngine {
             .map(str::trim)
             .filter(|s| !s.is_empty());
 
-        let response_rules = crate::resolve_run_rules(&opts.rules).map_err(js_err)?;
+        let response_rules =
+            crate::resolve_evaluate_rules(&opts.rules).map_err(|e| error_to_js(&e))?;
 
         let response = self
             .engine
-            .run(
+            .evaluate(
                 repo,
                 &opts.spec,
                 Some(&effective_dt),
@@ -105,10 +106,16 @@ impl WasmEngine {
         serialize_engine_json(&crate::api::Response::from(&response))
     }
 
+    /// Deprecated alias of [`Engine::evaluate`].
+    #[wasm_bindgen(js_name = run)]
+    pub fn run(&self, options: JsValue) -> Result<JsValue, JsValue> {
+        self.evaluate(options)
+    }
+
     /// Catalog of loaded repositories and specs (metadata only, no source).
-    #[wasm_bindgen(js_name = list)]
-    pub fn list_wasm(&self) -> Result<JsValue, JsValue> {
-        let repos = self.engine.list();
+    #[wasm_bindgen(js_name = specs)]
+    pub fn specs_wasm(&self) -> Result<JsValue, JsValue> {
+        let repos = self.engine.specs();
         serialize_engine_json(&repos)
     }
 
@@ -139,7 +146,7 @@ impl WasmEngine {
             .engine
             .show(repo, spec, Some(&effective_dt))
             .map_err(|e| error_to_js(&e))?;
-        serialize_engine_json(&crate::api::Show::from(&view))
+        serialize_engine_json(&crate::api::show_document(&self.engine, &view))
     }
 
     /// Formatted canonical Lemma source. Omit `spec` for whole-repository text.
@@ -243,6 +250,12 @@ impl WasmEngine {
     pub fn quality_wasm(&self) -> Result<JsValue, JsValue> {
         serialize_engine_json(&self.engine.quality())
     }
+
+    /// Semver of the loaded WASM build (e.g. `"0.9.12"`).
+    #[wasm_bindgen(getter)]
+    pub fn version(&self) -> String {
+        env!("CARGO_PKG_VERSION").to_string()
+    }
 }
 
 fn parse_repo_and_effective(
@@ -261,7 +274,7 @@ fn parse_repo_and_effective(
 }
 
 #[derive(Deserialize)]
-struct RunOptions {
+struct EvaluateOptions {
     spec: String,
     repository: Option<String>,
     effective: Option<String>,
@@ -269,101 +282,142 @@ struct RunOptions {
     explain: Option<bool>,
 }
 
-/// Convert npm `data` object to overlay strings for [`Engine::run`].
-///
-/// Reads the plain JS object directly so `bigint` and digit strings reach Rust
-/// without `serde_json::Value` (which cannot hold BigInt above `u64`).
-fn parse_run_data_js(data: &JsValue) -> Result<HashMap<String, String>, String> {
+fn js_object_entries(obj: &js_sys::Object) -> Vec<(String, JsValue)> {
+    js_sys::Object::entries(obj)
+        .iter()
+        .map(|entry| {
+            let pair = js_sys::Array::from(&entry);
+            let key = pair
+                .get(0)
+                .as_string()
+                .expect("BUG: Object.entries keys are always strings");
+            (key, pair.get(1))
+        })
+        .collect()
+}
+
+/// Convert npm `data` object to a [`EvaluateDataValue`] tree for [`Engine::evaluate`].
+fn parse_evaluate_data_js(data: &JsValue) -> Result<IndexMap<String, EvaluateDataValue>, Error> {
     if data.is_undefined() || data.is_null() {
-        return Ok(HashMap::new());
+        return Ok(IndexMap::new());
     }
-    if js_sys::Array::is_array(data) {
-        return Err("data must be a plain object".to_string());
+    let obj = match data.dyn_ref::<js_sys::Object>() {
+        Some(obj) if !js_sys::Array::is_array(data) => obj,
+        _ => {
+            return Err(Error::request(
+                "data must be a plain object",
+                None::<String>,
+            ))
+        }
+    };
+    let mut entries = Vec::new();
+    for (key, value) in js_object_entries(obj) {
+        let parsed = js_value_to_evaluate_data(&value)
+            .map_err(|e| crate::attribute_evaluate_data_error(e, &key))?;
+        if let Some(parsed) = parsed {
+            entries.push((key, parsed));
+        }
     }
-    let obj = data
-        .dyn_ref::<js_sys::Object>()
-        .ok_or_else(|| "data must be a plain object".to_string())?;
-    let entries = js_sys::Object::entries(obj);
-    let mut out = HashMap::with_capacity(entries.length() as usize);
-    for entry in entries.iter() {
-        let pair = js_sys::Array::from(&entry);
-        let key = pair
-            .get(0)
-            .as_string()
-            .ok_or_else(|| "data keys must be strings".to_string())?;
-        let value = pair.get(1);
-        out.insert(key.clone(), run_data_overlay_string_from_js(&key, &value)?);
-    }
-    Ok(out)
+    crate::evaluate_data_from_entries(entries)
 }
 
-fn js_magnitude_to_decimal_string(value: &JsValue) -> Result<String, String> {
-    if let Some(s) = value.as_string() {
-        return Ok(s);
-    }
-    if value.is_bigint() {
-        let bigint = js_sys::BigInt::new(value).map_err(|e| js_value_message(&e))?;
-        let digits = bigint
+fn js_bigint_to_decimal_string(value: &JsValue) -> String {
+    let bigint = js_sys::BigInt::new(value).expect("BUG: is_bigint value must convert to BigInt");
+    String::from(
+        bigint
             .to_string(10)
-            .map_err(|e| format!("bigint toString failed: {e:?}"))?;
-        return Ok(String::from(digits));
-    }
-    if js_sys::Number::is_safe_integer(value) {
-        let n = value.unchecked_into_f64() as i64;
-        return Ok(n.to_string());
-    }
-    if value.as_f64().is_some() {
-        return Err("decimal values must be passed as strings to preserve exactness".to_string());
-    }
-    Err("data magnitude must be a string, bigint, or safe integer".to_string())
+            .expect("BUG: BigInt.toString(10) cannot fail"),
+    )
 }
 
-fn run_data_overlay_string_from_js(key: &str, value: &JsValue) -> Result<String, String> {
-    if let Some(s) = value.as_string() {
-        return Ok(s);
+enum JsParent {
+    Root,
+    ListItem(usize),
+    ObjectEntry,
+}
+
+enum JsTask {
+    Visit { value: JsValue, parent: JsParent },
+    CollectList { len: usize },
+    CollectMap { keys: Vec<String> },
+}
+
+fn js_value_to_evaluate_data(value: &JsValue) -> Result<Option<EvaluateDataValue>, Error> {
+    let mut tasks = vec![JsTask::Visit {
+        value: value.clone(),
+        parent: JsParent::Root,
+    }];
+    let mut converted: Vec<Option<EvaluateDataValue>> = Vec::new();
+    while let Some(task) = tasks.pop() {
+        match task {
+            JsTask::Visit { value, parent } => {
+                if value.is_null() || value.is_undefined() {
+                    if let JsParent::ListItem(index) = parent {
+                        return Err(crate::evaluate_data_null_list_item(index + 1));
+                    }
+                    converted.push(None);
+                } else if let Some(s) = value.as_string() {
+                    converted.push(Some(EvaluateDataValue::Literal(s)));
+                } else if let Some(b) = value.as_bool() {
+                    converted.push(Some(EvaluateDataValue::Boolean(b)));
+                } else if value.is_bigint() {
+                    converted.push(Some(EvaluateDataValue::Literal(
+                        js_bigint_to_decimal_string(&value),
+                    )));
+                } else if let Some(n) = value.as_f64() {
+                    return Err(Error::request(
+                        format!("pass as string: \"{n}\""),
+                        Some("JS number is always a double; use a string or bigint"),
+                    ));
+                } else if js_sys::Array::is_array(&value) {
+                    let items: Vec<JsValue> = js_sys::Array::from(&value).iter().collect();
+                    tasks.push(JsTask::CollectList { len: items.len() });
+                    for (index, item) in items.into_iter().enumerate().rev() {
+                        tasks.push(JsTask::Visit {
+                            value: item,
+                            parent: JsParent::ListItem(index),
+                        });
+                    }
+                } else {
+                    let obj = value.dyn_ref::<js_sys::Object>().ok_or_else(|| {
+                        Error::request(
+                            "data value must be a string, boolean, bigint, object, or array",
+                            None::<String>,
+                        )
+                    })?;
+                    let entries = js_object_entries(obj);
+                    let keys = entries.iter().map(|(key, _)| key.clone()).collect();
+                    tasks.push(JsTask::CollectMap { keys });
+                    for (_, child) in entries.into_iter().rev() {
+                        tasks.push(JsTask::Visit {
+                            value: child,
+                            parent: JsParent::ObjectEntry,
+                        });
+                    }
+                }
+            }
+            JsTask::CollectList { len } => {
+                let items = converted
+                    .split_off(converted.len() - len)
+                    .into_iter()
+                    .map(|item| item.expect("BUG: null list items are rejected when visited"))
+                    .collect();
+                converted.push(Some(EvaluateDataValue::List(items)));
+            }
+            JsTask::CollectMap { keys } => {
+                let children = converted.split_off(converted.len() - keys.len());
+                let entries: Vec<(String, EvaluateDataValue)> = keys
+                    .into_iter()
+                    .zip(children)
+                    .filter_map(|(key, child)| child.map(|child| (key, child)))
+                    .collect();
+                converted.push(Some(crate::evaluate_data_map_from_entries(entries)?));
+            }
+        }
     }
-    if let Some(b) = value.as_bool() {
-        return Ok(b.to_string());
-    }
-    if value.is_bigint() || js_sys::Number::is_safe_integer(value) {
-        return js_magnitude_to_decimal_string(value);
-    }
-    if value.as_f64().is_some() {
-        return Err("decimal values must be passed as strings to preserve exactness".to_string());
-    }
-    if value.is_null() || value.is_undefined() {
-        return Err("data value must not be null".to_string());
-    }
-    if js_sys::Array::is_array(value) {
-        return Err("data value must not be an array".to_string());
-    }
-    let obj = value.dyn_ref::<js_sys::Object>().ok_or_else(|| {
-        "data value must be a string, boolean, bigint, safe integer, or unit map".to_string()
-    })?;
-    let entries = js_sys::Object::entries(obj);
-    if entries.length() == 0 {
-        return Err("data value object must not be empty".to_string());
-    }
-    let has_value = js_sys::Reflect::has(obj, &JsValue::from_str("value")).unwrap_or(false);
-    let has_unit = js_sys::Reflect::has(obj, &JsValue::from_str("unit")).unwrap_or(false);
-    if entries.length() == 2 && has_value && has_unit {
-        return Err(
-            "the {value, unit} object shape is not supported; use a unit map like {\"eur\": \"84\"}"
-                .to_string(),
-        );
-    }
-    if entries.length() != 1 {
-        return Err(format!(
-            "data value '{key}' must be a convenience string for run"
-        ));
-    }
-    let pair = js_sys::Array::from(&entries.get(0));
-    let unit = pair
-        .get(0)
-        .as_string()
-        .ok_or_else(|| "data value object must be a unit map with string magnitudes".to_string())?;
-    let mag_text = js_magnitude_to_decimal_string(&pair.get(1))?;
-    Ok(format!("{mag_text} {unit}"))
+    Ok(converted
+        .pop()
+        .expect("BUG: data value conversion yields exactly one result"))
 }
 
 /// Same JSON as CLI/HTTP.

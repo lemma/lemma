@@ -1,7 +1,10 @@
 //! Explain value parity and folded cross-rule product embeds.
 
-use lemma::{DateTimeValue, Engine};
-use std::collections::HashMap;
+#[path = "support/explanation_json_walk.rs"]
+mod explanation_support;
+
+use indexmap::IndexMap;
+use lemma::{DateTimeValue, Engine, EvaluateDataValue};
 
 fn load(code: &str) -> Engine {
     let mut engine = Engine::new();
@@ -14,38 +17,18 @@ fn load(code: &str) -> Engine {
 fn run(
     engine: &Engine,
     spec: &str,
-    data: HashMap<String, String>,
+    data: IndexMap<String, EvaluateDataValue>,
     rules: Option<&[String]>,
     explain: bool,
 ) -> lemma::Response {
     let now = DateTimeValue::now();
     engine
-        .run(None, spec, Some(&now), data, rules, explain)
+        .evaluate(None, spec, Some(&now), data, rules, explain)
         .expect("evaluation must succeed")
 }
 
 fn explanation_tree_rule_nodes(value: &serde_json::Value) -> Vec<&serde_json::Value> {
-    let mut found = Vec::new();
-    fn walk<'a>(value: &'a serde_json::Value, found: &mut Vec<&'a serde_json::Value>) {
-        match value {
-            serde_json::Value::Object(obj) => {
-                if obj.get("type").and_then(|t| t.as_str()) == Some("rule") {
-                    found.push(value);
-                }
-                for child in obj.values() {
-                    walk(child, found);
-                }
-            }
-            serde_json::Value::Array(arr) => {
-                for child in arr {
-                    walk(child, found);
-                }
-            }
-            _ => {}
-        }
-    }
-    walk(value, &mut found);
-    found
+    explanation_support::json_explained_rules(value)
 }
 
 /// Same spec/data/rules: response-rule values identical for explain true vs false;
@@ -61,7 +44,7 @@ rule line: price * qty
 rule total: line
 "#,
     );
-    let data = HashMap::from([("price".into(), "100".into()), ("qty".into(), "3".into())]);
+    let data = IndexMap::from([("price".into(), "100".into()), ("qty".into(), "3".into())]);
     let rules = ["total".to_string()];
 
     let without = run(&engine, "parity_oracle", data.clone(), Some(&rules), false);
@@ -102,7 +85,7 @@ rule sqrt_product: sqrt_two * sqrt_two
     let values_only = run(
         &engine,
         "fold_embed_oracle",
-        HashMap::new(),
+        IndexMap::new(),
         Some(&rules),
         false,
     );
@@ -121,7 +104,7 @@ rule sqrt_product: sqrt_two * sqrt_two
     let response = run(
         &engine,
         "fold_embed_oracle",
-        HashMap::new(),
+        IndexMap::new(),
         Some(&rules),
         true,
     );
@@ -139,17 +122,35 @@ rule sqrt_product: sqrt_two * sqrt_two
         .as_ref()
         .expect("sqrt_product explanation");
     let json = serde_json::to_value(explanation).expect("serialize explanation");
-    let rule_nodes = explanation_tree_rule_nodes(&json);
-    let sqrt_two_embeds: Vec<_> = rule_nodes
+    let sqrt_two_refs: Vec<_> = json["children"]
+        .as_array()
+        .expect("children")
         .iter()
-        .filter(|node| node.get("name").and_then(|r| r.as_str()) == Some("sqrt_two"))
+        .flat_map(|child| {
+            child["operands"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter(|op| {
+                    op.get("type").and_then(|t| t.as_str()) == Some("rule_ref")
+                        && op.get("name").and_then(|r| r.as_str()) == Some("sqrt_two")
+                })
+        })
         .collect();
     assert_eq!(
-        sqrt_two_embeds.len(),
+        sqrt_two_refs.len(),
         2,
-        "expected two sqrt_two rule references in explanation, got {json}"
+        "expected two sqrt_two rule_ref operands in explanation, got {json}"
     );
-    for embed in &sqrt_two_embeds {
+    assert_eq!(
+        explanation_tree_rule_nodes(&json)
+            .iter()
+            .filter(|node| node.get("name").and_then(|r| r.as_str()) == Some("sqrt_two"))
+            .count(),
+        1,
+        "shared rules table narrates sqrt_two once, got {json}"
+    );
+    for embed in &sqrt_two_refs {
         let result = embed
             .get("result")
             .and_then(|r| r.as_str())
@@ -175,7 +176,7 @@ rule out: 1 unless true then 2
     let response = run(
         &engine,
         "static_true_unless_oracle",
-        HashMap::new(),
+        IndexMap::new(),
         Some(&rules),
         true,
     );
@@ -203,7 +204,7 @@ rule out: 1 unless false then 2
     let response = run(
         &engine,
         "static_false_unless_oracle",
-        HashMap::new(),
+        IndexMap::new(),
         Some(&rules),
         true,
     );
@@ -233,7 +234,7 @@ rule c: b
     let response = run(
         &engine,
         "multi_hop_oracle",
-        HashMap::new(),
+        IndexMap::new(),
         Some(&rules),
         true,
     );
@@ -252,12 +253,12 @@ rule c: b
         .and_then(|c| c.as_array())
         .expect("b embed children");
     let a_in_b = b_children.iter().any(|child| {
-        child.get("type").and_then(|t| t.as_str()) == Some("rule")
+        child.get("type").and_then(|t| t.as_str()) == Some("rule_ref")
             && child.get("name").and_then(|r| r.as_str()) == Some("a")
     });
     assert!(
         a_in_b,
-        "b embed must nest an a rule child, got {b_embeds:?}"
+        "b embed must nest an a rule_ref child, got {b_embeds:?}"
     );
 }
 
@@ -274,7 +275,7 @@ rule out: 1 unless outer then inner_choice
 "#,
     );
     let rules = ["out".to_string()];
-    let data = HashMap::from([
+    let data = IndexMap::from([
         ("outer".into(), "true".into()),
         ("inner".into(), "true".into()),
     ]);
@@ -320,7 +321,7 @@ rule as_kg: (1 / zero) as kg
     let response = run(
         &engine,
         "veto_conversion_oracle",
-        HashMap::new(),
+        IndexMap::new(),
         Some(&rules),
         true,
     );

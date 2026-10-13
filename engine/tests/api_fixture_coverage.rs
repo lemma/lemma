@@ -130,29 +130,44 @@ fn coverage_check_fails_when_a_variant_has_no_fixture() {
 }
 
 #[test]
-fn show_minimal_fixture_deserializes_as_lemma_show() {
+fn show_minimal_fixture_validates_as_show() {
     let path = fixtures_dir().join("show_minimal.json");
     let text = std::fs::read_to_string(&path).expect("read show_minimal.json");
-    let show: lemma::api::Show = serde_json::from_str(&text)
-        .unwrap_or_else(|e| panic!("fixture must match lemma::api::Show: {e}\nfixture:\n{text}"));
-    assert_eq!(show.spec, "sample");
+    let show: serde_json::Value = serde_json::from_str(&text).expect("show_minimal.json JSON");
+    let schema = load_schema();
+    let rooted = serde_json::json!({
+        "$schema": schema["$schema"],
+        "$defs": schema["$defs"],
+        "$ref": "#/$defs/Show",
+    });
+    let validator = jsonschema::validator_for(&rooted).expect("api.v1.json compiles");
+    let errors: Vec<String> = validator
+        .iter_errors(&show)
+        .map(|error| format!("{}: {error}", error.instance_path()))
+        .collect();
+    assert!(
+        errors.is_empty(),
+        "show_minimal.json:\n{}",
+        errors.join("\n")
+    );
+    assert_eq!(show["title"], "sample");
 }
 
 /// Same Rust field must not have two TypeScript declarations.
 #[test]
-fn lemma_d_ts_effective_from_types_agree_on_show_and_listed_spec() {
+fn lemma_d_ts_effective_from_types_agree_on_show_and_spec_version() {
     let path = workspace_root().join("engine/packages/npm/lemma.d.ts");
     let text = std::fs::read_to_string(&path).expect("read lemma.d.ts");
 
-    let show_type = interface_field_type(&text, "Show", "effective_from")
-        .expect("Show.effective_from must be declared in lemma.d.ts");
-    let listed_type = interface_field_type(&text, "ListedSpec", "effective_from")
-        .expect("ListedSpec.effective_from must be declared in lemma.d.ts");
+    let show_type = interface_field_type(&text, "Show", "\"x-lemma-effective-from\"")
+        .expect("Show[\"x-lemma-effective-from\"] must be declared in lemma.d.ts");
+    let version_type = interface_field_type(&text, "SpecVersion", "effective_from")
+        .expect("SpecVersion.effective_from must be declared in lemma.d.ts");
 
     assert_eq!(
-        show_type, listed_type,
-        "Show.effective_from and ListedSpec.effective_from must be the same API type; \
-         got Show={show_type:?} ListedSpec={listed_type:?}"
+        show_type, version_type,
+        "Show[\"x-lemma-effective-from\"] and SpecVersion.effective_from must be the same API type; \
+         got Show={show_type:?} SpecVersion={version_type:?}"
     );
 }
 

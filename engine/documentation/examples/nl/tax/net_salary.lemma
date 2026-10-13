@@ -55,7 +55,6 @@ data payroll_tax_credit: boolean
   -> suggest true
   -> help "Apply payroll tax credit? Choose yes if this is your only or main income. May only be applied at one employer or benefits agency."
 
-
 rule periods_per_year:
   12
   unless pay_period is "4 week"  then 13
@@ -82,7 +81,8 @@ rule bracket_1_tax:
 
 rule bracket_2_income:
   0 eur
-  unless taxable_annual_salary > 38_883 eur and taxable_annual_salary <= 78_426 eur
+  unless taxable_annual_salary > 38_883 eur
+    and taxable_annual_salary <= 78_426 eur
     then taxable_annual_salary - 38_883 eur
   unless taxable_annual_salary > 78_426 eur
     then 39_543 eur
@@ -103,21 +103,32 @@ rule payroll_tax_before_credits:
 
 rule general_tax_credit:
   3_115 eur
-  unless taxable_annual_salary > 29_736 eur and taxable_annual_salary <= 78_426 eur
+  unless taxable_annual_salary > 29_736 eur
+    and taxable_annual_salary <= 78_426 eur
     then 3_115 eur - (taxable_annual_salary - 29_736 eur) * 6.4%
-  unless taxable_annual_salary > 78_426 eur then 0 eur
+  unless taxable_annual_salary > 78_426 eur
+    then 0 eur
 
 rule employment_tax_credit:
   0 eur
-  unless income_source is "employment" and taxable_annual_salary > 0 eur and taxable_annual_salary <= 11_965 eur
+  unless income_source is "employment"
+    and taxable_annual_salary > 0 eur
+    and taxable_annual_salary <= 11_965 eur
     then taxable_annual_salary * 8.324%
-  unless income_source is "employment" and taxable_annual_salary > 11_965 eur and taxable_annual_salary <= 25_845 eur
+  unless income_source is "employment"
+    and taxable_annual_salary > 11_965 eur
+    and taxable_annual_salary <= 25_845 eur
     then 996 eur + (taxable_annual_salary - 11_965 eur) * 31.009%
-  unless income_source is "employment" and taxable_annual_salary > 25_845 eur and taxable_annual_salary <= 45_592 eur
+  unless income_source is "employment"
+    and taxable_annual_salary > 25_845 eur
+    and taxable_annual_salary <= 45_592 eur
     then 5_300 eur + (taxable_annual_salary - 25_845 eur) * 1.95%
-  unless income_source is "employment" and taxable_annual_salary > 45_592 eur and taxable_annual_salary <= 132_920 eur
+  unless income_source is "employment"
+    and taxable_annual_salary > 45_592 eur
+    and taxable_annual_salary <= 132_920 eur
     then 5_685 eur - (taxable_annual_salary - 45_592 eur) * 6.51%
-  unless income_source is "employment" and taxable_annual_salary > 132_920 eur
+  unless income_source is "employment"
+    and taxable_annual_salary > 132_920 eur
     then 0 eur
 
 rule total_tax_credit:
@@ -131,7 +142,8 @@ rule payroll_tax_per_year:
     then 0 eur
 
 rule net_annual_salary:
-  gross_annual_salary - pension_contribution_per_year
+  gross_annual_salary
+  - pension_contribution_per_year
   - payroll_tax_per_year
 
 rule net_salary:

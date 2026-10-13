@@ -1,5 +1,6 @@
 //! Lemma LSP: library for native (stdio) and WASM (browser streams) builds.
 
+pub mod completion;
 pub mod diagnostics;
 pub mod semantic_tokens;
 pub mod server;

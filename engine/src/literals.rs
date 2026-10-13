@@ -14,11 +14,11 @@ use crate::computation::rational::{self, RationalInteger};
 // Dimensional decomposition type
 // -----------------------------------------------------------------------------
 
-/// A dimensional decomposition vector. Maps measure-type names to integer exponents.
+/// A dimensional decomposition vector. Maps base dimensions to integer exponents.
 /// For example, velocity `{length: 1, duration: -1}` or acceleration `{length: 1, duration: -2}`.
 /// An empty map indicates a base measure (no decomposition) until the decomposition pass runs,
 /// after which every measure carries a non-empty vector.
-pub type BaseMeasureVector = BTreeMap<String, i32>;
+pub type BaseMeasureVector = BTreeMap<crate::planning::semantics::Dimension, i32>;
 
 // -----------------------------------------------------------------------------
 // Unit tables for Measure and Ratio types
@@ -410,21 +410,38 @@ impl fmt::Display for BooleanValue {
     }
 }
 
+/// UTC offset in signed whole minutes; `|offset_minutes|` is at most 23:59.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct TimezoneValue {
-    pub offset_hours: i8,
-    pub offset_minutes: u8,
+    pub offset_minutes: i16,
+}
+
+const MAX_TIMEZONE_OFFSET_MINUTES: i16 = 23 * 60 + 59;
+
+impl TimezoneValue {
+    /// `None` when `seconds` is not a whole number of minutes within ±23:59.
+    pub fn from_offset_seconds(seconds: i32) -> Option<Self> {
+        if seconds % 60 != 0 {
+            return None;
+        }
+        let offset_minutes = i16::try_from(seconds / 60).ok()?;
+        (offset_minutes.unsigned_abs() <= MAX_TIMEZONE_OFFSET_MINUTES.unsigned_abs())
+            .then_some(Self { offset_minutes })
+    }
+
+    pub fn offset_seconds(&self) -> i32 {
+        i32::from(self.offset_minutes) * 60
+    }
 }
 
 impl fmt::Display for TimezoneValue {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        if self.offset_hours == 0 && self.offset_minutes == 0 {
-            write!(f, "Z")
-        } else {
-            let sign = if self.offset_hours >= 0 { "+" } else { "-" };
-            let hour = self.offset_hours.abs();
-            write!(f, "{}{:02}:{:02}", sign, hour, self.offset_minutes)
+        if self.offset_minutes == 0 {
+            return write!(f, "Z");
         }
+        let sign = if self.offset_minutes > 0 { "+" } else { "-" };
+        let magnitude = self.offset_minutes.unsigned_abs();
+        write!(f, "{}{:02}:{:02}", sign, magnitude / 60, magnitude % 60)
     }
 }
 
@@ -447,33 +464,28 @@ impl FromStr for TimezoneValue {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         let trimmed = s.trim();
         if trimmed == "Z" || trimmed == "z" {
-            return Ok(Self {
-                offset_hours: 0,
-                offset_minutes: 0,
-            });
+            return Ok(Self { offset_minutes: 0 });
         }
         if trimmed.len() == 6
             && (trimmed.starts_with('+') || trimmed.starts_with('-'))
             && trimmed.as_bytes()[3] == b':'
         {
-            let offset_hours: i8 = trimmed[1..3]
+            let hours: i16 = trimmed[1..3]
                 .parse()
                 .map_err(|_| format!("Invalid timezone format: '{s}'"))?;
-            let offset_minutes: u8 = trimmed[4..6]
+            let minutes: i16 = trimmed[4..6]
                 .parse()
                 .map_err(|_| format!("Invalid timezone format: '{s}'"))?;
-            if offset_hours > 23 || offset_minutes >= 60 {
+            if !(0..=23).contains(&hours) || !(0..60).contains(&minutes) {
                 return Err(format!("Invalid timezone format: '{s}'"));
             }
-            let signed_hours = if trimmed.starts_with('-') {
-                -offset_hours
+            let magnitude = hours * 60 + minutes;
+            let offset_minutes = if trimmed.starts_with('-') {
+                -magnitude
             } else {
-                offset_hours
+                magnitude
             };
-            return Ok(Self {
-                offset_hours: signed_hours,
-                offset_minutes,
-            });
+            return Ok(Self { offset_minutes });
         }
         Err(format!("Invalid timezone format: '{s}'"))
     }
@@ -619,10 +631,9 @@ impl DateTimeValue {
             minute: now.time().minute(),
             second: now.time().second(),
             microsecond: now.time().nanosecond() / 1000 % 1_000_000,
-            timezone: Some(TimezoneValue {
-                offset_hours: (offset_secs / 3600) as i8,
-                offset_minutes: ((offset_secs.abs() % 3600) / 60) as u8,
-            }),
+            timezone: Some(TimezoneValue::from_offset_seconds(offset_secs).expect(
+                "BUG: current local UTC offsets are whole minutes within ±23:59 since 1972",
+            )),
             granularity: DateGranularity::DateTime,
         }
     }
@@ -694,7 +705,7 @@ pub mod decimal_binary_serde {
     }
 
     pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Decimal, D::Error> {
-        let (mantissa, scale) = <(i128, u32)>::deserialize(deserializer)?;
+        let (mantissa, scale): (i128, u32) = Deserialize::deserialize(deserializer)?;
         Decimal::try_from_i128_with_scale(mantissa, scale).map_err(serde::de::Error::custom)
     }
 }
@@ -766,7 +777,8 @@ impl std::str::FromStr for DateTimeValue {
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         if let Ok(dt) = s.parse::<chrono::DateTime<chrono::FixedOffset>>() {
-            let offset = dt.offset().local_minus_utc();
+            let timezone = TimezoneValue::from_offset_seconds(dt.offset().local_minus_utc())
+                .ok_or_else(|| format!("Invalid timezone offset in date: '{}'", s))?;
             let microsecond = dt.nanosecond() / 1000 % 1_000_000;
             return Ok(DateTimeValue {
                 year: dt.year(),
@@ -776,10 +788,7 @@ impl std::str::FromStr for DateTimeValue {
                 minute: dt.minute(),
                 second: dt.second(),
                 microsecond,
-                timezone: Some(TimezoneValue {
-                    offset_hours: (offset / 3600) as i8,
-                    offset_minutes: ((offset.abs() % 3600) / 60) as u8,
-                }),
+                timezone: Some(timezone),
                 granularity: DateGranularity::DateTime,
             });
         }
@@ -854,13 +863,14 @@ impl std::str::FromStr for TimeValue {
         let (time_text, timezone) = if trimmed.ends_with('Z') || trimmed.ends_with('z') {
             (
                 &trimmed[..trimmed.len() - 1],
-                Some(TimezoneValue {
-                    offset_hours: 0,
-                    offset_minutes: 0,
-                }),
+                Some(TimezoneValue { offset_minutes: 0 }),
             )
-        } else if trimmed.len() > 1 {
-            if let Some(sign_index) = trimmed[1..].rfind(['+', '-']).map(|index| index + 1) {
+        } else if let Some(first) = trimmed.chars().next() {
+            let after_first = first.len_utf8();
+            if let Some(sign_index) = trimmed[after_first..]
+                .rfind(['+', '-'])
+                .map(|index| index + after_first)
+            {
                 let timezone_text = &trimmed[sign_index..];
                 if timezone_text.len() == 6
                     && (timezone_text.starts_with('+') || timezone_text.starts_with('-'))
@@ -910,7 +920,7 @@ impl std::str::FromStr for TimeValue {
     }
 }
 
-/// Number literal with Lemma rules (strip _ and , separators).
+/// Number literal with Lemma rules (strip `_` separators).
 ///
 /// Fractional digit count beyond [`Decimal::MAX_SCALE`] is rejected (no silent
 /// truncate). An integer magnitude that cannot be represented is an error.
@@ -920,7 +930,7 @@ impl std::str::FromStr for NumberLiteral {
     type Err = String;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let clean = s.trim().replace(['_', ','], "");
+        let clean = s.trim().replace('_', "");
         if let Some(dot) = clean.find('.') {
             let frac = &clean[dot + 1..];
             let frac_digits = frac.chars().take_while(|c| c.is_ascii_digit()).count();
@@ -1125,8 +1135,55 @@ impl std::str::FromStr for RatioLiteral {
 
 #[cfg(test)]
 mod tests {
-    use super::BooleanValue;
+    use super::{BooleanValue, TimeValue, TimezoneValue};
     use std::str::FromStr;
+
+    #[test]
+    fn timezone_value_round_trips_every_signed_offset() {
+        for text in [
+            "-00:30", "-03:30", "-09:30", "+05:45", "+00:30", "-12:00", "+14:00",
+        ] {
+            let timezone = TimezoneValue::from_str(text).expect("valid offset");
+            assert_eq!(timezone.to_string(), text);
+        }
+        assert_eq!(TimezoneValue::from_str("+00:00").unwrap().to_string(), "Z");
+        assert_eq!(TimezoneValue::from_str("-00:00").unwrap().to_string(), "Z");
+    }
+
+    #[test]
+    fn timezone_value_orders_by_signed_offset() {
+        let ordered = [
+            "-09:30", "-03:30", "-03:00", "-00:30", "Z", "+00:30", "+05:45",
+        ]
+        .map(|text| TimezoneValue::from_str(text).expect("valid offset"));
+        for pair in ordered.windows(2) {
+            assert!(
+                pair[0] < pair[1],
+                "{} must order before {}",
+                pair[0],
+                pair[1]
+            );
+        }
+    }
+
+    #[test]
+    fn time_value_rejects_multibyte_first_char() {
+        for invalid in ["é", "é10:00", "日12:00", "é10:00+01:00", "€+01:00"] {
+            assert!(
+                TimeValue::from_str(invalid).is_err(),
+                "'{invalid}' must not parse as time"
+            );
+        }
+    }
+
+    #[test]
+    fn time_value_parses_timezone_after_ascii_time() {
+        let time = TimeValue::from_str("10:30:00+01:00").expect("valid time with offset");
+        assert_eq!(time.hour, 10);
+        assert_eq!(time.minute, 30);
+        let timezone = time.timezone.expect("offset parsed");
+        assert_eq!(timezone.offset_minutes, 60);
+    }
 
     #[test]
     fn boolean_value_rejects_accept_and_reject_strings() {

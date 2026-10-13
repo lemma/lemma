@@ -28,8 +28,8 @@ fn test_example_07_shipping_policy() {
     .unwrap();
 
     let mut cmd = cargo_bin_cmd!("lemma");
-    cmd.arg("run")
-        .arg("--prefix")
+    cmd.arg("evaluate")
+        .arg("--path")
         .arg(temp_dir.path())
         .arg("shipping_policy")
         .arg("order_total=75.00")
@@ -66,8 +66,8 @@ fn test_example_13_temporal_versioning() {
     // Under-30 threshold in 2024 is 3672 → qualifies
     let output_2024 = std::process::Command::new(env!("CARGO_BIN_EXE_lemma"))
         .args([
-            "run",
-            "--prefix",
+            "evaluate",
+            "--path",
             dir,
             "kennismigrant_aanvraag",
             "--effective",
@@ -94,8 +94,8 @@ fn test_example_13_temporal_versioning() {
     // Age 30+ threshold in 2025 is 5331 → does not qualify
     let output_2025 = std::process::Command::new(env!("CARGO_BIN_EXE_lemma"))
         .args([
-            "run",
-            "--prefix",
+            "evaluate",
+            "--path",
             dir,
             "kennismigrant_aanvraag",
             "--effective",
@@ -139,7 +139,7 @@ fn test_all_examples_parse_via_cli() {
     }
 
     let mut cmd = cargo_bin_cmd!("lemma");
-    cmd.arg("list").arg("--prefix").arg(temp_dir.path());
+    cmd.arg("specs").arg("--path").arg(temp_dir.path());
 
     cmd.assert()
         .success()

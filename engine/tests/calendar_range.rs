@@ -1,5 +1,5 @@
-use lemma::{DateGranularity, DateTimeValue, Engine, TimezoneValue};
-use std::collections::HashMap;
+use indexmap::IndexMap;
+use lemma::{DateGranularity, DateTimeValue, Engine, EvaluateDataValue, TimezoneValue};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -16,10 +16,7 @@ fn default_effective() -> DateTimeValue {
         minute: 0,
         second: 0,
         microsecond: 0,
-        timezone: Some(TimezoneValue {
-            offset_hours: 0,
-            offset_minutes: 0,
-        }),
+        timezone: Some(TimezoneValue { offset_minutes: 0 }),
         granularity: DateGranularity::DateTime,
     }
 }
@@ -28,7 +25,7 @@ fn eval_bool_with_data(
     code: &str,
     spec_name: &str,
     rule_name: &str,
-    data: HashMap<String, String>,
+    data: IndexMap<String, EvaluateDataValue>,
 ) -> bool {
     let mut engine = Engine::new();
     engine
@@ -36,7 +33,7 @@ fn eval_bool_with_data(
         .expect("Should parse and plan");
     let effective = default_effective();
     let response = engine
-        .run(
+        .evaluate(
             None,
             spec_name,
             Some(&effective),
@@ -70,11 +67,11 @@ fn eval_bool(code: &str, spec_name: &str, rule_name: &str) -> bool {
         .expect("Should parse and plan");
     let effective = default_effective();
     let response = engine
-        .run(
+        .evaluate(
             None,
             spec_name,
             Some(&effective),
-            HashMap::new(),
+            IndexMap::new(),
             Some(&[rule_name.to_string()]),
             true,
         )
@@ -150,7 +147,7 @@ fn data_default_calendar_range() {
 uses lemma units
 data band: units.calendar range -> suggest 18 year...67 year
 rule span: 30 year in band"#;
-    let mut data = HashMap::new();
+    let mut data = IndexMap::new();
     data.insert("band".to_string(), "18 year...67 year".into());
     assert!(eval_bool_with_data(code, "band", "span", data));
 }
@@ -184,11 +181,11 @@ rule shifted: (18 year...67 year) + 2 year"#;
         .expect("Should parse and plan");
     let effective = default_effective();
     let response = engine
-        .run(
+        .evaluate(
             None,
             "shift",
             Some(&effective),
-            HashMap::new(),
+            IndexMap::new(),
             Some(&["shifted".to_string()]),
             true,
         )

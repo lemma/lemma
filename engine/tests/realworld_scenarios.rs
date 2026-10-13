@@ -2,8 +2,8 @@
 //! These cover edge cases in arithmetic, veto propagation, temporal specs, ranges,
 //! compound units, and cross-spec composition.
 
-use lemma::{DateTimeValue, Engine, SourceType};
-use std::collections::HashMap;
+use indexmap::IndexMap;
+use lemma::{DateTimeValue, Engine, EvaluateDataValue, SourceType};
 use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -12,14 +12,14 @@ fn src(name: &str) -> SourceType {
     SourceType::Path(Arc::new(PathBuf::from(name)))
 }
 
-fn run_spec(engine: &Engine, spec: &str, data: &[(&str, &str)]) -> lemma::Response {
+fn evaluate_spec(engine: &Engine, spec: &str, data: &[(&str, &str)]) -> lemma::Response {
     let now = DateTimeValue::now();
-    let data_map: HashMap<String, String> = data
+    let data_map: IndexMap<String, EvaluateDataValue> = data
         .iter()
-        .map(|(k, v)| (k.to_string(), (*v).to_string()))
+        .map(|(k, v)| (k.to_string(), (*v).into()))
         .collect();
     engine
-        .run(None, spec, Some(&now), data_map, None, false)
+        .evaluate(None, spec, Some(&now), data_map, None, false)
         .unwrap()
 }
 
@@ -92,7 +92,7 @@ rule coverage_check: yes
         .unwrap();
 
     // 25-year-old non-smoker, no conditions, 100k coverage
-    let resp = run_spec(
+    let resp = evaluate_spec(
         &engine,
         "insurance_premium",
         &[
@@ -156,7 +156,7 @@ rule coverage_check: yes
         .unwrap();
 
     // 75-year-old, 600k coverage should veto
-    let resp = run_spec(
+    let resp = evaluate_spec(
         &engine,
         "insurance_premium",
         &[
@@ -202,7 +202,7 @@ rule total_interest: future_value - principal
         .unwrap();
 
     // 1000 at 10% for 3 year = 1000 * 1.1^3 = 1331
-    let resp = run_spec(
+    let resp = evaluate_spec(
         &engine,
         "compound_interest",
         &[("principal", "1000"), ("annual_rate", "10%"), ("year", "3")],
@@ -254,7 +254,7 @@ rule gross_total: net_total + tax_amount
         )])
         .unwrap();
 
-    let resp = run_spec(&engine, "invoice", &[]);
+    let resp = evaluate_spec(&engine, "invoice", &[]);
 
     // items.subtotal = 50 * 10 = 500
     // tax = 500 * 21% = 105
@@ -297,7 +297,7 @@ rule has_vat: vat_rate is not veto
         )])
         .unwrap();
 
-    let resp = run_spec(&engine, "tax_lookup", &[("country", "DE")]);
+    let resp = evaluate_spec(&engine, "tax_lookup", &[("country", "DE")]);
     let display = rule_display(&resp, "vat_rate");
     assert_eq!(display, "19%", "Germany VAT = 19%");
     assert!(!rule_vetoed(&resp, "has_vat"));
@@ -334,7 +334,7 @@ rule final_price: after_seasonal - coupon_discount * after_seasonal
     // after_member = 1000 - 0.1*1000 = 900
     // after_seasonal = 900 - 0.2*900 = 720
     // final = 720 - 0.05*720 = 684
-    let resp = run_spec(&engine, "stacked_discounts", &[("price", "1000")]);
+    let resp = evaluate_spec(&engine, "stacked_discounts", &[("price", "1000")]);
     let display = rule_display(&resp, "final_price");
     assert_eq!(display, "684", "1000 * 0.9 * 0.8 * 0.95 = 684");
 }
@@ -366,7 +366,7 @@ rule is_light: package_weight < 1 kilogram
         )])
         .unwrap();
 
-    let resp = run_spec(&engine, "logistics", &[]);
+    let resp = evaluate_spec(&engine, "logistics", &[]);
     let display = rule_display(&resp, "weight_kg");
     assert_eq!(display, "2.5 kilogram", "2500g = 2.5kg");
 
@@ -403,7 +403,7 @@ rule in_q1_2023: hire_date in 2023-01-01...2023-04-01
         )])
         .unwrap();
 
-    let resp = run_spec(&engine, "employment", &[]);
+    let resp = evaluate_spec(&engine, "employment", &[]);
 
     // 2023-03-15 is in Q1 2023 (Jan 1 - Apr 1)
     let in_q1 = rule_display(&resp, "in_q1_2023");
@@ -456,7 +456,7 @@ rule access_level: 0
         .unwrap();
 
     // Verified non-admin, 60 day, with 2FA
-    let resp = run_spec(
+    let resp = evaluate_spec(
         &engine,
         "access_control",
         &[
@@ -498,7 +498,7 @@ rule double_ratio: division_ratio * 2
         )])
         .unwrap();
 
-    let resp = run_spec(
+    let resp = evaluate_spec(
         &engine,
         "division_test",
         &[("numerator", "100"), ("denominator", "0")],
@@ -530,7 +530,7 @@ spec math_ops
 
 data value: number
 
-rule remainder: value % 7
+rule remainder: value mod 7
 rule rounded: round(value / 3)
 rule floored: floor(value / 3)
 rule ceiled: ceil(value / 3)
@@ -540,10 +540,10 @@ rule absolute: abs(0 - value)
         )])
         .unwrap();
 
-    let resp = run_spec(&engine, "math_ops", &[("value", "20")]);
+    let resp = evaluate_spec(&engine, "math_ops", &[("value", "20")]);
 
     let rem = rule_display(&resp, "remainder");
-    assert_eq!(rem, "6", "20 % 7 = 6");
+    assert_eq!(rem, "6", "20 mod 7 = 6");
 
     let rounded = rule_display(&resp, "rounded");
     assert_eq!(rounded, "7", "round(20/3) = round(6.666) = 7");
@@ -587,22 +587,22 @@ rule is_passing: score >= 60
         .unwrap();
 
     // Score of 85 should be "B"
-    let resp = run_spec(&engine, "grading", &[("score", "85")]);
+    let resp = evaluate_spec(&engine, "grading", &[("score", "85")]);
     let grade = rule_display(&resp, "grade");
     assert_eq!(grade, "B", "score 85 is in [80,90) = B");
 
     // Score of 90 should be "A" (90 is inclusive lower bound of 90...101)
-    let resp = run_spec(&engine, "grading", &[("score", "90")]);
+    let resp = evaluate_spec(&engine, "grading", &[("score", "90")]);
     let grade = rule_display(&resp, "grade");
     assert_eq!(grade, "A", "score 90 is in [90,101) = A");
 
     // Score of 59 should be "F" (below all bands)
-    let resp = run_spec(&engine, "grading", &[("score", "59")]);
+    let resp = evaluate_spec(&engine, "grading", &[("score", "59")]);
     let grade = rule_display(&resp, "grade");
     assert_eq!(grade, "F", "score 59 is below all bands = F");
 
     // Boundary: score of 70 is in [70,80) = "C", not "D"
-    let resp = run_spec(&engine, "grading", &[("score", "70")]);
+    let resp = evaluate_spec(&engine, "grading", &[("score", "70")]);
     let grade = rule_display(&resp, "grade");
     assert_eq!(grade, "C", "score 70 is at boundary [70,80) = C");
 }
@@ -644,9 +644,10 @@ rule total: amount + tax
 
     // Evaluate at a date after 2024-01-01 — should use 21%
     let effective = DateTimeValue::from_str("2024-06-15").unwrap();
-    let data_map: HashMap<String, String> = [("amount".to_string(), "1000".into())].into();
+    let data_map: IndexMap<String, EvaluateDataValue> =
+        [("amount".to_string(), EvaluateDataValue::from("1000"))].into();
     let resp = engine
-        .run(
+        .evaluate(
             None,
             "invoice_calc",
             Some(&effective),
@@ -660,9 +661,10 @@ rule total: amount + tax
 
     // Evaluate before 2024-01-01 — should use 19%
     let effective_old = DateTimeValue::from_str("2023-06-15").unwrap();
-    let data_map2: HashMap<String, String> = [("amount".to_string(), "1000".into())].into();
+    let data_map2: IndexMap<String, EvaluateDataValue> =
+        [("amount".to_string(), EvaluateDataValue::from("1000"))].into();
     let resp2 = engine
-        .run(
+        .evaluate(
             None,
             "invoice_calc",
             Some(&effective_old),
@@ -709,7 +711,7 @@ rule safe_value: validated
         .unwrap();
 
     // Valid input
-    let resp = run_spec(&engine, "validation", &[("input_value", "50")]);
+    let resp = evaluate_spec(&engine, "validation", &[("input_value", "50")]);
     assert!(!rule_vetoed(&resp, "validated"));
     let valid = rule_display(&resp, "is_valid");
     assert_eq!(valid, "true", "50 is valid");
@@ -717,7 +719,7 @@ rule safe_value: validated
     assert_eq!(safe, "50", "safe_value = 50 when valid");
 
     // Negative input — vetoes
-    let resp = run_spec(&engine, "validation", &[("input_value", "-5")]);
+    let resp = evaluate_spec(&engine, "validation", &[("input_value", "-5")]);
     assert!(rule_vetoed(&resp, "validated"), "-5 should veto");
     let valid = rule_display(&resp, "is_valid");
     assert_eq!(valid, "false", "-5 is invalid");
@@ -767,7 +769,7 @@ rule times_fifty_pct: amount * 50%
         )])
         .unwrap();
 
-    let resp = run_spec(&engine, "percent_ops", &[("amount", "200")]);
+    let resp = evaluate_spec(&engine, "percent_ops", &[("amount", "200")]);
     let times = rule_display(&resp, "times_fifty_pct");
     assert_eq!(times, "100", "200 * 50% = 100");
 }
@@ -802,7 +804,7 @@ rule priority: "low"
         .unwrap();
 
     // urgency=9, vip=true, internal=true → last match is "internal"
-    let resp = run_spec(
+    let resp = evaluate_spec(
         &engine,
         "priority_rules",
         &[
@@ -815,7 +817,7 @@ rule priority: "low"
     assert_eq!(priority, "internal", "last matching clause wins: internal");
 
     // urgency=9, vip=true, internal=false → last match is "critical" (is_vip)
-    let resp = run_spec(
+    let resp = evaluate_spec(
         &engine,
         "priority_rules",
         &[
@@ -831,7 +833,7 @@ rule priority: "low"
     );
 
     // urgency=2, vip=false, internal=false → no unless matches → "low"
-    let resp = run_spec(
+    let resp = evaluate_spec(
         &engine,
         "priority_rules",
         &[

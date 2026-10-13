@@ -22,26 +22,26 @@ workspace = true
 default = []
 
 [dependencies]
-lemma = { package = "lemma-engine", version = "=0.9.12", path = ".." }
+lemma = { package = "lemma-engine", version = "=0.10.0", path = ".." }
 serde_json.workspace = true
 
-# Native: tokio (multi-threaded) + tower-lsp with stdio transport
+# Native: tokio (multi-threaded) + tower-lsp-server with stdio transport
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies.tokio]
 version = "1"
 features = ["rt-multi-thread", "macros", "io-std", "time"]
 
-[target.'cfg(not(target_arch = "wasm32"))'.dependencies.tower-lsp]
-version = "0.20"
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies.tower-lsp-server]
+version = "0.23"
 features = ["runtime-tokio"]
 
-# WASM: minimal tokio + tower-lsp (runtime-agnostic) + browser bindings
+# WASM: minimal tokio + tower-lsp-server (runtime-agnostic) + browser bindings
 [target.'cfg(target_arch = "wasm32")'.dependencies.tokio]
 version = "1"
 default-features = false
 features = ["rt", "macros", "sync", "io-util", "time"]
 
-[target.'cfg(target_arch = "wasm32")'.dependencies.tower-lsp]
-version = "0.20"
+[target.'cfg(target_arch = "wasm32")'.dependencies.tower-lsp-server]
+version = "0.23"
 default-features = false
 features = ["runtime-agnostic"]
 

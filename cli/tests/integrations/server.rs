@@ -1,3 +1,4 @@
+use super::stop_child;
 use std::net::TcpStream;
 use std::time::{Duration, Instant};
 
@@ -31,7 +32,7 @@ rule result: x
     let bin = env!("CARGO_BIN_EXE_lemma");
     let mut child = std::process::Command::new(bin)
         .arg("server")
-        .arg("--prefix")
+        .arg("--path")
         .arg(temp_dir.path())
         .arg("--port")
         .arg(SERVER_TEST_PORT.to_string())
@@ -40,16 +41,14 @@ rule result: x
 
     let ok = wait_for_port(SERVER_TEST_PORT, SERVER_STARTUP_TIMEOUT);
     if !ok {
-        let _ = child.kill();
-        let _ = child.wait();
+        stop_child(&mut child);
         panic!("server did not start within timeout");
     }
 
-    let url = format!("http://127.0.0.1:{}/single_spec?x=42", SERVER_TEST_PORT);
+    let url = format!("http://127.0.0.1:{}/single_spec", SERVER_TEST_PORT);
     let resp = reqwest::blocking::get(&url).expect("GET request");
     let status = resp.status();
-    let _ = child.kill();
-    let _ = child.wait();
+    stop_child(&mut child);
 
     assert!(
         status.is_success(),
@@ -75,7 +74,7 @@ rule result: x
     let bin = env!("CARGO_BIN_EXE_lemma");
     let mut child = std::process::Command::new(bin)
         .arg("server")
-        .arg("--prefix")
+        .arg("--path")
         .arg(temp_dir.path())
         .arg("--port")
         .arg(port.to_string())
@@ -85,8 +84,7 @@ rule result: x
 
     let ok = wait_for_port(port, SERVER_STARTUP_TIMEOUT);
     if !ok {
-        let _ = child.kill();
-        let _ = child.wait();
+        stop_child(&mut child);
         panic!("server did not start within timeout");
     }
 
@@ -102,8 +100,7 @@ rule result: x
     let status = resp.status();
     let body: serde_json::Value =
         serde_json::from_str(&resp.text().expect("response body")).expect("JSON body");
-    let _ = child.kill();
-    let _ = child.wait();
+    stop_child(&mut child);
 
     assert!(
         status.is_success(),
@@ -145,7 +142,7 @@ rule total: base
     let bin = env!("CARGO_BIN_EXE_lemma");
     let mut child = std::process::Command::new(bin)
         .arg("server")
-        .arg("--prefix")
+        .arg("--path")
         .arg(temp_dir.path())
         .arg("--port")
         .arg(port.to_string())
@@ -154,8 +151,7 @@ rule total: base
 
     let ok = wait_for_port(port, SERVER_STARTUP_TIMEOUT);
     if !ok {
-        let _ = child.kill();
-        let _ = child.wait();
+        stop_child(&mut child);
         panic!("server did not start within timeout");
     }
 
@@ -178,8 +174,7 @@ rule total: base
 
     let j2025 = post("2025-06-01");
     let j2026 = post("2026-06-01");
-    let _ = child.kill();
-    let _ = child.wait();
+    stop_child(&mut child);
 
     assert_eq!(
         j2025["results"]["total"]["number"].as_str(),
@@ -209,7 +204,7 @@ rule result: x
     let bin = env!("CARGO_BIN_EXE_lemma");
     let mut child = std::process::Command::new(bin)
         .arg("server")
-        .arg("--prefix")
+        .arg("--path")
         .arg(temp_dir.path())
         .arg("--port")
         .arg(port.to_string())
@@ -218,8 +213,7 @@ rule result: x
 
     let ok = wait_for_port(port, SERVER_STARTUP_TIMEOUT);
     if !ok {
-        let _ = child.kill();
-        let _ = child.wait();
+        stop_child(&mut child);
         panic!("server did not start within timeout");
     }
 
@@ -234,8 +228,7 @@ rule result: x
     let status = resp.status();
     let body: serde_json::Value =
         serde_json::from_str(&resp.text().expect("response body")).expect("JSON body");
-    let _ = child.kill();
-    let _ = child.wait();
+    stop_child(&mut child);
 
     assert!(
         status.is_success(),
@@ -244,11 +237,11 @@ rule result: x
     assert_eq!(body["results"]["result"]["number"].as_str(), Some("42"));
 }
 
-/// GET `/` returns the same JSON as [`Engine::list`]: workspace and dependency
-/// repositories with listed spec rows (name, optional effective_from/effective_to).
-/// Temporal show failures belong on GET `/{spec}`, not on the list route.
+/// GET `/` returns the same JSON as [`Engine::specs`]: workspace and dependency
+/// repositories with spec version rows (name, optional effective_from/effective_to).
+/// Temporal show failures belong on GET `/{spec}`, not on the specs route.
 #[test]
-fn list_returns_engine_list_api() {
+fn index_returns_engine_specs_api() {
     let temp_dir = tempfile::tempdir().unwrap();
     std::fs::write(
         temp_dir.path().join("specs.lemma"),
@@ -267,7 +260,7 @@ rule result: y
     let bin = env!("CARGO_BIN_EXE_lemma");
     let mut child = std::process::Command::new(bin)
         .arg("server")
-        .arg("--prefix")
+        .arg("--path")
         .arg(temp_dir.path())
         .arg("--port")
         .arg(port.to_string())
@@ -276,8 +269,7 @@ rule result: y
 
     let ok = wait_for_port(port, SERVER_STARTUP_TIMEOUT);
     if !ok {
-        let _ = child.kill();
-        let _ = child.wait();
+        stop_child(&mut child);
         panic!("server did not start within timeout");
     }
 
@@ -285,8 +277,7 @@ rule result: y
     let resp = reqwest::blocking::get(&url).expect("GET request");
     let status = resp.status();
     let body_text = resp.text().expect("response body");
-    let _ = child.kill();
-    let _ = child.wait();
+    stop_child(&mut child);
 
     assert!(
         status.is_success(),
@@ -296,7 +287,7 @@ rule result: y
         .unwrap_or_else(|e| panic!("invalid JSON: {e}; {body_text}"));
     let repositories = body
         .as_array()
-        .unwrap_or_else(|| panic!("list response must be ResolvedRepository[]: {body}"));
+        .unwrap_or_else(|| panic!("specs response must be Repository[]: {body}"));
 
     let workspace = repositories
         .iter()
@@ -310,11 +301,11 @@ rule result: y
         .collect();
     assert!(
         spec_names.contains(&"always_available"),
-        "always_available must appear in list: {body}"
+        "always_available must appear in specs: {body}"
     );
     assert!(
         spec_names.contains(&"future_only"),
-        "future_only must appear in list regardless of effective instant: {body}"
+        "future_only must appear in specs regardless of effective instant: {body}"
     );
 }
 
@@ -336,7 +327,7 @@ rule result: y
     let bin = env!("CARGO_BIN_EXE_lemma");
     let mut child = std::process::Command::new(bin)
         .arg("server")
-        .arg("--prefix")
+        .arg("--path")
         .arg(temp_dir.path())
         .arg("--port")
         .arg(port.to_string())
@@ -345,8 +336,7 @@ rule result: y
 
     let ok = wait_for_port(port, SERVER_STARTUP_TIMEOUT);
     if !ok {
-        let _ = child.kill();
-        let _ = child.wait();
+        stop_child(&mut child);
         panic!("server did not start within timeout");
     }
 
@@ -359,8 +349,7 @@ rule result: y
         .expect("GET request");
     let status = resp.status();
     let body_text = resp.text().expect("response body");
-    let _ = child.kill();
-    let _ = child.wait();
+    stop_child(&mut child);
 
     assert!(
         !status.is_success(),
@@ -389,10 +378,10 @@ rule result: x
     .unwrap();
 
     let bin = env!("CARGO_BIN_EXE_lemma");
-    let run_case = |port: u16, cors_flag: bool| -> Option<String> {
+    let evaluate_case = |port: u16, cors_flag: bool| -> Option<String> {
         let mut cmd = std::process::Command::new(bin);
         cmd.arg("server")
-            .arg("--prefix")
+            .arg("--path")
             .arg(temp_dir.path())
             .arg("--port")
             .arg(port.to_string());
@@ -403,8 +392,7 @@ rule result: x
 
         let ok = wait_for_port(port, SERVER_STARTUP_TIMEOUT);
         if !ok {
-            let _ = child.kill();
-            let _ = child.wait();
+            stop_child(&mut child);
             panic!("server did not start within timeout");
         }
 
@@ -419,18 +407,17 @@ rule result: x
             .get("access-control-allow-origin")
             .and_then(|v| v.to_str().ok())
             .map(|s| s.to_string());
-        let _ = child.kill();
-        let _ = child.wait();
+        stop_child(&mut child);
         allow_origin
     };
 
-    let default_origin = run_case(SERVER_TEST_PORT + 6, false);
+    let default_origin = evaluate_case(SERVER_TEST_PORT + 6, false);
     assert!(
         default_origin.is_none(),
         "default must not send Access-Control-Allow-Origin, got {default_origin:?}"
     );
 
-    let opt_in_origin = run_case(SERVER_TEST_PORT + 7, true);
+    let opt_in_origin = evaluate_case(SERVER_TEST_PORT + 7, true);
     assert_eq!(
         opt_in_origin.as_deref(),
         Some("*"),
@@ -455,7 +442,7 @@ fn evaluation_timeout_returns_503() {
     let bin = env!("CARGO_BIN_EXE_lemma");
     let mut child = std::process::Command::new(bin)
         .arg("server")
-        .arg("--prefix")
+        .arg("--path")
         .arg(temp_dir.path())
         .arg("--port")
         .arg(port.to_string())
@@ -466,8 +453,7 @@ fn evaluation_timeout_returns_503() {
 
     let ok = wait_for_port(port, SERVER_STARTUP_TIMEOUT);
     if !ok {
-        let _ = child.kill();
-        let _ = child.wait();
+        stop_child(&mut child);
         panic!("server did not start within timeout");
     }
 
@@ -481,8 +467,7 @@ fn evaluation_timeout_returns_503() {
     let status = resp.status();
     let body: serde_json::Value =
         serde_json::from_str(&resp.text().expect("response body")).expect("JSON body");
-    let _ = child.kill();
-    let _ = child.wait();
+    stop_child(&mut child);
 
     assert_eq!(
         status.as_u16(),
@@ -508,12 +493,10 @@ fn json_date_ymd(v: &serde_json::Value) -> Option<(i64, u64, u64)> {
     Some((year.parse().ok()?, month.parse().ok()?, day.parse().ok()?))
 }
 
-/// GET `/{spec}` must expose each temporal version's half-open
-/// `[effective_from, effective_to)` range. The latest version's `effective_to`
-/// is `null` (no successor); earlier versions' `effective_to` equals the next
-/// version's `effective_from`.
+/// GET `/{spec}` with `Accept-Datetime` must expose only the shown version's half-open
+/// `[effective_from, effective_to)` window; the version list belongs to `specs`.
 #[test]
-fn get_show_versions_expose_effective_to_range() {
+fn get_show_exposes_only_the_shown_version_window() {
     let temp_dir = tempfile::tempdir().unwrap();
     std::fs::write(
         temp_dir.path().join("temporal.lemma"),
@@ -532,7 +515,7 @@ rule total: base
     let bin = env!("CARGO_BIN_EXE_lemma");
     let mut child = std::process::Command::new(bin)
         .arg("server")
-        .arg("--prefix")
+        .arg("--path")
         .arg(temp_dir.path())
         .arg("--port")
         .arg(port.to_string())
@@ -541,17 +524,19 @@ rule total: base
 
     let ok = wait_for_port(port, SERVER_STARTUP_TIMEOUT);
     if !ok {
-        let _ = child.kill();
-        let _ = child.wait();
+        stop_child(&mut child);
         panic!("server did not start within timeout");
     }
 
     let url = format!("http://127.0.0.1:{}/pricing", port);
-    let resp = reqwest::blocking::get(&url).expect("GET request");
+    let resp = reqwest::blocking::Client::new()
+        .get(&url)
+        .header("Accept-Datetime", "2025-06-01")
+        .send()
+        .expect("GET request");
     let status = resp.status();
     let body_text = resp.text().expect("response body");
-    let _ = child.kill();
-    let _ = child.wait();
+    stop_child(&mut child);
 
     assert!(
         status.is_success(),
@@ -561,7 +546,7 @@ rule total: base
         .unwrap_or_else(|e| panic!("invalid JSON: {e}; {body_text}"));
 
     assert_eq!(
-        body["spec"].as_str(),
+        body["title"].as_str(),
         Some("pricing"),
         "GET show body must be Show: {body}"
     );
@@ -570,36 +555,19 @@ rule total: base
         "GET show body must not include spec_set_id: {body}"
     );
 
-    let versions = body["versions"]
-        .as_array()
-        .unwrap_or_else(|| panic!("'versions' must be an array: {body}"));
     assert_eq!(
-        versions.len(),
-        2,
-        "two temporal versions loaded, got: {body}"
-    );
-
-    let earlier = &versions[0];
-    assert_eq!(
-        json_date_ymd(&earlier["effective_from"]),
+        json_date_ymd(&body["x-lemma-effective-from"]),
         Some((2025, 1, 1)),
-        "earlier version effective_from: {earlier}"
+        "shown version effective_from: {body}"
     );
     assert_eq!(
-        json_date_ymd(&earlier["effective_to"]),
+        json_date_ymd(&body["x-lemma-effective-to"]),
         Some((2026, 1, 1)),
-        "earlier version effective_to equals next version's effective_from: {earlier}"
-    );
-
-    let latest = &versions[1];
-    assert_eq!(
-        json_date_ymd(&latest["effective_from"]),
-        Some((2026, 1, 1)),
-        "latest version effective_from: {latest}"
+        "shown version effective_to equals next version's effective_from: {body}"
     );
     assert!(
-        latest["effective_to"].is_null(),
-        "latest version effective_to must be null (no successor): {latest}"
+        body.get("x-lemma-versions").is_none(),
+        "versions belong to specs, not show: {body}"
     );
 }
 
@@ -627,7 +595,7 @@ rule total: base
     let bin = env!("CARGO_BIN_EXE_lemma");
     let mut child = std::process::Command::new(bin)
         .arg("server")
-        .arg("--prefix")
+        .arg("--path")
         .arg(temp_dir.path())
         .arg("--port")
         .arg(port.to_string())
@@ -636,8 +604,7 @@ rule total: base
 
     let ok = wait_for_port(port, SERVER_STARTUP_TIMEOUT);
     if !ok {
-        let _ = child.kill();
-        let _ = child.wait();
+        stop_child(&mut child);
         panic!("server did not start within timeout");
     }
 
@@ -655,8 +622,7 @@ rule total: base
         .and_then(|v| v.to_str().ok())
         .map(str::to_string);
     let body_text = resp.text().expect("response body");
-    let _ = child.kill();
-    let _ = child.wait();
+    stop_child(&mut child);
 
     assert!(
         status.is_success(),
@@ -699,7 +665,7 @@ rule r: n
     let bin = env!("CARGO_BIN_EXE_lemma");
     let mut child = std::process::Command::new(bin)
         .arg("server")
-        .arg("--prefix")
+        .arg("--path")
         .arg(temp_dir.path())
         .arg("--port")
         .arg(port.to_string())
@@ -708,8 +674,7 @@ rule r: n
 
     let ok = wait_for_port(port, SERVER_STARTUP_TIMEOUT);
     if !ok {
-        let _ = child.kill();
-        let _ = child.wait();
+        stop_child(&mut child);
         panic!("server did not start within timeout");
     }
 
@@ -724,8 +689,7 @@ rule r: n
     let status = resp.status();
     let body: serde_json::Value =
         serde_json::from_str(&resp.text().expect("response body")).expect("JSON body");
-    let _ = child.kill();
-    let _ = child.wait();
+    stop_child(&mut child);
 
     assert!(
         status.is_success(),
@@ -766,7 +730,7 @@ rule main: a + b
     let bin = env!("CARGO_BIN_EXE_lemma");
     let mut child = std::process::Command::new(bin)
         .arg("server")
-        .arg("--prefix")
+        .arg("--path")
         .arg(temp_dir.path())
         .arg("--port")
         .arg(port.to_string())
@@ -774,8 +738,7 @@ rule main: a + b
         .unwrap();
 
     if !wait_for_port(port, SERVER_STARTUP_TIMEOUT) {
-        let _ = child.kill();
-        let _ = child.wait();
+        stop_child(&mut child);
         panic!("server did not start within timeout");
     }
 
@@ -790,8 +753,7 @@ rule main: a + b
     let status = resp.status();
     let body: serde_json::Value =
         serde_json::from_str(&resp.text().expect("response body")).expect("JSON body");
-    let _ = child.kill();
-    let _ = child.wait();
+    stop_child(&mut child);
 
     assert!(
         status.is_success(),
@@ -826,7 +788,7 @@ rule result: x
     let bin = env!("CARGO_BIN_EXE_lemma");
     let mut child = std::process::Command::new(bin)
         .arg("server")
-        .arg("--prefix")
+        .arg("--path")
         .arg(temp_dir.path())
         .arg("--port")
         .arg(port.to_string())
@@ -835,8 +797,7 @@ rule result: x
 
     let ok = wait_for_port(port, SERVER_STARTUP_TIMEOUT);
     if !ok {
-        let _ = child.kill();
-        let _ = child.wait();
+        stop_child(&mut child);
         panic!("server did not start within timeout");
     }
 
@@ -859,15 +820,13 @@ rule result: x
             }
             Ok(None) => {
                 if Instant::now() >= deadline {
-                    let _ = child.kill();
-                    let _ = child.wait();
+                    stop_child(&mut child);
                     panic!("server did not exit within deadline after SIGTERM");
                 }
                 std::thread::sleep(Duration::from_millis(50));
             }
             Err(err) => {
-                let _ = child.kill();
-                let _ = child.wait();
+                stop_child(&mut child);
                 panic!("try_wait failed: {err}");
             }
         }

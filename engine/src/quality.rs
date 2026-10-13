@@ -5,9 +5,10 @@
 
 use crate::error::EngineErrorSource;
 use crate::literals::{BooleanValue, Value};
+use crate::parsing::arena::ExprRef;
 use crate::parsing::ast::{
     ComparisonComputation, DataValue, Expression, ExpressionKind, LemmaData, LemmaRule, LemmaSpec,
-    NegationType, ParentType, PrimitiveKind, Span, TypeConstraintCommand,
+    ParentType, PrimitiveKind, Span, TypeConstraintCommand,
 };
 use crate::parsing::source::{Source, SourceType};
 use crate::Engine;
@@ -150,34 +151,13 @@ fn analyze_spec(repository: Option<String>, spec: &LemmaSpec, out: &mut Vec<Reco
     }
 }
 
-fn analyze_import(
-    repository: Option<String>,
-    spec: &LemmaSpec,
-    bindings: &[crate::parsing::ast::UsesBinding],
-    out: &mut Vec<Recommendation>,
-) {
-    for binding in bindings {
-        if !binding.deprecated_standalone_with {
-            continue;
-        }
-        out.push(Recommendation {
-            message: "Standalone `with alias.field: …` is deprecated; nest under the matching `uses` line as `  -> with field: …`.".to_string(),
-            repository: repository.clone(),
-            spec: spec.name.clone(),
-            effective_from: spec.effective_from.to_option(),
-            source_location: binding.source_location.clone(),
-        });
-    }
-}
-
 fn analyze_data(
     repository: Option<String>,
     spec: &LemmaSpec,
     data: &LemmaData,
     out: &mut Vec<Recommendation>,
 ) {
-    if let DataValue::Import { bindings, .. } = &data.value {
-        analyze_import(repository.clone(), spec, bindings, out);
+    if let DataValue::Import { .. } = &data.value {
         return;
     }
 
@@ -265,11 +245,14 @@ fn analyze_data(
 }
 
 fn unwrap_parent_type(base: Option<&ParentType>) -> Option<&ParentType> {
-    match base {
-        Some(ParentType::Qualified { inner, .. } | ParentType::Ranged { inner }) => {
-            unwrap_parent_type(Some(inner.as_ref()))
+    let mut current = base;
+    loop {
+        match current {
+            Some(ParentType::Qualified { inner, .. } | ParentType::Ranged { inner }) => {
+                current = Some(inner.as_ref());
+            }
+            other => return other,
         }
-        other => other,
     }
 }
 
@@ -297,10 +280,10 @@ fn analyze_rule(
     rule: &LemmaRule,
     out: &mut Vec<Recommendation>,
 ) {
-    walk_expr_for_ambiguous_and(repository.clone(), spec, rule, &rule.expression, out);
+    walk_expr_for_ambiguous_and(repository.clone(), spec, rule.expression.root(), out);
     for unless in &rule.unless_clauses {
-        walk_expr_for_ambiguous_and(repository.clone(), spec, rule, &unless.condition, out);
-        walk_expr_for_ambiguous_and(repository.clone(), spec, rule, &unless.result, out);
+        walk_expr_for_ambiguous_and(repository.clone(), spec, unless.condition.root(), out);
+        walk_expr_for_ambiguous_and(repository.clone(), spec, unless.result.root(), out);
     }
 
     analyze_redundant_boolean_default_unless(repository.clone(), spec, rule, out);
@@ -310,7 +293,7 @@ fn analyze_rule(
         && rule
             .unless_clauses
             .iter()
-            .all(|u| matches!(u.result.kind, ExpressionKind::Veto(_)))
+            .all(|u| matches!(u.result.root_kind(), ExpressionKind::Veto(_)))
     {
         out.push(Recommendation {
             message: format!(
@@ -326,7 +309,7 @@ fn analyze_rule(
 }
 
 fn boolean_literal_truth(expr: &Expression) -> Option<bool> {
-    match &expr.kind {
+    match expr.root_kind() {
         ExpressionKind::Literal(Value::Boolean(b)) => Some(bool::from(*b)),
         _ => None,
     }
@@ -365,27 +348,22 @@ fn is_boolean_literal(expr: &Expression) -> bool {
     boolean_literal_truth(expr).is_some()
 }
 
-/// Conjunct shape for ambiguous `and` detection (AST only).
+/// Conjunct shape for ambiguous `and` detection (AST only). `not` needs no probe:
+/// `not x and y` does not parse, `not(x) and y` states its scope.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum BoolConjunct {
     Bare,
-    NotRef,
     IsFalse,
     Other,
 }
 
-fn classify_bool_conjunct(expr: &Expression) -> BoolConjunct {
-    match &expr.kind {
+fn classify_bool_conjunct(expr: ExprRef<'_, ExpressionKind>) -> BoolConjunct {
+    match expr.kind() {
         ExpressionKind::Reference(_) => BoolConjunct::Bare,
-        ExpressionKind::LogicalNegation(inner, NegationType::Not)
-            if matches!(inner.kind, ExpressionKind::Reference(_)) =>
-        {
-            BoolConjunct::NotRef
-        }
         ExpressionKind::Comparison(left, ComparisonComputation::Is, right)
-            if matches!(left.kind, ExpressionKind::Reference(_))
+            if matches!(expr.child(*left).kind(), ExpressionKind::Reference(_))
                 && matches!(
-                    right.kind,
+                    expr.child(*right).kind(),
                     ExpressionKind::Literal(Value::Boolean(BooleanValue::False | BooleanValue::No))
                 ) =>
         {
@@ -395,65 +373,45 @@ fn classify_bool_conjunct(expr: &Expression) -> BoolConjunct {
     }
 }
 
-fn is_ambiguous_logical_and(left: &Expression, right: &Expression) -> bool {
+fn is_ambiguous_logical_and(
+    left: ExprRef<'_, ExpressionKind>,
+    right: ExprRef<'_, ExpressionKind>,
+) -> bool {
     matches!(
         (classify_bool_conjunct(left), classify_bool_conjunct(right)),
-        (BoolConjunct::Bare, BoolConjunct::NotRef)
-            | (BoolConjunct::NotRef, BoolConjunct::Bare)
-            | (BoolConjunct::Bare, BoolConjunct::IsFalse)
-            | (BoolConjunct::IsFalse, BoolConjunct::Bare)
+        (BoolConjunct::Bare, BoolConjunct::IsFalse) | (BoolConjunct::IsFalse, BoolConjunct::Bare)
     )
 }
 
-const AMBIGUOUS_AND_MESSAGE: &str = "Boolean `and` mixes a bare name with `not` / `is false`. Readers misread scope. Prefer parallel probes (`not x and y is true`, or `x is false and y is true`) or parentheses.";
+const AMBIGUOUS_AND_MESSAGE: &str = "Boolean `and` mixes a bare name with `is false`. Readers misread scope. Prefer parallel probes (`x is false and y is true`) or parentheses.";
 
+/// Pre-order walk over every node reachable from `expr`, without recursion.
+///
+/// A flat `and` chain is one left fold, so only its first two operands can form the ambiguous
+/// pair: the fold's inner node holds them and every other step has a compound left side.
 fn walk_expr_for_ambiguous_and(
     repository: Option<String>,
     spec: &LemmaSpec,
-    rule: &LemmaRule,
-    expr: &Expression,
+    expr: ExprRef<'_, ExpressionKind>,
     out: &mut Vec<Recommendation>,
 ) {
-    match &expr.kind {
-        ExpressionKind::LogicalAnd(left, right) => {
-            if is_ambiguous_logical_and(left, right) {
+    let mut pending = vec![expr];
+    while let Some(node) = pending.pop() {
+        if let ExpressionKind::LogicalAnd { first, steps } = node.kind() {
+            let first_step = steps
+                .first()
+                .expect("BUG: logical and chain must have at least one step");
+            if is_ambiguous_logical_and(node.child(*first), node.child(first_step.operand)) {
                 out.push(Recommendation {
                     message: AMBIGUOUS_AND_MESSAGE.to_string(),
                     repository: repository.clone(),
                     spec: spec.name.clone(),
                     effective_from: spec.effective_from.to_option(),
-                    source_location: expr
-                        .source_location
-                        .clone()
-                        .unwrap_or_else(|| rule.source_location.clone()),
+                    source_location: first_step.source_location.clone(),
                 });
             }
-            walk_expr_for_ambiguous_and(repository.clone(), spec, rule, left, out);
-            walk_expr_for_ambiguous_and(repository, spec, rule, right, out);
         }
-        ExpressionKind::DateRelative(_, inner)
-        | ExpressionKind::PastFutureRange(_, inner)
-        | ExpressionKind::UnitConversion(inner, _)
-        | ExpressionKind::LogicalNegation(inner, _)
-        | ExpressionKind::MathematicalComputation(_, inner)
-        | ExpressionKind::RangeBound(_, inner)
-        | ExpressionKind::ResultIsVeto(inner) => {
-            walk_expr_for_ambiguous_and(repository, spec, rule, inner, out);
-        }
-        ExpressionKind::DateCalendar(_, _, inner) => {
-            walk_expr_for_ambiguous_and(repository, spec, rule, inner, out);
-        }
-        ExpressionKind::RangeLiteral(left, right)
-        | ExpressionKind::RangeContainment(left, right)
-        | ExpressionKind::Arithmetic(left, _, right)
-        | ExpressionKind::Comparison(left, _, right) => {
-            walk_expr_for_ambiguous_and(repository.clone(), spec, rule, left, out);
-            walk_expr_for_ambiguous_and(repository, spec, rule, right, out);
-        }
-        ExpressionKind::Literal(_)
-        | ExpressionKind::Reference(_)
-        | ExpressionKind::Now
-        | ExpressionKind::Veto(_) => {}
+        node.push_children(&mut pending);
     }
 }
 
@@ -522,24 +480,31 @@ rule total: qty
     }
 
     #[test]
-    fn deprecated_standalone_with_emits_quality_recommendation() {
-        let engine = load(
-            r#"spec inner
+    fn deprecated_standalone_with_is_parse_error() {
+        let mut engine = Engine::new();
+        let err = engine
+            .load([(
+                SourceType::Volatile,
+                r#"spec inner
 data x: number
 
 spec outer
 uses i: inner
 with i.x: 42
 rule r: i.x
-"#,
-        );
-        let recs = engine.quality();
-        let hit = recs
+"#
+                .to_string(),
+            )])
+            .expect_err("standalone with must be a parse error");
+        let joined = err
             .iter()
-            .find(|r| r.message.contains("deprecated") && r.spec == "outer")
-            .expect("deprecated standalone with must produce quality recommendation");
-        assert!(hit.message.contains("-> with"), "got: {}", hit.message);
-        assert_eq!(hit.source_location.span.line, 6);
+            .map(|e| e.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            joined.contains("with"),
+            "expected parse error mentioning with, got: {joined}"
+        );
     }
 
     #[test]
@@ -973,15 +938,12 @@ rule pass: no
     }
 
     #[test]
-    fn flags_not_ref_and_bare() {
-        let engine = load(&and_chain_spec("unless not ready and eligible then yes"));
-        let hits = ambiguous_and_hits(&engine);
-        assert_eq!(hits.len(), 1, "got: {hits:?}");
-        assert_eq!(hits[0].spec, "gate");
+    fn clean_not_call_and_bare() {
+        let engine = load(&and_chain_spec("unless not(ready) and eligible then yes"));
         assert!(
-            hits[0].message.contains("Prefer parallel probes"),
-            "got: {}",
-            hits[0].message
+            ambiguous_and_hits(&engine).is_empty(),
+            "got: {:?}",
+            ambiguous_and_hits(&engine)
         );
     }
 
@@ -998,7 +960,7 @@ rule pass: no
     #[test]
     fn clean_not_and_is_true() {
         let engine = load(&and_chain_spec(
-            "unless not ready and eligible is true then yes",
+            "unless not(ready) and eligible is true then yes",
         ));
         assert!(
             ambiguous_and_hits(&engine).is_empty(),

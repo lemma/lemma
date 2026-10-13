@@ -18,7 +18,8 @@ immediately after the spec line.
 
 data monthly_salary: 5_000
 
-rule annual_salary: monthly_salary * 12
+rule annual_salary:
+  monthly_salary * 12
 ```
 
 Spec names consist of letters, digits, underscores, slashes, hyphens, and dots (`_ / - .`), plus an optional effective datetime (`spec pricing 2026-01-01`).
@@ -49,7 +50,6 @@ Declare Data without a value to request the value at evaluation time:
 spec loan_application
 
 data birth_date: date
-
 data rating: number
   -> minimum 0
   -> maximum 100
@@ -64,13 +64,13 @@ data amount: measure
   -> decimals 2
 ```
 
-Constraints chain with `-> minimum`, `-> maximum`, `-> option`, `-> unit`, `-> decimals`, `-> suggest`, `-> help`, and more, depending on the primitive. To inspect the declared data catalog and rules (empty `needed_by_rules` = reuse-only):
+Constraints chain with `-> minimum`, `-> maximum`, `-> option`, `-> unit`, `-> decimals`, `-> suggest`, `-> help`, and more, depending on the primitive. To inspect the declared data catalog and rules (empty `x-lemma-needed-by-rules` = reuse-only):
 
 ```bash
 lemma show loan_application
 ```
 
-Which inputs a partial `run` still needs is run-data-aware: inspect each rule's `missing_data` on the evaluation response; types and suggestions are on `show` only. See [CLI reference](../reference/cli.md).
+Which inputs a partial `evaluate` still needs is evaluation-data-aware: inspect each rule's `missing_data` on the evaluation response; types and suggestions are on `show` only. See [CLI reference](../reference/cli.md).
 
 See [Data in the language reference](../reference/readme.md#data).
 
@@ -84,7 +84,6 @@ spec loan_application
 uses lemma units
 
 data birth_date: date
-
 data rating: number
   -> minimum 0
   -> maximum 100
@@ -94,7 +93,8 @@ data amount: measure
   -> unit usd: 0.91
   -> decimals 2
 
-rule max_amount: 100_000 eur
+rule max_amount:
+  100_000 eur
   unless rating > 90 then 120_000 eur
 
 rule loan_approved:
@@ -109,15 +109,18 @@ Reference other Rules by name. The engine resolves whether a name is Data or a R
 ```lemma
 spec driving
 
-data age:                number
-data license_status:     text
-data license_suspended:  boolean
+data age:               number
+data license_status:    text
+data license_suspended: boolean
 
-rule is_adult: age >= 18
+rule is_adult:
+  age >= 18
 
-rule has_license: license_status is "valid"
+rule has_license:
+  license_status is "valid"
 
-rule can_drive: is_adult and has_license and not license_suspended
+rule can_drive:
+  is_adult and has_license and not license_suspended
 ```
 
 Rules evaluate in dependency order: `can_drive` depends on `is_adult` and `has_license`, so those run first.

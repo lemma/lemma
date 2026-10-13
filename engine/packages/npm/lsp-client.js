@@ -185,6 +185,17 @@ export class LspClient {
     }
 
     /**
+     * Request textDocument/completion from the server.
+     * Returns { items: CompletionItem[] } or CompletionItem[].
+     */
+    async completion(uri, line, character) {
+        return this.sendRequest('textDocument/completion', {
+            textDocument: { uri: uri },
+            position: { line: line, character: character },
+        });
+    }
+
+    /**
      * Register a callback for textDocument/publishDiagnostics notifications.
      * @param {Function} callback  Receives (uri, diagnostics)
      */

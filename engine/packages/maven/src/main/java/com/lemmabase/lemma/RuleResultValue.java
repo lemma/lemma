@@ -6,11 +6,13 @@ import java.io.IOException;
 import java.math.BigDecimal;
 import java.time.LocalDate;
 import java.time.LocalTime;
+import java.util.Collections;
+import java.util.List;
 import java.util.Map;
 import org.jspecify.annotations.Nullable;
 
 /**
- * Typed value shared by show fill/suggestion. Pattern-match on the variant.
+ * Typed value shared by show committed value (`with`) and suggestion. Pattern-match on the variant.
  */
 public sealed interface RuleResultValue {
   /**
@@ -326,6 +328,49 @@ public sealed interface RuleResultValue {
   record Spec(@Nullable String result, RuleResult.SpecResult spec) implements RuleResultValue {}
 
   /**
+   * List row value: an index into {@link Response#rows()}.
+   *
+   * @param result display or null
+   * @param row the row reference
+   */
+  record Row(@Nullable String result, RuleResult.RowReference row) implements RuleResultValue {}
+
+  /**
+   * List value.
+   *
+   * @param result display or null
+   * @param items items in list order; rows are {@link Row} values
+   */
+  record ListValue(@Nullable String result, List<RuleResultValue> items)
+      implements RuleResultValue {}
+
+  /**
+   * Source row of an instance list value in show. Row order is list order; a source row
+   * has no result.
+   *
+   * @param fields fields the row sets, keyed relative to the row spec, in the order the row
+   *     writes them
+   */
+  record SourceRow(Map<String, RuleResultValue> fields) implements RuleResultValue {
+    @Override
+    public @Nullable String result() {
+      return null;
+    }
+  }
+
+  /**
+   * Show only: a source-row field whose value is a reference.
+   *
+   * @param data input key of the referenced data in the spec declaring the list
+   */
+  record Reference(String data) implements RuleResultValue {
+    @Override
+    public @Nullable String result() {
+      return null;
+    }
+  }
+
+  /**
    * One-liner only (explanation veto text; no typed magnitude map).
    *
    * @param result one-liner
@@ -353,10 +398,17 @@ public sealed interface RuleResultValue {
     RangeResult range = null;
     String unit = null;
     RuleResult.SpecResult specResult = null;
+    RuleResult.RowReference row = null;
+    List<RuleResultValue> items = null;
+    Map<String, RuleResultValue> fields = null;
+    String reference = null;
     while (p.nextToken() != JsonToken.END_OBJECT) {
       String field = p.currentName();
       p.nextToken();
       switch (field) {
+        case "row" -> row = RuleResult.RowReference.read(p);
+        case "fields" -> fields = JsonReading.readMap(p, RuleResultValue::read);
+        case "list" -> items = JsonReading.readList(p, RuleResultValue::read);
         case "result" -> result = JsonReading.readString(p);
         case "measure" -> measure = JsonReading.readMap(p, JsonReading::readDecimal);
         case "ratio" -> ratio = JsonReading.readMap(p, JsonReading::readDecimal);
@@ -369,6 +421,7 @@ public sealed interface RuleResultValue {
         case "unit" -> unit = JsonReading.readString(p);
         case "range" -> range = RangeResult.read(p);
         case "spec" -> specResult = RuleResult.SpecResult.read(p);
+        case "reference" -> reference = JsonReading.readString(p);
         default -> JsonReading.unknownField(field, "RuleResultValue");
       }
     }
@@ -401,6 +454,24 @@ public sealed interface RuleResultValue {
     }
     if (specResult != null) {
       return new Spec(result, specResult);
+    }
+    if (row != null) {
+      return new Row(result, row);
+    }
+    if (items != null) {
+      return new ListValue(result, List.copyOf(items));
+    }
+    if (fields != null) {
+      if (result != null) {
+        throw new LemmaBugError("BUG: show source row carries a result");
+      }
+      return new SourceRow(Collections.unmodifiableMap(fields));
+    }
+    if (reference != null) {
+      if (result != null) {
+        throw new LemmaBugError("BUG: show reference field carries a result");
+      }
+      return new Reference(reference);
     }
     throw new LemmaBugError("BUG: RuleResultValue has no typed value field");
   }

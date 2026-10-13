@@ -93,12 +93,12 @@ fn write_stdout(bytes: &[u8]) -> Result<(), String> {
 
 /// True if index or working tree differs from `HEAD` (uncommitted or unstaged changes).
 fn worktree_differs_from_head(root: &Path) -> bool {
-    Command::new("git")
+    let status = Command::new("git")
         .args(["diff-index", "--quiet", "HEAD", "--"])
         .current_dir(root)
         .status()
-        .map(|s| !s.success())
-        .unwrap_or(false)
+        .unwrap_or_else(|error| panic!("failed to run git diff-index: {error}"));
+    !status.success()
 }
 
 /// Print `git diff --stat`, `git log`, then `git diff` for the resolved range or tag → worktree.

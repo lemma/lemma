@@ -17,7 +17,8 @@ use std::str::FromStr;
 use std::sync::LazyLock;
 
 use crate::computation::bigint::AllocError;
-pub(crate) use crate::computation::bigint::BigInt;
+pub(crate) use crate::computation::bigint::{BigInt, BigUint};
+use crate::limits::MAX_RATIONAL_BITS;
 
 /// Digit limit for ℚ → [`Decimal`] API conversion.
 ///
@@ -65,7 +66,8 @@ fn reduce_small(numer: i128, denom: i128) -> (i128, i128) {
     if numer == 0 {
         return (0, 1);
     }
-    let g = gcd_u128(numer.unsigned_abs(), denom.unsigned_abs()) as i128;
+    let g = i128::try_from(gcd_u128(numer.unsigned_abs(), denom.unsigned_abs()))
+        .expect("BUG: gcd divides the positive i128 denominator");
     (numer / g, denom / g)
 }
 
@@ -183,15 +185,48 @@ impl RationalInteger {
             return Err(NumericFailure::DivisionByZero);
         }
         let (n, d) = if denom < 0 {
-            // numer.checked_neg / denom.checked_neg can fail for i128::MIN
-            let n = numer.checked_neg().ok_or(NumericFailure::OutOfMemory)?;
-            let d = denom.checked_neg().ok_or(NumericFailure::OutOfMemory)?;
-            (n, d)
+            match (numer.checked_neg(), denom.checked_neg()) {
+                (Some(n), Some(d)) => (n, d),
+                _ => return Self::reduce_big(BigInt::from_i128(numer), BigInt::from_i128(denom)),
+            }
         } else {
             (numer, denom)
         };
         let (rn, rd) = reduce_small(n, d);
         Ok(Self::from_reduced_small(rn, rd))
+    }
+
+    /// Construct without reducing. Callers guarantee `gcd(numer, denom) == 1`; `denom`
+    /// must be positive.
+    fn from_coprime(numer: BigInt, denom: BigInt) -> Self {
+        assert!(
+            denom.is_positive(),
+            "BUG: from_coprime requires a positive denominator, got {denom}"
+        );
+        match (numer.to_i128(), denom.to_i128()) {
+            (Some(n), Some(d)) => Self::from_reduced_small(n, d),
+            _ => Self {
+                repr: Repr::Big { numer, denom },
+            },
+        }
+    }
+
+    /// `(numer, denom)` of `1 / self` with a positive denominator. Reduced input stays reduced.
+    fn try_reciprocal_pair(&self) -> Result<(BigInt, BigInt), NumericFailure> {
+        if self.numer_is_zero() {
+            return Err(NumericFailure::DivisionByZero);
+        }
+        let (numer, denom) = self.as_big_pair();
+        if numer.is_negative() {
+            Ok((denom.try_neg()?, numer.try_neg()?))
+        } else {
+            Ok((denom, numer))
+        }
+    }
+
+    fn try_reciprocal(&self) -> Result<Self, NumericFailure> {
+        let (numer, denom) = self.try_reciprocal_pair()?;
+        Ok(Self::from_coprime(numer, denom))
     }
 
     pub fn try_new(numer: BigInt, denom: BigInt) -> Result<Self, NumericFailure> {
@@ -202,11 +237,7 @@ impl RationalInteger {
         if let (Some(n), Some(d)) = (numer.to_i128(), denom.to_i128()) {
             return Self::from_small(n, d);
         }
-        // Big path
-        let value = Self {
-            repr: Repr::Big { numer, denom },
-        };
-        value.try_reduce()
+        Self::reduce_big(numer, denom)
     }
 
     pub fn from_i64_pair(numer: i64, denom: i64) -> Self {
@@ -216,8 +247,8 @@ impl RationalInteger {
 
     /// Construct from string-parsed BigInts (used by `SerializedFactor` round-trip).
     pub fn from_bigint_strings(numer_str: &str, denom_str: &str) -> Result<Self, NumericFailure> {
-        let n = BigInt::try_from_str_radix(numer_str, 10).map_err(map_alloc)?;
-        let d = BigInt::try_from_str_radix(denom_str, 10).map_err(map_alloc)?;
+        let n = BigInt::try_from_str_radix(numer_str, 10).map_err(NumericFailure::from)?;
+        let d = BigInt::try_from_str_radix(denom_str, 10).map_err(NumericFailure::from)?;
         Self::try_new(n, d)
     }
 
@@ -267,13 +298,6 @@ impl RationalInteger {
         }
     }
 
-    pub fn denom_to_u32(&self) -> Option<u32> {
-        match &self.repr {
-            Repr::Small { denom, .. } => u32::try_from(*denom).ok(),
-            Repr::Big { denom, .. } => denom.to_u32(),
-        }
-    }
-
     pub fn numer_to_u8(&self) -> Option<u8> {
         match &self.repr {
             Repr::Small { numer, .. } => u8::try_from(*numer).ok(),
@@ -302,7 +326,7 @@ impl RationalInteger {
         }
     }
 
-    /// Approximate bit count of the numerator's magnitude (for structural size estimates).
+    /// Exact bit length of the numerator's magnitude; 0 for zero.
     pub fn numer_magnitude_bits(&self) -> u64 {
         match &self.repr {
             Repr::Small { numer, .. } => {
@@ -316,7 +340,7 @@ impl RationalInteger {
         }
     }
 
-    /// Approximate bit count of the denominator's magnitude (for structural size estimates).
+    /// Exact bit length of the denominator's magnitude.
     pub fn denom_magnitude_bits(&self) -> u64 {
         match &self.repr {
             Repr::Small { denom, .. } => {
@@ -335,31 +359,32 @@ impl RationalInteger {
     pub fn try_reduce_ref(rational: &RationalInteger) -> Result<Self, NumericFailure> {
         match &rational.repr {
             Repr::Small { numer, denom } => Self::from_small(*numer, *denom),
-            Repr::Big { numer, denom } => {
-                if denom.is_zero() {
-                    return Err(NumericFailure::DivisionByZero);
-                }
-                let mut n = numer.clone();
-                let mut d = denom.clone();
-                if d.is_negative() {
-                    n = n.try_neg().map_err(map_alloc)?;
-                    d = d.try_neg().map_err(map_alloc)?;
-                }
-                if n.is_zero() {
-                    return Ok(Self::from_reduced_small(0, 1));
-                }
-                let gcd = n.try_abs()?.try_gcd(&d.try_abs()?)?;
-                n = n.try_div_trunc(&gcd)?;
-                d = d.try_div_trunc(&gcd)?;
-                // Try to shrink back to small
-                if let (Some(sn), Some(sd)) = (n.to_i128(), d.to_i128()) {
-                    Ok(Self::from_reduced_small(sn, sd))
-                } else {
-                    Ok(Self {
-                        repr: Repr::Big { numer: n, denom: d },
-                    })
-                }
-            }
+            Repr::Big { numer, denom } => Self::reduce_big(numer.try_clone()?, denom.try_clone()?),
+        }
+    }
+
+    /// Reduce a BigInt pair: positive denominator, gcd 1, shrunk to Small when both fit i128.
+    fn reduce_big(numer: BigInt, denom: BigInt) -> Result<Self, NumericFailure> {
+        if denom.is_zero() {
+            return Err(NumericFailure::DivisionByZero);
+        }
+        let (n, d) = if denom.is_negative() {
+            (numer.try_neg()?, denom.try_neg()?)
+        } else {
+            (numer, denom)
+        };
+        if n.is_zero() {
+            return Ok(Self::from_reduced_small(0, 1));
+        }
+        let gcd = n.try_abs()?.try_gcd(&d)?;
+        let n = n.try_div_trunc(&gcd)?;
+        let d = d.try_div_trunc(&gcd)?;
+        if let (Some(sn), Some(sd)) = (n.to_i128(), d.to_i128()) {
+            Ok(Self::from_reduced_small(sn, sd))
+        } else {
+            Ok(Self {
+                repr: Repr::Big { numer: n, denom: d },
+            })
         }
     }
 
@@ -506,6 +531,9 @@ impl RationalInteger {
             Err(NumericFailure::Irrational) => {
                 unreachable!("BUG: display_str does not perform irrational operations")
             }
+            Err(NumericFailure::MagnitudeLimit) => {
+                unreachable!("BUG: try_to_decimal does not apply the arithmetic magnitude limit")
+            }
         }
     }
 }
@@ -571,6 +599,8 @@ pub enum NumericFailure {
     DivisionByZero,
     Overflow,
     OutOfMemory,
+    /// Arithmetic result exceeds [`MAX_RATIONAL_BITS`].
+    MagnitudeLimit,
     Irrational,
 }
 
@@ -580,18 +610,18 @@ impl fmt::Display for NumericFailure {
             NumericFailure::DivisionByZero => formatter.write_str("division by zero"),
             NumericFailure::Overflow => formatter.write_str("numeric overflow"),
             NumericFailure::OutOfMemory => formatter.write_str("out of memory"),
+            NumericFailure::MagnitudeLimit => write!(
+                formatter,
+                "numeric result exceeds the maximum of {MAX_RATIONAL_BITS} bits"
+            ),
             NumericFailure::Irrational => formatter.write_str("irrational numeric result"),
         }
     }
 }
 
-fn map_alloc(_: AllocError) -> NumericFailure {
-    NumericFailure::OutOfMemory
-}
-
 impl From<AllocError> for NumericFailure {
-    fn from(err: AllocError) -> Self {
-        map_alloc(err)
+    fn from(_: AllocError) -> Self {
+        NumericFailure::OutOfMemory
     }
 }
 
@@ -631,10 +661,13 @@ pub fn rational_is_zero(rational: &RationalInteger) -> bool {
 
 pub fn rational_abs(rational: &RationalInteger) -> Result<RationalInteger, NumericFailure> {
     match &rational.repr {
-        Repr::Small { numer, denom } => {
-            let n = numer.checked_abs().ok_or(NumericFailure::OutOfMemory)?;
-            Ok(RationalInteger::from_reduced_small(n, *denom))
-        }
+        Repr::Small { numer, denom } => match numer.checked_abs() {
+            Some(n) => Ok(RationalInteger::from_reduced_small(n, *denom)),
+            None => try_rational_new(
+                BigInt::from_i128(*numer).try_abs()?,
+                BigInt::from_i128(*denom),
+            ),
+        },
         Repr::Big { numer, denom } => {
             let n = numer.try_abs()?;
             let d = denom.try_clone()?;
@@ -651,6 +684,41 @@ pub fn rational_trunc(rational: &RationalInteger) -> Result<RationalInteger, Num
         Repr::Big { numer, denom } => {
             let truncated = numer.try_div_trunc(denom)?;
             try_rational_new(truncated, BigInt::one())
+        }
+    }
+}
+
+pub fn rational_floor(rational: &RationalInteger) -> Result<RationalInteger, NumericFailure> {
+    let truncated = rational_trunc(rational)?;
+    if rational.numer_is_negative() && !rational.is_integer() {
+        try_sub(&truncated, &rational_one())
+    } else {
+        Ok(truncated)
+    }
+}
+
+pub fn rational_ceil(rational: &RationalInteger) -> Result<RationalInteger, NumericFailure> {
+    let truncated = rational_trunc(rational)?;
+    if !rational.numer_is_negative() && !rational.is_integer() {
+        try_add(&truncated, &rational_one())
+    } else {
+        Ok(truncated)
+    }
+}
+
+/// Nearest integer; a fraction of exactly one half rounds to the even integer.
+pub fn rational_round(rational: &RationalInteger) -> Result<RationalInteger, NumericFailure> {
+    let floor = rational_floor(rational)?;
+    let fraction = try_sub(rational, &floor)?;
+    match fraction.try_cmp(&rational_new(1, 2))? {
+        std::cmp::Ordering::Less => Ok(floor),
+        std::cmp::Ordering::Greater => try_add(&floor, &rational_one()),
+        std::cmp::Ordering::Equal => {
+            if try_div(&floor, &rational_new(2, 1))?.is_integer() {
+                Ok(floor)
+            } else {
+                try_add(&floor, &rational_one())
+            }
         }
     }
 }
@@ -675,7 +743,7 @@ pub fn decimal_to_rational(decimal: Decimal) -> Result<RationalInteger, NumericF
     for _ in 0..scale {
         denominator = denominator
             .try_mul(&BigInt::from_i64(10))
-            .map_err(map_alloc)?;
+            .map_err(NumericFailure::from)?;
     }
     try_rational_new(BigInt::from_i128(mantissa), denominator)
 }
@@ -705,7 +773,24 @@ fn rational_fraction_str(rational: &RationalInteger) -> String {
 // Arithmetic operations
 // ---------------------------------------------------------------------------
 
+/// Exact arithmetic for Lemma operators. Results beyond [`MAX_RATIONAL_BITS`] fail with
+/// [`NumericFailure::MagnitudeLimit`]; the bare `try_*` helpers are unbounded and reserved
+/// for exact scaling by planned constants.
 pub fn rational_operation(
+    left: &RationalInteger,
+    operation: NumericOperation,
+    right: &RationalInteger,
+) -> Result<RationalInteger, NumericFailure> {
+    let result = rational_operation_unbounded(left, operation, right)?;
+    if result.numer_magnitude_bits() > MAX_RATIONAL_BITS
+        || result.denom_magnitude_bits() > MAX_RATIONAL_BITS
+    {
+        return Err(NumericFailure::MagnitudeLimit);
+    }
+    Ok(result)
+}
+
+fn rational_operation_unbounded(
     left: &RationalInteger,
     operation: NumericOperation,
     right: &RationalInteger,
@@ -725,8 +810,8 @@ pub fn rational_operation(
                 return Err(NumericFailure::DivisionByZero);
             }
             let quotient = try_div(left, right)?;
-            let truncated = rational_trunc(&quotient)?;
-            let product = try_mul(&truncated, right)?;
+            let floored = rational_floor(&quotient)?;
+            let product = try_mul(&floored, right)?;
             try_sub(left, &product)
         }
         NumericOperation::Power => try_rational_power(left, right),
@@ -743,6 +828,7 @@ pub fn rational_operation_with_fallback(
         Err(NumericFailure::DivisionByZero) => Err(NumericFailure::DivisionByZero),
         Err(NumericFailure::Overflow) => Err(NumericFailure::Overflow),
         Err(NumericFailure::OutOfMemory) => Err(NumericFailure::OutOfMemory),
+        Err(NumericFailure::MagnitudeLimit) => Err(NumericFailure::MagnitudeLimit),
         Err(NumericFailure::Irrational) => approximate_rational_operation(left, operation, right),
     }
 }
@@ -778,10 +864,8 @@ fn decimal_arithmetic(
                 return Err(NumericFailure::DivisionByZero);
             }
             let quotient = left.checked_div(right).ok_or(NumericFailure::Overflow)?;
-            let truncated = quotient.trunc();
-            let product = truncated
-                .checked_mul(right)
-                .ok_or(NumericFailure::Overflow)?;
+            let floored = quotient.floor();
+            let product = floored.checked_mul(right).ok_or(NumericFailure::Overflow)?;
             left.checked_sub(product).ok_or(NumericFailure::Overflow)
         }
         NumericOperation::Power => decimal_power(left, right),
@@ -895,11 +979,30 @@ pub fn try_mul(
             return RationalInteger::from_small(n, d);
         }
     }
+    if left.numer_is_zero() || right.numer_is_zero() {
+        return Ok(rational_zero());
+    }
     let (ln, ld) = left.as_big_pair();
     let (rn, rd) = right.as_big_pair();
-    let numerator = ln.try_mul(&rn)?;
-    let denominator = ld.try_mul(&rd)?;
-    try_rational_new(numerator, denominator)
+    cross_cancelled_product((&ln, &ld), (&rn, &rd))
+}
+
+/// `(ln / ld) * (rn / rd)` for reduced, non-zero operands with positive `ld` and `rd`.
+/// Cancels `gcd(ln, rd)` and `gcd(rn, ld)` first, so the result is reduced by
+/// construction and no gcd runs on the product.
+fn cross_cancelled_product(
+    (ln, ld): (&BigInt, &BigInt),
+    (rn, rd): (&BigInt, &BigInt),
+) -> Result<RationalInteger, NumericFailure> {
+    let left_cross = ln.try_gcd(rd)?;
+    let right_cross = rn.try_gcd(ld)?;
+    let numerator = ln
+        .try_div_trunc(&left_cross)?
+        .try_mul(&rn.try_div_trunc(&right_cross)?)?;
+    let denominator = ld
+        .try_div_trunc(&right_cross)?
+        .try_mul(&rd.try_div_trunc(&left_cross)?)?;
+    Ok(RationalInteger::from_coprime(numerator, denominator))
 }
 
 pub fn try_div(
@@ -924,44 +1027,48 @@ pub fn try_div(
             return RationalInteger::from_small(n, d);
         }
     }
+    if left.numer_is_zero() {
+        return Ok(rational_zero());
+    }
     let (ln, ld) = left.as_big_pair();
-    let (rn, rd) = right.as_big_pair();
-    let numerator = ln.try_mul(&rd)?;
-    let denominator = ld.try_mul(&rn)?;
-    try_rational_new(numerator, denominator)
+    let (rn, rd) = right.try_reciprocal_pair()?;
+    cross_cancelled_product((&ln, &ld), (&rn, &rd))
 }
 
-pub fn try_pow_i32(
+/// Exact `exponent`-th power of `base` for any integer exponent.
+pub fn try_pow_integer(
     base: &RationalInteger,
-    exponent: i32,
+    exponent: &BigInt,
 ) -> Result<RationalInteger, NumericFailure> {
-    if exponent == 0 {
+    if exponent.is_zero() {
         return Ok(rational_one());
     }
-    if exponent < 0 {
-        if base.numer_is_zero() {
-            return Err(NumericFailure::DivisionByZero);
-        }
-        // Invert and recurse with positive exponent
-        let inverted = match &base.repr {
-            Repr::Small { numer, denom } => RationalInteger::from_small(*denom, *numer)?,
-            Repr::Big { numer, denom } => try_rational_new(denom.try_clone()?, numer.try_clone()?)?,
-        };
-        return try_pow_i32(&inverted, -exponent);
+    if exponent.is_negative() {
+        try_pow_magnitude(&base.try_reciprocal()?, exponent.magnitude())
+    } else {
+        try_pow_magnitude(base, exponent.magnitude())
     }
-    let mut result = rational_one();
-    let mut factor = base.clone();
-    let mut remaining = exponent as u32;
-    while remaining > 0 {
-        if remaining % 2 == 1 {
-            result = try_mul(&result, &factor)?;
-        }
-        remaining /= 2;
-        if remaining > 0 {
-            factor = try_mul(&factor, &factor)?;
+}
+
+/// `gcd(a, b) = 1` implies `gcd(a^e, b^e) = 1`, so the power of a reduced base is
+/// reduced and needs no gcd.
+fn try_pow_magnitude(
+    base: &RationalInteger,
+    exponent: &BigUint,
+) -> Result<RationalInteger, NumericFailure> {
+    if let (Repr::Small { numer, denom }, Some(small_exponent)) = (&base.repr, exponent.to_u32()) {
+        if let (Some(n), Some(d)) = (
+            numer.checked_pow(small_exponent),
+            denom.checked_pow(small_exponent),
+        ) {
+            return Ok(RationalInteger::from_reduced_small(n, d));
         }
     }
-    Ok(result)
+    let (numer, denom) = base.as_big_pair();
+    Ok(RationalInteger::from_coprime(
+        numer.try_pow(exponent)?,
+        denom.try_pow(exponent)?,
+    ))
 }
 
 pub fn try_rational_power(
@@ -972,12 +1079,12 @@ pub fn try_rational_power(
         return Ok(rational_one());
     }
 
-    let exp_denom_u32 = exponent.denom_to_u32();
-    let exp_is_integer = exponent.is_integer();
-
-    if exp_is_integer {
-        let exponent_i32 = exponent.numer_to_i32().ok_or(NumericFailure::Overflow)?;
-        return try_pow_i32(base, exponent_i32);
+    if exponent.is_integer() {
+        let integer_exponent = exponent.to_big_numer();
+        if power_exceeds_magnitude_limit(base, integer_exponent.magnitude()) {
+            return Err(NumericFailure::MagnitudeLimit);
+        }
+        return try_pow_integer(base, &integer_exponent);
     }
 
     if base.numer_is_zero() {
@@ -987,62 +1094,61 @@ pub fn try_rational_power(
         return Ok(rational_new(0, 1));
     }
 
-    let abs_exp_numer = {
-        let n = exponent.to_big_numer();
-        n.try_abs()?
-    };
-    let abs_exp_i32 = abs_exp_numer.to_i32().ok_or(NumericFailure::Overflow)?;
-    let raised = try_pow_i32(base, abs_exp_i32)?;
+    let root_degree = exponent.to_big_denom().magnitude().clone();
+    let abs_exponent = exponent.to_big_numer();
 
-    let root_degree = exp_denom_u32.ok_or(NumericFailure::Overflow)?;
-
-    let raised_n = raised.to_big_numer();
-    let raised_d = raised.to_big_denom();
-
-    let (numer_root, numer_negative) = if raised_n.is_negative() {
-        if root_degree % 2 == 0 {
-            return Err(NumericFailure::Irrational);
-        }
-        (raised_n.try_abs()?.try_nth_root(root_degree)?, true)
-    } else {
-        (raised_n.try_nth_root(root_degree)?, false)
-    };
-
-    let denom_root = raised_d.try_nth_root(root_degree)?;
-
-    let numer_reconstructed = numer_root.try_pow_u32(root_degree)?;
-    let denom_reconstructed = denom_root.try_pow_u32(root_degree)?;
-
-    if numer_reconstructed != raised_n.try_abs()? {
-        return Err(NumericFailure::Irrational);
-    }
-    if denom_reconstructed != raised_d {
+    let result_negative = base.numer_is_negative() && abs_exponent.magnitude().is_odd();
+    if result_negative && !root_degree.is_odd() {
         return Err(NumericFailure::Irrational);
     }
 
-    let signed_numer = if numer_negative {
+    let numer_root = exact_integer_root(&base.to_big_numer().try_abs()?, &root_degree)?;
+    let denom_root = exact_integer_root(&base.to_big_denom(), &root_degree)?;
+    let signed_numer_root = if result_negative {
         numer_root.try_neg()?
     } else {
         numer_root
     };
-
-    let result = try_rational_new(signed_numer, denom_root)?;
+    let root = RationalInteger::from_coprime(signed_numer_root, denom_root);
+    if power_exceeds_magnitude_limit(&root, abs_exponent.magnitude()) {
+        return Err(NumericFailure::MagnitudeLimit);
+    }
+    let raised = try_pow_magnitude(&root, abs_exponent.magnitude())?;
 
     if exponent.numer_is_negative() {
-        if result.numer_is_zero() {
-            return Err(NumericFailure::DivisionByZero);
-        }
-        let (n, d) = result.as_big_pair();
-        try_rational_new(d, n)
+        raised.try_reciprocal()
     } else {
-        Ok(result)
+        Ok(raised)
     }
 }
 
-pub use {
-    try_add as checked_add, try_div as checked_div, try_mul as checked_mul,
-    try_pow_i32 as checked_pow_i32, try_sub as checked_sub,
-};
+/// True when `base^exponent` provably has a numerator or denominator above
+/// [`MAX_RATIONAL_BITS`]: a `b`-bit magnitude with `b >= 2` raised to `e` has at least
+/// `(b - 1) * e + 1` bits. When false the result has at most twice the limit, so
+/// computing it before the final check stays bounded.
+fn power_exceeds_magnitude_limit(base: &RationalInteger, exponent: &BigUint) -> bool {
+    [base.numer_magnitude_bits(), base.denom_magnitude_bits()]
+        .into_iter()
+        .filter(|bits| *bits >= 2)
+        .any(|bits| match exponent.to_u32() {
+            Some(exponent) => (bits - 1)
+                .checked_mul(u64::from(exponent))
+                .is_none_or(|lower_bound| lower_bound >= MAX_RATIONAL_BITS),
+            None => true,
+        })
+}
+
+/// Exact integer `degree`-th root of a positive `value`; `Irrational` when none exists.
+fn exact_integer_root(value: &BigInt, degree: &BigUint) -> Result<BigInt, NumericFailure> {
+    let root = value.try_nth_root(degree)?;
+    if root.try_pow(degree)? == *value {
+        Ok(root)
+    } else {
+        Err(NumericFailure::Irrational)
+    }
+}
+
+pub use {try_div as checked_div, try_mul as checked_mul, try_pow_integer as checked_pow_integer};
 
 // ---------------------------------------------------------------------------
 // Tests
@@ -1053,6 +1159,377 @@ mod tests {
     use super::*;
     use rust_decimal::Decimal;
     use std::str::FromStr;
+
+    #[test]
+    fn power_of_two_with_all_ones_exponent_is_positive() {
+        let two_pow_127 =
+            RationalInteger::from_bigint_strings("170141183460469231731687303715884105728", "1")
+                .unwrap();
+        assert!(two_pow_127.numer_is_positive(), "parsed 2^127 sign");
+        let big =
+            BigInt::try_from_str_radix("170141183460469231731687303715884105728", 10).unwrap();
+        assert!(big.is_positive(), "BigInt 2^127 sign");
+        let product = try_mul(&rational_new(1 << 62, 1), &rational_new(1 << 62, 1)).unwrap();
+        let product = try_mul(&product, &rational_new(8, 1)).unwrap();
+        assert!(product.numer_is_positive(), "2^62 * 2^62 * 8 sign");
+        let powered = try_pow_integer(&rational_new(2, 1), &BigInt::from_i64(127)).unwrap();
+        assert!(powered.numer_is_positive(), "2^127 via power sign");
+        assert_eq!(powered, two_pow_127);
+    }
+
+    #[test]
+    fn i128_min_numerator_promotes_instead_of_failing() {
+        let two_pow_127 =
+            RationalInteger::from_bigint_strings("170141183460469231731687303715884105728", "1")
+                .unwrap();
+        let min = RationalInteger::from_small(i128::MIN, 1).unwrap();
+        assert_eq!(rational_abs(&min).unwrap(), two_pow_127);
+        assert_eq!(try_div(&min, &rational_new(-1, 1)).unwrap(), two_pow_127);
+        let reciprocal = try_div(&rational_new(1, 1), &min).unwrap();
+        assert_eq!(
+            reciprocal,
+            RationalInteger::from_bigint_strings("-1", "170141183460469231731687303715884105728")
+                .unwrap()
+        );
+        assert_eq!(
+            RationalInteger::from_small(i128::MIN, -2).unwrap(),
+            RationalInteger::from_bigint_strings("85070591730234615865843651857942052864", "1")
+                .unwrap()
+        );
+        assert_eq!(
+            RationalInteger::from_small(1, i128::MIN).unwrap(),
+            RationalInteger::from_bigint_strings("-1", "170141183460469231731687303715884105728")
+                .unwrap()
+        );
+        assert_eq!(
+            RationalInteger::from_small(i128::MIN, i128::MIN).unwrap(),
+            rational_one()
+        );
+        assert_eq!(
+            RationalInteger::from_small(3, i128::MIN).unwrap(),
+            RationalInteger::from_bigint_strings("-3", "170141183460469231731687303715884105728")
+                .unwrap()
+        );
+    }
+
+    fn two_pow(exponent: i64) -> RationalInteger {
+        try_pow_integer(&rational_new(2, 1), &BigInt::from_i64(exponent)).unwrap()
+    }
+
+    fn operate(
+        left: &RationalInteger,
+        operation: NumericOperation,
+        right: &RationalInteger,
+    ) -> Result<RationalInteger, NumericFailure> {
+        rational_operation(left, operation, right)
+    }
+
+    fn negate(value: &RationalInteger) -> RationalInteger {
+        try_sub(&rational_zero(), value).unwrap()
+    }
+
+    const LIMIT: i64 = MAX_RATIONAL_BITS as i64;
+
+    #[test]
+    fn rational_operation_accepts_results_at_the_bit_limit() {
+        let at_limit = two_pow(LIMIT - 1);
+        assert_eq!(at_limit.numer_magnitude_bits(), MAX_RATIONAL_BITS);
+        let half_limit = two_pow(LIMIT / 2 - 1);
+        assert_eq!(
+            operate(&half_limit, NumericOperation::Multiply, &two_pow(LIMIT / 2)).unwrap(),
+            at_limit
+        );
+        assert_eq!(
+            operate(
+                &two_pow(LIMIT - 2),
+                NumericOperation::Add,
+                &two_pow(LIMIT - 2)
+            )
+            .unwrap(),
+            at_limit
+        );
+        let reciprocal = operate(&rational_one(), NumericOperation::Divide, &at_limit).unwrap();
+        assert_eq!(reciprocal.denom_magnitude_bits(), MAX_RATIONAL_BITS);
+    }
+
+    #[test]
+    fn rational_operation_rejects_numerator_beyond_the_bit_limit() {
+        let at_limit = two_pow(LIMIT - 1);
+        let two = rational_new(2, 1);
+        for (operation, right) in [
+            (NumericOperation::Add, at_limit.clone()),
+            (NumericOperation::Subtract, negate(&at_limit)),
+            (NumericOperation::Multiply, two.clone()),
+            (NumericOperation::Divide, rational_new(1, 2)),
+            (NumericOperation::Power, two.clone()),
+        ] {
+            assert_eq!(
+                operate(&at_limit, operation, &right).unwrap_err(),
+                NumericFailure::MagnitudeLimit,
+                "{operation:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn rational_operation_rejects_denominator_beyond_the_bit_limit() {
+        let reciprocal_at_limit = try_div(&rational_one(), &two_pow(LIMIT - 1)).unwrap();
+        assert_eq!(
+            operate(
+                &reciprocal_at_limit,
+                NumericOperation::Divide,
+                &rational_new(2, 1)
+            )
+            .unwrap_err(),
+            NumericFailure::MagnitudeLimit
+        );
+        assert_eq!(
+            operate(
+                &reciprocal_at_limit,
+                NumericOperation::Multiply,
+                &rational_new(1, 2)
+            )
+            .unwrap_err(),
+            NumericFailure::MagnitudeLimit
+        );
+    }
+
+    #[test]
+    fn power_precheck_is_exact_at_the_bit_limit() {
+        let two = rational_new(2, 1);
+        assert_eq!(
+            operate(&two, NumericOperation::Power, &rational_new(LIMIT - 1, 1)).unwrap(),
+            two_pow(LIMIT - 1)
+        );
+        assert!(!power_exceeds_magnitude_limit(
+            &two,
+            &BigUint::try_from_u32(LIMIT as u32 - 1).unwrap()
+        ));
+        assert!(power_exceeds_magnitude_limit(
+            &two,
+            &BigUint::try_from_u32(LIMIT as u32).unwrap()
+        ));
+        let two_pow_sixteen = rational_new(1 << 16, 1);
+        let largest_fitting_exponent = (LIMIT as u32 - 1) / 16;
+        assert!(!power_exceeds_magnitude_limit(
+            &two_pow_sixteen,
+            &BigUint::try_from_u32(largest_fitting_exponent).unwrap()
+        ));
+        assert_eq!(
+            operate(
+                &two_pow_sixteen,
+                NumericOperation::Power,
+                &rational_new(i64::from(largest_fitting_exponent), 1)
+            )
+            .unwrap(),
+            two_pow(16 * i64::from(largest_fitting_exponent))
+        );
+    }
+
+    #[test]
+    fn power_precheck_rejects_huge_exponents_before_allocating() {
+        let huge = RationalInteger::from_bigint_strings("1180591620717411303424", "1").unwrap();
+        for base in [rational_new(2, 1), rational_new(1, 2), rational_new(-3, 7)] {
+            assert_eq!(
+                operate(&base, NumericOperation::Power, &huge).unwrap_err(),
+                NumericFailure::MagnitudeLimit,
+                "{base:?}"
+            );
+            assert_eq!(
+                operate(&base, NumericOperation::Power, &negate(&huge)).unwrap_err(),
+                NumericFailure::MagnitudeLimit,
+                "{base:?} negative exponent"
+            );
+        }
+        assert_eq!(
+            operate(&rational_new(-1, 1), NumericOperation::Power, &huge).unwrap(),
+            rational_one()
+        );
+    }
+
+    #[test]
+    fn power_precheck_applies_to_the_root_of_fractional_exponents() {
+        let four = rational_new(4, 1);
+        assert_eq!(
+            operate(&four, NumericOperation::Power, &rational_new(LIMIT - 1, 2)).unwrap(),
+            two_pow(LIMIT - 1)
+        );
+        assert_eq!(
+            operate(&four, NumericOperation::Power, &rational_new(LIMIT + 1, 2)).unwrap_err(),
+            NumericFailure::MagnitudeLimit
+        );
+    }
+
+    use crate::computation::bigint::work_counters;
+
+    fn big(value: i64) -> BigInt {
+        BigInt::from_i64(value)
+    }
+
+    fn big_pow(base: i64, exponent: u32) -> BigInt {
+        big(base)
+            .try_pow(&BigUint::try_from_u32(exponent).unwrap())
+            .unwrap()
+    }
+
+    fn big_add(left: &BigInt, right: &BigInt) -> BigInt {
+        left.try_add(right).unwrap()
+    }
+
+    fn fraction(numer: BigInt, denom: BigInt) -> RationalInteger {
+        try_rational_new(numer, denom).unwrap()
+    }
+
+    fn assert_canonical(value: &RationalInteger) {
+        if let Err(reason) = RationalInteger::from_canonical_repr(value.repr.clone()) {
+            panic!("{value:?} is not canonical: {reason}");
+        }
+    }
+
+    fn reference_mul(left: &RationalInteger, right: &RationalInteger) -> RationalInteger {
+        let (ln, ld) = left.as_big_pair();
+        let (rn, rd) = right.as_big_pair();
+        fraction(ln.try_mul(&rn).unwrap(), ld.try_mul(&rd).unwrap())
+    }
+
+    fn reference_div(left: &RationalInteger, right: &RationalInteger) -> RationalInteger {
+        let (ln, ld) = left.as_big_pair();
+        let (rn, rd) = right.as_big_pair();
+        fraction(ln.try_mul(&rd).unwrap(), ld.try_mul(&rn).unwrap())
+    }
+
+    fn reference_pow(base: &RationalInteger, exponent: i64) -> RationalInteger {
+        let (n, d) = base.as_big_pair();
+        let magnitude = BigUint::try_from_u64(exponent.unsigned_abs()).unwrap();
+        let (n, d) = (
+            n.try_pow(&magnitude).unwrap(),
+            d.try_pow(&magnitude).unwrap(),
+        );
+        if exponent < 0 {
+            fraction(d, n)
+        } else {
+            fraction(n, d)
+        }
+    }
+
+    /// `2^32767 - 1` and `2^32767 + 1`: odd, two apart, hence coprime; 32767 and 32768 bits.
+    fn cap_sized_coprime_pair() -> (BigInt, BigInt) {
+        let power = big_pow(2, 32_767);
+        (big_add(&power, &big(-1)), big_add(&power, &big(1)))
+    }
+
+    fn arithmetic_fixtures() -> Vec<RationalInteger> {
+        vec![
+            rational_zero(),
+            rational_one(),
+            rational_new(-1, 1),
+            rational_new(3, 7),
+            rational_new(-22, 15),
+            RationalInteger::from_small(i128::MAX, 1).unwrap(),
+            RationalInteger::from_small(i128::MIN, 1).unwrap(),
+            RationalInteger::from_small(1, i128::MAX).unwrap(),
+            RationalInteger::from_small(i128::MIN, i128::MAX).unwrap(),
+            fraction(big_add(&big_pow(2, 200), &big(1)), big_pow(3, 100)),
+            fraction(big_pow(-5, 91), big_pow(2, 150)),
+            fraction(big_pow(6, 80), big_pow(35, 40)),
+            fraction(big_pow(35, 40), big_pow(-6, 81)),
+            fraction(big_pow(2, 130), big(3)),
+        ]
+    }
+
+    #[test]
+    fn mul_div_pow_match_reduction_of_the_raw_result() {
+        let fixtures = arithmetic_fixtures();
+        for left in &fixtures {
+            for right in &fixtures {
+                let product = try_mul(left, right).unwrap();
+                assert_canonical(&product);
+                assert_eq!(product, reference_mul(left, right), "{left:?} * {right:?}");
+                if right.numer_is_zero() {
+                    continue;
+                }
+                let quotient = try_div(left, right).unwrap();
+                assert_canonical(&quotient);
+                assert_eq!(quotient, reference_div(left, right), "{left:?} / {right:?}");
+            }
+            for exponent in -3..=3 {
+                if exponent < 0 && left.numer_is_zero() {
+                    continue;
+                }
+                let power = try_pow_integer(left, &BigInt::from_i64(exponent)).unwrap();
+                assert_canonical(&power);
+                assert_eq!(
+                    power,
+                    reference_pow(left, exponent),
+                    "{left:?} ^ {exponent}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn try_div_keeps_denominator_positive_for_every_sign() {
+        let (a, b) = cap_sized_coprime_pair();
+        let positive = fraction(a.try_clone().unwrap(), big_pow(3, 50));
+        let other = fraction(big_pow(7, 60), b);
+        let negate = |value: &RationalInteger| try_sub(&rational_zero(), value).unwrap();
+        for (left, right) in [
+            (positive.clone(), negate(&other)),
+            (negate(&positive), other.clone()),
+            (negate(&positive), negate(&other)),
+            (positive.clone(), other.clone()),
+        ] {
+            let quotient = try_div(&left, &right).unwrap();
+            assert_canonical(&quotient);
+            assert_eq!(quotient, reference_div(&left, &right));
+        }
+        assert_eq!(
+            try_div(&positive, &negate(&positive)).unwrap(),
+            rational_new(-1, 1)
+        );
+    }
+
+    #[test]
+    fn power_of_a_reduced_fraction_performs_no_gcd() {
+        let bases = [
+            rational_new(7301, 7300),
+            rational_new(-3, 7),
+            fraction(big_add(&big_pow(2, 200), &big(1)), big_pow(3, 130)),
+            fraction(big_pow(-5, 91), big_pow(2, 150)),
+        ];
+        for base in &bases {
+            for exponent in [-301, -2, 2, 5, 200] {
+                work_counters::reset();
+                let power = try_pow_integer(base, &BigInt::from_i64(exponent)).unwrap();
+                let counts = work_counters::snapshot();
+                assert_eq!(counts.gcd_calls, 0, "{base:?} ^ {exponent}");
+                assert_canonical(&power);
+                assert_eq!(
+                    power,
+                    reference_pow(base, exponent),
+                    "{base:?} ^ {exponent}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn product_of_reciprocals_takes_gcds_of_the_operands_only() {
+        let (a, b) = cap_sized_coprime_pair();
+        let operand_bits = a.bits().max(b.bits());
+        let left = fraction(a.try_clone().unwrap(), b.try_clone().unwrap());
+        let right = fraction(b, a);
+        work_counters::reset();
+        assert_eq!(try_mul(&left, &right).unwrap(), rational_one());
+        let counts = work_counters::snapshot();
+        assert_eq!(counts.gcd_calls, 2);
+        assert!(counts.gcd_max_operand_bits <= operand_bits);
+        work_counters::reset();
+        assert_eq!(try_div(&left, &left).unwrap(), rational_one());
+        let counts = work_counters::snapshot();
+        assert_eq!(counts.gcd_calls, 2);
+        assert!(counts.gcd_max_operand_bits <= operand_bits);
+    }
 
     #[test]
     fn rational_zero_is_zero() {
@@ -1112,7 +1589,7 @@ mod tests {
     fn try_to_decimal_huge_cancelling_rationals() {
         let numer = BigInt::try_from_str_radix("1", 10)
             .unwrap()
-            .try_pow_u32(100)
+            .try_pow(&BigUint::try_from_u32(100).unwrap())
             .unwrap();
         let rational = try_rational_new(numer.clone(), numer).unwrap();
         assert_eq!(rational.try_to_decimal().unwrap(), Decimal::ONE);
@@ -1129,7 +1606,7 @@ mod tests {
     #[test]
     fn try_pow_negative_exponent_inverts_base() {
         let hour_factor = rational_new(3600, 1);
-        let inverse = try_pow_i32(&hour_factor, -1).unwrap();
+        let inverse = try_pow_integer(&hour_factor, &BigInt::from_i64(-1)).unwrap();
         assert_eq!(inverse, rational_new(1, 3600));
     }
 
@@ -1155,6 +1632,104 @@ mod tests {
         let exponent = rational_new(1, 2);
         let result = rational_operation(&base, NumericOperation::Power, &exponent).unwrap();
         assert_eq!(result, rational_new(2, 1));
+    }
+
+    #[test]
+    fn rational_power_exact_roots_of_rationals() {
+        let power = |base: RationalInteger, exponent: RationalInteger| {
+            rational_operation(&base, NumericOperation::Power, &exponent)
+        };
+        assert_eq!(
+            power(rational_new(9, 4), rational_new(1, 2)).unwrap(),
+            rational_new(3, 2)
+        );
+        assert_eq!(
+            power(rational_new(9, 4), rational_new(-1, 2)).unwrap(),
+            rational_new(2, 3)
+        );
+        assert_eq!(
+            power(rational_new(8, 1), rational_new(2, 3)).unwrap(),
+            rational_new(4, 1)
+        );
+        assert_eq!(
+            power(rational_new(-8, 1), rational_new(1, 3)).unwrap(),
+            rational_new(-2, 1)
+        );
+        assert_eq!(
+            power(rational_new(-4, 1), rational_new(2, 1)).unwrap(),
+            rational_new(16, 1)
+        );
+        assert_eq!(
+            power(rational_new(1, 1), rational_new(49_595, 100_000)).unwrap(),
+            rational_new(1, 1)
+        );
+    }
+
+    #[test]
+    fn power_with_huge_integer_exponent_of_one_and_minus_one() {
+        let even_huge =
+            RationalInteger::from_bigint_strings("1000000000000000000000000000000", "1").unwrap();
+        let odd_huge =
+            RationalInteger::from_bigint_strings("1000000000000000000000000000001", "1").unwrap();
+        assert_eq!(
+            rational_operation(&rational_new(1, 1), NumericOperation::Power, &even_huge).unwrap(),
+            rational_new(1, 1)
+        );
+        assert_eq!(
+            rational_operation(&rational_new(-1, 1), NumericOperation::Power, &odd_huge).unwrap(),
+            rational_new(-1, 1)
+        );
+    }
+
+    #[test]
+    fn power_with_huge_root_degree_above_bit_length_is_irrational() {
+        let degree = RationalInteger::from_bigint_strings("1", "1000000000000").unwrap();
+        assert_eq!(
+            rational_operation(&rational_new(2, 1), NumericOperation::Power, &degree).unwrap_err(),
+            NumericFailure::Irrational
+        );
+    }
+
+    #[test]
+    fn power_with_exponent_beyond_every_allocation_is_out_of_memory() {
+        let exponent = BigInt::from_i128(1i128 << 70);
+        assert_eq!(
+            try_pow_integer(&rational_new(2, 1), &exponent).unwrap_err(),
+            NumericFailure::OutOfMemory
+        );
+        assert_eq!(
+            try_pow_integer(&rational_new(1, 1), &exponent).unwrap(),
+            rational_new(1, 1)
+        );
+    }
+
+    #[test]
+    fn rational_power_irrational_fails_fast_for_large_degree() {
+        let failure = rational_operation(
+            &rational_new(480, 1),
+            NumericOperation::Power,
+            &rational_new(49_595, 100_000),
+        )
+        .unwrap_err();
+        assert_eq!(failure, NumericFailure::Irrational);
+        let failure = rational_operation(
+            &rational_new(2, 1),
+            NumericOperation::Power,
+            &rational_new(49_595, 100_000),
+        )
+        .unwrap_err();
+        assert_eq!(failure, NumericFailure::Irrational);
+    }
+
+    #[test]
+    fn rational_power_negative_base_even_root_is_irrational() {
+        let failure = rational_operation(
+            &rational_new(-4, 1),
+            NumericOperation::Power,
+            &rational_new(1, 2),
+        )
+        .unwrap_err();
+        assert_eq!(failure, NumericFailure::Irrational);
     }
 
     #[test]
@@ -1185,6 +1760,46 @@ mod tests {
         assert_eq!(
             result.try_to_decimal().unwrap().round_dp(27),
             expected.round_dp(27),
+        );
+    }
+
+    #[test]
+    fn rational_modulo_is_floored_and_takes_divisor_sign() {
+        assert_eq!(
+            operate(
+                &rational_new(-7, 1),
+                NumericOperation::Modulo,
+                &rational_new(3, 1)
+            )
+            .unwrap(),
+            rational_new(2, 1)
+        );
+        assert_eq!(
+            operate(
+                &rational_new(7, 1),
+                NumericOperation::Modulo,
+                &rational_new(-3, 1)
+            )
+            .unwrap(),
+            rational_new(-2, 1)
+        );
+        assert_eq!(
+            operate(
+                &rational_new(-7, 2),
+                NumericOperation::Modulo,
+                &rational_new(1, 1)
+            )
+            .unwrap(),
+            rational_new(1, 2)
+        );
+        assert_eq!(
+            operate(
+                &rational_new(-7, 1),
+                NumericOperation::Modulo,
+                &rational_new(-3, 1)
+            )
+            .unwrap(),
+            rational_new(-1, 1)
         );
     }
 

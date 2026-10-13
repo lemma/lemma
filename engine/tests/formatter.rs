@@ -57,15 +57,59 @@ fn precedence_same_level_multiply_no_extra_parens() {
 }
 
 #[test]
-fn precedence_not_binds_tighter_than_and() {
-    let src = "spec test data a: true data b: true rule x: not a and b";
-    assert_eq!(format_and_extract_rule_expr(src), "not a and b");
+fn not_call_form_before_and() {
+    let src = "spec test data a: true data b: true rule x: not (a) and b";
+    assert_eq!(format_and_extract_rule_expr(src), "not(a) and b");
 }
 
 #[test]
-fn precedence_not_over_and_preserves_parens() {
+fn not_call_form_around_and() {
     let src = "spec test data a: true data b: true rule x: not (a and b)";
-    assert_eq!(format_and_extract_rule_expr(src), "not (a and b)");
+    assert_eq!(format_and_extract_rule_expr(src), "not(a and b)");
+}
+
+#[test]
+fn not_bare_operand_followed_by_and_is_parse_error() {
+    let src = "spec test data a: true data b: true rule x: not a and b";
+    let err = format_source(src, lemma::SourceType::Volatile).unwrap_err();
+    assert!(err.to_string().contains("not(a) and b"), "{err}");
+}
+
+#[test]
+fn prefix_operator_canonical_form() {
+    let spec = "spec t data x: 1.5 data y: 2 data ok: true data band: number range";
+    for (input, expected) in [
+        ("floor x", "floor x"),
+        ("floor (x)", "floor x"),
+        ("floor(x) + 1", "floor(x) + 1"),
+        ("(floor x) + 1", "floor(x) + 1"),
+        ("floor (x + 1)", "floor(x + 1)"),
+        ("1 + floor x", "1 + floor(x)"),
+        ("(floor x) * (floor y)", "floor(x) * floor(y)"),
+        ("ok and not ok", "ok and not ok"),
+        ("ok and not (y > 1)", "ok and not(y > 1)"),
+        ("floor abs x", "floor abs x"),
+        ("round (x as number)", "round(x as number)"),
+        ("floor(x) > 1 and ok", "floor(x) > 1 and ok"),
+        ("y > floor(x) and ok", "y > floor(x) and ok"),
+        ("lower band", "lower band"),
+        ("lower(band) + 1", "lower(band) + 1"),
+        ("not ok", "not ok"),
+        ("not (y > 1)", "not(y > 1)"),
+        ("abs (-1)", "abs(-1)"),
+    ] {
+        let src = format!("{spec} rule x: {input}");
+        assert_eq!(
+            format_and_extract_rule_expr(&src),
+            expected,
+            "input: {input}"
+        );
+        let formatted = format_source(&src, lemma::SourceType::Volatile)
+            .unwrap_or_else(|e| panic!("format failed for '{input}': {e}"));
+        let again = format_source(&formatted, lemma::SourceType::Volatile)
+            .unwrap_or_else(|e| panic!("reformat failed for '{formatted}': {e}"));
+        assert_eq!(again, formatted, "not idempotent: {input}");
+    }
 }
 
 #[test]
@@ -183,7 +227,7 @@ fn idempotency_precedence_expressions() {
         "a + b * c",
         "a * (b + c)",
         "(a + b) + c",
-        "not a and b",
+        "not(a) and b",
         "not (a and b)",
         "(a + b) * (c - d)",
     ];
@@ -424,4 +468,173 @@ data velocity: measure
     );
     let twice = format_source(&once, st).expect("reformat");
     assert_eq!(once, twice, "compound unit format must be idempotent");
+}
+
+#[test]
+fn list_key_comes_before_with() {
+    let source = r#"
+spec menu_item
+data drink: text
+data price: number
+
+spec coffee_order
+uses menu: menu_item list
+  -> with drink: "espresso", price: 1
+  -> key drink
+"#;
+    let formatted = format_source(source, lemma::SourceType::Volatile).expect("format");
+    let key = formatted.find("-> key drink").expect("key");
+    let with = formatted.find("-> with").expect("with");
+    assert!(key < with, "key before with, got:\n{formatted}");
+}
+
+#[test]
+fn inline_rows_align_fields() {
+    let source = r#"
+spec menu_item
+data drink: text
+data price: number
+
+spec coffee_order
+uses menu: menu_item list
+  -> with drink: "espresso", price: 2.50
+  -> with drink: "latte", price: 3.50
+"#;
+    let formatted = format_source(source, lemma::SourceType::Volatile).expect("format");
+    assert!(
+        formatted.contains("drink:") && formatted.contains("price:"),
+        "{formatted}"
+    );
+    let espresso = formatted.find("espresso").expect("espresso");
+    let latte = formatted.find("latte").expect("latte");
+    assert!(espresso < latte, "{formatted}");
+}
+
+#[test]
+fn long_inline_row_falls_back_to_one_field_per_line() {
+    let source = r#"
+spec menu_item
+data drink: text
+data description: text
+data origin: text
+data price: number
+
+spec coffee_order
+uses menu: menu_item list
+  -> with drink: "single-origin espresso from the highlands", description: "a very long tasting note that will not fit", origin: "ethiopia", price: 4.50
+"#;
+    let formatted = format_source(source, lemma::SourceType::Volatile).expect("format");
+    assert!(
+        formatted.contains("drink:")
+            && formatted
+                .lines()
+                .filter(|line| line.contains("drink:"))
+                .count()
+                >= 1,
+        "{formatted}"
+    );
+    assert!(
+        formatted.lines().any(|line| line.trim_end().ends_with(',')),
+        "vertical field pairs end in comma, got:\n{formatted}"
+    );
+}
+
+#[test]
+fn comma_list_wraps_with_deeper_indent() {
+    let source = r#"
+spec fares_card
+data fares: number list
+  -> with 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20
+"#;
+    let formatted = format_source(source, lemma::SourceType::Volatile).expect("format");
+    assert!(formatted.contains(","), "{formatted}");
+    assert!(
+        formatted
+            .lines()
+            .any(|line| line.starts_with("       ") || line.starts_with("    ")),
+        "continuation indent, got:\n{formatted}"
+    );
+}
+
+#[test]
+fn list_valued_unless_uses_split_then() {
+    let source = r#"
+spec rate
+data band: text
+spec parcel
+uses standard_rates: rate list
+  -> key band
+  -> with band: "light"
+uses express_rates: rate list
+  -> key band
+  -> with band: "light"
+data express: boolean
+rule rates:
+  standard_rates
+  unless express then express_rates
+"#;
+    let formatted = format_source(source, lemma::SourceType::Volatile).expect("format");
+    assert!(
+        formatted.contains("then") && formatted.contains("unless express"),
+        "{formatted}"
+    );
+}
+
+#[test]
+fn command_argument_canonical_form() {
+    let spec = "spec t data money: measure -> unit eur: 1.00 data fares: money list -> with 1 eur data take: number";
+    for (input, expected) in [
+        ("fares -> top (take)", "fares -> top take"),
+        ("fares -> top(2)", "fares -> top 2"),
+        ("fares -> top(take + 1)", "fares -> top(take + 1)"),
+        ("fares -> find (1 + 1)", "fares -> find(1 + 1)"),
+        ("fares -> where (>= 1 eur)", "fares -> where >= 1 eur"),
+        ("fares -> sum * 2", "fares -> sum * 2"),
+        ("(fares -> sum) - 1 eur", "fares -> sum - 1 eur"),
+        ("lines -> sum (qty * price)", "lines -> sum(qty * price)"),
+        ("lines -> sum(qty) * 2", "lines -> sum(qty) * 2"),
+        ("2 * lines -> sum(qty)", "2 * lines -> sum(qty)"),
+        ("2 * lines -> sum qty", "2 * lines -> sum(qty)"),
+        (
+            "lines -> sum(qty) > 1 and ok",
+            "lines -> sum(qty) > 1 and ok",
+        ),
+        ("staff -> where (salary > 1)", "staff -> where salary > 1"),
+        (
+            "staff -> where (a > 1 and b < 2)",
+            "staff -> where(a > 1 and b < 2)",
+        ),
+        (
+            "staff -> sort (salary * 2) desc",
+            "staff -> sort(salary * 2) desc",
+        ),
+        ("fares -> sort", "fares -> sort asc"),
+        ("staff -> sort salary", "staff -> sort salary asc"),
+    ] {
+        let src = format!("{spec} rule x: {input}");
+        assert_eq!(format_and_extract_rule_expr(&src), expected, "{input}");
+        let once = format_source(&src, lemma::SourceType::Volatile).unwrap();
+        let twice = format_source(&once, lemma::SourceType::Volatile).unwrap();
+        assert_eq!(once, twice, "{input}");
+    }
+}
+
+#[test]
+fn short_expression_chain_stays_on_one_line() {
+    let source = r#"
+spec employee
+data salary: number
+spec payroll
+uses staff: employee list
+  -> with salary: 1
+rule top_salary:
+  staff -> sort salary desc -> first
+"#;
+    let formatted = format_source(source, lemma::SourceType::Volatile).expect("format");
+    assert!(
+        formatted
+            .lines()
+            .any(|line| line.contains("staff -> sort salary desc -> first")),
+        "{formatted}"
+    );
 }

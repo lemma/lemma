@@ -11,7 +11,11 @@ mod tracked {
     pub const PATH_DEP_MANIFESTS: &[&str] = &[
         "cli/Cargo.toml",
         "openapi/Cargo.toml",
+        "engine/Cargo.toml",
+        "engine/fixtures/Cargo.toml",
         "engine/lsp/Cargo.toml",
+        "engine/packages/hex/native/lemma_hex/Cargo.toml",
+        "engine/packages/maven/native/lemma_jni/Cargo.toml",
     ];
 
     pub const HEX_MIX: &str = "engine/packages/hex/mix.exs";
@@ -261,24 +265,24 @@ pub fn versions_bump(root: &Path, new: &str) -> Result<(), String> {
     let pkg = root.join(tracked::VSCODE_PACKAGE_JSON);
     bump_package_json_version(&pkg, &old, new)?;
 
-    run_cargo_generate_lockfile(root)?;
+    run_cargo_update_workspace(root)?;
     run_mix_deps_get(root)?;
     run_npm_package_lock_only(root)?;
     Ok(())
 }
 
-fn run_cargo_generate_lockfile(root: &Path) -> Result<(), String> {
-    eprintln!("xtask: cargo generate-lockfile");
-    let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
+fn run_cargo_update_workspace(root: &Path) -> Result<(), String> {
+    eprintln!("xtask: cargo update --workspace");
+    let cargo = crate::cargo_bin();
     let st = Command::new(&cargo)
-        .args(["generate-lockfile"])
+        .args(["update", "--workspace"])
         .current_dir(root)
         .stdout(Stdio::null())
         .stderr(Stdio::inherit())
         .status()
-        .map_err(|e| format!("failed to run {cargo} generate-lockfile: {e}"))?;
+        .map_err(|e| format!("failed to run {cargo} update --workspace: {e}"))?;
     if !st.success() {
-        return Err("cargo generate-lockfile failed".into());
+        return Err("cargo update --workspace failed".into());
     }
     Ok(())
 }

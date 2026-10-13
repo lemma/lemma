@@ -85,8 +85,7 @@ rule later: start_time + 2 hour
         assert_eq!(date.minute, 0);
         assert_eq!(date.second, 0);
         if let Some(tz) = &date.timezone {
-            assert_eq!(tz.offset_hours, 1);
-            assert_eq!(tz.offset_minutes, 0);
+            assert_eq!(tz.offset_minutes, 60);
         } else {
             panic!("Expected timezone to be preserved");
         }
@@ -119,8 +118,7 @@ rule later: west_coast + 3 hour
     {
         assert_eq!(date.hour, 12);
         if let Some(tz) = date.timezone {
-            assert_eq!(tz.offset_hours, -8);
-            assert_eq!(tz.offset_minutes, 0);
+            assert_eq!(tz.offset_minutes, -480);
         } else {
             panic!("Expected timezone to be preserved");
         }
@@ -154,8 +152,7 @@ rule next_day: evening + 2 hour
         assert_eq!(date.hour, 1);
         assert_eq!(date.minute, 0);
         if let Some(tz) = date.timezone {
-            assert_eq!(tz.offset_hours, 5);
-            assert_eq!(tz.offset_minutes, 30);
+            assert_eq!(tz.offset_minutes, 330);
         } else {
             panic!("Expected timezone to be preserved");
         }
@@ -215,14 +212,82 @@ rule preserved: nepal_time
     } = get_rule_value(&engine, "test", "preserved")
     {
         if let Some(tz) = date.timezone {
-            assert_eq!(tz.offset_hours, 5);
-            assert_eq!(tz.offset_minutes, 45);
+            assert_eq!(tz.offset_minutes, 345);
         } else {
             panic!("Expected timezone to be present");
         }
     } else {
         panic!("Expected Date value");
     }
+}
+
+fn rule_boolean(code: &str, rule: &str) -> bool {
+    let mut engine = Engine::new();
+    engine
+        .load([(lemma::SourceType::Volatile, code.to_string())])
+        .expect("Failed to parse");
+    match get_rule_value(&engine, "test", rule).value {
+        lemma::ValueKind::Boolean(value) => value,
+        other => panic!("Expected Boolean value, got {other:?}"),
+    }
+}
+
+#[test]
+fn test_negative_half_hour_offset_is_same_instant_as_utc() {
+    let code = r#"
+spec test
+data st_johns: 2024-01-01T12:00:00-03:30
+data utc: 2024-01-01T15:30:00+00:00
+rule same_instant: st_johns is utc
+    "#;
+    assert!(
+        rule_boolean(code, "same_instant"),
+        "12:00-03:30 is 15:30 UTC"
+    );
+}
+
+#[test]
+fn test_negative_half_hour_offset_arithmetic_keeps_instant() {
+    let code = r#"
+spec test
+uses lemma units
+data marquesas: 2024-01-01T12:00:00-09:30
+data utc: 2024-01-01T22:30:00+00:00
+rule same_instant: marquesas + 1 hour is utc
+    "#;
+    assert!(
+        rule_boolean(code, "same_instant"),
+        "12:00-09:30 plus one hour is 22:30 UTC"
+    );
+}
+
+#[test]
+fn test_negative_offset_below_one_hour_keeps_sign() {
+    let code = r#"
+spec test
+data behind: 2024-01-01T12:00:00-00:30
+data utc: 2024-01-01T12:30:00+00:00
+rule same_instant: behind is utc
+    "#;
+    assert!(
+        rule_boolean(code, "same_instant"),
+        "12:00-00:30 is 12:30 UTC"
+    );
+}
+
+#[test]
+fn test_negative_offset_below_one_hour_displays_sign() {
+    let mut engine = Engine::new();
+    let code = r#"
+spec test
+data behind: 2024-01-01T12:00:00-00:30
+rule kept: behind
+    "#;
+    engine
+        .load([(lemma::SourceType::Volatile, code.to_string())])
+        .expect("Failed to parse");
+    let shown = get_rule_value(&engine, "test", "kept").to_string();
+    assert!(shown.contains("-00:30"), "expected -00:30 in {shown}");
 }
 
 // Note: Time literals with timezones are not supported by chrono parser
@@ -250,7 +315,7 @@ rule later: hawaii + 1 hour
     {
         assert_eq!(date.hour, 13);
         if let Some(tz) = date.timezone {
-            assert_eq!(tz.offset_hours, -10);
+            assert_eq!(tz.offset_minutes, -600);
         } else {
             panic!("Expected timezone to be preserved");
         }
@@ -280,7 +345,7 @@ rule earlier: kiribati - 1 hour
     {
         assert_eq!(date.hour, 11);
         if let Some(tz) = date.timezone {
-            assert_eq!(tz.offset_hours, 14);
+            assert_eq!(tz.offset_minutes, 840);
         } else {
             panic!("Expected timezone to be preserved");
         }

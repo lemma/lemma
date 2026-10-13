@@ -6,6 +6,7 @@ mod hex_standalone;
 mod llms;
 mod lsp;
 mod maven_natives;
+mod recursion;
 mod schema;
 mod versions;
 mod versions_diff;
@@ -14,7 +15,22 @@ mod warnings;
 use std::process::Command;
 
 fn cargo_bin() -> String {
-    std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string())
+    std::env::var("CARGO").expect("BUG: xtask must run through cargo, which sets CARGO")
+}
+
+fn exit_for_child_status(status: std::process::ExitStatus, command: &str) -> ! {
+    match status.code() {
+        Some(code) => std::process::exit(code),
+        None => panic!("{command} terminated by signal: {status}"),
+    }
+}
+
+fn probe_succeeded(result: std::io::Result<std::process::ExitStatus>, tool: &str) -> bool {
+    match result {
+        Ok(status) => status.success(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+        Err(error) => panic!("failed to run {tool}: {error}"),
+    }
 }
 
 fn run(args: &[&str]) {
@@ -23,7 +39,7 @@ fn run(args: &[&str]) {
         .status()
         .unwrap_or_else(|e| panic!("failed to run {} {:?}: {e}", cargo_bin(), args));
     if !status.success() {
-        std::process::exit(status.code().unwrap_or(1));
+        exit_for_child_status(status, &format!("{} {args:?}", cargo_bin()));
     }
 }
 
@@ -35,7 +51,8 @@ fn run_versions_verify() {
     }
     eprintln!(
         "versions-verify: ok ({})",
-        versions::read_workspace_version(&root).unwrap_or_default()
+        versions::read_workspace_version(&root)
+            .expect("BUG: workspace version readable after versions_verify passed")
     );
 }
 
@@ -49,18 +66,20 @@ const FUZZ_TARGETS: &[&str] = &[
     "fuzz_literals",
     "fuzz_deeply_nested",
     "fuzz_data_bindings",
+    "fuzz_snapshot_decode",
 ];
 /// Wall-clock budget for `--fuzz`, split evenly across [`FUZZ_TARGETS`].
 const FUZZ_BUDGET_SECS: u64 = 1800;
 
 fn require_command(name: &str, install_hint: &str) {
-    let ok = Command::new(name)
-        .arg("--version")
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false);
+    let ok = probe_succeeded(
+        Command::new(name)
+            .arg("--version")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status(),
+        name,
+    );
     if !ok {
         panic!("{name} not found on PATH. {install_hint}");
     }
@@ -83,7 +102,11 @@ fn require_wasm_pack() {
         );
     }
     let stdout = String::from_utf8_lossy(&output.stdout);
-    let line = stdout.lines().next().unwrap_or("").trim();
+    let line = stdout
+        .lines()
+        .next()
+        .expect("wasm-pack --version printed no output")
+        .trim();
     let expected = format!("wasm-pack {}", versions::WASM_PACK_VERSION);
     if line != expected {
         panic!(
@@ -120,7 +143,15 @@ fn run_npm_wasm_precommit() {
                 panic!("failed to run node {script} in {}: {e}", npm_dir.display())
             });
         if !status.success() {
-            std::process::exit(status.code().unwrap_or(1));
+            exit_for_child_status(status, &format!("node {script}"));
+        }
+    }
+    require_command("npm", "Install Node.js (https://nodejs.org/).");
+    for args in [&["ci"][..], &["run", "typecheck:fixtures"][..]] {
+        eprintln!("xtask: npm wasm (npm {})", args.join(" "));
+        if let Err(e) = lsp::run_npm(&npm_dir, args) {
+            eprintln!("npm wasm: {e}");
+            std::process::exit(1);
         }
     }
 }
@@ -137,7 +168,7 @@ fn run_mix_precommit() {
         .status()
         .unwrap_or_else(|e| panic!("failed to run mix precommit in {}: {e}", hex_dir.display()));
     if !status.success() {
-        std::process::exit(status.code().unwrap_or(1));
+        exit_for_child_status(status, "mix precommit");
     }
 }
 
@@ -180,7 +211,7 @@ fn run_maven_precommit() {
     print!("{combined}");
     let label = "./mvnw -B verify";
     if !output.status.success() {
-        std::process::exit(output.status.code().unwrap_or(1));
+        exit_for_child_status(output.status, label);
     }
     if let Err(e) = warnings::reject_warnings_in_output(label, &combined) {
         eprintln!("{e}");
@@ -197,7 +228,7 @@ fn run_deny_precommit() {
         .status()
         .unwrap_or_else(|e| panic!("failed to run cargo deny: {e}"));
     if !status.success() {
-        std::process::exit(status.code().unwrap_or(1));
+        exit_for_child_status(status, "cargo deny check");
     }
 }
 
@@ -207,13 +238,14 @@ fn run_fuzz_precommit() {
         "Install rustup (https://rustup.rs/) for the nightly toolchain used by --fuzz.",
     );
     require_nightly();
-    let fuzz_ok = Command::new(cargo_bin())
-        .args(["fuzz", "--version"])
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false);
+    let fuzz_ok = probe_succeeded(
+        Command::new(cargo_bin())
+            .args(["fuzz", "--version"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status(),
+        "cargo fuzz",
+    );
     if !fuzz_ok {
         panic!("cargo fuzz not available. Install cargo-fuzz: cargo install cargo-fuzz");
     }
@@ -253,7 +285,7 @@ fn run_fuzz_precommit() {
                 )
             });
         if !status.success() {
-            std::process::exit(status.code().unwrap_or(1));
+            exit_for_child_status(status, &format!("cargo fuzz run {target}"));
         }
     }
 }
@@ -282,6 +314,11 @@ fn precommit(run_fuzz: bool) {
     run_vscode_precommit();
     eprintln!("xtask: fmt --check");
     run(&["fmt", "--all", "--", "--check"]);
+    eprintln!("xtask: recursion-check");
+    if let Err(e) = recursion::run(&versions::workspace_root()) {
+        eprintln!("{e}");
+        std::process::exit(1);
+    }
     eprintln!("xtask: clippy");
     run(&[
         "clippy",
@@ -293,15 +330,13 @@ fn precommit(run_fuzz: bool) {
         "warnings",
     ]);
     eprintln!("xtask: clippy wasm32");
-    let wasm_target_ok = Command::new("rustup")
+    let installed_targets = Command::new("rustup")
         .args(["target", "list", "--installed"])
         .output()
-        .map(|o| {
-            String::from_utf8_lossy(&o.stdout)
-                .lines()
-                .any(|l| l.trim() == "wasm32-unknown-unknown")
-        })
-        .unwrap_or(false);
+        .unwrap_or_else(|e| panic!("failed to run rustup target list: {e}"));
+    let wasm_target_ok = String::from_utf8_lossy(&installed_targets.stdout)
+        .lines()
+        .any(|line| line.trim() == "wasm32-unknown-unknown");
     if !wasm_target_ok {
         panic!(
             "wasm32-unknown-unknown target not installed. Install with: rustup target add wasm32-unknown-unknown"
@@ -348,7 +383,7 @@ fn precommit(run_fuzz: bool) {
 
 fn usage() {
     eprintln!(
-        "usage:\n  cargo precommit [--fuzz] | cargo run -p xtask -- [precommit] [--fuzz]\n  cargo verify   | cargo run -p xtask -- versions-verify\n  cargo bump <version> | cargo run -p xtask -- versions-bump <version>\n  cargo changelog | cargo run -p xtask -- versions-diff [semver]\n  cargo lsp | cargo run -p xtask -- lsp [vsix|prepare|package|publish-marketplace|publish-openvsx|--help]\n  cargo run -p xtask -- hex-standalone\n  cargo benchmarks <engine|cli|all> | cargo run -p xtask -- benchmarks <engine|cli|all>\n  cargo coverage <engine|cli|all> [--check] | cargo run -p xtask -- coverage <engine|cli|all> [--check]\n  cargo run -p xtask -- schema\n  cargo run -p xtask -- llms\n  cargo run -p xtask -- maven-natives\n\n  --fuzz  after the gate, run engine/fuzz for 30 minutes total (split across targets; CI uses this)"
+        "usage:\n  cargo precommit [--fuzz] | cargo run -p xtask -- [precommit] [--fuzz]\n  cargo verify   | cargo run -p xtask -- versions-verify\n  cargo bump <version> | cargo run -p xtask -- versions-bump <version>\n  cargo changelog | cargo run -p xtask -- versions-diff [semver]\n  cargo lsp | cargo run -p xtask -- lsp [vsix|prepare|package|publish-marketplace|publish-openvsx|--help]\n  cargo run -p xtask -- hex-standalone\n  cargo benchmarks <engine|cli|all> | cargo run -p xtask -- benchmarks <engine|cli|all>\n  cargo coverage <engine|cli|all> [--check] | cargo run -p xtask -- coverage <engine|cli|all> [--check]\n  cargo run -p xtask -- schema [--check]\n  cargo run -p xtask -- llms\n  cargo run -p xtask -- maven-natives\n  cargo run -p xtask -- recursion-check\n\n  --fuzz  after the gate, run engine/fuzz for 30 minutes total (split across targets; CI uses this)"
     );
 }
 
@@ -436,13 +471,27 @@ fn main() {
             }
         }
         Some("schema") => {
+            let check = match args.next().as_deref() {
+                None => false,
+                Some("--check") => true,
+                Some(other) => {
+                    eprintln!("schema: unknown argument '{other}'");
+                    usage();
+                    std::process::exit(1);
+                }
+            };
             if args.next().is_some() {
-                eprintln!("schema: takes no arguments");
+                eprintln!("schema: takes at most one argument (--check)");
                 usage();
                 std::process::exit(1);
             }
             let root = versions::workspace_root();
-            if let Err(e) = schema::run(&root) {
+            let result = if check {
+                schema::check(&root)
+            } else {
+                schema::run(&root)
+            };
+            if let Err(e) = result {
                 eprintln!("schema: {e}");
                 std::process::exit(1);
             }
@@ -468,6 +517,18 @@ fn main() {
             let root = versions::workspace_root();
             if let Err(e) = maven_natives::run(&root) {
                 eprintln!("maven-natives: {e}");
+                std::process::exit(1);
+            }
+        }
+        Some("recursion-check") => {
+            if args.next().is_some() {
+                eprintln!("recursion-check: takes no arguments");
+                usage();
+                std::process::exit(1);
+            }
+            let root = versions::workspace_root();
+            if let Err(e) = recursion::run(&root) {
+                eprintln!("{e}");
                 std::process::exit(1);
             }
         }

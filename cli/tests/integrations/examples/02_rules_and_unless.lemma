@@ -1,9 +1,15 @@
 spec rules_and_unless
 
-data is_premium   : yes
-data base_price   : number -> minimum 0
-data customer_age : number -> minimum 0 -> maximum 120
-data quantity          : number -> minimum 0
+data is_premium: yes
+data base_price: number
+  -> minimum 0
+
+data customer_age: number
+  -> minimum 0
+  -> maximum 120
+
+data quantity: number
+  -> minimum 0
 
 rule total_before_discount:
   base_price * quantity
@@ -12,7 +18,7 @@ rule discount_percentage:
   0%
   unless quantity >= 10 then 10%
   unless quantity >= 20 then 15%
-  unless is_premium then 20%
+  unless is_premium     then 20%
 
 rule discount_amount:
   total_before_discount * discount_percentage
@@ -32,7 +38,8 @@ rule age_validation:
   true
   unless customer_age < 18
     then veto "Customer must be 18 or older"
-  unless customer_age > 120 then veto "Invalid age"
+  unless customer_age > 120
+    then veto "Invalid age"
 
 rule can_process:
   yes
@@ -41,7 +48,7 @@ rule can_process:
 rule priority_processing:
   no
   unless total_after_discount > 500 then yes
-  unless is_premium then yes
+  unless is_premium                 then yes
 
 rule message:
   "Standard order"

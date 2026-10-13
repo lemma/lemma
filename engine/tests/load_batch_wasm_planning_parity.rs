@@ -149,7 +149,7 @@ rule gross: y
         .expect("tier_b dependency bundle loads with duplicate bare spec name `finance`");
 
     let counts: Vec<(Option<String>, usize)> = engine
-        .list()
+        .specs()
         .iter()
         .map(|entry| (entry.repository.clone(), entry.specs.len()))
         .collect();

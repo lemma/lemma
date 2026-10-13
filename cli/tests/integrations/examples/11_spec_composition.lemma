@@ -7,9 +7,11 @@ Base Pricing Configuration
 Foundation pricing rules that can be referenced and customized.
 """
 
-data standard_discount : 5%
-data tax_rate          : 21%
-data base_price        : number -> minimum 0 -> suggest 100
+data standard_discount: 5%
+data tax_rate:          21%
+data base_price: number
+  -> minimum 0
+  -> suggest 100
 
 rule tax_amount:
   base_price * tax_rate
@@ -34,9 +36,9 @@ Wholesale Pricing
 Standalone wholesale pricing with its own defaults.
 """
 
-data base_price        : 75
-data standard_discount : 15%
-data tax_rate          : 21%
+data base_price:        75
+data standard_discount: 15%
+data tax_rate:          21%
 
 rule tax_amount:
   base_price * tax_rate
@@ -67,9 +69,9 @@ Retail Pricing
 Standalone retail pricing with its own defaults.
 """
 
-data base_price        : 120
-data standard_discount : 0%
-data tax_rate          : 21%
+data base_price:        120
+data standard_discount: 0%
+data tax_rate:          21%
 
 rule tax_amount:
   base_price * tax_rate
@@ -101,9 +103,11 @@ Combines pricing with measure calculations.
 Demonstrates nested spec references and multi-level data access.
 """
 
-data quantity : number -> minimum 0 -> suggest 10
-
 uses pricing: base_config
+
+data quantity: number
+  -> minimum 0
+  -> suggest 10
 
 rule line_total:
   pricing.final_price * quantity
@@ -139,18 +143,19 @@ Demonstrates mixing different base specs for complex scenarios.
 """
 
 uses base_config
+
 uses retail
+
 uses wholesale
 
 rule avg_discount:
-  (wholesale.standard_discount
-  + retail.standard_discount
-  + base_config.standard_discount)
+  (wholesale.standard_discount + retail.standard_discount + base_config.standard_discount)
   / 3
 
 rule price_range:
-  retail.retail_final
-  - wholesale.wholesale_final
+  retail.retail_final - wholesale.wholesale_final
 
 rule all_configs_loaded:
-  wholesale.wholesale_final > 0 and retail.retail_final > 0 and base_config.final_price > 0
+  wholesale.wholesale_final > 0
+  and retail.retail_final > 0
+  and base_config.final_price > 0

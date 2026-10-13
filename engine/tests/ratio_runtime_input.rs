@@ -1,6 +1,6 @@
 //! Strict runtime-input grammar for Ratio-typed data overrides.
 //!
-//! Covers `engine.run(None, spec, ..., data: HashMap<String, String>, ...)` where each
+//! Covers `engine.evaluate(None, spec, ..., data: IndexMap<String, EvaluateDataValue>, ...)` where each
 //! string flows through `parse_value_from_string` → `parse_number_unit::Ratio` →
 //! `RatioLiteral::parse`. Pins exact `ValueKind::Ratio(decimal)`,
 //! not substrings of `Display`, so a 100x off value cannot pass.
@@ -9,11 +9,11 @@
 //! with the friendly Measure message (no leftover `%`/`%%` handling in the Measure
 //! literal parser).
 
+use indexmap::IndexMap;
 use lemma::DateTimeValue;
 use lemma::Engine;
 use lemma::ValueKind;
 use rust_decimal::Decimal;
-use std::collections::HashMap;
 use std::str::FromStr;
 
 fn decimal_lit(d: &str) -> Decimal {
@@ -38,12 +38,12 @@ fn load(engine: &mut Engine, code: &str) {
         });
 }
 
-fn run_rational(engine: &Engine, spec: &str, raw: &str) -> (Decimal, Option<String>) {
-    let mut data = HashMap::new();
-    data.insert("r".to_string(), raw.to_string());
+fn evaluate_rational(engine: &Engine, spec: &str, raw: &str) -> (Decimal, Option<String>) {
+    let mut data = IndexMap::new();
+    data.insert("r".to_string(), raw.into());
     let now = DateTimeValue::now();
     let resp = engine
-        .run(None, spec, Some(&now), data, None, true)
+        .evaluate(None, spec, Some(&now), data, None, true)
         .unwrap_or_else(|e| panic!("run failed for input '{raw}': {e}"));
     let rr = resp
         .results
@@ -96,12 +96,12 @@ fn run_rational(engine: &Engine, spec: &str, raw: &str) -> (Decimal, Option<Stri
     }
 }
 
-fn run_veto_reason(engine: &Engine, spec: &str, raw: &str) -> String {
-    let mut data = HashMap::new();
-    data.insert("r".to_string(), raw.to_string());
+fn evaluate_veto_reason(engine: &Engine, spec: &str, raw: &str) -> String {
+    let mut data = IndexMap::new();
+    data.insert("r".to_string(), raw.into());
     let now = DateTimeValue::now();
     let resp = engine
-        .run(None, spec, Some(&now), data, None, true)
+        .evaluate(None, spec, Some(&now), data, None, true)
         .unwrap_or_else(|e| panic!("run must complete with veto, not Error for '{raw}': {e}"));
     let rr = resp
         .results
@@ -144,7 +144,7 @@ rule out: r
 fn rejects_bare_zero() {
     let mut engine = Engine::new();
     load(&mut engine, percent_spec());
-    let msg = run_veto_reason(&engine, "s", "0");
+    let msg = evaluate_veto_reason(&engine, "s", "0");
     assert_data_veto_contains(&msg, "r", "ratio", "requires a unit");
 }
 
@@ -152,7 +152,7 @@ fn rejects_bare_zero() {
 fn rejects_bare_decimal() {
     let mut engine = Engine::new();
     load(&mut engine, percent_spec());
-    let msg = run_veto_reason(&engine, "s", "0.5");
+    let msg = evaluate_veto_reason(&engine, "s", "0.5");
     assert_data_veto_contains(&msg, "r", "ratio", "requires a unit");
 }
 
@@ -160,7 +160,7 @@ fn rejects_bare_decimal() {
 fn rejects_bare_negative() {
     let mut engine = Engine::new();
     load(&mut engine, percent_spec());
-    let msg = run_veto_reason(&engine, "s", "-0.25");
+    let msg = evaluate_veto_reason(&engine, "s", "-0.25");
     assert_data_veto_contains(&msg, "r", "ratio", "requires a unit");
 }
 
@@ -170,7 +170,7 @@ fn rejects_bare_negative() {
 fn accepts_percent_sigil_integer() {
     let mut engine = Engine::new();
     load(&mut engine, percent_spec());
-    let (n, u) = run_rational(&engine, "s", "50%");
+    let (n, u) = evaluate_rational(&engine, "s", "50%");
     assert_eq!(n, decimal_lit("0.50"));
     assert_eq!(u.as_deref(), Some("percent"));
 }
@@ -179,7 +179,7 @@ fn accepts_percent_sigil_integer() {
 fn accepts_percent_sigil_decimal() {
     let mut engine = Engine::new();
     load(&mut engine, percent_spec());
-    let (n, u) = run_rational(&engine, "s", "50.5%");
+    let (n, u) = evaluate_rational(&engine, "s", "50.5%");
     assert_eq!(n, decimal_lit("0.505"));
     assert_eq!(u.as_deref(), Some("percent"));
 }
@@ -188,18 +188,26 @@ fn accepts_percent_sigil_decimal() {
 fn accepts_percent_sigil_negative() {
     let mut engine = Engine::new();
     load(&mut engine, percent_spec());
-    let (n, u) = run_rational(&engine, "s", "-50%");
+    let (n, u) = evaluate_rational(&engine, "s", "-50%");
     assert_eq!(n, decimal_lit("-0.5"));
     assert_eq!(u.as_deref(), Some("percent"));
 }
 
 #[test]
-fn accepts_percent_sigil_with_thousands_separator() {
+fn comma_thousands_separator_in_percent_vetoes() {
     let mut engine = Engine::new();
     load(&mut engine, percent_spec());
-    let (n, u) = run_rational(&engine, "s", "5,000%");
-    assert_eq!(n, decimal_lit("50"));
-    assert_eq!(u.as_deref(), Some("percent"));
+    let mut data = IndexMap::new();
+    data.insert("r".to_string(), "5,000%".into());
+    let now = DateTimeValue::now();
+    let resp = engine
+        .evaluate(None, "s", Some(&now), data, None, true)
+        .unwrap_or_else(|e| panic!("run failed for 5,000%: {e}"));
+    let rr = resp.results.get("out").expect("rule 'out' not found");
+    assert!(
+        rr.vetoed,
+        "5,000% must veto after comma digit separator removal"
+    );
 }
 
 // ─── Accepted: permille sigil ─────────────────────────────────────────
@@ -208,7 +216,7 @@ fn accepts_percent_sigil_with_thousands_separator() {
 fn accepts_permille_sigil() {
     let mut engine = Engine::new();
     load(&mut engine, percent_spec());
-    let (n, u) = run_rational(&engine, "s", "25%%");
+    let (n, u) = evaluate_rational(&engine, "s", "25%%");
     assert_eq!(n, decimal_lit("0.025"));
     assert_eq!(u.as_deref(), Some("permille"));
 }
@@ -217,7 +225,7 @@ fn accepts_permille_sigil() {
 fn accepts_permille_sigil_negative() {
     let mut engine = Engine::new();
     load(&mut engine, percent_spec());
-    let (n, u) = run_rational(&engine, "s", "-25%%");
+    let (n, u) = evaluate_rational(&engine, "s", "-25%%");
     assert_eq!(n, decimal_lit("-0.025"));
     assert_eq!(u.as_deref(), Some("permille"));
 }
@@ -228,7 +236,7 @@ fn accepts_permille_sigil_negative() {
 fn accepts_percent_keyword_single_space() {
     let mut engine = Engine::new();
     load(&mut engine, percent_spec());
-    let (n, u) = run_rational(&engine, "s", "50 percent");
+    let (n, u) = evaluate_rational(&engine, "s", "50 percent");
     assert_eq!(n, decimal_lit("0.50"));
     assert_eq!(u.as_deref(), Some("percent"));
 }
@@ -237,7 +245,7 @@ fn accepts_percent_keyword_single_space() {
 fn accepts_percent_keyword_multi_space() {
     let mut engine = Engine::new();
     load(&mut engine, percent_spec());
-    let (n, u) = run_rational(&engine, "s", "50    percent");
+    let (n, u) = evaluate_rational(&engine, "s", "50    percent");
     assert_eq!(n, decimal_lit("0.50"));
     assert_eq!(u.as_deref(), Some("percent"));
 }
@@ -246,7 +254,7 @@ fn accepts_percent_keyword_multi_space() {
 fn accepts_percent_keyword_tab() {
     let mut engine = Engine::new();
     load(&mut engine, percent_spec());
-    let (n, u) = run_rational(&engine, "s", "50\tpercent");
+    let (n, u) = evaluate_rational(&engine, "s", "50\tpercent");
     assert_eq!(n, decimal_lit("0.50"));
     assert_eq!(u.as_deref(), Some("percent"));
 }
@@ -255,7 +263,7 @@ fn accepts_percent_keyword_tab() {
 fn accepts_permille_keyword() {
     let mut engine = Engine::new();
     load(&mut engine, percent_spec());
-    let (n, u) = run_rational(&engine, "s", "25 permille");
+    let (n, u) = evaluate_rational(&engine, "s", "25 permille");
     assert_eq!(n, decimal_lit("0.025"));
     assert_eq!(u.as_deref(), Some("permille"));
 }
@@ -271,7 +279,7 @@ rule out: r
 "#;
     let mut engine = Engine::new();
     load(&mut engine, code);
-    let (n, u) = run_rational(&engine, "s", "500 basis_points");
+    let (n, u) = evaluate_rational(&engine, "s", "500 basis_points");
     assert_eq!(n, decimal_lit("0.05"));
     assert_eq!(u.as_deref(), Some("basis_points"));
 }
@@ -282,8 +290,8 @@ rule out: r
 fn sigil_and_keyword_produce_same_value() {
     let mut engine = Engine::new();
     load(&mut engine, percent_spec());
-    let sigil = run_rational(&engine, "s", "50%");
-    let keyword = run_rational(&engine, "s", "50 percent");
+    let sigil = evaluate_rational(&engine, "s", "50%");
+    let keyword = evaluate_rational(&engine, "s", "50 percent");
     assert_eq!(sigil, keyword);
 }
 
@@ -291,8 +299,8 @@ fn sigil_and_keyword_produce_same_value() {
 fn permille_sigil_and_keyword_produce_same_value() {
     let mut engine = Engine::new();
     load(&mut engine, percent_spec());
-    let sigil = run_rational(&engine, "s", "25%%");
-    let keyword = run_rational(&engine, "s", "25 permille");
+    let sigil = evaluate_rational(&engine, "s", "25%%");
+    let keyword = evaluate_rational(&engine, "s", "25 permille");
     assert_eq!(sigil, keyword);
 }
 
@@ -302,7 +310,7 @@ fn permille_sigil_and_keyword_produce_same_value() {
 fn rejects_empty() {
     let mut engine = Engine::new();
     load(&mut engine, percent_spec());
-    let msg = run_veto_reason(&engine, "s", "");
+    let msg = evaluate_veto_reason(&engine, "s", "");
     assert!(
         msg.contains("Data r [ratio]:") && msg.to_lowercase().contains("cannot be empty"),
         "expected field-named empty ratio message, got: {msg}"
@@ -317,7 +325,7 @@ fn rejects_empty() {
 fn rejects_whitespace_only() {
     let mut engine = Engine::new();
     load(&mut engine, percent_spec());
-    let msg = run_veto_reason(&engine, "s", "   ");
+    let msg = evaluate_veto_reason(&engine, "s", "   ");
     assert!(
         msg.contains("Data r [ratio]:") && msg.to_lowercase().contains("cannot be empty"),
         "expected field-named empty ratio message, got: {msg}"
@@ -330,7 +338,7 @@ fn rejects_whitespace_only() {
 fn rejects_bare_percent_sigil() {
     let mut engine = Engine::new();
     load(&mut engine, percent_spec());
-    let msg = run_veto_reason(&engine, "s", "%");
+    let msg = evaluate_veto_reason(&engine, "s", "%");
     assert_data_veto_contains(&msg, "r", "ratio", "Invalid ratio");
 }
 
@@ -338,7 +346,7 @@ fn rejects_bare_percent_sigil() {
 fn rejects_bare_permille_sigil() {
     let mut engine = Engine::new();
     load(&mut engine, percent_spec());
-    let msg = run_veto_reason(&engine, "s", "%%");
+    let msg = evaluate_veto_reason(&engine, "s", "%%");
     assert_data_veto_contains(&msg, "r", "ratio", "Invalid ratio");
 }
 
@@ -346,9 +354,9 @@ fn rejects_bare_permille_sigil() {
 fn rejects_sigil_before_number() {
     let mut engine = Engine::new();
     load(&mut engine, percent_spec());
-    let percent = run_veto_reason(&engine, "s", "%5");
+    let percent = evaluate_veto_reason(&engine, "s", "%5");
     assert_data_veto_contains(&percent, "r", "ratio", "Invalid ratio");
-    let permille = run_veto_reason(&engine, "s", "%%5");
+    let permille = evaluate_veto_reason(&engine, "s", "%%5");
     assert_data_veto_contains(&permille, "r", "ratio", "Invalid ratio");
 }
 
@@ -358,7 +366,7 @@ fn rejects_sigil_before_number() {
 fn rejects_percent_sigil_with_space() {
     let mut engine = Engine::new();
     load(&mut engine, percent_spec());
-    let msg = run_veto_reason(&engine, "s", "5 %");
+    let msg = evaluate_veto_reason(&engine, "s", "5 %");
     assert_data_veto_contains(&msg, "r", "ratio", "Invalid ratio");
 }
 
@@ -366,7 +374,7 @@ fn rejects_percent_sigil_with_space() {
 fn rejects_permille_sigil_with_space() {
     let mut engine = Engine::new();
     load(&mut engine, percent_spec());
-    let msg = run_veto_reason(&engine, "s", "5  %%");
+    let msg = evaluate_veto_reason(&engine, "s", "5  %%");
     assert_data_veto_contains(&msg, "r", "ratio", "Invalid ratio");
 }
 
@@ -376,7 +384,7 @@ fn rejects_permille_sigil_with_space() {
 fn rejects_digit_after_percent_sigil() {
     let mut engine = Engine::new();
     load(&mut engine, percent_spec());
-    let msg = run_veto_reason(&engine, "s", "5%5");
+    let msg = evaluate_veto_reason(&engine, "s", "5%5");
     assert_data_veto_contains(&msg, "r", "ratio", "Invalid ratio");
 }
 
@@ -384,7 +392,7 @@ fn rejects_digit_after_percent_sigil() {
 fn rejects_digit_after_permille_sigil() {
     let mut engine = Engine::new();
     load(&mut engine, percent_spec());
-    let msg = run_veto_reason(&engine, "s", "5%%5");
+    let msg = evaluate_veto_reason(&engine, "s", "5%%5");
     assert_data_veto_contains(&msg, "r", "ratio", "Invalid ratio");
 }
 
@@ -392,7 +400,7 @@ fn rejects_digit_after_permille_sigil() {
 fn rejects_sigil_glued_to_keyword() {
     let mut engine = Engine::new();
     load(&mut engine, percent_spec());
-    let msg = run_veto_reason(&engine, "s", "5%percent");
+    let msg = evaluate_veto_reason(&engine, "s", "5%percent");
     assert_data_veto_contains(&msg, "r", "ratio", "Invalid ratio");
 }
 
@@ -402,7 +410,7 @@ fn rejects_sigil_glued_to_keyword() {
 fn rejects_trailing_token_after_keyword() {
     let mut engine = Engine::new();
     load(&mut engine, percent_spec());
-    let msg = run_veto_reason(&engine, "s", "50 percent extra");
+    let msg = evaluate_veto_reason(&engine, "s", "50 percent extra");
     assert_data_veto_contains(&msg, "r", "ratio", "Invalid ratio");
 }
 
@@ -412,7 +420,7 @@ fn rejects_trailing_token_after_keyword() {
 fn rejects_unknown_unit_name() {
     let mut engine = Engine::new();
     load(&mut engine, percent_spec());
-    let msg = run_veto_reason(&engine, "s", "50 fictional");
+    let msg = evaluate_veto_reason(&engine, "s", "50 fictional");
     assert_data_veto_contains(&msg, "r", "ratio", "Unknown unit");
     assert_data_veto_contains(&msg, "r", "ratio", "fictional");
 }
@@ -428,7 +436,7 @@ rule out: r
 "#;
     let mut engine = Engine::new();
     load(&mut engine, code);
-    let msg = run_veto_reason(&engine, "s", "5%");
+    let msg = evaluate_veto_reason(&engine, "s", "5%");
     assert_data_veto_contains(&msg, "r", "measure", "must include a unit");
     assert_data_veto_contains(&msg, "r", "measure", "eur");
     assert!(
@@ -446,11 +454,35 @@ rule out: r
 "#;
     let mut engine = Engine::new();
     load(&mut engine, code);
-    let msg = run_veto_reason(&engine, "s", "5%%");
+    let msg = evaluate_veto_reason(&engine, "s", "5%%");
     assert_data_veto_contains(&msg, "r", "measure", "must include a unit");
     assert_data_veto_contains(&msg, "r", "measure", "eur");
     assert!(
         !msg.contains("Unknown unit 'permille'"),
         "Measure path must not leak a 'permille' unit lookup, got: {msg}"
+    );
+}
+
+#[test]
+fn custom_ratio_unit_result_displays_magnitude_in_that_unit() {
+    let mut engine = Engine::new();
+    load(
+        &mut engine,
+        "spec bps\ndata r: ratio -> unit basis_points: 10000\nrule out: r",
+    );
+    let mut data = IndexMap::new();
+    data.insert("r".to_string(), "500 basis_points".into());
+    let now = DateTimeValue::now();
+    let response = engine
+        .evaluate(None, "bps", Some(&now), data, None, false)
+        .expect("evaluate bps");
+    let result = response.results["out"]
+        .result
+        .as_ref()
+        .expect("out has a value");
+    assert_eq!(result.result.as_deref(), Some("500 basis_points"));
+    assert_eq!(
+        result.ratio.as_ref().expect("ratio map")["basis_points"],
+        decimal_lit("500")
     );
 }

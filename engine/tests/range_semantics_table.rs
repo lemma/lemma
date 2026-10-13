@@ -1,6 +1,6 @@
+use indexmap::IndexMap;
 use lemma::{DateGranularity, DateTimeValue, Engine, LiteralValue, TimezoneValue, ValueKind};
 use rust_decimal::Decimal;
-use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -17,10 +17,7 @@ fn default_effective() -> DateTimeValue {
         minute: 0,
         second: 0,
         microsecond: 0,
-        timezone: Some(TimezoneValue {
-            offset_hours: 0,
-            offset_minutes: 0,
-        }),
+        timezone: Some(TimezoneValue { offset_minutes: 0 }),
         granularity: DateGranularity::DateTime,
     }
 }
@@ -32,11 +29,11 @@ fn eval_literal(code: &str, spec_name: &str, rule_name: &str) -> LiteralValue {
         .expect("Should parse and plan");
     let effective = default_effective();
     let response = engine
-        .run(
+        .evaluate(
             None,
             spec_name,
             Some(&effective),
-            HashMap::new(),
+            IndexMap::new(),
             Some(&[rule_name.to_string()]),
             true,
         )
@@ -68,11 +65,11 @@ fn eval_rule(code: &str, spec_name: &str, rule_name: &str) -> String {
         .expect("Should parse and plan");
     let effective = default_effective();
     let response = engine
-        .run(
+        .evaluate(
             None,
             spec_name,
             Some(&effective),
-            HashMap::new(),
+            IndexMap::new(),
             Some(&[rule_name.to_string()]),
             true,
         )
@@ -93,11 +90,11 @@ fn eval_rule_measure_unit(code: &str, spec_name: &str, rule_name: &str, unit: &s
         .expect("Should parse and plan");
     let effective = default_effective();
     let response = engine
-        .run(
+        .evaluate(
             None,
             spec_name,
             Some(&effective),
-            HashMap::new(),
+            IndexMap::new(),
             Some(&[rule_name.to_string()]),
             true,
         )
@@ -254,13 +251,13 @@ rule reversed: (5...3) - (7...6)"#;
 #[test]
 fn number_range_arithmetic_and_comparison_use_sizes() {
     let code = r#"spec test
-rule sum: (3...5) + (6...7)
+rule added: (3...5) + (6...7)
 rule diff: (3...5) - (6...7)
 rule gte: (3...5) >= 2
 rule gt: (3...5) > 2
 rule reversed_add: (5...3) + 2
 rule reversed_cmp: (5...3) >= 0"#;
-    assert_eq!(eval_rule(code, "test", "sum"), "3");
+    assert_eq!(eval_rule(code, "test", "added"), "3");
     assert_eq!(eval_rule(code, "test", "diff"), "1");
     assert!(eval_bool(code, "test", "gte"));
     assert!(!eval_bool(code, "test", "gt"));
@@ -298,11 +295,11 @@ rule rminus: 5 kilogram - (3 kilogram...5 kilogram)"#;
 fn measure_range_arithmetic_and_comparison_use_sizes() {
     let code = r#"spec test
 data weight: measure -> unit gram: 1 -> unit kilogram: 1000
-rule sum: (3 kilogram...5 kilogram) + (6 kilogram...7 kilogram)
+rule added: (3 kilogram...5 kilogram) + (6 kilogram...7 kilogram)
 rule diff: (3 kilogram...5 kilogram) - (6 kilogram...7 kilogram)
 rule cmp: (3 kilogram...5 kilogram) >= 2 kilogram"#;
     // Span result promotes via signature_index to the canonical unit (gram).
-    assert_contains_all(&eval_rule(code, "test", "sum"), &["3000", "gram"]);
+    assert_contains_all(&eval_rule(code, "test", "added"), &["3000", "gram"]);
     assert_contains_all(&eval_rule(code, "test", "diff"), &["1000", "gram"]);
     assert!(eval_bool(code, "test", "cmp"));
 }
@@ -323,10 +320,10 @@ rule rminus: 60% - (10%...50%)"#;
 #[test]
 fn ratio_range_arithmetic_and_comparison_use_sizes() {
     let code = r#"spec test
-rule sum: (10%...50%) + (20%...30%)
+rule added: (10%...50%) + (20%...30%)
 rule diff: (10%...50%) - (20%...30%)
 rule cmp: (10%...50%) >= 40%"#;
-    assert_eq!(eval_rule(code, "test", "sum"), "50%");
+    assert_eq!(eval_rule(code, "test", "added"), "50%");
     assert_eq!(eval_rule(code, "test", "diff"), "30%");
     assert!(eval_bool(code, "test", "cmp"));
 }
@@ -347,11 +344,11 @@ rule rminus: (40 day - (2024-02-15...2024-03-15)) as day as number"#;
 fn date_range_arithmetic_and_comparison_use_sizes() {
     let code = r#"spec test
 uses lemma units
-rule sum: ((2024-01-01...2024-01-03) + (2024-02-01...2024-02-02)) as day as number
+rule added: ((2024-01-01...2024-01-03) + (2024-02-01...2024-02-02)) as day as number
 rule diff: ((2024-01-01...2024-01-03) - (2024-02-01...2024-02-02)) as day as number
 rule cmp: (2024-01-01...2024-01-03) >= 2 day
 rule reversed: (2024-01-03...2024-01-01) as day as number"#;
-    assert_contains_all(&eval_rule(code, "test", "sum"), &["3"]);
+    assert_contains_all(&eval_rule(code, "test", "added"), &["3"]);
     assert_contains_all(&eval_rule(code, "test", "diff"), &["1"]);
     assert!(eval_bool(code, "test", "cmp"));
     assert_contains_all(&eval_rule(code, "test", "reversed"), &["2"]);

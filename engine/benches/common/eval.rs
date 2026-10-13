@@ -1,5 +1,6 @@
 use crate::common::{effective, source_path, Fixture};
-use lemma::{Engine, Response, SourceType};
+use indexmap::IndexMap;
+use lemma::{Engine, EvaluateDataValue, Response, SourceType};
 use std::sync::Arc;
 
 pub fn terminal_rule(spec_name: &str) -> &'static str {
@@ -23,20 +24,19 @@ pub fn load_engine(fixture: &Fixture) -> Engine {
 
 pub fn evaluate_loaded(
     engine: &Engine,
-    fixture: &Fixture,
-    terminal: &str,
+    spec_name: &str,
+    data: IndexMap<String, EvaluateDataValue>,
+    rules: &[String],
     explain: bool,
 ) -> Response {
     let effective = effective();
-    let data = fixture.inputs();
-    let rules = [terminal.to_string()];
     engine
-        .run(
+        .evaluate(
             None,
-            fixture.spec_name,
+            spec_name,
             Some(&effective),
             data,
-            Some(rules.as_slice()),
+            Some(rules),
             explain,
         )
         .expect("BUG: bench fixture must evaluate")

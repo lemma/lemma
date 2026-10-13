@@ -1,7 +1,7 @@
 //! Load/remove must not leave Engine in a half-committed state.
 
+use indexmap::IndexMap;
 use lemma::{DateTimeValue, Engine, SourceType};
-use std::collections::HashMap;
 use std::sync::Arc;
 
 #[test]
@@ -21,7 +21,7 @@ rule y: x
 
     let now = DateTimeValue::now();
     let before = engine
-        .run(None, "good", Some(&now), HashMap::new(), None, false)
+        .evaluate(None, "good", Some(&now), IndexMap::new(), None, false)
         .expect("good runs before");
 
     let bad = engine.load([(
@@ -36,14 +36,14 @@ rule y: x + some_spec.value
     )]);
     assert!(bad.is_err(), "load with missing dependency must fail");
 
-    let listed = engine.list();
-    let workspace = listed
+    let repositories = engine.specs();
+    let workspace = repositories
         .iter()
         .find(|r| r.repository.is_none())
         .expect("workspace");
     assert!(
         workspace.specs.iter().any(|s| s.name == "good"),
-        "good must remain listed"
+        "good must remain loaded"
     );
     assert!(
         !workspace.specs.iter().any(|s| s.name == "consumer"),
@@ -51,7 +51,7 @@ rule y: x + some_spec.value
     );
 
     let after = engine
-        .run(None, "good", Some(&now), HashMap::new(), None, false)
+        .evaluate(None, "good", Some(&now), IndexMap::new(), None, false)
         .expect("good still runs after failed load");
     assert_eq!(
         before.results.keys().collect::<Vec<_>>(),
@@ -85,7 +85,7 @@ rule total: d.value
 
     let now = DateTimeValue::now();
     engine
-        .run(None, "consumer", Some(&now), HashMap::new(), None, false)
+        .evaluate(None, "consumer", Some(&now), IndexMap::new(), None, false)
         .expect("consumer runs before remove");
 
     let remove_result = engine.remove(None, "dep", Some(&now));
@@ -94,8 +94,8 @@ rule total: d.value
         "removing dep must fail while consumer still uses it"
     );
 
-    let listed = engine.list();
-    let workspace = listed
+    let repositories = engine.specs();
+    let workspace = repositories
         .iter()
         .find(|r| r.repository.is_none())
         .expect("workspace");
@@ -108,7 +108,7 @@ rule total: d.value
         .show(None, "dep", Some(&now))
         .expect("dep plan still served");
     engine
-        .run(None, "consumer", Some(&now), HashMap::new(), None, false)
+        .evaluate(None, "consumer", Some(&now), IndexMap::new(), None, false)
         .expect("consumer still runs after failed remove");
 }
 
@@ -146,7 +146,7 @@ rule out: value
         .expect("update dep while consumer depends on it");
 
     let response = engine
-        .run(None, "consumer", Some(&now), HashMap::new(), None, false)
+        .evaluate(None, "consumer", Some(&now), IndexMap::new(), None, false)
         .expect("consumer runs after update");
     let total = response
         .results
@@ -178,7 +178,7 @@ rule total: d.value
 
     let now = DateTimeValue::now();
     let before = engine
-        .run(None, "consumer", Some(&now), HashMap::new(), None, false)
+        .evaluate(None, "consumer", Some(&now), IndexMap::new(), None, false)
         .expect("consumer runs before");
 
     let bad = engine.update(
@@ -194,8 +194,8 @@ rule out: value + missing.x
     );
     assert!(bad.is_err(), "update with broken deps must fail");
 
-    let listed = engine.list();
-    let workspace = listed
+    let repositories = engine.specs();
+    let workspace = repositories
         .iter()
         .find(|r| r.repository.is_none())
         .expect("workspace");
@@ -205,7 +205,7 @@ rule out: value + missing.x
     );
 
     let after = engine
-        .run(None, "consumer", Some(&now), HashMap::new(), None, false)
+        .evaluate(None, "consumer", Some(&now), IndexMap::new(), None, false)
         .expect("consumer still runs after failed update");
     assert_eq!(
         before.results.get("total").and_then(|r| r.result()),

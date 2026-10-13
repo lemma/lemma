@@ -1,6 +1,6 @@
-use lemma::Engine;
+use indexmap::IndexMap;
+use lemma::{Engine, EvaluateDataValue};
 use rust_decimal::Decimal;
-use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -43,7 +43,7 @@ fn eval_rule_measure_unit(
     spec_name: &str,
     rule_name: &str,
     unit: &str,
-    data: HashMap<String, String>,
+    data: IndexMap<String, EvaluateDataValue>,
 ) -> Decimal {
     let code = code.as_ref();
     let mut engine = Engine::new();
@@ -52,7 +52,7 @@ fn eval_rule_measure_unit(
         .expect("Should parse and plan");
     let now = lemma::DateTimeValue::now();
     let response = engine
-        .run(None, spec_name, Some(&now), data, None, false)
+        .evaluate(None, spec_name, Some(&now), data, None, false)
         .expect("Should evaluate");
     let rule = response
         .results
@@ -81,14 +81,7 @@ fn eval_rule(code: impl AsRef<str>, spec_name: &str, rule_name: &str) -> String 
         .expect("Should parse and plan");
     let now = lemma::DateTimeValue::now();
     let response = engine
-        .run(
-            None,
-            spec_name,
-            Some(&now),
-            std::collections::HashMap::new(),
-            None,
-            false,
-        )
+        .evaluate(None, spec_name, Some(&now), IndexMap::new(), None, false)
         .expect("Should evaluate");
     response
         .results
@@ -225,8 +218,8 @@ uses lemma units
 data duration: units.duration
 data elapsed: duration -> suggest 2 hour
 rule value: elapsed as minute"#;
-    let _engine = load_ok(code);
-    let mut data = HashMap::new();
+    load_ok(code);
+    let mut data = IndexMap::new();
     data.insert("elapsed".to_string(), "2 hour".into());
     assert_eq!(
         eval_rule_measure_unit(code, "test", "value", "minute", data),

@@ -16,7 +16,6 @@ data wind_speed: number
 
 data is_raining: boolean
 
-
 rule clothing_layer:
   "light"
   unless temperature < 10 celsius then "warm"
@@ -39,8 +38,10 @@ rule needs_hat:
 
 rule comfort_level:
   "comfortable"
-  unless temperature < 5 celsius  then "cold"
-  unless temperature > 30 celsius then "hot"
+  unless temperature < 5 celsius
+    then "cold"
+  unless temperature > 30 celsius
+    then "hot"
   unless is_raining and temperature < 10 celsius
     then "uncomfortable"
 

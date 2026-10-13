@@ -2,8 +2,8 @@
 //! result on non-happy paths, and must keep narrating source parts the
 //! evaluator logically skipped (e.g. short-circuit).
 
-use lemma::{format_explanation, DateTimeValue, Engine};
-use std::collections::HashMap;
+use indexmap::IndexMap;
+use lemma::{format_explanation, DateTimeValue, Engine, EvaluateDataValue};
 
 fn load(code: &str) -> Engine {
     let mut engine = Engine::new();
@@ -13,14 +13,14 @@ fn load(code: &str) -> Engine {
     engine
 }
 
-fn run_explain(engine: &Engine, spec: &str, inputs: &[(&str, &str)]) -> lemma::Response {
+fn evaluate_explain(engine: &Engine, spec: &str, inputs: &[(&str, &str)]) -> lemma::Response {
     let now = DateTimeValue::now();
-    let data: HashMap<String, String> = inputs
+    let data: IndexMap<String, EvaluateDataValue> = inputs
         .iter()
-        .map(|(name, value)| (name.to_string(), (*value).to_string()))
+        .map(|(name, value)| (name.to_string(), (*value).into()))
         .collect();
     engine
-        .run(None, spec, Some(&now), data, None, true)
+        .evaluate(None, spec, Some(&now), data, None, true)
         .expect("evaluation must succeed")
 }
 
@@ -48,7 +48,7 @@ rule r: 1
 "#,
     );
 
-    let response = run_explain(&engine, "condition_veto", &[("input", "2000")]);
+    let response = evaluate_explain(&engine, "condition_veto", &[("input", "2000")]);
     let result = rule_result(&response, "r");
     assert!(
         result.vetoed,
@@ -90,7 +90,7 @@ rule r: 1
 "#,
     );
 
-    let response = run_explain(&engine, "condition_missing", &[]);
+    let response = evaluate_explain(&engine, "condition_missing", &[]);
     let result = rule_result(&response, "r");
     assert!(
         result.vetoed,
@@ -118,7 +118,7 @@ rule huge: 10 ^ 100
 "#,
     );
 
-    let response = run_explain(&engine, "decimal_limit", &[]);
+    let response = evaluate_explain(&engine, "decimal_limit", &[]);
     let result = rule_result(&response, "huge");
     assert!(
         result.vetoed,
@@ -155,7 +155,7 @@ rule r: flag and expensive_check
     // `flag` is false, so conjunction short-circuits and the value walk never
     // reads `expensive_check`. The explanation still narrates the skipped
     // operand with its value.
-    let response = run_explain(
+    let response = evaluate_explain(
         &engine,
         "vision",
         &[("flag", "no"), ("expensive_check", "yes")],
@@ -184,7 +184,7 @@ rule active: a >= b
 "#,
     );
 
-    let response = run_explain(&engine, "comparison_operands", &[("a", "7"), ("b", "3")]);
+    let response = evaluate_explain(&engine, "comparison_operands", &[("a", "7"), ("b", "3")]);
     let result = rule_result(&response, "active");
     assert!(!result.vetoed);
     assert_eq!(result.result(), Some("true"));

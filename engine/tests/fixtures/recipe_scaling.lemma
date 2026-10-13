@@ -30,19 +30,26 @@ data original_servings: number
 rule scaling_factor:
   desired_servings / original_servings
 
-rule scaled_flour: flour_needed * scaling_factor
+rule scaled_flour:
+  flour_needed * scaling_factor
 
-rule scaled_sugar: sugar_needed * scaling_factor
+rule scaled_sugar:
+  sugar_needed * scaling_factor
 
-rule scaled_butter: butter_needed * scaling_factor
+rule scaled_butter:
+  butter_needed * scaling_factor
 
-rule scaled_eggs: eggs_needed * scaling_factor
+rule scaled_eggs:
+  eggs_needed * scaling_factor
 
-rule total_dry_ingredients: scaled_flour + scaled_sugar
+rule total_dry_ingredients:
+  scaled_flour + scaled_sugar
 
-rule baking_time: 30 minute
+rule baking_time:
+  30 minute
   unless desired_servings <= 4 then 35 minute
   unless desired_servings >= 8 then 40 minute
 
-rule oven_temperature: 175 celsius
+rule oven_temperature:
+  175 celsius
   unless recipe_name is "bread" then 190 celsius

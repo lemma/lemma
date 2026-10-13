@@ -260,6 +260,51 @@ public sealed interface LemmaType {
   }
 
   /**
+   * Name field for a named type, or null for a specification.
+   *
+   * @param nameSeen whether {@code name} was present
+   * @param name parsed name
+   * @param identity named type vs specification
+   * @param typeName JSON type name for errors
+   * @return name or null
+   */
+  private static @Nullable String identityName(
+      boolean nameSeen, @Nullable String name, TypeIdentity identity, String typeName) {
+    if (identity == TypeIdentity.NAMED) {
+      if (!nameSeen) {
+        JsonReading.missingRequired("name", typeName);
+      }
+      return name;
+    }
+    if (nameSeen) {
+      throw new LemmaBugError("BUG: TypeSpecification carries name");
+    }
+    return null;
+  }
+
+  /**
+   * Extends field for a named type, or primitive for a specification.
+   *
+   * @param extendsType parsed extends
+   * @param identity named type vs specification
+   * @param typeName JSON type name for errors
+   * @return extends
+   */
+  private static TypeExtends identityExtends(
+      @Nullable TypeExtends extendsType, TypeIdentity identity, String typeName) {
+    if (identity == TypeIdentity.NAMED) {
+      if (extendsType == null) {
+        JsonReading.missingRequired("extends", typeName);
+      }
+      return extendsType;
+    }
+    if (extendsType != null) {
+      throw new LemmaBugError("BUG: TypeSpecification carries extends");
+    }
+    return new TypeExtends.Primitive();
+  }
+
+  /**
    * Parses JSON.
    *
    * @param p parser at value start
@@ -295,6 +340,10 @@ public sealed interface LemmaType {
      * @throws IOException if JSON IO fails
      */
     public static BooleanType read(JsonParser p) throws IOException {
+      return read(p, TypeIdentity.NAMED);
+    }
+
+    static BooleanType read(JsonParser p, TypeIdentity identity) throws IOException {
       JsonReading.expectStartObject(p, "LemmaType.Boolean");
       String name = null;
       boolean nameSeen = false;
@@ -314,15 +363,11 @@ public sealed interface LemmaType {
           default -> JsonReading.unknownField(field, "LemmaType.Boolean");
         }
       }
-      if (!nameSeen) {
-        JsonReading.missingRequired("name", "LemmaType.Boolean");
-      }
+      name = identityName(nameSeen, name, identity, "LemmaType.Boolean");
       if (help == null) {
         JsonReading.missingRequired("help", "LemmaType.Boolean");
       }
-      if (extendsType == null) {
-        JsonReading.missingRequired("extends", "LemmaType.Boolean");
-      }
+      extendsType = identityExtends(extendsType, identity, "LemmaType.Boolean");
       return new BooleanType(name, help, extendsType);
     }
   }
@@ -366,6 +411,10 @@ public sealed interface LemmaType {
      * @throws IOException if JSON IO fails
      */
     public static Measure read(JsonParser p) throws IOException {
+      return read(p, TypeIdentity.NAMED);
+    }
+
+    static Measure read(JsonParser p, TypeIdentity identity) throws IOException {
       JsonReading.expectStartObject(p, "LemmaType.Measure");
       String name = null;
       boolean nameSeen = false;
@@ -418,9 +467,7 @@ public sealed interface LemmaType {
           default -> JsonReading.unknownField(field, "LemmaType.Measure");
         }
       }
-      if (!nameSeen) {
-        JsonReading.missingRequired("name", "LemmaType.Measure");
-      }
+      name = identityName(nameSeen, name, identity, "LemmaType.Measure");
       if (!minimumSeen) {
         JsonReading.missingRequired("minimum", "LemmaType.Measure");
       }
@@ -442,9 +489,7 @@ public sealed interface LemmaType {
       if (help == null) {
         JsonReading.missingRequired("help", "LemmaType.Measure");
       }
-      if (extendsType == null) {
-        JsonReading.missingRequired("extends", "LemmaType.Measure");
-      }
+      extendsType = identityExtends(extendsType, identity, "LemmaType.Measure");
       return new Measure(
           name, minimum, maximum, decimals, units, traits, decomposition, unit, help, extendsType);
     }
@@ -481,6 +526,10 @@ public sealed interface LemmaType {
      * @throws IOException if JSON IO fails
      */
     public static NumberType read(JsonParser p) throws IOException {
+      return read(p, TypeIdentity.NAMED);
+    }
+
+    static NumberType read(JsonParser p, TypeIdentity identity) throws IOException {
       JsonReading.expectStartObject(p, "LemmaType.Number");
       String name = null;
       boolean nameSeen = false;
@@ -518,9 +567,7 @@ public sealed interface LemmaType {
           default -> JsonReading.unknownField(field, "LemmaType.Number");
         }
       }
-      if (!nameSeen) {
-        JsonReading.missingRequired("name", "LemmaType.Number");
-      }
+      name = identityName(nameSeen, name, identity, "LemmaType.Number");
       if (!minimumSeen) {
         JsonReading.missingRequired("minimum", "LemmaType.Number");
       }
@@ -533,9 +580,7 @@ public sealed interface LemmaType {
       if (help == null) {
         JsonReading.missingRequired("help", "LemmaType.Number");
       }
-      if (extendsType == null) {
-        JsonReading.missingRequired("extends", "LemmaType.Number");
-      }
+      extendsType = identityExtends(extendsType, identity, "LemmaType.Number");
       return new NumberType(name, minimum, maximum, decimals, help, extendsType);
     }
   }
@@ -562,7 +607,7 @@ public sealed interface LemmaType {
     /** {@inheritDoc} */
     @Override
     public String kind() {
-      return "numberrange";
+      return "number_range";
     }
 
     /**
@@ -573,6 +618,10 @@ public sealed interface LemmaType {
      * @throws IOException if JSON IO fails
      */
     public static NumberRange read(JsonParser p) throws IOException {
+      return read(p, TypeIdentity.NAMED);
+    }
+
+    static NumberRange read(JsonParser p, TypeIdentity identity) throws IOException {
       JsonReading.expectStartObject(p, "LemmaType.NumberRange");
       String name = null;
       boolean nameSeen = false;
@@ -594,7 +643,7 @@ public sealed interface LemmaType {
             nameSeen = true;
             name = JsonReading.readString(p);
           }
-          case "kind" -> expectKind(p, "numberrange");
+          case "kind" -> expectKind(p, "number_range");
           case "lower" -> {
             lowerSeen = true;
             lower = readNullableDecimal(p);
@@ -616,9 +665,7 @@ public sealed interface LemmaType {
           default -> JsonReading.unknownField(field, "LemmaType.NumberRange");
         }
       }
-      if (!nameSeen) {
-        JsonReading.missingRequired("name", "LemmaType.NumberRange");
-      }
+      name = identityName(nameSeen, name, identity, "LemmaType.NumberRange");
       if (!lowerSeen) {
         JsonReading.missingRequired("lower", "LemmaType.NumberRange");
       }
@@ -634,9 +681,7 @@ public sealed interface LemmaType {
       if (help == null) {
         JsonReading.missingRequired("help", "LemmaType.NumberRange");
       }
-      if (extendsType == null) {
-        JsonReading.missingRequired("extends", "LemmaType.NumberRange");
-      }
+      extendsType = identityExtends(extendsType, identity, "LemmaType.NumberRange");
       return new NumberRange(name, lower, upper, minimum, maximum, help, extendsType);
     }
   }
@@ -676,6 +721,10 @@ public sealed interface LemmaType {
      * @throws IOException if JSON IO fails
      */
     public static Ratio read(JsonParser p) throws IOException {
+      return read(p, TypeIdentity.NAMED);
+    }
+
+    static Ratio read(JsonParser p, TypeIdentity identity) throws IOException {
       JsonReading.expectStartObject(p, "LemmaType.Ratio");
       String name = null;
       boolean nameSeen = false;
@@ -717,9 +766,7 @@ public sealed interface LemmaType {
           default -> JsonReading.unknownField(field, "LemmaType.Ratio");
         }
       }
-      if (!nameSeen) {
-        JsonReading.missingRequired("name", "LemmaType.Ratio");
-      }
+      name = identityName(nameSeen, name, identity, "LemmaType.Ratio");
       if (!minimumSeen) {
         JsonReading.missingRequired("minimum", "LemmaType.Ratio");
       }
@@ -735,9 +782,7 @@ public sealed interface LemmaType {
       if (help == null) {
         JsonReading.missingRequired("help", "LemmaType.Ratio");
       }
-      if (extendsType == null) {
-        JsonReading.missingRequired("extends", "LemmaType.Ratio");
-      }
+      extendsType = identityExtends(extendsType, identity, "LemmaType.Ratio");
       return new Ratio(name, minimum, maximum, decimals, units, unit, help, extendsType);
     }
   }
@@ -766,7 +811,7 @@ public sealed interface LemmaType {
     /** {@inheritDoc} */
     @Override
     public String kind() {
-      return "ratiorange";
+      return "ratio_range";
     }
 
     /**
@@ -777,6 +822,10 @@ public sealed interface LemmaType {
      * @throws IOException if JSON IO fails
      */
     public static RatioRange read(JsonParser p) throws IOException {
+      return read(p, TypeIdentity.NAMED);
+    }
+
+    static RatioRange read(JsonParser p, TypeIdentity identity) throws IOException {
       JsonReading.expectStartObject(p, "LemmaType.RatioRange");
       String name = null;
       boolean nameSeen = false;
@@ -799,7 +848,7 @@ public sealed interface LemmaType {
             nameSeen = true;
             name = JsonReading.readString(p);
           }
-          case "kind" -> expectKind(p, "ratiorange");
+          case "kind" -> expectKind(p, "ratio_range");
           case "lower" -> {
             lowerSeen = true;
             lower = readNullableDecimal(p);
@@ -822,9 +871,7 @@ public sealed interface LemmaType {
           default -> JsonReading.unknownField(field, "LemmaType.RatioRange");
         }
       }
-      if (!nameSeen) {
-        JsonReading.missingRequired("name", "LemmaType.RatioRange");
-      }
+      name = identityName(nameSeen, name, identity, "LemmaType.RatioRange");
       if (!lowerSeen) {
         JsonReading.missingRequired("lower", "LemmaType.RatioRange");
       }
@@ -843,9 +890,7 @@ public sealed interface LemmaType {
       if (help == null) {
         JsonReading.missingRequired("help", "LemmaType.RatioRange");
       }
-      if (extendsType == null) {
-        JsonReading.missingRequired("extends", "LemmaType.RatioRange");
-      }
+      extendsType = identityExtends(extendsType, identity, "LemmaType.RatioRange");
       return new RatioRange(name, lower, upper, minimum, maximum, units, help, extendsType);
     }
   }
@@ -879,6 +924,10 @@ public sealed interface LemmaType {
      * @throws IOException if JSON IO fails
      */
     public static Text read(JsonParser p) throws IOException {
+      return read(p, TypeIdentity.NAMED);
+    }
+
+    static Text read(JsonParser p, TypeIdentity identity) throws IOException {
       JsonReading.expectStartObject(p, "LemmaType.Text");
       String name = null;
       boolean nameSeen = false;
@@ -906,9 +955,7 @@ public sealed interface LemmaType {
           default -> JsonReading.unknownField(field, "LemmaType.Text");
         }
       }
-      if (!nameSeen) {
-        JsonReading.missingRequired("name", "LemmaType.Text");
-      }
+      name = identityName(nameSeen, name, identity, "LemmaType.Text");
       if (!lengthSeen) {
         JsonReading.missingRequired("length", "LemmaType.Text");
       }
@@ -918,9 +965,7 @@ public sealed interface LemmaType {
       if (help == null) {
         JsonReading.missingRequired("help", "LemmaType.Text");
       }
-      if (extendsType == null) {
-        JsonReading.missingRequired("extends", "LemmaType.Text");
-      }
+      extendsType = identityExtends(extendsType, identity, "LemmaType.Text");
       return new Text(name, length, options, help, extendsType);
     }
   }
@@ -954,7 +999,11 @@ public sealed interface LemmaType {
      * @throws IOException if JSON IO fails
      */
     public static DateType read(JsonParser p) throws IOException {
-      return readStringBounds(p, "date", "LemmaType.Date");
+      return read(p, TypeIdentity.NAMED);
+    }
+
+    static DateType read(JsonParser p, TypeIdentity identity) throws IOException {
+      return readStringBounds(p, "date", "LemmaType.Date", identity);
     }
   }
 
@@ -987,12 +1036,16 @@ public sealed interface LemmaType {
      * @throws IOException if JSON IO fails
      */
     public static TimeType read(JsonParser p) throws IOException {
-      var r = readStringBounds(p, "time", "LemmaType.Time");
+      return read(p, TypeIdentity.NAMED);
+    }
+
+    static TimeType read(JsonParser p, TypeIdentity identity) throws IOException {
+      var r = readStringBounds(p, "time", "LemmaType.Time", identity);
       return new TimeType(r.name(), r.minimum(), r.maximum(), r.help(), r.extendsType());
     }
   }
 
-  private static DateType readStringBounds(JsonParser p, String kind, String typeName)
+  private static DateType readStringBounds(JsonParser p, String kind, String typeName, TypeIdentity identity)
       throws IOException {
     JsonReading.expectStartObject(p, typeName);
     String name = null;
@@ -1025,21 +1078,14 @@ public sealed interface LemmaType {
         default -> JsonReading.unknownField(field, typeName);
       }
     }
-    if (!nameSeen) {
-      JsonReading.missingRequired("name", typeName);
-    }
-    if (!minimumSeen) {
-      JsonReading.missingRequired("minimum", typeName);
-    }
     if (!maximumSeen) {
       JsonReading.missingRequired("maximum", typeName);
     }
     if (help == null) {
       JsonReading.missingRequired("help", typeName);
     }
-    if (extendsType == null) {
-      JsonReading.missingRequired("extends", typeName);
-    }
+    name = identityName(nameSeen, name, identity, typeName);
+    extendsType = identityExtends(extendsType, identity, typeName);
     return new DateType(name, minimum, maximum, help, extendsType);
   }
 
@@ -1065,7 +1111,7 @@ public sealed interface LemmaType {
     /** {@inheritDoc} */
     @Override
     public String kind() {
-      return "daterange";
+      return "date_range";
     }
 
     /**
@@ -1076,7 +1122,11 @@ public sealed interface LemmaType {
      * @throws IOException if JSON IO fails
      */
     public static DateRange read(JsonParser p) throws IOException {
-      return readCalendarRange(p, "daterange", "LemmaType.DateRange");
+      return read(p, TypeIdentity.NAMED);
+    }
+
+    static DateRange read(JsonParser p, TypeIdentity identity) throws IOException {
+      return readCalendarRange(p, "date_range", "LemmaType.DateRange", identity);
     }
   }
 
@@ -1102,7 +1152,7 @@ public sealed interface LemmaType {
     /** {@inheritDoc} */
     @Override
     public String kind() {
-      return "timerange";
+      return "time_range";
     }
 
     /**
@@ -1113,13 +1163,18 @@ public sealed interface LemmaType {
      * @throws IOException if JSON IO fails
      */
     public static TimeRange read(JsonParser p) throws IOException {
-      var r = readCalendarRange(p, "timerange", "LemmaType.TimeRange");
+      return read(p, TypeIdentity.NAMED);
+    }
+
+    static TimeRange read(JsonParser p, TypeIdentity identity) throws IOException {
+      var r = readCalendarRange(p, "time_range", "LemmaType.TimeRange", identity);
       return new TimeRange(
           r.name(), r.lower(), r.upper(), r.minimum(), r.maximum(), r.help(), r.extendsType());
     }
   }
 
-  private static DateRange readCalendarRange(JsonParser p, String kind, String typeName)
+  private static DateRange readCalendarRange(
+      JsonParser p, String kind, String typeName, TypeIdentity identity)
       throws IOException {
     JsonReading.expectStartObject(p, typeName);
     String name = null;
@@ -1164,9 +1219,6 @@ public sealed interface LemmaType {
         default -> JsonReading.unknownField(field, typeName);
       }
     }
-    if (!nameSeen) {
-      JsonReading.missingRequired("name", typeName);
-    }
     if (!lowerSeen) {
       JsonReading.missingRequired("lower", typeName);
     }
@@ -1182,9 +1234,8 @@ public sealed interface LemmaType {
     if (help == null) {
       JsonReading.missingRequired("help", typeName);
     }
-    if (extendsType == null) {
-      JsonReading.missingRequired("extends", typeName);
-    }
+    name = identityName(nameSeen, name, identity, typeName);
+    extendsType = identityExtends(extendsType, identity, typeName);
     return new DateRange(name, lower, upper, minimum, maximum, help, extendsType);
   }
 
@@ -1214,7 +1265,7 @@ public sealed interface LemmaType {
     /** {@inheritDoc} */
     @Override
     public String kind() {
-      return "measurerange";
+      return "measure_range";
     }
 
     /**
@@ -1225,6 +1276,10 @@ public sealed interface LemmaType {
      * @throws IOException if JSON IO fails
      */
     public static MeasureRange read(JsonParser p) throws IOException {
+      return read(p, TypeIdentity.NAMED);
+    }
+
+    static MeasureRange read(JsonParser p, TypeIdentity identity) throws IOException {
       JsonReading.expectStartObject(p, "LemmaType.MeasureRange");
       String name = null;
       boolean nameSeen = false;
@@ -1249,7 +1304,7 @@ public sealed interface LemmaType {
             nameSeen = true;
             name = JsonReading.readString(p);
           }
-          case "kind" -> expectKind(p, "measurerange");
+          case "kind" -> expectKind(p, "measure_range");
           case "lower" -> {
             lowerSeen = true;
             lower = NamedBound.readNullable(p);
@@ -1279,9 +1334,7 @@ public sealed interface LemmaType {
           default -> JsonReading.unknownField(field, "LemmaType.MeasureRange");
         }
       }
-      if (!nameSeen) {
-        JsonReading.missingRequired("name", "LemmaType.MeasureRange");
-      }
+      name = identityName(nameSeen, name, identity, "LemmaType.MeasureRange");
       if (!lowerSeen) {
         JsonReading.missingRequired("lower", "LemmaType.MeasureRange");
       }
@@ -1303,9 +1356,7 @@ public sealed interface LemmaType {
       if (help == null) {
         JsonReading.missingRequired("help", "LemmaType.MeasureRange");
       }
-      if (extendsType == null) {
-        JsonReading.missingRequired("extends", "LemmaType.MeasureRange");
-      }
+      extendsType = identityExtends(extendsType, identity, "LemmaType.MeasureRange");
       return new MeasureRange(
           name, lower, upper, minimum, maximum, units, decomposition, help, extendsType);
     }
@@ -1341,6 +1392,10 @@ public sealed interface LemmaType {
      * @throws IOException if JSON IO fails
      */
     public static Spec read(JsonParser p) throws IOException {
+      return read(p, TypeIdentity.NAMED);
+    }
+
+    static Spec read(JsonParser p, TypeIdentity identity) throws IOException {
       JsonReading.expectStartObject(p, "LemmaType.Spec");
       String name = null;
       boolean nameSeen = false;
@@ -1364,19 +1419,159 @@ public sealed interface LemmaType {
           default -> JsonReading.unknownField(field, "LemmaType.Spec");
         }
       }
-      if (!nameSeen) {
-        JsonReading.missingRequired("name", "LemmaType.Spec");
-      }
+      name = identityName(nameSeen, name, identity, "LemmaType.Spec");
       if (spec == null) {
         JsonReading.missingRequired("spec", "LemmaType.Spec");
       }
       if (effective == null) {
         JsonReading.missingRequired("effective", "LemmaType.Spec");
       }
-      if (extendsType == null) {
-        JsonReading.missingRequired("extends", "LemmaType.Spec");
-      }
+      extendsType = identityExtends(extendsType, identity, "LemmaType.Spec");
       return new Spec(name, repository, spec, effective, extendsType);
+    }
+  }
+
+  /** How a list addresses its rows. */
+  sealed interface ListKey {
+    /** Rows addressed by 1-based position. */
+    record Numbered() implements ListKey {}
+
+    /**
+     * Rows addressed by the values of key fields.
+     *
+     * @param fields key field names in declaration order
+     */
+    record Fields(List<String> fields) implements ListKey {}
+
+    /**
+     * Parses JSON: {@code "numbered"} or {@code {"fields": [...]}}.
+     *
+     * @param p parser at value start
+     * @return parsed value
+     * @throws IOException if JSON IO fails
+     */
+    static ListKey read(JsonParser p) throws IOException {
+      if (p.currentToken() == JsonToken.VALUE_STRING) {
+        String tag = p.getText();
+        if (!"numbered".equals(tag)) {
+          throw new LemmaBugError("BUG: unknown ListKey '" + tag + "'");
+        }
+        return new Numbered();
+      }
+      JsonReading.expectStartObject(p, "ListKey");
+      List<String> fields = null;
+      while (p.nextToken() != JsonToken.END_OBJECT) {
+        String field = p.currentName();
+        p.nextToken();
+        switch (field) {
+          case "fields" -> fields = JsonReading.readList(p, JsonReading::readString);
+          default -> JsonReading.unknownField(field, "ListKey");
+        }
+      }
+      if (fields == null || fields.isEmpty()) {
+        JsonReading.missingRequired("fields", "ListKey");
+      }
+      return new Fields(List.copyOf(fields));
+    }
+  }
+
+  /**
+   * List type.
+   *
+   * @param name name
+   * @param element row type: the unnamed primitive type of the element specification, a {@link
+   *     Spec} for instance lists; never a list, lists do not nest
+   * @param key how rows are addressed
+   * @param extendsType extends
+   */
+  record ListType(@Nullable String name, LemmaType element, ListKey key, TypeExtends extendsType)
+      implements LemmaType {
+    /** {@inheritDoc} */
+    @Override
+    public String kind() {
+      return "list";
+    }
+
+    /**
+     * Parses JSON.
+     *
+     * @param p parser at value start
+     * @return parsed value
+     * @throws IOException if JSON IO fails
+     */
+    public static ListType read(JsonParser p) throws IOException {
+      return read(p, TypeIdentity.NAMED);
+    }
+
+    static ListType read(JsonParser p, TypeIdentity identity) throws IOException {
+      JsonReading.expectStartObject(p, "LemmaType.ListType");
+      String name = null;
+      boolean nameSeen = false;
+      LemmaType element = null;
+      ListKey key = null;
+      TypeExtends extendsType = null;
+      while (p.nextToken() != JsonToken.END_OBJECT) {
+        String field = p.currentName();
+        p.nextToken();
+        switch (field) {
+          case "name" -> {
+            nameSeen = true;
+            name = JsonReading.readString(p);
+          }
+          case "kind" -> expectKind(p, "list");
+          case "element" -> element = readSpecification(p);
+          case "key" -> key = ListKey.read(p);
+          case "extends" -> extendsType = TypeExtends.read(p);
+          default -> JsonReading.unknownField(field, "LemmaType.ListType");
+        }
+      }
+      name = identityName(nameSeen, name, identity, "LemmaType.ListType");
+      if (element == null) {
+        JsonReading.missingRequired("element", "LemmaType.ListType");
+      }
+      if (key == null) {
+        JsonReading.missingRequired("key", "LemmaType.ListType");
+      }
+      extendsType = identityExtends(extendsType, identity, "LemmaType.ListType");
+      return new ListType(name, element, key, extendsType);
+    }
+  }
+
+  /**
+   * Parses a bare type specification (a list element: kind and constraints, no name or extends)
+   * as the unnamed primitive type with that specification.
+   *
+   * @param p parser at value start
+   * @return parsed value
+   * @throws IOException if JSON IO fails
+   */
+  private static LemmaType readSpecification(JsonParser p) throws IOException {
+    JsonReading.expectStartObject(p, "TypeSpecification");
+    String json = JsonReading.bufferObjectAsString(p);
+    String kind = JsonReading.findTag(json, "kind");
+    if (kind == null) {
+      throw new LemmaBugError("BUG: missing 'kind' in TypeSpecification");
+    }
+    if ("list".equals(kind)) {
+      throw new LemmaBugError("BUG: list element is a list: " + json);
+    }
+    try (JsonParser reader = JsonReading.parserFor(json)) {
+      return switch (kind) {
+        case "boolean" -> BooleanType.read(reader, TypeIdentity.SPECIFICATION);
+        case "measure" -> Measure.read(reader, TypeIdentity.SPECIFICATION);
+        case "number" -> NumberType.read(reader, TypeIdentity.SPECIFICATION);
+        case "number_range" -> NumberRange.read(reader, TypeIdentity.SPECIFICATION);
+        case "ratio" -> Ratio.read(reader, TypeIdentity.SPECIFICATION);
+        case "ratio_range" -> RatioRange.read(reader, TypeIdentity.SPECIFICATION);
+        case "text" -> Text.read(reader, TypeIdentity.SPECIFICATION);
+        case "date" -> DateType.read(reader, TypeIdentity.SPECIFICATION);
+        case "date_range" -> DateRange.read(reader, TypeIdentity.SPECIFICATION);
+        case "time" -> TimeType.read(reader, TypeIdentity.SPECIFICATION);
+        case "time_range" -> TimeRange.read(reader, TypeIdentity.SPECIFICATION);
+        case "measure_range" -> MeasureRange.read(reader, TypeIdentity.SPECIFICATION);
+        case "spec" -> Spec.read(reader, TypeIdentity.SPECIFICATION);
+        default -> throw new LemmaBugError("BUG: unknown kind value: " + kind);
+      };
     }
   }
 
@@ -1399,16 +1594,17 @@ public sealed interface LemmaType {
         case "boolean" -> BooleanType.read(reader);
         case "measure" -> Measure.read(reader);
         case "number" -> NumberType.read(reader);
-        case "numberrange" -> NumberRange.read(reader);
+        case "number_range" -> NumberRange.read(reader);
         case "ratio" -> Ratio.read(reader);
-        case "ratiorange" -> RatioRange.read(reader);
+        case "ratio_range" -> RatioRange.read(reader);
         case "text" -> Text.read(reader);
         case "date" -> DateType.read(reader);
-        case "daterange" -> DateRange.read(reader);
+        case "date_range" -> DateRange.read(reader);
         case "time" -> TimeType.read(reader);
-        case "timerange" -> TimeRange.read(reader);
-        case "measurerange" -> MeasureRange.read(reader);
+        case "time_range" -> TimeRange.read(reader);
+        case "measure_range" -> MeasureRange.read(reader);
         case "spec" -> Spec.read(reader);
+        case "list" -> ListType.read(reader);
         default -> throw new LemmaBugError("BUG: unknown kind value: " + kind);
       };
     }

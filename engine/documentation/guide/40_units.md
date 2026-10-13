@@ -14,7 +14,6 @@ data package_weight: 12 kilogram
 data shift_length:   8 hour
 data route_distance: 45 kilometer
 
-
 rule is_heavy:
   package_weight > 20 kilogram
 
@@ -24,9 +23,13 @@ rule is_long_shift:
 
 Prefer `units.mass`, `units.duration`, `units.length` over redefining units. Convert in family: `as <unit>`. Strip unit: `amount as eur as number`. Cross-family relabel: `5 eur as kg` -> `5 kg`. Name the concept, not the unit (see **Anti-patterns**).
 
+**Qualifying units**
+
+Bare unit when exactly one declarer is in scope (`5 kilogram`, `5 eur`). When two or more types declare the same name (local type beside `uses lemma units`, or two imports), bare use is a planning error: write `Type.unit` or `alias.Type.unit` (not `alias.unit`), e.g. `units.mass.kilogram`, `crate_weight.kilogram`. Same rule for each factor in a compound unit. Builtin `percent` / `permille` (`%` / `%%`) are always bare primitives; `as percent` / `as permille` always works.
+
 **Ranges: half-open intervals**
 
-Ranges: lower bound inclusive, upper bound exclusive (`lo...hi`). Test with `in`. Width: `lo...hi as <unit>` (duration/measure). Add `as number` only when a bare number is required. Bare `as number` on date/measure ranges fails. Read an endpoint with `lower` / `upper` (`lower 5...10`, `upper period`). `lower` is included; `upper` is excluded. `...` binds tighter than those operators. `-> lower` / `-> upper` still constrain a range slot; they are not the operators. `lower` and `upper` are reserved names. Typedefs: `number range`, `date range`, `measure range`, `ratio range`. Month/year intervals: `uses lemma units` and inline literals (`18 year...67 year`) or `units.calendar range`. Prefix operators (`floor`, `sqrt`, `lower`, …) take one range operand: `floor x + 1` is `(floor x) + 1`.
+Ranges: lower bound inclusive, upper bound exclusive (`lo...hi`). Test with `in`. Width: `lo...hi as <unit>` (duration/measure). Add `as number` only when a bare number is required. Bare `as number` on date/measure ranges fails. Read an endpoint with `lower` / `upper` (`lower 5...10`, `upper period`). `lower` is included; `upper` is excluded. `...` binds tighter than those operators. `-> lower` / `-> upper` still constrain a range slot; they are not the operators. `lower` and `upper` are reserved names. Typedefs: `number range`, `date range`, `measure range`, `ratio range`. Month/year intervals: `uses lemma units` and inline literals (`18 year...67 year`) or `units.calendar range`. Prefix operators (`floor`, `sqrt`, `lower`, …) and `not` take `floor(x)` or one bare operand: `floor(x) + 1` adds to the result, `floor (x + 1)` floors the sum, `floor x + 1` is a parse error.
 
 The snippet below is a syntax sample, not one policy.
 
@@ -40,14 +43,13 @@ data employee_age: 42 year
 data eligible_band: units.calendar range
   -> suggest 18 year...67 year
 
-
 rule is_working_age:
   employee_age in eligible_band
 ```
 
 Upper bound exclusive: `67 year` is NOT inside `18 year...67 year`.
 
-Custom measure types can declare their own `measure range` without importing SI; see Reference.
+Custom measure types can declare their own range (`data band: <type> range`) without importing SI; see Reference.
 
 **Derived measures: compound units**
 
@@ -67,7 +69,6 @@ data wage_rate: measure
 data time_worked: 120 hour
 data wage: wage_rate
   -> suggest 85 eur_per_hour
-
 
 rule total:
   wage * time_worked
@@ -95,7 +96,6 @@ uses lemma units
 
 data event_date: date
   -> help "When did the event happen?"
-
 
 rule recent:
   event_date in past 7 day

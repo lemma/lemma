@@ -3,11 +3,13 @@
 mod error_json;
 
 use error_json::engine_errors_json;
-use jni::objects::{JByteArray, JClass, JObject, JObjectArray, JString, JThrowable, JValue};
+use indexmap::IndexMap;
+use jni::objects::{
+    JByteArray, JClass, JObject, JObjectArray, JString, JThrowable, JValue, JValueOwned,
+};
 use jni::sys::{jboolean, jbyteArray, jint, jlong, jstring, JNI_FALSE};
 use jni::{jni_sig, jni_str, Env, EnvUnowned};
-use lemma::{DateTimeValue, Engine, ResourceLimits, SourceType};
-use std::collections::HashMap;
+use lemma::{DateTimeValue, Engine, EvaluateDataValue, ResourceLimits, SourceType};
 use std::sync::Mutex;
 
 type EngineHandle = Mutex<Engine>;
@@ -42,7 +44,7 @@ impl<T: Default> jni::errors::ErrorPolicy<T, BridgeError> for ThrowLemmaBugAndDe
 
     fn on_error<'unowned_env_local: 'native_method, 'native_method>(
         env: &mut Env<'unowned_env_local>,
-        _captures: &mut Self::Captures<'unowned_env_local, 'native_method>,
+        _: &mut Self::Captures<'unowned_env_local, 'native_method>,
         err: BridgeError,
     ) -> jni::errors::Result<T> {
         if env.exception_check() {
@@ -58,8 +60,8 @@ impl<T: Default> jni::errors::ErrorPolicy<T, BridgeError> for ThrowLemmaBugAndDe
 
     fn on_panic<'unowned_env_local: 'native_method, 'native_method>(
         env: &mut Env<'unowned_env_local>,
-        _captures: &mut Self::Captures<'unowned_env_local, 'native_method>,
-        _payload: Box<dyn std::any::Any + Send + 'static>,
+        _: &mut Self::Captures<'unowned_env_local, 'native_method>,
+        _: Box<dyn std::any::Any + Send + 'static>,
     ) -> jni::errors::Result<T> {
         if env.exception_check() {
             return Ok(T::default());
@@ -90,7 +92,11 @@ fn throw_lemma_exception(env: &mut Env, message: &str, errors_json: &str) {
         .cast_local::<JThrowable>(obj)
         .expect("BUG: LemmaException must be throwable");
     // jni 0.22: throw returns Err(JavaException) after a successful throw.
-    let _ = env.throw(throwable);
+    match env.throw(throwable) {
+        Err(jni::errors::Error::JavaException) => {}
+        Ok(()) => panic!("BUG: JNI throw returned Ok without a pending exception"),
+        Err(error) => panic!("BUG: JNI throw failed: {error}"),
+    }
 }
 
 fn throw_bug(env: &mut Env, message: &str) {
@@ -110,7 +116,11 @@ fn throw_bug(env: &mut Env, message: &str) {
     let throwable = env
         .cast_local::<JThrowable>(obj)
         .expect("BUG: LemmaBugError must be throwable");
-    let _ = env.throw(throwable);
+    match env.throw(throwable) {
+        Err(jni::errors::Error::JavaException) => {}
+        Ok(()) => panic!("BUG: JNI throw returned Ok without a pending exception"),
+        Err(error) => panic!("BUG: JNI throw failed: {error}"),
+    }
 }
 
 fn with_catch<'local, R, F>(unowned: &mut EnvUnowned<'local>, f: F) -> R
@@ -152,6 +162,431 @@ fn jstring_optional(env: &Env, value: &JString) -> Result<Option<String>, String
 fn jstring_from_object<'local>(env: &Env, obj: JObject<'local>) -> Result<JString<'local>, String> {
     env.cast_local::<JString>(obj)
         .map_err(|e| format!("BUG: expected java.lang.String: {e}"))
+}
+
+/// Run-data walk failure: bad caller input (request Error) or a JNI bridge failure (bug path).
+enum WalkError {
+    Request(lemma::Error),
+    Bridge(String),
+}
+
+impl From<String> for WalkError {
+    fn from(message: String) -> Self {
+        Self::Bridge(message)
+    }
+}
+
+fn bridge(what: &'static str) -> impl FnOnce(jni::errors::Error) -> String {
+    move |e| format!("BUG: JNI {what}: {e}")
+}
+
+fn java_map_entries<'local>(
+    env: &mut Env<'local>,
+    map: &JObject,
+) -> Result<Vec<(JObject<'local>, JObject<'local>)>, String> {
+    let entry_set = env
+        .call_method(
+            map,
+            jni_str!("entrySet"),
+            jni_sig!("()Ljava/util/Set;"),
+            &[],
+        )
+        .map_err(bridge("Map.entrySet"))?
+        .l()
+        .map_err(bridge("Map.entrySet object"))?;
+    let iterator = env
+        .call_method(
+            &entry_set,
+            jni_str!("iterator"),
+            jni_sig!("()Ljava/util/Iterator;"),
+            &[],
+        )
+        .map_err(bridge("Set.iterator"))?
+        .l()
+        .map_err(bridge("Set.iterator object"))?;
+    env.delete_local_ref(entry_set);
+    let mut entries = Vec::new();
+    loop {
+        let has_next = env
+            .call_method(&iterator, jni_str!("hasNext"), jni_sig!("()Z"), &[])
+            .map_err(bridge("Iterator.hasNext"))?
+            .z()
+            .map_err(bridge("Iterator.hasNext bool"))?;
+        if !has_next {
+            break;
+        }
+        let entry = env
+            .call_method(
+                &iterator,
+                jni_str!("next"),
+                jni_sig!("()Ljava/lang/Object;"),
+                &[],
+            )
+            .map_err(bridge("Iterator.next"))?
+            .l()
+            .map_err(bridge("Iterator.next object"))?;
+        let key = env
+            .call_method(
+                &entry,
+                jni_str!("getKey"),
+                jni_sig!("()Ljava/lang/Object;"),
+                &[],
+            )
+            .map_err(bridge("Map.Entry.getKey"))?
+            .l()
+            .map_err(bridge("Map.Entry.getKey object"))?;
+        let value = env
+            .call_method(
+                &entry,
+                jni_str!("getValue"),
+                jni_sig!("()Ljava/lang/Object;"),
+                &[],
+            )
+            .map_err(bridge("Map.Entry.getValue"))?
+            .l()
+            .map_err(bridge("Map.Entry.getValue object"))?;
+        env.delete_local_ref(entry);
+        entries.push((key, value));
+    }
+    env.delete_local_ref(iterator);
+    Ok(entries)
+}
+
+fn java_map_key(env: &mut Env, key: &JObject) -> Result<String, WalkError> {
+    if key.is_null() {
+        return Err(WalkError::Request(lemma::Error::request(
+            "data map keys must not be null",
+            None::<String>,
+        )));
+    }
+    let class_name = java_class_name(env, key)?;
+    if class_name != "java.lang.String" {
+        return Err(WalkError::Request(lemma::Error::request(
+            format!("data map keys must be String, got {class_name}"),
+            None::<String>,
+        )));
+    }
+    Ok(call_to_string(env, key)?)
+}
+
+/// Top-level `data` map. Outer `Err` is the JNI bug path; inner `Err` are request Errors.
+fn java_map_to_evaluate_data(
+    env: &mut Env,
+    map: &JObject,
+) -> Result<Result<IndexMap<String, EvaluateDataValue>, Vec<lemma::Error>>, String> {
+    if map.is_null() {
+        return Ok(Ok(IndexMap::new()));
+    }
+    if !instance_of(env, map, jni_str!("java/util/Map"))? {
+        return Ok(Err(vec![lemma::Error::request(
+            "data must be a Map",
+            None::<String>,
+        )]));
+    }
+    let mut entries = Vec::new();
+    let mut failures = Vec::new();
+    for (key_obj, val_obj) in java_map_entries(env, map)? {
+        let key = java_map_key(env, &key_obj);
+        env.delete_local_ref(key_obj);
+        let key = match key {
+            Ok(key) => key,
+            Err(WalkError::Request(err)) => {
+                failures.push(err);
+                continue;
+            }
+            Err(WalkError::Bridge(message)) => return Err(message),
+        };
+        if val_obj.is_null() {
+            env.delete_local_ref(val_obj);
+            failures.push(
+                lemma::Error::request(
+                    format!("data value for '{key}' must not be null"),
+                    Some("omit the key to leave the data unbound"),
+                )
+                .with_related_data(key),
+            );
+            continue;
+        }
+        match java_value_to_evaluate_data(env, val_obj) {
+            Ok(parsed) => entries.push((key, parsed)),
+            Err(WalkError::Request(err)) => {
+                failures.push(lemma::attribute_evaluate_data_error(err, &key))
+            }
+            Err(WalkError::Bridge(message)) => return Err(message),
+        }
+    }
+    if !failures.is_empty() {
+        return Ok(Err(failures));
+    }
+    Ok(lemma::evaluate_data_from_entries(entries).map_err(|e| vec![e]))
+}
+
+/// Non-null Java value to run data. Nested `null` map values are omitted; a `null` list item is a
+/// request error.
+fn java_value_to_evaluate_data<'local>(
+    env: &mut Env<'local>,
+    obj: JObject<'local>,
+) -> Result<EvaluateDataValue, WalkError> {
+    let mut frames: Vec<JavaFrame<'local>> = Vec::new();
+    let mut step = JavaStep::Descend(obj);
+    loop {
+        step = match step {
+            JavaStep::Descend(obj) => java_descend(env, obj, &mut frames)?,
+            JavaStep::NextChild => {
+                let frame = frames
+                    .last_mut()
+                    .expect("BUG: java frame stack empty while reading a child");
+                match frame.next_child(env)? {
+                    Some(child) => JavaStep::Descend(child),
+                    None => {
+                        let frame = frames
+                            .pop()
+                            .expect("BUG: java frame stack empty on completion");
+                        JavaStep::Deliver(frame.finish(env)?)
+                    }
+                }
+            }
+            JavaStep::Deliver(value) => match frames.last_mut() {
+                None => return Ok(value),
+                Some(frame) => {
+                    frame.push(value);
+                    JavaStep::NextChild
+                }
+            },
+        };
+    }
+}
+
+enum JavaStep<'local> {
+    Descend(JObject<'local>),
+    NextChild,
+    Deliver(EvaluateDataValue),
+}
+
+enum JavaFrame<'local> {
+    List {
+        list: JObject<'local>,
+        size: i32,
+        index: i32,
+        out: Vec<EvaluateDataValue>,
+    },
+    Map {
+        entries: std::vec::IntoIter<(JObject<'local>, JObject<'local>)>,
+        pending_key: Option<String>,
+        out: Vec<(String, EvaluateDataValue)>,
+    },
+}
+
+impl<'local> JavaFrame<'local> {
+    fn next_child(&mut self, env: &mut Env<'local>) -> Result<Option<JObject<'local>>, WalkError> {
+        match self {
+            JavaFrame::List {
+                list, size, index, ..
+            } => {
+                if *index >= *size {
+                    return Ok(None);
+                }
+                let position =
+                    usize::try_from(*index).expect("BUG: List index is non-negative") + 1;
+                let child = env
+                    .call_method(
+                        &*list,
+                        jni_str!("get"),
+                        jni_sig!("(I)Ljava/lang/Object;"),
+                        &[JValue::Int(*index)],
+                    )
+                    .map_err(bridge("List.get"))?
+                    .l()
+                    .map_err(bridge("List.get object"))?;
+                *index += 1;
+                if child.is_null() {
+                    env.delete_local_ref(child);
+                    return Err(WalkError::Request(lemma::evaluate_data_null_list_item(
+                        position,
+                    )));
+                }
+                Ok(Some(child))
+            }
+            JavaFrame::Map {
+                entries,
+                pending_key,
+                ..
+            } => {
+                for (key_obj, value_obj) in entries.by_ref() {
+                    let key = java_map_key(env, &key_obj);
+                    env.delete_local_ref(key_obj);
+                    let key = key?;
+                    if value_obj.is_null() {
+                        env.delete_local_ref(value_obj);
+                        continue;
+                    }
+                    *pending_key = Some(key);
+                    return Ok(Some(value_obj));
+                }
+                Ok(None)
+            }
+        }
+    }
+
+    fn push(&mut self, value: EvaluateDataValue) {
+        match self {
+            JavaFrame::List { out, .. } => out.push(value),
+            JavaFrame::Map {
+                pending_key, out, ..
+            } => {
+                let key = pending_key
+                    .take()
+                    .expect("BUG: java map child delivered without its key");
+                out.push((key, value));
+            }
+        }
+    }
+
+    fn finish(self, env: &mut Env<'local>) -> Result<EvaluateDataValue, WalkError> {
+        match self {
+            JavaFrame::List { list, out, .. } => {
+                env.delete_local_ref(list);
+                Ok(EvaluateDataValue::List(out))
+            }
+            JavaFrame::Map { out, .. } => {
+                lemma::evaluate_data_map_from_entries(out).map_err(WalkError::Request)
+            }
+        }
+    }
+}
+
+fn java_descend<'local>(
+    env: &mut Env<'local>,
+    obj: JObject<'local>,
+    frames: &mut Vec<JavaFrame<'local>>,
+) -> Result<JavaStep<'local>, WalkError> {
+    if obj.is_null() {
+        panic!("BUG: null reached java_value_to_evaluate_data; callers omit or reject null values");
+    }
+    let class_name = java_class_name(env, &obj)?;
+    let value = match class_name.as_str() {
+        "java.lang.String" => EvaluateDataValue::Literal(call_to_string(env, &obj)?),
+        "java.lang.Boolean" => EvaluateDataValue::Boolean(call_bool(env, &obj)?),
+        "java.lang.Float" | "java.lang.Double" => {
+            let text = call_to_string(env, &obj)?;
+            return Err(WalkError::Request(lemma::Error::request(
+                format!("pass as string: \"{text}\""),
+                Some("Java float/double has no exact native type; use String, BigDecimal, or an integer type"),
+            )));
+        }
+        "java.math.BigDecimal" => EvaluateDataValue::Literal(call_to_plain_string(env, &obj)?),
+        "java.lang.Integer"
+        | "java.lang.Long"
+        | "java.lang.Short"
+        | "java.lang.Byte"
+        | "java.math.BigInteger" => EvaluateDataValue::Literal(call_to_string(env, &obj)?),
+        _ => return java_open_container(env, obj, &class_name, frames),
+    };
+    env.delete_local_ref(obj);
+    Ok(JavaStep::Deliver(value))
+}
+
+fn java_open_container<'local>(
+    env: &mut Env<'local>,
+    obj: JObject<'local>,
+    class_name: &str,
+    frames: &mut Vec<JavaFrame<'local>>,
+) -> Result<JavaStep<'local>, WalkError> {
+    if instance_of(env, &obj, jni_str!("java/util/Map"))? {
+        let entries = java_map_entries(env, &obj)?;
+        env.delete_local_ref(obj);
+        frames.push(JavaFrame::Map {
+            entries: entries.into_iter(),
+            pending_key: None,
+            out: Vec::new(),
+        });
+        return Ok(JavaStep::NextChild);
+    }
+    if instance_of(env, &obj, jni_str!("java/util/List"))? {
+        let size = call_int_size(env, &obj)?;
+        frames.push(JavaFrame::List {
+            list: obj,
+            size,
+            index: 0,
+            out: Vec::with_capacity(usize::try_from(size).expect("BUG: List.size is non-negative")),
+        });
+        return Ok(JavaStep::NextChild);
+    }
+    Err(WalkError::Request(lemma::Error::request(
+        format!("unsupported data value type: {class_name}"),
+        Some("use String, Boolean, an integer type, BigDecimal, Map, or List"),
+    )))
+}
+
+fn instance_of(env: &mut Env, obj: &JObject, class: &jni::strings::JNIStr) -> Result<bool, String> {
+    let class = env.find_class(class).map_err(bridge("find_class"))?;
+    let is_instance = env
+        .is_instance_of(obj, &class)
+        .map_err(bridge("is_instance_of"))?;
+    env.delete_local_ref(class);
+    Ok(is_instance)
+}
+
+fn call_bool(env: &mut Env, obj: &JObject) -> Result<bool, String> {
+    env.call_method(obj, jni_str!("booleanValue"), jni_sig!("()Z"), &[])
+        .map_err(bridge("Boolean.booleanValue"))?
+        .z()
+        .map_err(bridge("Boolean.booleanValue bool"))
+}
+
+fn call_int_size(env: &mut Env, obj: &JObject) -> Result<i32, String> {
+    env.call_method(obj, jni_str!("size"), jni_sig!("()I"), &[])
+        .map_err(bridge("List.size"))?
+        .i()
+        .map_err(bridge("List.size int"))
+}
+
+fn jstring_from_call(env: &mut Env, raw: JValueOwned) -> Result<String, String> {
+    let obj = raw.l().map_err(bridge("string method object"))?;
+    let js = env
+        .cast_local::<JString>(obj)
+        .map_err(bridge("string method cast"))?;
+    jstring_required(env, &js)
+}
+
+fn call_to_string(env: &mut Env, obj: &JObject) -> Result<String, String> {
+    let raw = env
+        .call_method(
+            obj,
+            jni_str!("toString"),
+            jni_sig!("()Ljava/lang/String;"),
+            &[],
+        )
+        .map_err(bridge("Object.toString"))?;
+    jstring_from_call(env, raw)
+}
+
+fn call_to_plain_string(env: &mut Env, obj: &JObject) -> Result<String, String> {
+    let raw = env
+        .call_method(
+            obj,
+            jni_str!("toPlainString"),
+            jni_sig!("()Ljava/lang/String;"),
+            &[],
+        )
+        .map_err(bridge("BigDecimal.toPlainString"))?;
+    jstring_from_call(env, raw)
+}
+
+fn java_class_name(env: &mut Env, obj: &JObject) -> Result<String, String> {
+    let class = env
+        .get_object_class(obj)
+        .map_err(bridge("get_object_class"))?;
+    let raw = env
+        .call_method(
+            &class,
+            jni_str!("getName"),
+            jni_sig!("()Ljava/lang/String;"),
+            &[],
+        )
+        .map_err(bridge("Class.getName"))?;
+    env.delete_local_ref(class);
+    jstring_from_call(env, raw)
 }
 
 fn string_pairs_from_java(
@@ -250,11 +685,21 @@ fn return_bytes(env: &mut Env, bytes: &[u8]) -> Result<jbyteArray, String> {
 }
 
 #[no_mangle]
+pub extern "system" fn Java_com_lemmabase_lemma_Native_version(
+    mut unowned: EnvUnowned,
+    _class: JClass,
+) -> jstring {
+    with_catch(&mut unowned, |env| {
+        Ok(return_string(env, env!("CARGO_PKG_VERSION").to_string()))
+    })
+}
+
+#[no_mangle]
 pub extern "system" fn Java_com_lemmabase_lemma_Native_create(
     mut unowned: EnvUnowned,
     _class: JClass,
 ) -> jlong {
-    with_catch(&mut unowned, |_env| {
+    with_catch(&mut unowned, |_| {
         let engine = Box::new(Mutex::new(Engine::new()));
         Ok(Box::into_raw(engine) as jlong)
     })
@@ -315,7 +760,7 @@ pub extern "system" fn Java_com_lemmabase_lemma_Native_destroy(
     _class: JClass,
     handle: jlong,
 ) {
-    with_catch(&mut unowned, |_env| {
+    with_catch(&mut unowned, |_| {
         if handle != 0 {
             unsafe {
                 drop(Box::from_raw(handle as *mut EngineHandle));
@@ -385,7 +830,7 @@ pub extern "system" fn Java_com_lemmabase_lemma_Native_loadLabeled(
 }
 
 #[no_mangle]
-pub extern "system" fn Java_com_lemmabase_lemma_Native_list(
+pub extern "system" fn Java_com_lemmabase_lemma_Native_specs(
     mut unowned: EnvUnowned,
     _class: JClass,
     handle: jlong,
@@ -395,8 +840,8 @@ pub extern "system" fn Java_com_lemmabase_lemma_Native_list(
         let guard = engine
             .lock()
             .map_err(|_| "BUG: Engine lock poisoned".to_string())?;
-        let json = serde_json::to_string(&guard.list())
-            .map_err(|e| format!("BUG: list serialization failed: {e}"))?;
+        let json = serde_json::to_string(&guard.specs())
+            .map_err(|e| format!("BUG: specs serialization failed: {e}"))?;
         Ok(return_string(env, json))
     })
 }
@@ -423,7 +868,7 @@ pub extern "system" fn Java_com_lemmabase_lemma_Native_show(
             .map_err(|_| "BUG: Engine lock poisoned".to_string())?;
         match guard.show(repo.as_deref(), &spec, effective.as_ref()) {
             Ok(view) => {
-                let json = serde_json::to_string(&lemma::api::Show::from(&view))
+                let json = serde_json::to_string(&lemma::api::show_document(&guard, &view))
                     .map_err(|e| format!("BUG: show serialization failed: {e}"))?;
                 Ok(return_string(env, json))
             }
@@ -482,8 +927,7 @@ pub extern "system" fn Java_com_lemmabase_lemma_Native_run(
     repository: JString,
     spec: JString,
     effective: JString,
-    data_keys: JObjectArray,
-    data_values: JObjectArray,
+    data_map: JObject,
     rules: JObjectArray,
     explain: jboolean,
 ) -> jstring {
@@ -495,9 +939,13 @@ pub extern "system" fn Java_com_lemmabase_lemma_Native_run(
             Ok(v) => v,
             Err(()) => return Ok(std::ptr::null_mut()),
         };
-        let data: HashMap<String, String> = string_pairs_from_java(env, &data_keys, &data_values)?
-            .into_iter()
-            .collect();
+        let data = match java_map_to_evaluate_data(env, &data_map)? {
+            Ok(data) => data,
+            Err(errs) => {
+                throw_lemma_exception(env, "evaluate failed", &engine_errors_json(&errs));
+                return Ok(std::ptr::null_mut());
+            }
+        };
         let rules = if rules.is_null() {
             None
         } else {
@@ -509,7 +957,7 @@ pub extern "system" fn Java_com_lemmabase_lemma_Native_run(
                     lemma::Error::request("rules must not be empty".to_string(), None::<String>);
                 throw_lemma_exception(
                     env,
-                    "run failed",
+                    "evaluate failed",
                     &engine_errors_json(std::slice::from_ref(&err)),
                 );
                 return Ok(std::ptr::null_mut());
@@ -527,7 +975,7 @@ pub extern "system" fn Java_com_lemmabase_lemma_Native_run(
         let guard = engine
             .lock()
             .map_err(|_| "BUG: Engine lock poisoned".to_string())?;
-        match guard.run(
+        match guard.evaluate(
             repo.as_deref(),
             &spec,
             effective.as_ref(),
@@ -543,7 +991,7 @@ pub extern "system" fn Java_com_lemmabase_lemma_Native_run(
             Err(err) => {
                 throw_lemma_exception(
                     env,
-                    "run failed",
+                    "evaluate failed",
                     &engine_errors_json(std::slice::from_ref(&err)),
                 );
                 Ok(std::ptr::null_mut())
@@ -663,11 +1111,9 @@ pub extern "system" fn Java_com_lemmabase_lemma_Native_installStep(
             .step
             .as_ref()
             .ok_or_else(|| "BUG: installStep called with no current step".to_string())?;
-        let finished = matches!(step, lemma::InstallStep::Finished(_));
-        let json = serialize_install_step(step)?;
         // Java owns the free via installFree; keep the handle until then so a
         // Finished(Err) that throws in Java cannot use-after-free.
-        let _ = finished;
+        let json = serialize_install_step(step)?;
         Ok(return_string(env, json))
     })
 }
@@ -717,7 +1163,7 @@ pub extern "system" fn Java_com_lemmabase_lemma_Native_installFree(
     _class: JClass,
     handle: jlong,
 ) {
-    with_catch(&mut unowned, |_env| {
+    with_catch(&mut unowned, |_| {
         free_install_handle(handle);
         Ok(())
     });

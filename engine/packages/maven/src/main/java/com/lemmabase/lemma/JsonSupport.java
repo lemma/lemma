@@ -42,22 +42,22 @@ final class JsonSupport {
    */
   static Show parseShow(String json) {
     try (JsonParser p = JsonReading.parserFor(json)) {
-      return Show.read(p);
+      return Show.read(p, json);
     } catch (IOException e) {
       throw new LemmaBugError("BUG: failed to parse Show JSON: " + e.getMessage());
     }
   }
 
   /**
-   * Parses a JSON array of {@link ResolvedRepository}.
+   * Parses a JSON array of {@link Repository}.
    *
    * @param json JSON array text
    */
-  static List<ResolvedRepository> parseList(String json) {
+  static List<Repository> parseRepositories(String json) {
     try (JsonParser p = JsonReading.parserFor(json)) {
-      return JsonReading.readList(p, ResolvedRepository::read);
+      return JsonReading.readList(p, Repository::read);
     } catch (IOException e) {
-      throw new LemmaBugError("BUG: failed to parse list JSON: " + e.getMessage());
+      throw new LemmaBugError("BUG: failed to parse specs JSON: " + e.getMessage());
     }
   }
 

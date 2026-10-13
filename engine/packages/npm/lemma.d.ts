@@ -18,6 +18,9 @@ declare module './lemma.bindings.js' {
   }
 
   interface Engine {
+    /** Semver of the loaded WASM build (e.g. `"0.9.12"`). */
+    readonly version: string;
+
     /**
      * Load Lemma source(s).
      * - string → volatile source in the default repository
@@ -35,11 +38,11 @@ declare module './lemma.bindings.js' {
     install(name: string): Promise<RepositoryInstallResult>;
 
     /**
-     * JSON serialization of `Vec<ResolvedRepository>` from [`Engine::list`]:
+     * JSON serialization of `Vec<Repository>` from [`Engine::specs`]:
      * each item has `repository` (name, or omitted for the default repository) and `specs`
-     * (`ListedSpec` rows: name, effective_from, effective_to).
+     * (`SpecVersion` rows: name, effective_from, effective_to, dependencies).
      */
-    list(): ResolvedRepository[];
+    specs(): Repository[];
 
     /**
      * Spec interface and temporal window at `effective`. Lemma text is {@link Engine.source}.
@@ -101,12 +104,30 @@ declare module './lemma.bindings.js' {
     /**
      * Evaluate a spec. Large integers: digit `string` or `bigint`. Safe integers may be numbers. Decimals: strings.
      */
-    run(options: RunOptions): Response;
+    evaluate(options: EvaluateOptions): Response;
+    /**
+     * Deprecated alias of {@link Engine.evaluate}.
+     * @deprecated Use {@link Engine.evaluate}
+     */
+    run(options: EvaluateOptions): Response;
   }
 }
 
-/** Options for {@link Engine.run}. */
-export interface RunOptions {
+/** Overlay tree for {@link Engine.evaluate} `data`. JSON `number` / JS `number` are rejected. */
+export type EvaluateDataValue =
+  | string
+  | boolean
+  | bigint
+  | { [unit: string]: EvaluateDataValue }
+  | EvaluateDataValue[];
+
+/**
+ * @deprecated Use {@link EvaluateDataValue}
+ */
+export type RunDataValue = EvaluateDataValue;
+
+/** Options for {@link Engine.evaluate}. */
+export interface EvaluateOptions {
   /** Spec name (required). */
   spec: string;
   /** Repository qualifier (e.g. `@org/repo`), or omit for the default repository. */
@@ -115,15 +136,20 @@ export interface RunOptions {
   effective?: string | null;
   /**
    * Input data values.
-   * Magnitudes: digit `string` or `bigint` (exact through Decimal::MAX); `number` only when `Number.isSafeInteger`; decimals as strings.
-   * Booleans and unit maps (`{ eur: "84" }` or `{ eur: 84n }`) also accepted.
+   * Magnitudes: digit `string` or `bigint` (exact). `number` is always a double and is rejected.
+   * Booleans, single-unit maps (`{ eur: "84" }` or `{ eur: 84n }`), and arrays also accepted.
    */
-  data?: Record<string, string | boolean | bigint | number | Record<string, string | bigint | number>>;
+  data?: Record<string, EvaluateDataValue>;
   /** Rule names to evaluate, or omit for all rules. */
   rules?: string[] | string | null;
   /** Include explanation tree in response. */
   explain?: boolean;
 }
+
+/**
+ * @deprecated Use {@link EvaluateOptions}
+ */
+export type RunOptions = EvaluateOptions;
 
 /**
  * Source location attached to an {@link EngineError}. Line and column are
@@ -137,7 +163,7 @@ export interface EngineErrorSource {
 }
 
 /**
- * Structured error thrown by {@link Engine.run}, {@link Engine.show},
+ * Structured error thrown by {@link Engine.evaluate}, {@link Engine.show},
  * {@link Engine.load}, and {@link Engine.install}
  * (as an array), and rejected from {@link Engine.install} (as an array).
  *
@@ -190,7 +216,7 @@ export interface EngineError {
 
 /**
  * API value fields shared by `RuleResult` (flattened into its top-level fields),
- * `ShowData.fill`, `ShowData.suggestion`, and range endpoints.
+ * `ShowProperty["x-lemma-value"]`, `ShowProperty["x-lemma-suggestion"]`, and range endpoints.
  * A `None` field is absent (not `null`) per Rust `skip_serializing_if`.
  * When present: always `result`, plus exactly one typed field.
  */
@@ -213,10 +239,11 @@ export interface RuleResultValueEndpoint {
 
 /**
  * API value shared by `RuleResult` (flattened into its top-level fields),
- * `ShowData.fill`, and `ShowData.suggestion`. When present: always `result`,
+ * `ShowProperty["x-lemma-value"]`, and `ShowProperty["x-lemma-suggestion"]`. When present: always `result`,
  * plus exactly one typed field for a non-range value; `range` is set instead for a
  * range value. A range endpoint (`range.from`/`range.to`) never itself carries a
- * `range` field.
+ * `range` field. An instance list in Show is the exception: it carries `list` only,
+ * and each source row `fields` only.
  */
 export interface SpecRuleResult {
   vetoed: boolean;
@@ -231,6 +258,28 @@ export interface SpecResult {
   spec: string;
   effective: string;
   instance: string;
+  /** One hop per `uses` from the evaluated spec to the instance. Never empty. */
+  path: PathSegment[];
+  data: Record<string, SpecRuleResult>;
+  rules: Record<string, SpecRuleResult>;
+}
+
+/** A list row in a result: `index` points into {@link Response.rows}. */
+export interface RowReference {
+  repository?: string;
+  spec: string;
+  /** Resolved row effective date; empty for the origin row. */
+  effective: string;
+  /** Row path relative to its holder, e.g. `lines.2`. */
+  instance: string;
+  index: number;
+}
+
+/** One list row the results reach, filled once however many results reach it. */
+export interface RowResult {
+  repository?: string;
+  spec: string;
+  effective: string;
   data: Record<string, SpecRuleResult>;
   rules: Record<string, SpecRuleResult>;
 }
@@ -238,6 +287,21 @@ export interface SpecResult {
 export interface RuleResultValue extends RuleResultValueEndpoint {
   range?: { from: RuleResultValueEndpoint; to: RuleResultValueEndpoint };
   spec?: SpecResult;
+  /** Set when the value is one list row. */
+  row?: RowReference;
+  /** Set when the value is a list: items in list order; rows carry `row`. */
+  list?: RuleResultValue[];
+  /**
+   * Show only: on a source row of an instance list value, the fields the row sets,
+   * keyed relative to the row spec. Such rows and their list have no `result`;
+   * row order is array order.
+   */
+  fields?: Record<string, RuleResultValue>;
+  /**
+   * Show only: on a source-row field whose value is a reference; the input key of
+   * the referenced data in the spec declaring the list.
+   */
+  reference?: string;
 }
 
 /** Where a custom type's extension chain is rooted: local to this spec, or imported. */
@@ -278,15 +342,30 @@ export interface RatioUnit {
 }
 
 /**
- * Discriminated union over the 12 Lemma type kinds reachable at the API boundary.
+ * Discriminated union over the 14 Lemma type kinds reachable at the API boundary.
  * Field `kind` is the serde tag; kind-specific fields sit at the top level next to
  * `kind`, `name`, and `extends`. The `veto`/`undetermined` `TypeSpecification`
  * variants are internal sentinels that never reach a successfully planned API
  * response and are intentionally excluded.
  */
-export type LemmaType =
-  & { name: string | null; extends: TypeExtends }
-  & (
+export type LemmaType = { name: string | null; extends: TypeExtends } & (
+  | TypeSpecification
+  | ListTypeSpecification
+);
+
+/** List type: rows of `element`. */
+export interface ListTypeSpecification {
+  kind: "list";
+  /** Row type: a spec for instance lists. Never a list; lists do not nest. */
+  element: TypeSpecification;
+  key: ListKey;
+}
+
+/** How a list addresses its rows. */
+export type ListKey = "numbered" | { fields: string[] };
+
+/** Kind-specific fields of a non-list type, without `name` and `extends`; also a list element. */
+export type TypeSpecification =
     | { kind: "boolean"; help: string }
     | {
         kind: "measure";
@@ -308,7 +387,7 @@ export type LemmaType =
         help: string;
       }
     | {
-        kind: "numberrange";
+        kind: "number_range";
         lower: string | null;
         upper: string | null;
         minimum: string | null;
@@ -326,7 +405,7 @@ export type LemmaType =
         help: string;
       }
     | {
-        kind: "ratiorange";
+        kind: "ratio_range";
         lower: string | null;
         upper: string | null;
         minimum: string | null;
@@ -342,7 +421,7 @@ export type LemmaType =
       }
     | { kind: "date"; minimum: string | null; maximum: string | null; help: string }
     | {
-        kind: "daterange";
+        kind: "date_range";
         lower: string | null;
         upper: string | null;
         minimum: NamedBound | null;
@@ -351,7 +430,7 @@ export type LemmaType =
       }
     | { kind: "time"; minimum: string | null; maximum: string | null; help: string }
     | {
-        kind: "timerange";
+        kind: "time_range";
         lower: string | null;
         upper: string | null;
         minimum: NamedBound | null;
@@ -359,7 +438,7 @@ export type LemmaType =
         help: string;
       }
     | {
-        kind: "measurerange";
+        kind: "measure_range";
         lower: NamedBound | null;
         upper: NamedBound | null;
         minimum: NamedBound | null;
@@ -373,8 +452,7 @@ export type LemmaType =
         spec: string;
         effective: string;
         repository?: string;
-      }
-  );
+      };
 
 /** One uses hop on a Show data or rule path. */
 export interface PathSegment {
@@ -386,20 +464,84 @@ export interface PathSegment {
   spec: string;
 }
 
-/** One input declared in a spec. Omitted fields are absent (not `null`). */
-export interface ShowData {
-  type: LemmaType;
+/** Drops the keywords a {@link ShowProperty} states in JSON Schema: `help` (`description`), text `options` (`enum`) and `length` (`minLength`/`maxLength`). */
+type WithoutStandardKeywords<T> = T extends { kind: "text" }
+  ? Omit<T, "help" | "options" | "length">
+  : Omit<T, "help">;
+
+/** `x-lemma-type` of a {@link ShowProperty}: the {@link LemmaType} without its standard-keyword fields. */
+export type ShowPropertyType = { name: string | null; extends: TypeExtends } & (
+  | WithoutStandardKeywords<TypeSpecification>
+  | (Omit<ListTypeSpecification, "element"> & {
+      element: WithoutStandardKeywords<TypeSpecification>;
+    })
+);
+
+/** An evaluation-data JSON value: literal string, boolean, list, or object (list row, single-unit measure map). */
+export type EvaluateDataJson =
+  | string
+  | boolean
+  | EvaluateDataJson[]
+  | { [key: string]: EvaluateDataJson };
+
+/**
+ * @deprecated Use {@link EvaluateDataJson}
+ */
+export type RunDataJson = EvaluateDataJson;
+
+/** `items` of a list {@link ShowProperty}: element literal schema, or `$ref` to a row schema in `Show.$defs`. */
+export type ShowItems =
+  | {
+      type?: "string" | "boolean";
+      oneOf?: Record<string, unknown>[];
+      pattern?: string;
+      enum?: string[];
+      minLength?: number;
+      maxLength?: number;
+    }
+  | { $ref: string };
+
+/** One evaluation-data input of a {@link Show} document, keyed by input key (dotted keys included). */
+export interface ShowProperty {
+  type?: "string" | "boolean" | "array";
+  /** Alternatives: text, boolean, or a single-unit object for measure and ratio data. */
+  oneOf?: Record<string, unknown>[];
+  /** Literal grammar of number, measure and ratio inputs (ECMA-262). */
+  pattern?: string;
+  /** Text options. */
+  enum?: string[];
+  minLength?: number;
+  maxLength?: number;
+  /** Type help. */
+  description?: string;
+  /** Evaluation-data JSON of `x-lemma-value`. */
+  default?: EvaluateDataJson;
+  /** Evaluation-data JSON of `x-lemma-suggestion`. */
+  examples?: [EvaluateDataJson];
+  items?: ShowItems;
+  /** `max_list_rows`. */
+  maxItems?: number;
+  "x-lemma-type": ShowPropertyType;
   /** Import hops to this slot. Empty means this spec. */
-  path: PathSegment[];
+  "x-lemma-path": PathSegment[];
+  /** `x-lemma-rules` keys that transitively need this data after normalize. Empty = reuse catalog only. */
+  "x-lemma-needed-by-rules": string[];
   /** Spec literal or literal `with` binding; UIs may skip review. */
-  fill?: RuleResultValue;
+  "x-lemma-value"?: RuleResultValue;
   /** `-> suggest ...` suggestion; prompt with prefill in interactive UIs. */
-  suggestion?: RuleResultValue;
-  /** Show.rules keys that transitively need this data after normalize. Empty = reuse catalog only. */
-  needed_by_rules: string[];
+  "x-lemma-suggestion"?: RuleResultValue;
 }
 
-/** Return shape of {@link Engine.run}. */
+/** Row object schema of an instance list, one per row spec in `Show.$defs`. */
+export interface ShowRowSchema {
+  title: string;
+  type: "object";
+  additionalProperties: true;
+  properties: Record<string, ShowProperty>;
+  required?: string[];
+}
+
+/** Return shape of {@link Engine.evaluate}. */
 export interface Response {
   spec: string;
   effective: string;
@@ -407,6 +549,8 @@ export interface Response {
   spec_effective_from?: string;
   spec_effective_to?: string;
   results: Record<string, RuleResult>;
+  /** List rows the results reach, in first-reached order. Omitted when none. */
+  rows?: RowResult[];
 }
 
 /**
@@ -418,9 +562,9 @@ export type RuleResult = RuleResultValue & {
   vetoed: boolean;
   veto_reason?: string;
   rule_type: string;
-  /** Input keys still unbound for this rule (run-data-aware; subset of Show.data with non-empty needed_by_rules). */
+  /** Input keys still unbound for this rule (evaluation-data-aware; subset of Show.properties with non-empty x-lemma-needed-by-rules). */
   missing_data?: string[];
-  /** Present when `run(..., explain: true)`. Shape: engine/schemas/api.v1.json (`RuleResult.explanation`). */
+  /** Present when `evaluate(..., explain: true)`. Shape: engine/schemas/api.v1.json (`RuleResult.explanation`). */
   explanation?: Explanation;
 };
 
@@ -436,14 +580,21 @@ export interface ConversionStep {
   text: string;
 }
 
+/** One narrated rule body in a root explanation's `rules` table. */
+export type ExplainedRule = {
+  id: number;
+  name: string;
+  body: string;
+  causes?: Cause[];
+  children?: ExplanationNode[];
+} & RuleResultValue;
+
 /** Nested explanation tree node (tagged by `type`). */
 export type ExplanationNode =
   | ({
-      type: "rule";
+      type: "rule_ref";
+      id: number;
       name: string;
-      body: string;
-      causes?: Cause[];
-      children?: ExplanationNode[];
     } & RuleResultValue)
   | {
       type: "compose";
@@ -468,22 +619,32 @@ export type ExplanationNode =
   | {
       type: "veto";
       message?: string;
+    }
+  | {
+      type: "row";
+      number: number;
+      appended?: boolean;
+      key?: ExplanationNode[];
+      fields: ExplanationNode[];
+    }
+  | {
+      type: "filter";
+      condition: string;
+      matched: number;
+      total: number;
+      children?: ExplanationNode[];
     };
 
-/** Root and nested rule explanation (same shape). */
+/** Root rule explanation under `RuleResult.explanation`. */
 export type Explanation = {
   type: "rule";
   name: string;
   body: string;
   causes?: Cause[];
   children?: ExplanationNode[];
+  /** Narrated rules reachable from this root; `rule_ref` nodes point here by `id`. */
+  rules?: ExplainedRule[];
 } & RuleResultValue;
-
-/** Half-open `[effective_from, effective_to)` for one loaded temporal row. */
-export interface ShowVersion {
-  effective_from?: string;
-  effective_to?: string;
-}
 
 /** Provenance of a loaded source. Externally tagged; the unit `Volatile` variant
  *  is the bare string `"volatile"`. */
@@ -518,18 +679,23 @@ export type ShowConversionTarget =
     }
   | { unit: { unit_name: string } };
 
+/** One operator step of an `arithmetic` show node: `op operand`. */
+export interface ShowArithmeticStep {
+  op: "add" | "subtract" | "multiply" | "divide" | "modulo" | "power";
+  operand: ShowExpression;
+}
+
 /** Resolved expression on a Show rule branch (tagged by `type`). */
 export type ShowExpression =
   | ({ type: "literal" } & RuleResultValue)
   | { type: "data"; name: string }
   | { type: "rule"; name: string }
-  | { type: "and"; left: ShowExpression; right: ShowExpression }
+  | { type: "and"; operands: ShowExpression[] }
   | { type: "not"; operand: ShowExpression }
   | {
       type: "arithmetic";
-      op: "add" | "subtract" | "multiply" | "divide" | "modulo" | "power";
-      left: ShowExpression;
-      right: ShowExpression;
+      first: ShowExpression;
+      steps: ShowArithmeticStep[];
     }
   | {
       type: "comparison";
@@ -546,7 +712,7 @@ export type ShowExpression =
   | {
       type: "unit_conversion";
       operand: ShowExpression;
-      target: ShowConversionTarget;
+      targets: ShowConversionTarget[];
     }
   | {
       type: "math";
@@ -596,7 +762,41 @@ export type ShowExpression =
       operand: ShowExpression;
     }
   | { type: "is_veto"; operand: ShowExpression }
-  | { type: "spec_member"; base: string; member: string };
+  | { type: "spec_member"; base: string; member: string }
+  /** Field of a computed row: `(lines -> first).price`. */
+  | { type: "member"; base: ShowExpression; member: string }
+  /** Field of the row a list command visits (`price` in `lines -> where price > 1`). */
+  | { type: "row_field"; field: string }
+  /** The item a value-list command visits (`>= 100 eur` in `fares -> where >= 100 eur`). */
+  | { type: "row_value" }
+  /** One `field: value` of a `with` row. */
+  | { type: "row_field_value"; field: string; value: ShowExpression }
+  | {
+      type: "list_command";
+      list: ShowExpression;
+      command: ShowListCommand;
+      /** Set only for `sort`. */
+      direction?: "asc" | "desc";
+      args: ShowExpression[];
+    };
+
+/** List command on a Show `list_command` expression. */
+export type ShowListCommand =
+  | "find"
+  | "first"
+  | "last"
+  | "count"
+  | "sum"
+  | "avg"
+  | "product"
+  | "min"
+  | "max"
+  | "any"
+  | "all"
+  | "where"
+  | "sort"
+  | "top"
+  | "with";
 
 /** One arm of a rule's flat last-match table. Default arm omits condition. */
 export interface ShowBranch {
@@ -613,35 +813,57 @@ export interface ShowRule {
   depends_on_rules: string[];
 }
 
-/** Return shape of {@link Engine.show}. */
+/**
+ * Return shape of {@link Engine.show}: a Draft 2020-12 JSON Schema for the spec's evaluation-data inputs.
+ * Validate an evaluation-data payload against it as is; `x-lemma-*` keywords carry Lemma metadata.
+ */
 export interface Show {
+  $schema: "https://json-schema.org/draft/2020-12/schema";
+  /** Spec name. */
+  title: string;
+  /** Spec commentary. */
+  description?: string;
+  type: "object";
+  additionalProperties: true;
+  /** Inputs rules need (non-empty `x-lemma-needed-by-rules`). */
+  properties: Record<string, ShowProperty>;
+  /** Inputs a rule needs that have no committed value. */
+  required?: string[];
+  /** Instance-list row schemas, referenced from `items.$ref`. */
+  $defs?: Record<string, ShowRowSchema>;
   /** Interned repository name; omitted for the unnamed workspace. */
-  repository?: string;
-  spec: string;
-  commentary?: string;
-  effective_from?: string;
-  effective_to?: string;
-  start_line: number;
-  source_type?: SourceType;
-  versions?: ShowVersion[];
-  data: Record<string, ShowData>;
+  "x-lemma-repository"?: string;
+  "x-lemma-effective-from"?: string;
+  "x-lemma-effective-to"?: string;
+  "x-lemma-start-line": number;
+  "x-lemma-source-type"?: SourceType;
+  "x-lemma-meta": Record<string, LiteralValue>;
+  /** Local data declarations (empty path), declaration order. */
+  "x-lemma-types": Record<string, LemmaType>;
   /** This spec's rule graph (local plus reachable imports); measure/ratio units under `type.units`. */
-  rules: Record<string, ShowRule>;
-  meta: Record<string, LiteralValue>;
+  "x-lemma-rules": Record<string, ShowRule>;
 }
 
-/** Slim listed spec row (engine `list`). */
-export interface ListedSpec {
+/** One `uses` target on a spec version (engine `specs`). */
+export interface SpecDependency {
+  repository?: string;
+  name: string;
+  effective?: string;
+}
+
+/** One temporal spec version (engine `specs`). */
+export interface SpecVersion {
   name: string;
   effective_from?: string;
   effective_to?: string;
+  dependencies?: SpecDependency[];
 }
 
-/** Rust `ResolvedRepository` (engine `list`). */
-export interface ResolvedRepository {
+/** Rust `Repository` (engine `specs`). */
+export interface Repository {
   /** Absent for the default unnamed repository (only named repositories carry a name). */
   repository?: string;
-  specs: ListedSpec[];
+  specs: SpecVersion[];
 }
 
 /** Rust `ResourceLimits`. */
@@ -655,7 +877,9 @@ export interface ResourceLimits {
   max_normalized_expression_nodes: number;
   max_spec_dependency_depth: number;
   max_dag_specs: number;
-  max_normal_form_depth: number;
+  max_list_rows: number;
+  max_list_depth: number;
+  max_list_nodes: number;
 }
 
 /** Source location on a quality recommendation. Same shape as {@link EngineErrorSource}. */

@@ -1,9 +1,9 @@
 //! Regression: stored rule results use Decimal in ValueKind and scalar JSON numbers.
 
+use indexmap::IndexMap;
 use lemma::DateTimeValue;
 use lemma::{Engine, LiteralValue, ValueKind};
 use rust_decimal::Decimal;
-use std::collections::HashMap;
 fn rule_number(resp: &lemma::Response, rule: &str) -> Decimal {
     let rr = resp
         .results
@@ -60,8 +60,8 @@ rule double: x * 2
         .expect("load");
     let now = DateTimeValue::now();
     let resp = engine
-        .run(None, "s", Some(&now), HashMap::new(), None, true)
-        .expect("run");
+        .evaluate(None, "s", Some(&now), IndexMap::new(), None, true)
+        .expect("evaluate");
     assert_eq!(rule_number(&resp, "double"), Decimal::from(20));
     let lit = resp
         .results
@@ -88,10 +88,10 @@ rule doubled: number_data * 2
         .load([(lemma::SourceType::Volatile, code.to_string())])
         .expect("load");
     let now = DateTimeValue::now();
-    let data = HashMap::from([("number_data".to_string(), "50".into())]);
+    let data = IndexMap::from([("number_data".to_string(), "50".into())]);
     let resp = engine
-        .run(None, "s", Some(&now), data, None, true)
-        .expect("run");
+        .evaluate(None, "s", Some(&now), data, None, true)
+        .expect("evaluate");
     assert_eq!(rule_number(&resp, "doubled"), Decimal::from(100));
     let lit = resp
         .results
@@ -118,8 +118,8 @@ rule root: sqrt 9
         .expect("load");
     let now = DateTimeValue::now();
     let resp = engine
-        .run(None, "s", Some(&now), HashMap::new(), None, true)
-        .expect("run");
+        .evaluate(None, "s", Some(&now), IndexMap::new(), None, true)
+        .expect("evaluate");
     assert_eq!(rule_number(&resp, "root"), Decimal::from(3));
 }
 
@@ -135,8 +135,8 @@ rule root: sqrt 2
         .expect("load");
     let now = DateTimeValue::now();
     let resp = engine
-        .run(None, "s", Some(&now), HashMap::new(), None, true)
-        .expect("run");
+        .evaluate(None, "s", Some(&now), IndexMap::new(), None, true)
+        .expect("evaluate");
     let d = rule_number(&resp, "root");
     assert!(d > Decimal::from(1));
     assert!(d < Decimal::from(2));
@@ -166,8 +166,8 @@ rule s: sin 1
         .expect("load");
     let now = DateTimeValue::now();
     let resp = engine
-        .run(None, "s", Some(&now), HashMap::new(), None, true)
-        .expect("run");
+        .evaluate(None, "s", Some(&now), IndexMap::new(), None, true)
+        .expect("evaluate");
     let lit = resp
         .results
         .get("s")
@@ -198,8 +198,8 @@ rule converted: amount as eur
         .expect("load");
     let now = DateTimeValue::now();
     let resp = engine
-        .run(None, "s", Some(&now), HashMap::new(), None, true)
-        .expect("run");
+        .evaluate(None, "s", Some(&now), IndexMap::new(), None, true)
+        .expect("evaluate");
     let rr = resp.results.get("converted").unwrap();
     if rr.vetoed {
         panic!("veto: {}", rr.veto_reason.as_deref().unwrap_or("Vetoed"));

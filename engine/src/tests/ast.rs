@@ -81,7 +81,7 @@ fn test_arithmetic_operation_display() {
     assert_eq!(format!("{}", ArithmeticComputation::Subtract), "-");
     assert_eq!(format!("{}", ArithmeticComputation::Multiply), "*");
     assert_eq!(format!("{}", ArithmeticComputation::Divide), "/");
-    assert_eq!(format!("{}", ArithmeticComputation::Modulo), "%");
+    assert_eq!(format!("{}", ArithmeticComputation::Modulo), "mod");
     assert_eq!(format!("{}", ArithmeticComputation::Power), "^");
 }
 
@@ -237,10 +237,7 @@ fn test_literal_value_display_value() {
         minute: 30,
         second: 45,
         microsecond: 0,
-        timezone: Some(TimezoneValue {
-            offset_hours: 1,
-            offset_minutes: 0,
-        }),
+        timezone: Some(TimezoneValue { offset_minutes: 60 }),
 
         granularity: DateGranularity::DateTime,
     };
@@ -318,10 +315,7 @@ fn test_datetime_value_display() {
         minute: 30,
         second: 45,
         microsecond: 0,
-        timezone: Some(TimezoneValue {
-            offset_hours: 1,
-            offset_minutes: 0,
-        }),
+        timezone: Some(TimezoneValue { offset_minutes: 60 }),
 
         granularity: DateGranularity::DateTime,
     };
@@ -337,8 +331,7 @@ fn test_time_value_display() {
         second: 45,
         microsecond: 0,
         timezone: Some(TimezoneValue {
-            offset_hours: -5,
-            offset_minutes: 30,
+            offset_minutes: -330,
         }),
     };
     let display = format!("{}", time);
@@ -348,21 +341,16 @@ fn test_time_value_display() {
 #[test]
 fn test_timezone_value() {
     let tz_positive = TimezoneValue {
-        offset_hours: 5,
-        offset_minutes: 30,
+        offset_minutes: 330,
     };
     assert_eq!(format!("{}", tz_positive), "+05:30");
 
     let tz_negative = TimezoneValue {
-        offset_hours: -8,
-        offset_minutes: 0,
+        offset_minutes: -480,
     };
     assert_eq!(format!("{}", tz_negative), "-08:00");
 
-    let tz_utc = TimezoneValue {
-        offset_hours: 0,
-        offset_minutes: 0,
-    };
+    let tz_utc = TimezoneValue { offset_minutes: 0 };
     assert_eq!(format!("{}", tz_utc), "Z");
 }
 

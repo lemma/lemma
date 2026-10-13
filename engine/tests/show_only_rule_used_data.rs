@@ -1,11 +1,11 @@
-//! Show lists all declared promptable data; needed_by_rules marks intake vs reuse.
+//! Show.types = local data decls; Show.data = inputs rules need only.
 
 use lemma::DateTimeValue;
 use lemma::Engine;
 use std::collections::BTreeSet;
 
 #[test]
-fn show_lists_unused_data_with_empty_needed_by_rules() {
+fn show_data_lists_only_inputs_rules_need() {
     let code = r#"
 spec t
 data used: 4
@@ -21,24 +21,18 @@ rule r: used
         .show(None, "t", Some(&DateTimeValue::now()))
         .expect("show");
 
-    let keys: BTreeSet<&str> = show.data.keys().map(String::as_str).collect();
-    assert_eq!(keys, BTreeSet::from(["used", "unused"]));
+    let type_keys: BTreeSet<&str> = show.types.keys().map(String::as_str).collect();
+    assert_eq!(type_keys, BTreeSet::from(["used", "unused"]));
+    let data_keys: BTreeSet<&str> = show.data.keys().map(String::as_str).collect();
+    assert_eq!(data_keys, BTreeSet::from(["used"]));
     assert_eq!(
         show.data.get("used").expect("used").needed_by_rules,
         vec!["r".to_string()]
     );
-    assert!(
-        show.data
-            .get("unused")
-            .expect("unused")
-            .needed_by_rules
-            .is_empty(),
-        "unused must have empty needed_by_rules"
-    );
 }
 
 #[test]
-fn show_includes_dead_unless_data_with_empty_needed_by_rules() {
+fn show_omits_dead_unless_data_from_data_section() {
     let code = r#"
 spec t
 data used: 4
@@ -55,28 +49,17 @@ rule r: used * dead
         .show(None, "t", Some(&DateTimeValue::now()))
         .expect("show");
 
-    let keys: BTreeSet<&str> = show.data.keys().map(String::as_str).collect();
-    assert_eq!(keys, BTreeSet::from(["used", "dead"]));
+    let type_keys: BTreeSet<&str> = show.types.keys().map(String::as_str).collect();
+    assert_eq!(type_keys, BTreeSet::from(["used", "dead"]));
     assert!(
-        show.data
-            .get("used")
-            .expect("used")
-            .needed_by_rules
-            .is_empty(),
-        "used only on dead primary arm; needed_by_rules empty"
-    );
-    assert!(
-        show.data
-            .get("dead")
-            .expect("dead")
-            .needed_by_rules
-            .is_empty(),
-        "dead only on dead primary arm; needed_by_rules empty"
+        show.data.is_empty(),
+        "neither slot is needed by live arms; data empty, keys: {:?}",
+        show.data.keys().collect::<Vec<_>>()
     );
 }
 
 #[test]
-fn show_includes_dead_under_unless_inlined_divide_rule() {
+fn show_keeps_live_arm_data_under_unless_inlined_divide_rule() {
     let code = r#"
 spec t
 data dead: 5
@@ -93,11 +76,7 @@ rule r: dead
         .show(None, "t", Some(&DateTimeValue::now()))
         .expect("show");
 
-    assert!(
-        show.data.contains_key("dead"),
-        "dead slot still declared for reuse; keys: {:?}",
-        show.data.keys().collect::<Vec<_>>()
-    );
+    assert!(show.types.contains_key("dead"));
     assert!(
         show.data
             .get("dead")
@@ -109,7 +88,7 @@ rule r: dead
 }
 
 #[test]
-fn show_includes_dead_under_unless_nested_arithmetic() {
+fn show_dead_under_unless_nested_arithmetic_stays_in_types_only() {
     let code = r#"
 spec t
 data dead: 5
@@ -125,23 +104,15 @@ rule r: dead
         .show(None, "t", Some(&DateTimeValue::now()))
         .expect("show");
 
+    assert!(show.types.contains_key("dead"));
     assert!(
-        show.data.contains_key("dead"),
-        "dead slot still declared for reuse; keys: {:?}",
-        show.data.keys().collect::<Vec<_>>()
-    );
-    assert!(
-        show.data
-            .get("dead")
-            .expect("dead")
-            .needed_by_rules
-            .is_empty(),
+        !show.data.contains_key("dead"),
         "dead not needed by remaining rules"
     );
 }
 
 #[test]
-fn show_library_spec_with_no_rules_lists_declared_slots() {
+fn show_library_spec_with_no_rules_lists_types_not_data() {
     let code = r#"
 spec base_types
 data currency: text
@@ -159,15 +130,10 @@ data rate: ratio
         .show(None, "base_types", Some(&DateTimeValue::now()))
         .expect("show");
 
-    let keys: BTreeSet<&str> = show.data.keys().map(String::as_str).collect();
-    assert_eq!(keys, BTreeSet::from(["currency", "rate"]));
+    let type_keys: BTreeSet<&str> = show.types.keys().map(String::as_str).collect();
+    assert_eq!(type_keys, BTreeSet::from(["currency", "rate"]));
+    assert!(show.data.is_empty());
     assert!(show.rules.is_empty());
-    for name in ["currency", "rate"] {
-        assert!(
-            show.data.get(name).expect(name).needed_by_rules.is_empty(),
-            "{name} must have empty needed_by_rules"
-        );
-    }
 }
 
 /// Transitive needed_by_rules through a linear rule-ref chain.
@@ -189,6 +155,7 @@ rule r3: r2 + 1
         .show(None, "t", Some(&DateTimeValue::now()))
         .expect("show");
 
+    assert!(show.types.contains_key("x0"));
     assert_eq!(
         show.data.get("x0").expect("x0").needed_by_rules,
         vec!["r1".to_string(), "r2".to_string(), "r3".to_string()]
@@ -257,9 +224,6 @@ rule r: i.slot
         vec!["computed".to_string()]
     );
 
-    // Outer plan embeds src.computed via the with-bound i.slot DataPath; show
-    // must still succeed (topo memo handles imported embed targets) and union
-    // the target rule's needed set onto the consumer.
     let show_outer = engine
         .show(None, "outer", Some(&DateTimeValue::now()))
         .expect("show outer");
@@ -267,9 +231,13 @@ rule r: i.slot
         show_outer
             .data
             .get("src.x0")
-            .expect("src.x0 must appear in outer show catalog")
+            .expect("src.x0 must appear in outer show data")
             .needed_by_rules,
         vec!["r".to_string(), "src.computed".to_string()],
         "outer needed_by_rules must include reachable consumers (local + imported)"
+    );
+    assert!(
+        !show_outer.types.contains_key("src.x0"),
+        "imported slots are not local types"
     );
 }

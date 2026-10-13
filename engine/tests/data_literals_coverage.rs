@@ -4,10 +4,10 @@
 //! values. Tests that encode invariants the implementation may not satisfy
 //! are EXPECTED TO FAIL and must remain red. Do not weaken.
 
+use indexmap::IndexMap;
 use lemma::DateTimeValue;
 use lemma::Engine;
 use rust_decimal::Decimal;
-use std::collections::HashMap;
 
 fn load_ok(engine: &mut Engine, code: &str) {
     engine
@@ -69,15 +69,15 @@ fn rule_measure_unit(result: &lemma::Response, rule_name: &str, unit: &str) -> D
 fn run(engine: &Engine, spec: &str) -> lemma::Response {
     let now = DateTimeValue::now();
     engine
-        .run(None, spec, Some(&now), HashMap::new(), None, true)
-        .expect("run")
+        .evaluate(None, spec, Some(&now), IndexMap::new(), None, true)
+        .expect("evaluate")
 }
 
-fn run_explain(engine: &Engine, spec: &str) -> lemma::Response {
+fn evaluate_explain(engine: &Engine, spec: &str) -> lemma::Response {
     let now = DateTimeValue::now();
     engine
-        .run(None, spec, Some(&now), HashMap::new(), None, true)
-        .expect("run")
+        .evaluate(None, spec, Some(&now), IndexMap::new(), None, true)
+        .expect("evaluate")
 }
 
 // ─── Number literals ──────────────────────────────────────────────────
@@ -555,7 +555,7 @@ rule out: r
 "#;
     let mut engine = Engine::new();
     load_ok(&mut engine, code);
-    let resp = run_explain(&engine, "s");
+    let resp = evaluate_explain(&engine, "s");
     let (value, unit) = rule_ratio(&resp, "out");
     assert_eq!(value, rust_decimal::Decimal::new(50, 2));
     assert_eq!(unit.as_deref(), Some("percent"));
@@ -571,7 +571,7 @@ rule out: r
 "#;
     let mut engine = Engine::new();
     load_ok(&mut engine, code);
-    let resp = run_explain(&engine, "s");
+    let resp = evaluate_explain(&engine, "s");
     let (value, unit) = rule_ratio(&resp, "out");
     assert_eq!(value, rust_decimal::Decimal::new(25, 3));
     assert_eq!(unit.as_deref(), Some("permille"));
@@ -587,7 +587,7 @@ rule out: r
 "#;
     let mut engine = Engine::new();
     load_ok(&mut engine, code);
-    let resp = run_explain(&engine, "s");
+    let resp = evaluate_explain(&engine, "s");
     let (value, unit) = rule_ratio(&resp, "out");
     assert_eq!(value, rust_decimal::Decimal::new(50, 2));
     assert_eq!(unit.as_deref(), Some("percent"));
@@ -603,7 +603,7 @@ rule out: r
 "#;
     let mut engine = Engine::new();
     load_ok(&mut engine, code);
-    let resp = run_explain(&engine, "s");
+    let resp = evaluate_explain(&engine, "s");
     let (value, unit) = rule_ratio(&resp, "out");
     assert_eq!(value, rust_decimal::Decimal::new(25, 3));
     assert_eq!(unit.as_deref(), Some("permille"));
@@ -619,7 +619,7 @@ rule out: r
 "#;
     let mut engine = Engine::new();
     load_ok(&mut engine, code);
-    let resp = run_explain(&engine, "s");
+    let resp = evaluate_explain(&engine, "s");
     let (value, unit) = rule_ratio(&resp, "out");
     assert_eq!(value, rust_decimal::Decimal::new(-50, 2));
     assert_eq!(unit.as_deref(), Some("percent"));
@@ -635,7 +635,7 @@ rule out: r
 "#;
     let mut engine = Engine::new();
     load_ok(&mut engine, code);
-    let resp = run_explain(&engine, "s");
+    let resp = evaluate_explain(&engine, "s");
     let rr = resp.results.get("out").expect("rule 'out' not found");
     assert!(!rr.vetoed, "rule 'out' produced veto: {:?}", rr.veto_reason);
     let lit = rr

@@ -1,6 +1,7 @@
 //! Regression: `Engine::plans` key by `(repository, name)`.
 //! Different repositories may reuse the same spec basename without clobbering plans.
 
+use indexmap::IndexMap;
 use lemma::DateTimeValue;
 use lemma::{Engine, SourceType};
 use rust_decimal::Decimal;
@@ -57,34 +58,34 @@ rule answer: 99
 
     let now = DateTimeValue::now();
 
-    let run_alpha = engine
-        .run(
+    let evaluate_alpha = engine
+        .evaluate(
             Some("alpha"),
             "duped",
             Some(&now),
-            Default::default(),
+            IndexMap::new(),
             None,
             true,
         )
-        .expect("run alpha");
-    let run_beta = engine
-        .run(
+        .expect("evaluate alpha");
+    let evaluate_beta = engine
+        .evaluate(
             Some("beta"),
             "duped",
             Some(&now),
-            Default::default(),
+            IndexMap::new(),
             None,
             true,
         )
-        .expect("run beta");
+        .expect("evaluate beta");
 
     assert_eq!(
-        rule_answer_decimal(&run_alpha),
+        rule_answer_decimal(&evaluate_alpha),
         Decimal::ONE,
         "alpha::duped rule answer must be 1"
     );
     assert_eq!(
-        rule_answer_decimal(&run_beta),
+        rule_answer_decimal(&evaluate_beta),
         Decimal::from(99),
         "beta::duped rule answer must be 99"
     );

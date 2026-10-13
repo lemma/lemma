@@ -1,0 +1,75 @@
+spec menu_item
+
+data drink: text
+data price: measure
+  -> unit eur: 1.00
+
+data size: number
+
+
+spec coffee_order
+
+uses menu: menu_item list
+  -> key drink
+  -> with drink: "espresso", price: 2.50 eur, size: 1
+  -> with drink: "latte",    price: 3.50 eur, size: 2
+
+data ordered: menu.drink
+  -> with "latte"
+
+data fares: menu.price list
+  -> with 89 eur, 120 eur
+
+rule selected:
+  menu -> find ordered
+
+rule selected_price:
+  (menu -> find ordered).price
+
+rule cheapest:
+  menu -> sort price asc -> first
+
+rule priciest:
+  menu -> sort price desc -> first
+
+rule newest:
+  menu -> last
+
+rule drink_count:
+  menu -> count
+
+rule total:
+  menu -> sum price
+
+rule average:
+  menu -> avg price
+
+rule size_product:
+  menu -> product size
+
+rule lowest:
+  menu -> min price
+
+rule highest:
+  menu -> max price
+
+rule any_large:
+  menu -> any size > 1
+
+rule all_cheap:
+  menu -> all price < 5 eur
+
+rule large:
+  menu -> where size > 1
+
+rule top_two:
+  menu -> top 2
+
+rule extended:
+  menu -> with drink: "mocha", price: 4 eur, size: 2
+
+rule high_fares:
+  fares -> where >= 100 eur
+
+rule more_fares:
+  fares -> with 64 eur

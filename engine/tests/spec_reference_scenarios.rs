@@ -2,8 +2,8 @@
 //!
 //! Each `scenario_XX_*` test encodes a fixture and asserts planning/load or eval outcomes.
 
+use indexmap::IndexMap;
 use lemma::{DateGranularity, DateTimeValue, Engine, SourceType};
-use std::collections::HashMap;
 use std::sync::Arc;
 
 fn date(year: i32, month: u32, day: u32) -> DateTimeValue {
@@ -26,11 +26,11 @@ fn path_source(name: &str) -> SourceType {
 
 fn eval(engine: &Engine, spec_name: &str, effective: &DateTimeValue) -> lemma::Response {
     engine
-        .run(
+        .evaluate(
             None,
             spec_name,
             Some(effective),
-            HashMap::new(),
+            IndexMap::new(),
             None,
             false,
         )
@@ -246,11 +246,11 @@ rule r: i.x
     let now = DateTimeValue::now();
     assert_rule_value(
         &engine
-            .run(
+            .evaluate(
                 None,
                 "outer",
                 Some(&now),
-                HashMap::from([("i.x".to_string(), "1".into())]),
+                IndexMap::from([("i.x".to_string(), "1".into())]),
                 None,
                 false,
             )

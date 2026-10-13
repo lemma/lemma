@@ -2,9 +2,11 @@
 //!
 //! Ensures all example files in documentation/examples/ are valid and can be evaluated
 
-use lemma::{DateGranularity, DateTimeValue, Engine, LemmaType, LiteralValue, ValueKind};
+use indexmap::IndexMap;
+use lemma::{
+    DateGranularity, DateTimeValue, Engine, EvaluateDataValue, LemmaType, LiteralValue, ValueKind,
+};
 use rust_decimal::Decimal;
-use std::collections::HashMap;
 use std::str::FromStr;
 use std::sync::Arc;
 
@@ -16,11 +18,11 @@ fn get_rule_value(
     engine: &Engine,
     spec_name: &str,
     rule_name: &str,
-    data: HashMap<String, String>,
+    data: IndexMap<String, EvaluateDataValue>,
 ) -> (lemma::LiteralValue, Arc<LemmaType>) {
     let now = DateTimeValue::now();
     let response = engine
-        .run(
+        .evaluate(
             None,
             spec_name,
             Some(&now),
@@ -102,8 +104,8 @@ fn load_specs_folder_examples() -> Engine {
 fn test_01_coffee_order() {
     let engine = load_specs_folder_examples();
 
-    let mut data = HashMap::new();
-    data.insert("product".to_string(), "latte".into());
+    let mut data = IndexMap::new();
+    data.insert("drink".to_string(), "latte".into());
     data.insert("size".to_string(), "large".into());
     data.insert("number_of_cups".to_string(), "2".into());
     data.insert("has_loyalty_card".to_string(), "true".into());
@@ -123,7 +125,7 @@ fn test_01_coffee_order() {
 fn test_02_library_fees() {
     let engine = load_specs_folder_examples();
 
-    let mut data = HashMap::new();
+    let mut data = IndexMap::new();
     data.insert("due_date".to_string(), "2024-01-01".into());
     data.insert("return_date".to_string(), "2024-01-06".into());
     data.insert("book_type".to_string(), "regular".into());
@@ -141,7 +143,7 @@ fn test_02_library_fees() {
 fn test_03_recipe_scaling() {
     let engine = load_specs_folder_examples();
 
-    let mut data = HashMap::new();
+    let mut data = IndexMap::new();
     data.insert("original_servings".to_string(), "4".into());
     data.insert("desired_servings".to_string(), "8".into());
     data.insert("recipe_name".to_string(), "chocolate_cake".into());
@@ -171,7 +173,7 @@ fn test_04_membership_benefits() {
         &engine,
         "premium_membership",
         "discount_rate",
-        HashMap::new(),
+        IndexMap::new(),
     );
     assert_eq!(
         discount_rate.value,
@@ -179,7 +181,7 @@ fn test_04_membership_benefits() {
     );
 
     // Test membership_benefits spec (references premium_membership)
-    let mut benefits_data = HashMap::new();
+    let mut benefits_data = IndexMap::new();
     benefits_data.insert("monthly_spend".to_string(), "150".into());
     let (discount, _) = get_rule_value(
         &engine,
@@ -219,7 +221,7 @@ fn test_04_membership_benefits() {
 fn test_05_weather_clothing() {
     let engine = load_specs_folder_examples();
 
-    let mut data = HashMap::new();
+    let mut data = IndexMap::new();
     data.insert("temperature".to_string(), "15 celsius".into());
     data.insert("is_raining".to_string(), "false".into());
     data.insert("wind_speed".to_string(), "10".into());
@@ -248,14 +250,14 @@ fn test_nl_tax_net_salary() {
         granularity: DateGranularity::DateTime,
     };
 
-    let mut data = HashMap::new();
+    let mut data = IndexMap::new();
     data.insert("gross_salary".to_string(), "5000 eur".into());
     data.insert("pay_period".to_string(), "month".into());
     data.insert("income_source".to_string(), "employment".into());
     data.insert("pension_contribution".to_string(), "0 eur".into());
     data.insert("payroll_tax_credit".to_string(), "true".into());
     let response = engine
-        .run(None, "net_salary", Some(&effective), data, None, true)
+        .evaluate(None, "net_salary", Some(&effective), data, None, true)
         .expect("net_salary run");
 
     let net = response

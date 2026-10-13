@@ -5,15 +5,15 @@ use crate::engine::{resolve_effective as resolve_effective_datetime, Engine};
 use crate::evaluation::explanations::format_explanation;
 use crate::evaluation::response::Response;
 use crate::mcp::error::ToolError;
-use crate::parse_run_data_object;
+use crate::parse_evaluate_data_object;
 use crate::parsing::ast::DateTimeValue;
 use crate::parsing::source::SourceType;
-use crate::resolve_run_rules;
+use crate::resolve_evaluate_rules;
 use crate::spec_set_id::parse_spec_set_id;
 
-/// Evaluate a spec. Always explains (`Engine::run(..., true)`). No `explain` arg.
+/// Evaluate a spec. Always explains (`Engine::evaluate(..., true)`). No `explain` arg.
 /// Success text is ASCII explanation trees plus a Missing data block when unbound.
-pub fn run(engine: &Engine, args: &Value) -> Result<String, ToolError> {
+pub fn evaluate(engine: &Engine, args: &Value) -> Result<String, ToolError> {
     require_object(args)?;
     reject_explain_arg(args)?;
     if args.get("rule").is_some() {
@@ -29,25 +29,25 @@ pub fn run(engine: &Engine, args: &Value) -> Result<String, ToolError> {
     let spec_name = parse_spec_set_id(spec_set_id).map_err(engine_error_to_diagnostics)?;
     let repository = optional_nonempty_string(args, "repository")?;
     let now = resolve_effective(args)?;
-    let data_values =
-        parse_run_data_object(&args.get("data").cloned()).map_err(ToolError::invalid_arguments)?;
-    let rule_names =
-        resolve_run_rules(&args.get("rules").cloned()).map_err(ToolError::invalid_arguments)?;
+    let data_values = parse_evaluate_data_object(&args.get("data").cloned())
+        .map_err(|e| ToolError::invalid_arguments(e.to_string()))?;
+    let rule_names = resolve_evaluate_rules(&args.get("rules").cloned())
+        .map_err(|e| ToolError::invalid_arguments(e.to_string()))?;
     let rules = rule_names.as_deref();
 
     let response = engine
-        .run(repository, &spec_name, Some(&now), data_values, rules, true)
+        .evaluate(repository, &spec_name, Some(&now), data_values, rules, true)
         .map_err(engine_error_to_diagnostics)?;
 
-    Ok(format_run_text(&response))
+    Ok(format_evaluate_text(&response))
 }
 
-/// Deprecated alias of [`run`]. Same args and formatted trees.
-pub fn evaluate(engine: &Engine, args: &Value) -> Result<String, ToolError> {
-    run(engine, args)
+/// Deprecated alias of [`evaluate`]. Same args and formatted trees.
+pub fn run(engine: &Engine, args: &Value) -> Result<String, ToolError> {
+    evaluate(engine, args)
 }
 
-fn format_run_text(response: &Response) -> String {
+fn format_evaluate_text(response: &Response) -> String {
     let mut output = String::new();
     let missing: Vec<&str> = response
         .results
@@ -73,22 +73,31 @@ fn format_run_text(response: &Response) -> String {
         let explanation = result
             .explanation
             .as_ref()
-            .expect("BUG: MCP run always explains");
+            .expect("BUG: MCP evaluate always explains");
         output.push_str(&format_explanation(explanation));
         output.push('\n');
     }
     output
 }
 
-pub fn list(engine: &Engine, args: &Value) -> Result<String, ToolError> {
+pub fn specs(engine: &Engine, args: &Value) -> Result<String, ToolError> {
     require_object(args)?;
-    let list = engine.list();
-    Ok(serde_json::to_string_pretty(&list)
-        .unwrap_or_else(|error| panic!("BUG: engine list must serialize: {error}")))
+    let text = optional_bool(args, "text")?;
+    let all = optional_bool(args, "all")?;
+    let mut repositories = engine.specs();
+    if text {
+        return Ok(crate::format_repositories(&repositories, all));
+    }
+    if !all {
+        repositories.retain(|repository| !repository.from_dependency);
+    }
+    Ok(serde_json::to_string_pretty(&repositories)
+        .unwrap_or_else(|error| panic!("BUG: engine specs must serialize: {error}")))
 }
 
 pub fn show(engine: &Engine, args: &Value) -> Result<String, ToolError> {
     let repository = optional_nonempty_string(args, "repository")?;
+    let text = optional_bool(args, "text")?;
     let spec_set_id = required_string(args, "spec")?;
     if spec_set_id.is_empty() {
         return Err(ToolError::invalid_arguments("Spec set id cannot be empty"));
@@ -98,8 +107,13 @@ pub fn show(engine: &Engine, args: &Value) -> Result<String, ToolError> {
     let show = engine
         .show(repository, &spec_name, Some(&now))
         .map_err(engine_error_to_diagnostics)?;
-    Ok(serde_json::to_string_pretty(&crate::api::Show::from(&show))
-        .unwrap_or_else(|error| panic!("BUG: show response must serialize: {error}")))
+    if text {
+        return Ok(format!("{show}\n"));
+    }
+    Ok(
+        serde_json::to_string_pretty(&crate::api::show_document(engine, &show))
+            .unwrap_or_else(|error| panic!("BUG: show response must serialize: {error}")),
+    )
 }
 
 pub fn source(engine: &Engine, args: &Value) -> Result<String, ToolError> {
@@ -124,6 +138,7 @@ pub fn source(engine: &Engine, args: &Value) -> Result<String, ToolError> {
 }
 
 pub fn check(args: &Value) -> Result<String, ToolError> {
+    let text = optional_bool(args, "text")?;
     let sources_value = args
         .get("sources")
         .ok_or_else(|| ToolError::invalid_arguments("Missing 'sources' array field"))?;
@@ -163,8 +178,23 @@ pub fn check(args: &Value) -> Result<String, ToolError> {
     }
 
     let recommendations = engine.quality();
+    if text {
+        return Ok(format_recommendations_text(&recommendations));
+    }
     Ok(serde_json::to_string_pretty(&recommendations)
         .unwrap_or_else(|error| panic!("BUG: quality recommendations must serialize: {error}")))
+}
+
+fn format_recommendations_text(recommendations: &[crate::Recommendation]) -> String {
+    if recommendations.is_empty() {
+        return "No recommendations.\n".to_string();
+    }
+    let mut output = String::new();
+    for recommendation in recommendations {
+        output.push_str(&recommendation.to_string());
+        output.push('\n');
+    }
+    output
 }
 
 pub fn guide(args: &Value) -> Result<String, ToolError> {
@@ -240,6 +270,16 @@ fn optional_nonempty_string<'a>(
     }
 }
 
+fn optional_bool(args: &Value, field: &str) -> Result<bool, ToolError> {
+    match args.get(field) {
+        None | Some(Value::Null) => Ok(false),
+        Some(Value::Bool(value)) => Ok(*value),
+        Some(_) => Err(ToolError::invalid_arguments(format!(
+            "'{field}' must be a boolean"
+        ))),
+    }
+}
+
 fn resolve_effective(args: &Value) -> Result<DateTimeValue, ToolError> {
     match args.get("effective") {
         None | Some(Value::Null) => {
@@ -270,17 +310,17 @@ mod tests {
     }
 
     #[test]
-    fn run_returns_formatted_explanation_tree() {
+    fn evaluate_returns_formatted_explanation_tree() {
         let engine = load_pricing();
         let text = run(
             &engine,
             &serde_json::json!({
                 "spec": "pricing",
                 "rules": "total",
-                "data": { "quantity": 3 }
+                "data": { "quantity": "3" }
             }),
         )
-        .expect("run");
+        .expect("evaluate");
         assert!(
             text.contains("total: 30"),
             "expected formatted tree with total: 30, got: {text}"
@@ -292,7 +332,26 @@ mod tests {
     }
 
     #[test]
-    fn run_rejects_explain_arg() {
+    fn evaluate_rejects_json_number_data() {
+        let engine = load_pricing();
+        let err = run(
+            &engine,
+            &serde_json::json!({
+                "spec": "pricing",
+                "data": { "quantity": 3 }
+            }),
+        )
+        .expect_err("json number");
+        match err {
+            ToolError::InvalidArguments(message) => {
+                assert!(message.contains("pass as string: \"3\""), "{message}");
+            }
+            other => panic!("expected InvalidArguments, got {other}"),
+        }
+    }
+
+    #[test]
+    fn evaluate_rejects_explain_arg() {
         let engine = load_pricing();
         let err = run(
             &engine,
@@ -306,7 +365,7 @@ mod tests {
     }
 
     #[test]
-    fn run_rejects_legacy_rule_field() {
+    fn evaluate_rejects_legacy_rule_field() {
         let engine = load_pricing();
         let err = run(
             &engine,
@@ -320,17 +379,17 @@ mod tests {
     }
 
     #[test]
-    fn run_rules_array() {
+    fn evaluate_rules_array() {
         let engine = load_pricing();
         let text = run(
             &engine,
             &serde_json::json!({
                 "spec": "pricing",
                 "rules": ["total"],
-                "data": { "quantity": 2 }
+                "data": { "quantity": "2" }
             }),
         )
-        .expect("run");
+        .expect("evaluate");
         assert!(
             text.contains("total: 20"),
             "expected formatted tree with total: 20, got: {text}"
@@ -349,7 +408,8 @@ mod tests {
         )
         .expect("show lemma units");
         let value: Value = serde_json::from_str(&text).expect("Show JSON");
-        assert_eq!(value["spec"], "units");
+        assert_eq!(value["title"], "units");
+        assert_eq!(value["x-lemma-repository"], "lemma");
     }
 
     #[test]
@@ -374,15 +434,15 @@ mod tests {
             &engine,
             &serde_json::json!({
                 "spec": "pricing",
-                "data": { "quantity": 1 }
+                "data": { "quantity": "1" }
             }),
         )
-        .expect("run");
+        .expect("evaluate");
         let b = evaluate(
             &engine,
             &serde_json::json!({
                 "spec": "pricing",
-                "data": { "quantity": 1 }
+                "data": { "quantity": "1" }
             }),
         )
         .expect("evaluate");
@@ -397,5 +457,120 @@ mod tests {
         .expect("check");
         let value: Value = serde_json::from_str(&text).expect("quality JSON");
         assert!(value.is_array());
+    }
+
+    fn assert_text_must_be_boolean(result: Result<String, ToolError>) {
+        match result.expect_err("non-boolean text") {
+            ToolError::InvalidArguments(message) => {
+                assert_eq!(message, "'text' must be a boolean")
+            }
+            other => panic!("expected InvalidArguments, got {other}"),
+        }
+    }
+
+    #[test]
+    fn specs_text_is_the_cli_view() {
+        let engine = load_pricing();
+        let text = specs(&engine, &serde_json::json!({ "text": true })).expect("specs text");
+        assert_eq!(text, crate::format_repositories(&engine.specs(), false));
+        assert_eq!(text, "pricing\n");
+        let all_text =
+            specs(&engine, &serde_json::json!({ "text": true, "all": true })).expect("specs all");
+        assert_eq!(all_text, crate::format_repositories(&engine.specs(), true));
+        assert!(
+            all_text.starts_with("pricing\n\nlemma\n  units\n"),
+            "{all_text}"
+        );
+        let json = specs(&engine, &serde_json::json!({ "text": false })).expect("specs JSON");
+        let value: Value = serde_json::from_str(&json).expect("specs JSON parses");
+        assert!(value.is_array());
+        assert!(
+            !value
+                .as_array()
+                .expect("array")
+                .iter()
+                .any(|g| g["repository"] == "lemma"),
+            "default specs JSON omits lemma: {json}"
+        );
+        assert_eq!(json, specs(&engine, &serde_json::json!({})).expect("specs"));
+        let all_json = specs(&engine, &serde_json::json!({ "all": true })).expect("specs all JSON");
+        let all_value: Value = serde_json::from_str(&all_json).expect("all JSON");
+        assert!(
+            all_value
+                .as_array()
+                .expect("array")
+                .iter()
+                .any(|g| g["repository"] == "lemma"),
+            "all: true JSON includes lemma: {all_json}"
+        );
+        assert_text_must_be_boolean(specs(&engine, &serde_json::json!({ "text": "true" })));
+        assert_text_must_be_boolean(specs(&engine, &serde_json::json!({ "text": 1 })));
+    }
+
+    #[test]
+    fn show_text_is_the_cli_view() {
+        let engine = load_pricing();
+        let now = DateTimeValue::now();
+        let expected = format!(
+            "{}\n",
+            engine.show(None, "pricing", Some(&now)).expect("show")
+        );
+        let text = show(
+            &engine,
+            &serde_json::json!({ "spec": "pricing", "text": true }),
+        )
+        .expect("show text");
+        assert_eq!(text, expected);
+        let json = show(
+            &engine,
+            &serde_json::json!({ "spec": "pricing", "text": null }),
+        )
+        .expect("show JSON");
+        let value: Value = serde_json::from_str(&json).expect("Show JSON");
+        assert_eq!(
+            value["$schema"],
+            "https://json-schema.org/draft/2020-12/schema"
+        );
+        assert_text_must_be_boolean(show(
+            &engine,
+            &serde_json::json!({ "spec": "pricing", "text": "yes" }),
+        ));
+    }
+
+    #[test]
+    fn check_text_lists_one_recommendation_per_line() {
+        let source = "spec pricing 2026-01-01\n\"\"\"\nx\n\"\"\"\n\ndata qty: number\n  -> help \"Order quantity.\"\nrule total: qty\n";
+        let mut engine = Engine::new();
+        let source_type = SourceType::from_binding_label("pricing.lemma").expect("label");
+        engine
+            .load([(source_type, source.to_string())])
+            .expect("load");
+        let recommendations = engine.quality();
+        assert!(!recommendations.is_empty());
+        let expected: String = recommendations
+            .iter()
+            .map(|recommendation| format!("{recommendation}\n"))
+            .collect();
+        let text = check(&serde_json::json!({
+            "sources": [["pricing.lemma", source]],
+            "text": true
+        }))
+        .expect("check text");
+        assert_eq!(text, expected);
+        assert_text_must_be_boolean(check(&serde_json::json!({
+            "sources": [["pricing.lemma", source]],
+            "text": 0
+        })));
+    }
+
+    #[test]
+    fn check_text_without_recommendations_says_so() {
+        let source = "spec pricing 2026-01-01\n\"\"\"\nBulk pricing.\n\"\"\"\n\ndata qty: number\n  -> minimum 0\n  -> maximum 1000000\n  -> help \"Order quantity.\"\n\nrule total: qty\n";
+        let text = check(&serde_json::json!({
+            "sources": [["pricing.lemma", source]],
+            "text": true
+        }))
+        .expect("check text");
+        assert_eq!(text, "No recommendations.\n");
     }
 }

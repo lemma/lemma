@@ -321,32 +321,10 @@
         };
 
         function datetimeValueToString(dt) {
-            if (!dt) return '';
-            if (typeof dt === 'string') return dt;
-            if (typeof dt !== 'object') return '';
-            var s = String(dt.year);
-            if (dt.month) {
-                s += '-' + String(dt.month).padStart(2, '0');
-                if (dt.day) {
-                    s += '-' + String(dt.day).padStart(2, '0');
-                    if (dt.hour || dt.minute || dt.second) {
-                        s += 'T' + String(dt.hour || 0).padStart(2, '0')
-                            + ':' + String(dt.minute || 0).padStart(2, '0')
-                            + ':' + String(dt.second || 0).padStart(2, '0');
-                        if (dt.timezone) {
-                            var oh = dt.timezone.offset_hours || 0;
-                            var om = dt.timezone.offset_minutes || 0;
-                            if (oh === 0 && om === 0) { s += 'Z'; }
-                            else {
-                                s += (oh >= 0 ? '+' : '-')
-                                    + String(Math.abs(oh)).padStart(2, '0')
-                                    + ':' + String(om).padStart(2, '0');
-                            }
-                        }
-                    }
-                }
+            if (typeof dt !== 'string') {
+                throw new Error('BUG: DateTimeValue serializes as a string, got ' + JSON.stringify(dt));
             }
-            return s;
+            return dt;
         }
 
         function effectiveFromToShowParam(effective_from) {
@@ -879,9 +857,9 @@
             actions.className = 'spec-actions';
 
             const runButton = document.createElement('button');
-            runButton.textContent = 'Run';
+            runButton.textContent = 'Evaluate';
             runButton.addEventListener('click', function () {
-                runPage(key);
+                evaluatePage(key);
             });
             actions.appendChild(runButton);
 
@@ -972,8 +950,8 @@
                     data[name] = {
                         entryType: entry.type,
                         defaultValue:
-                            entry.fill != null
-                                ? entry.fill
+                            entry.value != null
+                                ? entry.value
                                 : entry.suggestion != null
                                   ? entry.suggestion
                                   : null
@@ -1002,7 +980,7 @@
 
             let specGroups;
             try {
-                specGroups = engine.list();
+                specGroups = engine.specs();
             } catch (e) {
                 setStatus('err', 'Exception listing specs', e.message || String(e));
                 state.specs = [];
@@ -1067,7 +1045,7 @@
         // Evaluate and clear
         // ---------------------------------------------------------------
 
-        async function runPage(key) {
+        async function evaluatePage(key) {
             if (loadTimer !== null) {
                 clearTimeout(loadTimer);
                 loadTimer = null;
@@ -1084,7 +1062,7 @@
             const dataObj = serializeDataValues(key);
 
             try {
-                const response = engine.run(repo, name, null, dataObj, effective);
+                const response = engine.evaluate(repo, name, null, dataObj, effective);
                 state.evalResults[key] = { success: true, response: response };
             } catch (e) {
                 state.evalResults[key] = { success: false, error: e.message || String(e) };

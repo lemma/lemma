@@ -1,0 +1,177 @@
+{
+  "boolean": {
+    "kind": "boolean"
+  },
+  "measure": {
+    "kind": "measure",
+    "minimum": null,
+    "maximum": null,
+    "decimals": 2,
+    "units": [
+      {
+        "name": "eur",
+        "factor": {
+          "numer": "1",
+          "denom": "1"
+        },
+        "derived_measure_factors": [],
+        "decomposition": {
+          "tax_bracket.money": 1
+        }
+      }
+    ],
+    "traits": [],
+    "decomposition": {
+      "tax_bracket.money": 1
+    }
+  },
+  "measure_duration_trait": {
+    "kind": "measure",
+    "minimum": null,
+    "maximum": null,
+    "decimals": null,
+    "units": [
+      {
+        "name": "hour",
+        "factor": {
+          "numer": "3600",
+          "denom": "1"
+        },
+        "derived_measure_factors": [],
+        "decomposition": {
+          "duration": 1
+        }
+      }
+    ],
+    "traits": [
+      "duration"
+    ],
+    "decomposition": {
+      "duration": 1
+    }
+  },
+  "measure_calendar_trait": {
+    "kind": "measure",
+    "minimum": null,
+    "maximum": null,
+    "decimals": null,
+    "units": [
+      {
+        "name": "month",
+        "factor": {
+          "numer": "1",
+          "denom": "1"
+        },
+        "derived_measure_factors": [],
+        "decomposition": {
+          "calendar": 1
+        }
+      }
+    ],
+    "traits": [
+      "calendar"
+    ],
+    "decomposition": {
+      "calendar": 1
+    }
+  },
+  "number": {
+    "kind": "number",
+    "minimum": null,
+    "maximum": null,
+    "decimals": null
+  },
+  "number_range": {
+    "kind": "number_range",
+    "lower": null,
+    "upper": null,
+    "minimum": "0",
+    "maximum": "120"
+  },
+  "ratio": {
+    "kind": "ratio",
+    "minimum": null,
+    "maximum": null,
+    "decimals": null,
+    "units": [
+      {
+        "name": "percent",
+        "value": {
+          "numer": "100",
+          "denom": "1"
+        }
+      }
+    ]
+  },
+  "ratio_range": {
+    "kind": "ratio_range",
+    "lower": null,
+    "upper": null,
+    "minimum": null,
+    "maximum": null,
+    "units": [
+      {
+        "name": "percent",
+        "value": {
+          "numer": "100",
+          "denom": "1"
+        }
+      }
+    ]
+  },
+  "text": {
+    "kind": "text"
+  },
+  "date": {
+    "kind": "date",
+    "minimum": null,
+    "maximum": null
+  },
+  "date_range": {
+    "kind": "date_range",
+    "lower": null,
+    "upper": null,
+    "minimum": null,
+    "maximum": null
+  },
+  "time": {
+    "kind": "time",
+    "minimum": null,
+    "maximum": null
+  },
+  "time_range": {
+    "kind": "time_range",
+    "lower": null,
+    "upper": null,
+    "minimum": null,
+    "maximum": null
+  },
+  "measure_range": {
+    "kind": "measure_range",
+    "lower": null,
+    "upper": null,
+    "minimum": null,
+    "maximum": null,
+    "units": [
+      {
+        "name": "km",
+        "factor": {
+          "numer": "1",
+          "denom": "1"
+        },
+        "derived_measure_factors": [],
+        "decomposition": {
+          "tax_bracket.length": 1
+        }
+      }
+    ],
+    "decomposition": {
+      "tax_bracket.length": 1
+    }
+  },
+  "spec": {
+    "kind": "spec",
+    "spec": "tax_bracket",
+    "effective": ""
+  }
+}

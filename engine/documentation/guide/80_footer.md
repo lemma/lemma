@@ -11,4 +11,4 @@
   - [05_weather_clothing.lemma](https://raw.githubusercontent.com/lemma/lemma/main/engine/documentation/examples/05_weather_clothing.lemma)
   - [nl/tax/net_salary.lemma](https://raw.githubusercontent.com/lemma/lemma/main/engine/documentation/examples/nl/tax/net_salary.lemma)
 
-Decimals at JSON boundaries: pass as strings. Detail: [Numeric precision](https://lemma.run/learn/precision).
+Decimals at JSON boundaries: pass as strings (`pass as string: "84"`). JS `number`, Java floats, and Elixir floats are rejected; `bigint`, Java integers/`BigDecimal`, and Elixir integers are exact. Detail: [Numeric precision](https://lemma.run/learn/precision).

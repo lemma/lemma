@@ -13,6 +13,7 @@ pub mod discovery;
 pub mod execution_plan;
 pub mod explanation;
 pub mod graph;
+pub mod instance_list;
 pub mod normalize;
 pub mod ordered_dispatch;
 pub mod semantics;
@@ -23,13 +24,14 @@ pub mod typing;
 pub mod unit_family;
 pub mod unit_index;
 use crate::engine::Context;
-use crate::parsing::ast::{DateTimeValue, EffectiveDate, LemmaRepository};
+use crate::parsing::ast::{DateTimeValue, EffectiveDate, LemmaRepository, LemmaSpec};
 use crate::Error;
 pub use execution_plan::ExecutionPlan;
 use indexmap::IndexMap;
+use semantics::SpecIdentity;
 use serde::{Deserialize, Serialize};
 pub use spec_set::LemmaSpecSet;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashSet};
 use std::sync::Arc;
 use std::unreachable;
 
@@ -62,277 +64,90 @@ impl std::fmt::Display for SpecSetKey {
     }
 }
 
-/// One spec set a planning pass rebuilds, with the identity needed to address it in
-/// both the [`Context`] and a [`PlanStore`].
-///
-/// `repository` and `spec` are the identity as the context spells it, or as the caller
-/// spelled it for a spec set that this batch removed from the context.
-///
-/// `dirty_slices`: `None` means every temporal slice must be rebuilt; `Some` lists
-/// only the `effective_from` values whose bodies changed (structural add/remove of
-/// versions and reverse-edge consumers are always whole-set).
-pub(crate) struct ScopeMember {
-    key: SpecSetKey,
-    repository: Arc<LemmaRepository>,
-    spec: String,
-    dirty_slices: Option<HashSet<EffectiveDate>>,
-}
-
-/// The spec sets a planning pass rebuilds.
-///
-/// A spec set's execution plans are a function of its own spec versions plus the
-/// spec versions and temporal structure of every spec set reachable through its
-/// dependency edges (`uses` imports and qualified parent types, as extracted by
-/// [`discovery::dependency_edges`]). Mutating one spec set therefore invalidates
-/// that set and every set that transitively depends on it, and nothing else:
-/// plans outside the scope remain valid and are kept as they are.
-///
-/// Reverse edges are derived from the context on every pass rather than cached
-/// across passes. Edge resolution depends on global context state (`uses` aliases,
-/// repository qualifiers), so a cached reverse index could resolve differently than
-/// the forward pass and silently under-report consumers, leaving stale plans behind.
-/// Deriving the edges costs one cheap walk of the context per pass and cannot go
-/// stale.
-pub(crate) struct ReplanScope {
-    /// Sorted by [`SpecSetKey`], so a pass visits its members in an order determined
-    /// only by which spec sets are in scope, never by the order specs were loaded.
-    members: Vec<ScopeMember>,
-    keys: HashSet<SpecSetKey>,
-}
-
-impl ReplanScope {
-    /// Every listed set is fully dirty (first load / structural identity change).
-    #[cfg(test)]
-    pub(crate) fn from_changed_sets(
-        context: &Context,
-        changed: Vec<(Arc<LemmaRepository>, String)>,
-    ) -> Self {
-        let whole_set: HashSet<SpecSetKey> = changed
-            .iter()
-            .map(|(repository, spec)| SpecSetKey::new(repository.name.as_deref(), spec))
-            .collect();
-        let changed = changed
-            .into_iter()
-            .map(|(repository, spec)| (repository, spec, EffectiveDate::Origin))
-            .collect();
-        Self::from_changed(context, changed, whole_set)
-    }
-
-    /// `changed` plus every spec set that transitively depends on a changed one.
-    ///
-    /// Keys in `whole_set` rebuild every temporal slice. Other seed keys rebuild only
-    /// the `EffectiveDate`s listed in `changed`. Consumers reached via reverse edges
-    /// are always whole-set.
-    ///
-    /// A changed spec set need not be in `context`: this batch may have removed it.
-    /// Pinned edges (`uses dep 2025-06-01`) propagate dirtiness like any other, since
-    /// a pin fixes the resolution instant, not the pinned source text.
-    pub(crate) fn from_changed(
-        context: &Context,
-        changed: Vec<(Arc<LemmaRepository>, String, EffectiveDate)>,
-        whole_set: HashSet<SpecSetKey>,
-    ) -> Self {
-        let mut identities: HashMap<SpecSetKey, (Arc<LemmaRepository>, String)> = HashMap::new();
-        let mut consumers_of: HashMap<SpecSetKey, Vec<SpecSetKey>> = HashMap::new();
-        let mut worklist: Vec<SpecSetKey> = Vec::with_capacity(changed.len());
-        let mut seed_slices: HashMap<SpecSetKey, HashSet<EffectiveDate>> = HashMap::new();
-
-        for (repository, by_name) in context.repositories() {
-            for (spec_name, spec_set) in by_name {
-                let consumer = SpecSetKey::new(repository.name.as_deref(), spec_name);
-                identities.insert(
-                    consumer.clone(),
-                    (Arc::clone(repository), spec_name.clone()),
-                );
-                for spec in spec_set.iter_specs() {
-                    match discovery::dependency_edges(spec, repository, context) {
-                        Ok(edges) => {
-                            for edge in edges {
-                                consumers_of
-                                    .entry(SpecSetKey::new(
-                                        edge.dep_repository.name.as_deref(),
-                                        &edge.dep_name,
-                                    ))
-                                    .or_default()
-                                    .push(consumer.clone());
-                            }
-                        }
-                        // This spec set's dependencies are unknown, so it cannot be shown
-                        // to be unaffected. Replanning it surfaces the same edge errors
-                        // through the normal planning path.
-                        Err(_) => worklist.push(consumer.clone()),
-                    }
-                }
-            }
-        }
-
-        for (repository, spec, effective) in changed {
-            let key = SpecSetKey::new(repository.name.as_deref(), &spec);
-            identities
-                .entry(key.clone())
-                .or_insert_with(|| (Arc::clone(&repository), spec.clone()));
-            seed_slices
-                .entry(key.clone())
-                .or_default()
-                .insert(effective);
-            worklist.push(key);
-        }
-
-        let mut keys: HashSet<SpecSetKey> = HashSet::new();
-        let mut consumer_keys: HashSet<SpecSetKey> = HashSet::new();
-        while let Some(key) = worklist.pop() {
-            if !keys.insert(key.clone()) {
-                continue;
-            }
-            if let Some(consumers) = consumers_of.get(&key) {
-                for consumer in consumers {
-                    consumer_keys.insert(consumer.clone());
-                    worklist.push(consumer.clone());
-                }
-            }
-        }
-
-        let mut members: Vec<ScopeMember> = keys
-            .iter()
-            .map(|key| {
-                let (repository, spec) = identities.get(key).unwrap_or_else(|| {
-                    panic!("BUG: spec set '{key}' entered the replan scope without an identity")
-                });
-                let dirty_slices = if whole_set.contains(key)
-                    || consumer_keys.contains(key)
-                    || !seed_slices.contains_key(key)
-                {
-                    None
-                } else {
-                    Some(seed_slices.get(key).cloned().expect(
-                        "BUG: seed_slices.contains_key was true in the complementary branch",
-                    ))
-                };
-                ScopeMember {
-                    key: key.clone(),
-                    repository: Arc::clone(repository),
-                    spec: spec.clone(),
-                    dirty_slices,
-                }
-            })
-            .collect();
-        members.sort_by(|left, right| left.key.cmp(&right.key));
-
-        Self { members, keys }
-    }
-
-    pub(crate) fn contains(&self, repository: Option<&str>, spec: &str) -> bool {
-        self.keys.contains(&SpecSetKey::new(repository, spec))
-    }
-
-    /// The spec sets this pass rebuilds, in canonical order.
-    pub(crate) fn members(&self) -> impl Iterator<Item = &ScopeMember> + '_ {
-        self.members.iter()
-    }
-}
-
-/// Plans as they must be read while a pass is still in progress: newly built plans
-/// for whole-set members inside the [`ReplanScope`], a merged view (committed slices
-/// outside the dirty ranges plus replanned dirty slices) for slice-mode members, and
-/// already committed plans for every spec set outside the scope.
-///
-/// A committed store always holds plans for every spec set of its context, because
-/// [`crate::Engine`] commits a pass only when that pass reported no errors. A spec
-/// set outside the scope with no committed plans is therefore a bug.
-pub(crate) struct PlanView<'a> {
-    replanned: &'a PlanStore,
-    committed: &'a PlanStore,
-    scope: &'a ReplanScope,
-    /// Merged plans for slice-mode members: committed outside dirty ranges, then
-    /// overlay of replanned dirty slices. Built once so [`Self::get_plans`] can
-    /// return a stable reference for the duration of the pass.
-    slice_merged: HashMap<SpecSetKey, BTreeMap<EffectiveDate, ExecutionPlan>>,
-}
-
-impl<'a> PlanView<'a> {
-    pub(crate) fn new(
-        replanned: &'a PlanStore,
-        committed: &'a PlanStore,
-        scope: &'a ReplanScope,
-        context: &Context,
-    ) -> Self {
-        let mut slice_merged = HashMap::new();
-        for member in scope.members() {
-            let Some(dirty) = &member.dirty_slices else {
-                continue;
-            };
-            let mut merged = committed
-                .get_plans(member.key.repository.as_deref(), &member.key.spec)
-                .cloned()
-                .unwrap_or_default();
-            if let Some(spec_set) = context.spec_set(&member.repository, &member.spec) {
-                let dirty_ranges: Vec<(Option<DateTimeValue>, Option<DateTimeValue>)> = spec_set
-                    .iter_with_ranges()
-                    .filter(|(spec, _, _)| dirty.contains(&spec.effective_from))
-                    .map(|(_, from, to)| (from, to))
-                    .collect();
-                merged.retain(|effective, _| {
-                    !dirty_ranges.iter().any(|(from, to)| {
-                        effective_in_version_range(effective, from.as_ref(), to.as_ref())
-                    })
-                });
-            }
-            if let Some(from_replan) =
-                replanned.get_plans(member.key.repository.as_deref(), &member.key.spec)
-            {
-                for (effective, plan) in from_replan {
-                    merged.insert(effective.clone(), plan.clone());
-                }
-            }
-            slice_merged.insert(member.key.clone(), merged);
-        }
-        Self {
-            replanned,
-            committed,
-            scope,
-            slice_merged,
-        }
-    }
-
-    /// Temporal slices for `(repository, spec)`, ordered by `effective`.
-    ///
-    /// `None` means a spec set inside the scope has no plans in this pass: its
-    /// planning failed for every slice that still exists in context, or it is no
-    /// longer in the context.
-    pub(crate) fn get_plans(
-        &self,
-        repository: Option<&str>,
-        spec: &str,
-    ) -> Option<&BTreeMap<EffectiveDate, ExecutionPlan>> {
-        let key = SpecSetKey::new(repository, spec);
-        if let Some(merged) = self.slice_merged.get(&key) {
-            if merged.is_empty() {
-                return None;
-            }
-            return Some(merged);
-        }
-        if self.scope.contains(repository, spec) {
-            return self.replanned.get_plans(repository, spec);
-        }
-        Some(
-            self.committed
-                .get_plans(repository, spec)
-                .unwrap_or_else(|| {
-                    panic!(
-                        "BUG: spec set '{}' is outside the replan scope but has no committed plans",
-                        key
-                    )
-                }),
-        )
-    }
-}
+/// Temporal slices of one spec, keyed by [`ExecutionPlan::effective`].
+pub(crate) type PlanSlices = BTreeMap<EffectiveDate, Arc<ExecutionPlan>>;
 
 /// Compiled plans keyed by repository name (`None` = default unnamed repository) then spec name.
 ///
 /// Temporal slices per spec are a [`BTreeMap`] keyed by [`ExecutionPlan::effective`].
+/// Values are [`Arc`] so a planning pass can intern the same plan as a named-`uses`
+/// / row template without a second deep clone.
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub(crate) struct PlanStore {
-    plans: IndexMap<Option<String>, IndexMap<String, BTreeMap<EffectiveDate, ExecutionPlan>>>,
+    #[serde(with = "plan_store_plans")]
+    plans: IndexMap<Option<String>, IndexMap<String, PlanSlices>>,
+}
+
+/// Snapshot form of [`PlanStore::plans`]: every plan slice keeps its `Arc` identity.
+mod plan_store_plans {
+    use super::PlanSlices;
+    use crate::snapshot::shared::arc_map;
+    use indexmap::IndexMap;
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    type Plans = IndexMap<Option<String>, IndexMap<String, PlanSlices>>;
+
+    struct SlicesRef<'a>(&'a PlanSlices);
+
+    impl serde::Serialize for SlicesRef<'_> {
+        fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+            arc_map::serialize(self.0, serializer)
+        }
+    }
+
+    struct SlicesOwned(PlanSlices);
+
+    impl<'de> Deserialize<'de> for SlicesOwned {
+        fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+            arc_map::deserialize(deserializer).map(SlicesOwned)
+        }
+    }
+
+    struct SpecsRef<'a>(&'a IndexMap<String, PlanSlices>);
+
+    impl serde::Serialize for SpecsRef<'_> {
+        fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+            serializer.collect_seq(
+                self.0
+                    .iter()
+                    .map(|(spec, slices)| (spec, SlicesRef(slices))),
+            )
+        }
+    }
+
+    pub(super) fn serialize<S: Serializer>(
+        plans: &Plans,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        serializer.collect_seq(
+            plans
+                .iter()
+                .map(|(repository, specs)| (repository, SpecsRef(specs))),
+        )
+    }
+
+    pub(super) fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Plans, D::Error> {
+        let raw = Vec::<(Option<String>, Vec<(String, SlicesOwned)>)>::deserialize(deserializer)?;
+        let mut plans = IndexMap::with_capacity(raw.len());
+        for (repository, specs) in raw {
+            let mut by_spec = IndexMap::with_capacity(specs.len());
+            for (spec, slices) in specs {
+                if by_spec.insert(spec, slices.0).is_some() {
+                    return Err(serde::de::Error::custom(
+                        "engine snapshot repeats a spec name",
+                    ));
+                }
+            }
+            if plans.insert(repository, by_spec).is_some() {
+                return Err(serde::de::Error::custom(
+                    "engine snapshot repeats a repository",
+                ));
+            }
+        }
+        Ok(plans)
+    }
 }
 
 impl PlanStore {
@@ -357,7 +172,7 @@ impl PlanStore {
         &mut self,
         repository: Option<&str>,
         spec: &str,
-        plan: ExecutionPlan,
+        plan: Arc<ExecutionPlan>,
     ) {
         let effective = plan.effective.clone();
         let occupied = self
@@ -375,14 +190,12 @@ impl PlanStore {
 
     /// Temporal slices for `(repository, spec)`, ordered by `effective`.
     #[must_use]
-    pub(crate) fn get_plans(
-        &self,
-        repository: Option<&str>,
-        spec: &str,
-    ) -> Option<&BTreeMap<EffectiveDate, ExecutionPlan>> {
+    pub(crate) fn get_plans(&self, repository: Option<&str>, spec: &str) -> Option<&PlanSlices> {
         self.plans
             .get(&Self::repo_key(repository))
-            .and_then(|by_name| by_name.get(&Self::spec_key(spec)))
+            .and_then(|by_name| {
+                by_name.get(crate::parsing::ast::canonical_logical_name(spec).as_ref())
+            })
     }
 
     /// Covering plan at `effective_at`, or `None`.
@@ -395,121 +208,6 @@ impl PlanStore {
     ) -> Option<&ExecutionPlan> {
         self.get_plans(repository, spec)
             .and_then(|plans| execution_plan::plan_at(plans, effective_at))
-    }
-
-    fn take_spec_set(
-        &mut self,
-        key: &SpecSetKey,
-    ) -> Option<BTreeMap<EffectiveDate, ExecutionPlan>> {
-        self.plans
-            .get_mut(&key.repository)
-            .and_then(|by_name| by_name.shift_remove(&key.spec))
-    }
-
-    fn put_spec_set(&mut self, key: &SpecSetKey, slices: BTreeMap<EffectiveDate, ExecutionPlan>) {
-        self.plans
-            .entry(key.repository.clone())
-            .or_default()
-            .insert(key.spec.clone(), slices);
-    }
-
-    fn remove_spec_set(&mut self, key: &SpecSetKey) {
-        if let Some(by_name) = self.plans.get_mut(&key.repository) {
-            by_name.shift_remove(&key.spec);
-        }
-    }
-
-    fn holds_any_spec_set(&self) -> bool {
-        self.plans.values().any(|by_name| !by_name.is_empty())
-    }
-
-    /// Install the result of one planning pass.
-    ///
-    /// Whole-set members (`dirty_slices == None`) take the plans `replanned` built for
-    /// them, or lose plans when removed from `context`. Slice members merge dirty
-    /// keys into the existing `BTreeMap`, drop keys absent from context, and leave
-    /// other slices untouched. Spec sets outside `scope` keep their plans.
-    ///
-    /// Call only after the pass reported no errors.
-    pub(crate) fn commit(&mut self, context: &Context, scope: &ReplanScope, mut replanned: Self) {
-        for member in scope.members() {
-            match &member.dirty_slices {
-                None => match replanned.take_spec_set(&member.key) {
-                    Some(slices) => self.put_spec_set(&member.key, slices),
-                    None => {
-                        assert!(
-                            context
-                                .spec_set(&member.repository, &member.spec)
-                                .is_none(),
-                            "BUG: spec set '{}' is in the context but the planning pass produced no plans for it",
-                            member.key
-                        );
-                        self.remove_spec_set(&member.key);
-                    }
-                },
-                Some(dirty) => {
-                    let Some(spec_set) = context.spec_set(&member.repository, &member.spec) else {
-                        self.remove_spec_set(&member.key);
-                        let leftover = replanned.take_spec_set(&member.key);
-                        assert!(
-                            leftover.is_none(),
-                            "BUG: slice-mode member '{}' left context but replanned still holds slices",
-                            member.key
-                        );
-                        continue;
-                    };
-
-                    let dirty_ranges: Vec<(Option<DateTimeValue>, Option<DateTimeValue>)> =
-                        spec_set
-                            .iter_with_ranges()
-                            .filter(|(spec, _, _)| dirty.contains(&spec.effective_from))
-                            .map(|(_, from, to)| (from, to))
-                            .collect();
-
-                    let existing = self
-                        .plans
-                        .entry(member.key.repository.clone())
-                        .or_default()
-                        .entry(member.key.spec.clone())
-                        .or_default();
-                    existing.retain(|effective, _| {
-                        !dirty_ranges.iter().any(|(from, to)| {
-                            effective_in_version_range(effective, from.as_ref(), to.as_ref())
-                        })
-                    });
-
-                    let from_replan = replanned.take_spec_set(&member.key).unwrap_or_else(|| {
-                        panic!(
-                            "BUG: slice-mode member '{}' produced no replanned slices",
-                            member.key
-                        )
-                    });
-                    for (effective, plan) in from_replan {
-                        existing.insert(effective, plan);
-                    }
-                }
-            }
-        }
-        assert!(
-            !replanned.holds_any_spec_set(),
-            "BUG: planning pass produced plans for spec sets outside the replan scope"
-        );
-    }
-}
-
-/// Whether plan key `effective` falls in version half-open range `[from, to)`.
-fn effective_in_version_range(
-    effective: &EffectiveDate,
-    from: Option<&DateTimeValue>,
-    to: Option<&DateTimeValue>,
-) -> bool {
-    let from_key = EffectiveDate::from_option(from.cloned());
-    if effective < &from_key {
-        return false;
-    }
-    match to {
-        None => true,
-        Some(end) => effective < &EffectiveDate::DateTimeValue(end.clone()),
     }
 }
 
@@ -536,182 +234,312 @@ pub(crate) fn ranges_overlap(
 
 /// Result of one planning pass over a [`Context`].
 pub(crate) struct PlanningResult {
-    /// Plans for the spec sets in the pass's [`ReplanScope`], and only those.
-    /// Install with [`PlanStore::commit`].
+    /// Plans for every spec set of the context. Committed only when `errors` is empty.
     pub plans: PlanStore,
     pub errors: Vec<Error>,
 }
 
-/// Build execution plans for every spec set of `context` that is in `scope`.
+/// Every spec set of `context` with its identity, ordered by [`SpecSetKey`], so a pass
+/// visits sets in an order fixed by their identities and not by load order.
+pub(crate) fn spec_sets_in_order(
+    context: &Context,
+) -> Vec<(&Arc<LemmaRepository>, &String, &LemmaSpecSet)> {
+    let mut sets: Vec<_> = context
+        .repositories()
+        .iter()
+        .flat_map(|(repository, by_name)| {
+            by_name
+                .iter()
+                .map(move |(name, spec_set)| (repository, name, spec_set))
+        })
+        .collect();
+    sets.sort_by_key(|(repository, name, _)| SpecSetKey::new(repository.name.as_deref(), name));
+    sets
+}
+
+/// Canonical bytes of everything the plans of one temporal version are built from: the
+/// version with its effective boundaries, and every spec set reachable from it through
+/// dependency edges, each with all of its versions and boundaries.
 ///
-/// `committed` holds the plans of the previous successful pass; spec sets outside
-/// `scope` are read from it during dependency interface validation instead of being
-/// rebuilt. Does not mutate caller state.
+/// Equal bytes mean equal plans, so a committed slice with equal bytes is reused as is.
+/// Bytes are compared directly and never hashed. `start_line` and spans are part of the
+/// bytes, so moving a version in its source rebuilds its slice.
+pub(crate) fn planning_input(
+    context: &Context,
+    repository: &Arc<LemmaRepository>,
+    spec: &LemmaSpec,
+) -> Result<Arc<Vec<u8>>, Vec<Error>> {
+    #[derive(Serialize)]
+    struct VersionInput<'a> {
+        spec: &'a LemmaSpec,
+        boundaries: (Option<DateTimeValue>, Option<DateTimeValue>),
+    }
+
+    #[derive(Serialize)]
+    struct DependencySetInput<'a> {
+        repository: &'a LemmaRepository,
+        name: &'a str,
+        versions: Option<Vec<VersionInput<'a>>>,
+    }
+
+    #[derive(Serialize)]
+    struct PlanningInput<'a> {
+        repository: &'a LemmaRepository,
+        version: VersionInput<'a>,
+        dependencies: Vec<DependencySetInput<'a>>,
+    }
+
+    let lemma_spec_set = context
+        .spec_set(repository, &spec.name)
+        .expect("BUG: planning input requested for a spec missing from context");
+
+    let mut reached: BTreeMap<SpecSetKey, (Arc<LemmaRepository>, String, Option<&LemmaSpecSet>)> =
+        BTreeMap::new();
+    let mut frontier: Vec<(Arc<LemmaRepository>, &LemmaSpec)> =
+        vec![(Arc::clone(repository), spec)];
+    while let Some((owner, version)) = frontier.pop() {
+        for edge in discovery::dependency_edges(version, &owner, context)? {
+            let key = SpecSetKey::new(edge.dep_repository.name.as_deref(), &edge.dep_name);
+            if reached.contains_key(&key) {
+                continue;
+            }
+            let dep_set = context.spec_set(&edge.dep_repository, &edge.dep_name);
+            if let Some(dep_set) = dep_set {
+                for dep_version in dep_set.iter_specs() {
+                    frontier.push((Arc::clone(&edge.dep_repository), dep_version));
+                }
+            }
+            reached.insert(
+                key,
+                (Arc::clone(&edge.dep_repository), edge.dep_name, dep_set),
+            );
+        }
+    }
+
+    let dependencies = reached
+        .values()
+        .map(|(dep_repository, name, dep_set)| DependencySetInput {
+            repository: dep_repository.as_ref(),
+            name,
+            versions: dep_set.map(|dep_set| {
+                dep_set
+                    .iter_with_ranges()
+                    .map(|(spec, from, to)| VersionInput {
+                        spec,
+                        boundaries: (from, to),
+                    })
+                    .collect()
+            }),
+        })
+        .collect();
+    let input = PlanningInput {
+        repository: repository.as_ref(),
+        version: VersionInput {
+            spec,
+            boundaries: lemma_spec_set.effective_range(spec),
+        },
+        dependencies,
+    };
+    Ok(Arc::new(
+        postcard::to_allocvec(&input).expect("BUG: planning input serializes"),
+    ))
+}
+
+/// The template plan of `spec` at instant `at`, built at most once per pass.
+///
+/// Nested row templates and root temporal slices both come through here, so one
+/// `(identity, instant)` has exactly one plan in a pass.
+pub(crate) fn get_or_build_template(
+    context: &Context,
+    repository: &Arc<LemmaRepository>,
+    spec: &LemmaSpec,
+    at: &EffectiveDate,
+    limits: &crate::limits::ResourceLimits,
+    interners: &mut instance_list::PassInterners,
+    planning_input: &Arc<Vec<u8>>,
+) -> Result<Arc<ExecutionPlan>, Vec<Error>> {
+    let identity = SpecIdentity::of(repository, spec);
+    if let Some(template) = interners.spec_templates.get(&identity, at) {
+        return Ok(template);
+    }
+    let lemma_spec_set = context
+        .spec_set(repository, &spec.name)
+        .expect("BUG: template spec missing from context");
+    let dependencies = discovery::discover_dependency_order(context, spec, at, limits).map_err(
+        |error| match error {
+            discovery::DependencyDiscoveryError::Cycle(errors)
+            | discovery::DependencyDiscoveryError::Other(errors) => errors,
+        },
+    )?;
+    let (graph, resolved_types) = graph::Graph::build(
+        context,
+        repository,
+        spec,
+        &dependencies,
+        at,
+        limits,
+        interners,
+    )?;
+    let mut plan = execution_plan::build_execution_plan(
+        &graph,
+        resolved_types,
+        at,
+        limits,
+        &mut normalize::NormalFormInterner::new(),
+        Arc::clone(planning_input),
+    )?;
+    execution_plan::attach_show_cache(&mut plan, lemma_spec_set, spec);
+    let template = Arc::new(plan);
+    interners
+        .spec_templates
+        .insert(identity, at, Arc::clone(&template));
+    Ok(template)
+}
+
+/// Committed plans of the temporal version `spec` of `repository`, when every one of them
+/// was built from `planning_input`. Empty when the version must be planned again.
+fn reusable_version_plans(
+    committed: &PlanStore,
+    repository: &Arc<LemmaRepository>,
+    spec: &LemmaSpec,
+    planning_input: &Arc<Vec<u8>>,
+) -> Vec<Arc<ExecutionPlan>> {
+    let Some(slices) = committed.get_plans(repository.name.as_deref(), &spec.name) else {
+        return Vec::new();
+    };
+    let version_plans: Vec<Arc<ExecutionPlan>> = slices
+        .values()
+        .filter(|plan| plan.identity.effective == spec.effective_from)
+        .cloned()
+        .collect();
+    let unchanged = !version_plans.is_empty()
+        && version_plans
+            .iter()
+            .all(|plan| plan.planning_input == *planning_input);
+    if unchanged {
+        version_plans
+    } else {
+        Vec::new()
+    }
+}
+
+/// Build the execution plans of every spec set of `context`.
+///
+/// `committed` is read only to reuse plans: a temporal version whose planning input
+/// bytes equal the committed ones keeps its committed `Arc`s. Every other version is
+/// built. Neither the context nor `committed` is mutated.
 pub(crate) fn plan(
     context: &Context,
     limits: &crate::limits::ResourceLimits,
-    scope: &ReplanScope,
     committed: &PlanStore,
 ) -> PlanningResult {
     let mut plans = PlanStore::new();
     let mut errors = Vec::new();
     let mut failed_specs: HashSet<(Arc<LemmaRepository>, String, EffectiveDate)> = HashSet::new();
-    let mut failed_plan_sets: HashSet<(Arc<LemmaRepository>, String)> = HashSet::new();
     let mut missing_repository_source_specs: HashSet<(
         Arc<LemmaRepository>,
         String,
         EffectiveDate,
     )> = HashSet::new();
+    let mut interners = instance_list::PassInterners::default();
 
-    for member in scope.members() {
-        let repository = &member.repository;
-        // A member with no spec set left the context in this batch: it has no versions
-        // to plan. `PlanStore::commit` asserts that this is the only reason a scope
-        // member can end a pass without plans.
-        if let Some(lemma_spec_set) = context.spec_set(repository, &member.spec) {
-            let versions: std::sync::Arc<[execution_plan::ShowVersion]> = lemma_spec_set
-                .iter_with_ranges()
-                .map(|(_, from, to)| execution_plan::ShowVersion {
-                    effective_from: from,
-                    effective_to: to,
-                })
-                .collect::<Vec<_>>()
-                .into();
-            // One interner for every temporal slice of this set in this pass: cons
-            // keys ignore spans, so identical subexpressions share cells across slices.
-            let mut interner = normalize::NormalFormInterner::new();
-
-            for spec in lemma_spec_set.iter_specs() {
-                if let Some(dirty) = &member.dirty_slices {
-                    if !dirty.contains(&spec.effective_from) {
-                        continue;
-                    }
-                }
-                let spec_name = &spec.name;
-                let mut slice_errors = Vec::new();
-                let mut slice_plans = Vec::new();
-
-                let breakpoints =
-                    match discovery::plan_breakpoints(context, lemma_spec_set, spec, limits) {
-                        Ok(dates) => dates,
-                        Err(errors) => {
-                            slice_errors.extend(errors);
-                            // Skip the slice loop: existing error handling below treats empty
-                            // slice_plans + non-empty slice_errors as a failed spec.
-                            Vec::new()
-                        }
-                    };
-
-                for effective in breakpoints {
-                    let ordered_dependencies = match discovery::discover_dependency_order(
-                        context, spec, &effective, limits,
-                    ) {
-                        Ok(ordered_dependencies) => ordered_dependencies,
-                        Err(discovery::DependencyDiscoveryError::Cycle(plan_errors)) => {
-                            slice_errors.extend(plan_errors);
-                            continue;
-                        }
-                        Err(discovery::DependencyDiscoveryError::Other(plan_errors)) => {
-                            slice_errors.extend(plan_errors);
-                            continue;
-                        }
-                    };
-
-                    match graph::Graph::build(
-                        context,
-                        repository,
-                        spec,
-                        &ordered_dependencies,
-                        &effective,
-                        limits,
-                    ) {
-                        Ok((graph, resolved_types)) => {
-                            match execution_plan::build_execution_plan(
-                                &graph,
-                                resolved_types,
-                                &effective,
-                                limits,
-                                &mut interner,
-                            ) {
-                                Ok(mut execution_plan) => {
-                                    execution_plan::attach_show_cache(
-                                        &mut execution_plan,
-                                        lemma_spec_set,
-                                        spec,
-                                        &versions,
-                                    );
-                                    slice_plans.push(execution_plan);
-                                }
-                                Err(plan_errors) => slice_errors.extend(plan_errors),
-                            }
-                        }
-                        Err(build_errors) => {
-                            slice_errors.extend(build_errors);
-                        }
-                    }
-                }
-
-                if slice_plans.is_empty() && slice_errors.is_empty() {
-                    unreachable!(
-                        "BUG: no plans or errors for spec {}, effective from {:?}",
-                        spec_name, spec.effective_from
-                    );
-                }
-
-                if !slice_errors.is_empty() {
-                    if slice_errors
-                        .iter()
-                        .any(|error| error.kind() == crate::ErrorKind::MissingRepository)
-                    {
-                        missing_repository_source_specs.insert((
-                            Arc::clone(repository),
-                            spec_name.clone(),
-                            spec.effective_from.clone(),
-                        ));
-                    }
+    for (repository, spec_name, lemma_spec_set) in spec_sets_in_order(context) {
+        for spec in lemma_spec_set.iter_specs() {
+            let input = match planning_input(context, repository, spec) {
+                Ok(input) => input,
+                Err(input_errors) => {
                     errors.extend(
-                        slice_errors
+                        input_errors
                             .into_iter()
                             .map(|err| err.with_spec_context(spec)),
                     );
-                    if slice_plans.is_empty() {
-                        failed_specs.insert((
-                            Arc::clone(repository),
-                            spec_name.clone(),
-                            spec.effective_from.clone(),
-                        ));
-                    }
+                    failed_specs.insert((
+                        Arc::clone(repository),
+                        spec_name.clone(),
+                        spec.effective_from.clone(),
+                    ));
+                    continue;
                 }
+            };
 
-                if !slice_plans.is_empty() {
-                    for execution_plan in slice_plans {
-                        plans.insert_plan(repository.name.as_deref(), spec_name, execution_plan);
-                    }
+            let reused = reusable_version_plans(committed, repository, spec, &input);
+            if !reused.is_empty() {
+                for plan in reused {
+                    plans.insert_plan(repository.name.as_deref(), spec_name, plan);
                 }
+                continue;
+            }
+
+            let mut slice_errors = Vec::new();
+            let mut slice_plans = Vec::new();
+            let breakpoints =
+                match discovery::plan_breakpoints(context, lemma_spec_set, spec, limits) {
+                    Ok(dates) => dates,
+                    Err(plan_errors) => {
+                        slice_errors.extend(plan_errors);
+                        Vec::new()
+                    }
+                };
+            for effective in breakpoints {
+                match get_or_build_template(
+                    context,
+                    repository,
+                    spec,
+                    &effective,
+                    limits,
+                    &mut interners,
+                    &input,
+                ) {
+                    Ok(plan) => slice_plans.push(plan),
+                    Err(build_errors) => slice_errors.extend(build_errors),
+                }
+            }
+
+            if slice_plans.is_empty() && slice_errors.is_empty() {
+                unreachable!(
+                    "BUG: no plans or errors for spec {}, effective from {:?}",
+                    spec_name, spec.effective_from
+                );
+            }
+
+            if !slice_errors.is_empty() {
+                if slice_errors
+                    .iter()
+                    .any(|error| error.kind() == crate::ErrorKind::MissingRepository)
+                {
+                    missing_repository_source_specs.insert((
+                        Arc::clone(repository),
+                        spec_name.clone(),
+                        spec.effective_from.clone(),
+                    ));
+                }
+                errors.extend(
+                    slice_errors
+                        .into_iter()
+                        .map(|err| err.with_spec_context(spec)),
+                );
+                if slice_plans.is_empty() {
+                    failed_specs.insert((
+                        Arc::clone(repository),
+                        spec_name.clone(),
+                        spec.effective_from.clone(),
+                    ));
+                }
+            }
+
+            for execution_plan in slice_plans {
+                plans.insert_plan(repository.name.as_deref(), spec_name, execution_plan);
             }
         }
     }
 
-    // Validate dependency interfaces for the replanned specs. A spec set outside the
-    // scope keeps the dependencies it was already validated against: its own edges did
-    // not change, and neither did any spec set it reaches, or it would be in the scope.
-    let plan_view = PlanView::new(&plans, committed, scope, context);
-    for (consumer_repository, consumer_spec_name, consumer_spec, err) in
-        discovery::validate_dependency_interfaces(
-            context,
-            &plan_view,
-            scope,
-            &missing_repository_source_specs,
-            &failed_specs,
-        )
-    {
+    for (_, _, consumer_spec, err) in discovery::validate_dependency_interfaces(
+        context,
+        &plans,
+        &missing_repository_source_specs,
+        &failed_specs,
+    ) {
         errors.push(err.with_spec_context(consumer_spec));
-        failed_plan_sets.insert((consumer_repository, consumer_spec_name));
-    }
-
-    // Remove failed plan sets from the plan store.
-    for (repository, name) in &failed_plan_sets {
-        plans.remove_spec_set(&SpecSetKey::new(repository.name.as_deref(), name));
     }
 
     dedup_errors(&mut errors);
@@ -739,10 +567,11 @@ fn dedup_errors(errors: &mut Vec<Error>) {
 #[cfg(test)]
 mod tests {
     use super::dedup_errors;
-    use super::{Arc, Context, EffectiveDate, LemmaRepository, ReplanScope};
+    use super::{Arc, EffectiveDate};
     use crate::parsing::ast::{LemmaSpec, Span};
     use crate::parsing::source::{Source, SourceType};
     use crate::Error;
+    use indexmap::IndexMap;
 
     /// `plan` dedups errors globally, after spec context is attached.
     /// Two errors that agree on kind, message, and location but belong to
@@ -812,14 +641,7 @@ mod tests {
         rule_name: &str,
     ) -> String {
         engine
-            .run(
-                None,
-                spec_name,
-                Some(at),
-                std::collections::HashMap::new(),
-                None,
-                false,
-            )
+            .evaluate(None, spec_name, Some(at), IndexMap::new(), None, false)
             .expect("evaluation must succeed")
             .results
             .get(rule_name)
@@ -1216,48 +1038,13 @@ data x: 1
         );
     }
 
-    // --- Incremental replanning: scope, reuse, transactionality ---
+    // --- Incremental replanning: reuse, transactionality ---
 
     use crate::planning::normalize::NormalForm;
     use std::path::PathBuf;
 
     fn path_source(name: &str) -> SourceType {
         SourceType::Path(Arc::new(PathBuf::from(name)))
-    }
-
-    /// Build a context from one source text and return it with its default repository.
-    fn context_from(source: &str) -> (Context, Arc<LemmaRepository>) {
-        let specs = crate::parse(
-            source,
-            SourceType::Volatile,
-            &crate::ResourceLimits::default(),
-        )
-        .expect("parse")
-        .into_flattened_specs();
-        let mut context = Context::new();
-        let workspace = context.workspace();
-        for spec in specs {
-            context
-                .insert_spec(Arc::clone(&workspace), spec)
-                .expect("insert spec");
-        }
-        (context, workspace)
-    }
-
-    /// Spec-set names the scope covers when `changed` names change, default repository only.
-    fn scope_names(source: &str, changed: &[&str]) -> std::collections::BTreeSet<String> {
-        let (context, workspace) = context_from(source);
-        let scope = ReplanScope::from_changed_sets(
-            &context,
-            changed
-                .iter()
-                .map(|name| (Arc::clone(&workspace), (*name).to_string()))
-                .collect(),
-        );
-        scope
-            .members()
-            .map(|member| member.key.spec.clone())
-            .collect::<std::collections::BTreeSet<_>>()
     }
 
     /// Heap identity of each slice's normal-form table for a spec set.
@@ -1324,127 +1111,64 @@ data x: 1
         shape
     }
 
-    /// A change propagates to every transitive consumer and stops there.
+    /// An edit to the base of a diamond must replan both arms and the root, and the root
+    /// must observe the new value.
     #[test]
-    fn replan_scope_covers_transitive_consumers_only() {
-        let source = r#"
-spec base
-data v: 1
-rule r: v
+    fn editing_a_diamond_dependency_replans_both_arms_and_root() {
+        let mut engine = crate::Engine::new();
+        engine
+            .load([
+                (
+                    path_source("base.lemma"),
+                    "spec base\ndata v: 1\nrule r: v\n",
+                ),
+                (
+                    path_source("left.lemma"),
+                    "spec left\nuses b: base\nrule r: b.r\n",
+                ),
+                (
+                    path_source("right.lemma"),
+                    "spec right\nuses b: base\nrule r: b.r\n",
+                ),
+                (
+                    path_source("root.lemma"),
+                    "spec root\nuses l: left\nuses r_dep: right\nrule out: l.r + r_dep.r\n",
+                ),
+            ])
+            .expect("initial load");
 
-spec mid
-uses b: base
-rule r: b.r
+        let left_before = plan_buffers(&engine, None, "left");
+        let right_before = plan_buffers(&engine, None, "right");
+        let root_before = plan_buffers(&engine, None, "root");
 
-spec root
-uses m: mid
-rule out: m.r
+        engine
+            .update(
+                None,
+                "spec base\ndata v: 5\nrule r: v\n".to_string(),
+                path_source("base.lemma"),
+            )
+            .expect("base edit applies");
 
-spec unrelated
-data v: 2
-rule r: v
-"#;
+        assert_ne!(plan_buffers(&engine, None, "left"), left_before);
+        assert_ne!(plan_buffers(&engine, None, "right"), right_before);
+        assert_ne!(plan_buffers(&engine, None, "root"), root_before);
         assert_eq!(
-            scope_names(source, &["base"]),
-            ["base", "mid", "root"]
-                .into_iter()
-                .map(String::from)
-                .collect::<std::collections::BTreeSet<_>>(),
-            "a change to 'base' must dirty 'mid' and 'root', and must not dirty 'unrelated'"
-        );
-        assert_eq!(
-            scope_names(source, &["unrelated"]),
-            ["unrelated"]
-                .into_iter()
-                .map(String::from)
-                .collect::<std::collections::BTreeSet<_>>(),
-            "a leaf change must dirty nothing else"
-        );
-        assert_eq!(
-            scope_names(source, &["mid"]),
-            ["mid", "root"]
-                .into_iter()
-                .map(String::from)
-                .collect::<std::collections::BTreeSet<_>>(),
-            "dirtiness flows to consumers, never down into dependencies"
+            run_display(&engine, "root", &date(2025, 1, 1), "out"),
+            "10",
+            "the root must observe both arms of the diamond after the base edit"
         );
     }
 
-    /// A pin fixes the resolution instant, not the pinned spec's source text or its own
-    /// dependencies. A pinned consumer must therefore still be replanned when the spec
-    /// set it pins into changes.
+    /// A dependency cycle must fail planning with an error and must not diverge.
     #[test]
-    fn replan_scope_includes_pinned_consumers() {
-        let source = r#"
-spec dep 2025-01-01
-data v: 1
-rule r: v
-
-spec pinned_consumer 2025-01-01
-uses d: dep 2025-01-01
-rule out: d.r
-"#;
-        assert_eq!(
-            scope_names(source, &["dep"]),
-            ["dep", "pinned_consumer"]
-                .into_iter()
-                .map(String::from)
-                .collect::<std::collections::BTreeSet<_>>(),
-            "pinning must not exempt a consumer from replanning"
-        );
-    }
-
-    /// A diamond closure must dirty each consumer once and reach the root.
-    #[test]
-    fn replan_scope_handles_diamond_closure() {
-        let source = r#"
-spec base
-data v: 1
-rule r: v
-
-spec left
-uses b: base
-rule r: b.r
-
-spec right
-uses b: base
-rule r: b.r
-
-spec root
-uses l: left
-uses r_dep: right
-rule out: l.r
-"#;
-        assert_eq!(
-            scope_names(source, &["base"]),
-            ["base", "left", "right", "root"]
-                .into_iter()
-                .map(String::from)
-                .collect::<std::collections::BTreeSet<_>>(),
-            "both diamond arms and the root must be dirty"
-        );
-    }
-
-    /// A dependency cycle must not make scope computation diverge.
-    #[test]
-    fn replan_scope_terminates_on_dependency_cycle() {
-        let source = r#"
-spec a
-uses b_dep: b
-data amount: number
-
-spec b
-uses a_dep: a
-data imported: a_dep.amount
-"#;
-        assert_eq!(
-            scope_names(source, &["a"]),
-            ["a", "b"]
-                .into_iter()
-                .map(String::from)
-                .collect::<std::collections::BTreeSet<_>>(),
-            "a cyclic closure must be dirtied once and terminate"
-        );
+    fn dependency_cycle_fails_planning_and_terminates() {
+        let mut engine = crate::Engine::new();
+        engine
+            .load([(
+                path_source("cycle.lemma"),
+                "spec a\nuses b_dep: b\ndata amount: number\n\nspec b\nuses a_dep: a\ndata imported: a_dep.amount\n",
+            )])
+            .expect_err("a dependency cycle must fail to load");
     }
 
     /// Editing a workspace spec must not rebuild the plans of an untouched dependency
@@ -1712,8 +1436,7 @@ rule current: code
         let consumer_before = plan_buffers(&engine, None, "consumer");
 
         // Replacing the dependency with a version that no longer exposes rule `r`
-        // breaks the consumer. Both spec sets are in the replan scope, so both are
-        // rebuilt during the failed pass.
+        // breaks the consumer. Both spec sets are planned again during the failed pass.
         engine
             .update(
                 None,
@@ -1745,9 +1468,8 @@ rule current: code
     }
 
     /// Removing a spec set that another spec set still depends on must fail the batch
-    /// and leave both spec sets' plans in place. The removed spec set is in the replan
-    /// scope but no longer in the context, so this drives the pass over a scope member
-    /// that has no spec set to plan.
+    /// and leave both spec sets' plans in place. The removed spec set is no longer in the
+    /// context while its consumer still imports it.
     #[test]
     fn removing_a_dependency_that_has_a_consumer_fails_and_rolls_back() {
         let mut engine = crate::Engine::new();
@@ -1817,7 +1539,7 @@ rule current: code
     /// its plans exercise the empty-normal-form-table path through commit.
     ///
     /// If a commit dropped the stdlib's plans, the next edit of a spec that imports
-    /// it would panic inside [`PlanView::get_plans`] instead of applying.
+    /// it would panic inside [`discovery::validate_dependency_interfaces`] instead of applying.
     #[test]
     fn a_dirty_consumer_validates_against_committed_stdlib_plans() {
         let mut engine = crate::Engine::new();
@@ -1863,7 +1585,7 @@ rule current: code
     }
 
     /// Reaching a context incrementally must produce the same plans as planning that
-    /// context from scratch. This is the guarantee that makes scoped replanning safe.
+    /// context from scratch. This is the guarantee that makes reusing committed plans safe.
     #[test]
     fn incremental_and_from_scratch_planning_agree() {
         let base_v1 = "spec base\ndata v: 1\nrule r: v\n";
@@ -1921,7 +1643,7 @@ rule current: code
     }
 
     /// Repeating the same edit must reach the same store: no order or iteration
-    /// dependence leaks in through scoped commits.
+    /// dependence leaks in through reused plans.
     #[test]
     fn repeated_identical_edits_reach_the_same_store() {
         let mut engine = crate::Engine::new();
@@ -2018,9 +1740,10 @@ rule r: v
         );
     }
 
-    /// Adding or removing a temporal version dirties the whole spec set.
+    /// Adding a temporal version rebuilds only the slices whose planning input changed:
+    /// the new version, and the neighbor whose `effective_to` moved to the new boundary.
     #[test]
-    fn version_add_forces_whole_set_replan() {
+    fn version_add_rebuilds_only_neighbor_with_moved_boundary() {
         let mut engine = crate::Engine::new();
         engine
             .load([(
@@ -2062,13 +1785,13 @@ rule r: v
 
         let after = plan_buffers(&engine, None, "item");
         assert_eq!(after.len(), 3);
-        assert_ne!(
+        assert_eq!(
             after[0], before[0],
-            "whole-set replan must rebuild the origin slice"
+            "origin slice keeps its range and body, so its plan must be reused"
         );
         assert_ne!(
             after[1], before[1],
-            "whole-set replan must rebuild the mid slice"
+            "mid slice's effective_to moved to the new version, so it must be rebuilt"
         );
     }
 }

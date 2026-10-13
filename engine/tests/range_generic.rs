@@ -1,6 +1,6 @@
-use lemma::{DateGranularity, ValueKind};
+use indexmap::IndexMap;
+use lemma::{DateGranularity, EvaluateDataValue, ValueKind};
 use lemma::{DateTimeValue, Engine, LiteralValue, TimezoneValue};
-use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -17,10 +17,7 @@ fn default_effective() -> DateTimeValue {
         minute: 0,
         second: 0,
         microsecond: 0,
-        timezone: Some(TimezoneValue {
-            offset_hours: 0,
-            offset_minutes: 0,
-        }),
+        timezone: Some(TimezoneValue { offset_minutes: 0 }),
         granularity: DateGranularity::DateTime,
     }
 }
@@ -29,7 +26,7 @@ fn eval_literal_with_data(
     code: &str,
     spec_name: &str,
     rule_name: &str,
-    data: HashMap<String, String>,
+    data: IndexMap<String, EvaluateDataValue>,
 ) -> LiteralValue {
     let mut engine = Engine::new();
     engine
@@ -37,7 +34,7 @@ fn eval_literal_with_data(
         .expect("Should parse and plan");
     let effective = default_effective();
     let response = engine
-        .run(
+        .evaluate(
             None,
             spec_name,
             Some(&effective),
@@ -67,7 +64,7 @@ fn eval_literal_with_data(
 }
 
 fn eval_literal(code: &str, spec_name: &str, rule_name: &str) -> LiteralValue {
-    eval_literal_with_data(code, spec_name, rule_name, HashMap::new())
+    eval_literal_with_data(code, spec_name, rule_name, IndexMap::new())
 }
 
 fn eval_rule(code: &str, spec_name: &str, rule_name: &str) -> String {
@@ -77,11 +74,11 @@ fn eval_rule(code: &str, spec_name: &str, rule_name: &str) -> String {
         .expect("Should parse and plan");
     let effective = default_effective();
     let response = engine
-        .run(
+        .evaluate(
             None,
             spec_name,
             Some(&effective),
-            HashMap::new(),
+            IndexMap::new(),
             Some(&[rule_name.to_string()]),
             true,
         )
@@ -96,14 +93,14 @@ fn eval_rule(code: &str, spec_name: &str, rule_name: &str) -> String {
 }
 
 fn eval_bool(code: &str, spec_name: &str, rule_name: &str) -> bool {
-    eval_bool_with_data(code, spec_name, rule_name, HashMap::new())
+    eval_bool_with_data(code, spec_name, rule_name, IndexMap::new())
 }
 
 fn eval_bool_with_data(
     code: &str,
     spec_name: &str,
     rule_name: &str,
-    data: HashMap<String, String>,
+    data: IndexMap<String, EvaluateDataValue>,
 ) -> bool {
     let mut engine = Engine::new();
     engine
@@ -111,7 +108,7 @@ fn eval_bool_with_data(
         .expect("Should parse and plan");
     let effective = default_effective();
     let response = engine
-        .run(
+        .evaluate(
             None,
             spec_name,
             Some(&effective),
@@ -302,7 +299,7 @@ data high: number -> suggest 100
 data value: number -> suggest 50
 rule bounds: low...high
 rule check: value in bounds"#;
-    let mut data = HashMap::new();
+    let mut data = IndexMap::new();
     data.insert("low".to_string(), "0".into());
     data.insert("high".to_string(), "100".into());
     data.insert("value".to_string(), "50".into());
@@ -325,7 +322,7 @@ fn p20_user_declared() {
     let code = r#"spec test
 data bounds: number range -> suggest 0...100
 rule check: 50 in bounds"#;
-    let mut data = HashMap::new();
+    let mut data = IndexMap::new();
     data.insert("bounds".to_string(), "0...100".into());
     assert!(eval_bool_with_data(code, "test", "check", data));
 }
@@ -335,7 +332,7 @@ fn p21_user_declared_dynamic() {
     let code = r#"spec test
 data bounds: number range
 rule check: 50 in bounds"#;
-    let mut data = HashMap::new();
+    let mut data = IndexMap::new();
     data.insert("bounds".to_string(), "0...100".into());
     let lit = eval_literal_with_data(code, "test", "check", data);
     match lit.value {
@@ -475,7 +472,7 @@ fn q15_user_declared() {
 data weight: measure -> unit gram: 1 -> unit kilogram: 1000
 data acceptable: weight range -> suggest 30 kilogram...35 kilogram
 rule check: 32 kilogram in acceptable"#;
-    let mut data = HashMap::new();
+    let mut data = IndexMap::new();
     data.insert("acceptable".to_string(), "30 kilogram...35 kilogram".into());
     assert!(eval_bool_with_data(code, "test", "check", data));
 }
@@ -502,7 +499,7 @@ data money: measure -> unit eur: 1.00
 data estimated: money range -> suggest 30 eur...50 eur
 rule inside: 40 eur in estimated
 rule span: (30 eur...50 eur) >= 20 eur"#;
-    let mut data = HashMap::new();
+    let mut data = IndexMap::new();
     data.insert("estimated".to_string(), "30 eur...50 eur".into());
     assert!(eval_bool_with_data(code, "test", "inside", data.clone()));
     assert!(eval_bool_with_data(code, "test", "span", data));
@@ -696,5 +693,43 @@ rule width: ((2 * 0)...10) as number"#;
             assert_eq!(dec, rust_decimal::Decimal::from(10));
         }
         other => panic!("expected number span width 10, got {other:?}"),
+    }
+}
+
+fn named_range_over_element(element_value: &str) -> String {
+    format!(
+        "spec pricing\ndata price: measure\n  -> unit eur: 1\n  -> {element_value} 5 eur\ndata band: price range\nrule hit: 2 eur in band\n"
+    )
+}
+
+#[test]
+fn named_range_does_not_inherit_element_scalar_suggestion_or_value() {
+    for element_value in ["suggest", "with"] {
+        let code = named_range_over_element(element_value);
+        let mut engine = Engine::new();
+        engine
+            .load([(source(), code.clone())])
+            .unwrap_or_else(|errors| panic!("{element_value}: {errors:?}"));
+        let effective = default_effective();
+        let unbound = engine
+            .evaluate(
+                None,
+                "pricing",
+                Some(&effective),
+                IndexMap::new(),
+                Some(&["hit".to_string()]),
+                false,
+            )
+            .expect("evaluate");
+        let hit = unbound.results.get("hit").expect("hit");
+        assert!(hit.vetoed, "{element_value}: band has no value of its own");
+        assert_eq!(hit.missing_data(), ["band".to_string()], "{element_value}");
+
+        let mut data = IndexMap::new();
+        data.insert("band".to_string(), EvaluateDataValue::from("1 eur...3 eur"));
+        assert!(
+            eval_bool_with_data(&code, "pricing", "hit", data),
+            "{element_value}"
+        );
     }
 }

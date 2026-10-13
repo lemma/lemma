@@ -1,9 +1,11 @@
 defmodule Lemma.RuleResult do
   @moduledoc """
-  One rule result from `Lemma.run/3`, as returned in `Lemma.Response.results`.
+  One rule result from `Lemma.evaluate/3`, as returned in `Lemma.Response.results`.
 
   Value fields (`measure`, `ratio`, `number`, …) mirror the flattened Rust
-  `RuleResultValue`. `explanation` is the raw explanation JSON map when present
+  `RuleResultValue`. `row` is a list row reference: its `"index"` points into
+  `Lemma.Response.rows`. `list` holds the items of a list value, each a raw value
+  map (rows carry `"row"`). `explanation` is the raw explanation JSON map when present
   (tagged by `"type"`); pattern-match on that tag directly.
   """
 
@@ -23,6 +25,8 @@ defmodule Lemma.RuleResult do
           unit: String.t() | nil,
           range: map() | nil,
           spec: map() | nil,
+          row: map() | nil,
+          list: [map()] | nil,
           missing_data: [String.t()] | nil,
           explanation: map() | nil
         }
@@ -44,12 +48,14 @@ defmodule Lemma.RuleResult do
     :unit,
     :range,
     :spec,
+    :row,
+    :list,
     :missing_data,
     :explanation
   ]
 
   @doc """
-  Builds a `Lemma.RuleResult` from one value of the decoded `Lemma.run/3` JSON
+  Builds a `Lemma.RuleResult` from one value of the decoded `Lemma.evaluate/3` JSON
   `"results"` map. Optional fields are absent (not `null`) from the API JSON when
   unset; `Map.get/3` yields `nil` for those.
   """
@@ -71,6 +77,8 @@ defmodule Lemma.RuleResult do
       unit: Map.get(map, "unit"),
       range: Map.get(map, "range"),
       spec: Map.get(map, "spec"),
+      row: Map.get(map, "row"),
+      list: Map.get(map, "list"),
       missing_data: Map.get(map, "missing_data"),
       explanation: Map.get(map, "explanation")
     }

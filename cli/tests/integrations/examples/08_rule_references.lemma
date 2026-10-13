@@ -6,11 +6,11 @@ This example demonstrates how to reference other rules by name.
 Rule references are resolved by name, looking up data first, then rules.
 """
 
-data age                  : 25
-data has_drivers_license  : true
-data has_vehicle          : true
-data license_is_suspended : false
-data vehicle_is_insured   : true
+data age:                  25
+data has_drivers_license:  true
+data has_vehicle:          true
+data license_is_suspended: false
+data vehicle_is_insured:   true
 
 rule is_of_legal_age:
   age >= 18
@@ -22,7 +22,9 @@ rule vehicle_is_ready:
   has_vehicle and vehicle_is_insured
 
 rule can_drive_legally:
-  is_of_legal_age and has_valid_license and vehicle_is_ready
+  is_of_legal_age
+  and has_valid_license
+  and vehicle_is_ready
 
 rule driving_status:
   "Cannot drive"
@@ -36,12 +38,18 @@ Eligibility Check with Rule References
 Shows complex rule composition and cross-rule dependencies.
 """
 
-data criminal_record : false
-data has_passport    : true
-data has_visa        : false
-data passport_valid  : true
-data debt_amount     : number -> minimum 0 -> suggest 0
-data user_age        : number -> minimum 0 -> maximum 120 -> suggest 30
+data criminal_record: false
+data has_passport:    true
+data has_visa:        false
+data passport_valid:  true
+data debt_amount: number
+  -> minimum 0
+  -> suggest 0
+
+data user_age: number
+  -> minimum 0
+  -> maximum 120
+  -> suggest 30
 
 rule is_adult:
   user_age >= 18
@@ -62,7 +70,10 @@ rule financial_standing_good:
   debt_amount < 10_000
 
 rule can_travel_internationally:
-  is_adult and travel_documents_valid and background_check_passed and financial_standing_good
+  is_adult
+  and travel_documents_valid
+  and background_check_passed
+  and financial_standing_good
   unless not travel_documents_valid
     then veto "Valid travel documents required"
 

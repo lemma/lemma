@@ -30,7 +30,7 @@ fn cross_process_show_bytes_identical() {
             .args([
                 "show",
                 "--json",
-                "--prefix",
+                "--path",
                 dir.path().to_str().expect("utf8 path"),
                 "ordered",
             ])

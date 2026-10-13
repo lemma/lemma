@@ -2,10 +2,10 @@
 //!
 //! Tests `uses`, qualified parent types, inline type declarations with constraints, and complex rule chains
 
+use indexmap::IndexMap;
 use lemma::DateTimeValue;
 use lemma::Engine;
 use rust_decimal::Decimal;
-use std::collections::HashMap;
 use std::str::FromStr;
 
 fn decimal_lit(d: &str) -> Decimal {
@@ -106,14 +106,14 @@ fn test_coffee_order_espresso_small_no_loyalty() {
     let engine = load_coffee_order();
     let now = DateTimeValue::now();
 
-    let data_values = HashMap::from([
+    let data_values = IndexMap::from([
         ("coffee".to_string(), "espresso".into()),
         ("size".to_string(), "small".into()),
         ("number_of_cups".to_string(), "2".into()),
         ("has_loyalty_card".to_string(), "false".into()),
     ]);
     let response = engine
-        .run(None, "coffee_order", Some(&now), data_values, None, true)
+        .evaluate(None, "coffee_order", Some(&now), data_values, None, true)
         .expect("Evaluation failed");
 
     // Check base_price: espresso = 2.50 usd
@@ -351,14 +351,14 @@ fn test_coffee_order_latte_large_with_loyalty() {
     let engine = load_coffee_order();
     let now = DateTimeValue::now();
 
-    let data_values = HashMap::from([
+    let data_values = IndexMap::from([
         ("coffee".to_string(), "latte".into()),
         ("size".to_string(), "large".into()),
         ("number_of_cups".to_string(), "3".into()),
         ("has_loyalty_card".to_string(), "true".into()),
     ]);
     let response = engine
-        .run(None, "coffee_order", Some(&now), data_values, None, true)
+        .evaluate(None, "coffee_order", Some(&now), data_values, None, true)
         .expect("Evaluation failed");
 
     // Check base_price: latte = 3.50 usd
@@ -556,9 +556,9 @@ fn test_coffee_order_ordered_priority() {
     let expected_values = ["1", "2", "3"];
 
     for (priority, expected) in priorities.iter().zip(expected_values.iter()) {
-        let data_values = HashMap::from([("priority".to_string(), (*priority).to_string())]);
+        let data_values = IndexMap::from([("priority".to_string(), (*priority).into())]);
         let response = engine
-            .run(None, "coffee_order", Some(&now), data_values, None, true)
+            .evaluate(None, "coffee_order", Some(&now), data_values, None, true)
             .expect("Evaluation failed");
 
         let ordered_priority = response
@@ -585,13 +585,13 @@ fn test_coffee_order_invalid_size_veto() {
 
     // Size "extra large" is defined in the inline type constraint, but size_multiplier
     // only handles small/medium/large, so it should veto
-    let data_values = HashMap::from([
+    let data_values = IndexMap::from([
         ("coffee".to_string(), "espresso".into()),
         ("size".to_string(), "extra large".into()),
         ("number_of_cups".to_string(), "1".into()),
     ]);
     let response = engine
-        .run(None, "coffee_order", Some(&now), data_values, None, true)
+        .evaluate(None, "coffee_order", Some(&now), data_values, None, true)
         .expect("Evaluation should complete (even with veto)");
 
     let size_multiplier = response

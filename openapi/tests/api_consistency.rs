@@ -1,6 +1,6 @@
 //! OpenAPI must not contradict itself on temporal field types.
 
-use lemma::{DateTimeValue, Engine, SourceType};
+use lemma::{Engine, SourceType};
 use lemma_openapi::generate_openapi;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -20,8 +20,6 @@ rule r: n
             .to_string(),
         )])
         .expect("load");
-    let now = DateTimeValue::now();
-    let _ = now;
     let doc = generate_openapi(&engine, false);
 
     let mut declarations: BTreeMap<String, Vec<String>> = BTreeMap::new();

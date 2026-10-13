@@ -1,6 +1,7 @@
 //! Derived measure unit planning: `uses lemma units` duration units, compound-of-compound
 //! resolution, topological ordering, and conversion-factor normalization.
 
+use indexmap::IndexMap;
 use lemma::Engine;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -23,9 +24,6 @@ fn expect_plan_error(code: &str, source_file: &str, expected_fragment: &str) {
         result.is_err(),
         "expected planning to fail containing '{expected_fragment}'"
     );
-    if expected_fragment.is_empty() {
-        return;
-    }
     let errors = result.unwrap_err();
     let combined = errors
         .iter()
@@ -97,12 +95,10 @@ fn compound_newton_force_unit_plans() {
     let code = r#"spec mechanics
 uses lemma units
 
-data mass: measure
+data mass: units.mass
   -> unit kg: 1
-  -> unit gram: 0.001
 
-data length: measure
-  -> unit meter: 1
+data length: units.length
   -> unit km: 1000
 
 data acceleration: measure
@@ -126,11 +122,8 @@ fn compound_pascal_pressure_unit_plans() {
     let code = r#"spec mechanics_pressure
 uses lemma units
 
-data mass: measure
+data mass: units.mass
   -> unit kg: 1
-
-data length: measure
-  -> unit meter: 1
 
 data acceleration: measure
   -> unit mps2: meter/second^2
@@ -162,8 +155,7 @@ uses lemma units
 data population: measure
   -> unit person: 1
 
-data length: measure
-  -> unit meter: 1
+data length: units.length
   -> unit km: 1000
 
 data area: measure
@@ -264,12 +256,10 @@ fn compound_kilonewton_with_prefix_plans() {
     let code = r#"spec force_prefix
 uses lemma units
 
-data mass: measure
+data mass: units.mass
   -> unit kg: 1
-  -> unit gram: 0.001
 
-data length: measure
-  -> unit meter: 1
+data length: units.length
   -> unit km: 1000
 
 data acceleration: measure
@@ -299,12 +289,10 @@ fn compound_kilonewton_to_gram_kmh2_conversion() {
     let code = r#"spec force_conv
 uses lemma units
 
-data mass: measure
+data mass: units.mass
   -> unit kg: 1
-  -> unit gram: 0.001
 
-data length: measure
-  -> unit meter: 1
+data length: units.length
   -> unit km: 1000
 
 data acceleration: measure
@@ -325,14 +313,7 @@ rule converted: f as gram_kmh2
         .expect("local_newton/local_kilonewton/gram_kmh2 must plan");
     let now = lemma::DateTimeValue::now();
     let response = engine
-        .run(
-            None,
-            "force_conv",
-            Some(&now),
-            std::collections::HashMap::new(),
-            None,
-            false,
-        )
+        .evaluate(None, "force_conv", Some(&now), IndexMap::new(), None, false)
         .expect("should evaluate");
     let result = response
         .results
@@ -355,8 +336,7 @@ fn compound_volume_liter_and_cubic_meter_plans() {
     let code = r#"spec volume
 uses lemma units
 
-data length: measure
-  -> unit meter: 1
+data length: units.length
   -> unit km: 1000
 
 data volume: measure

@@ -11,8 +11,15 @@ struct ServerGuard(Child);
 
 impl Drop for ServerGuard {
     fn drop(&mut self) {
-        let _ = self.0.kill();
-        let _ = self.0.wait();
+        if self
+            .0
+            .try_wait()
+            .expect("BUG: query bench server status")
+            .is_none()
+        {
+            self.0.kill().expect("BUG: kill bench server");
+            self.0.wait().expect("BUG: reap bench server");
+        }
     }
 }
 
@@ -33,7 +40,7 @@ fn start_server() -> ServerGuard {
 
     let child = Command::new(env!("CARGO_BIN_EXE_lemma"))
         .arg("server")
-        .args(["--prefix", &examples_dir.to_string_lossy()])
+        .args(["--path", &examples_dir.to_string_lossy()])
         .args(["--port", &PORT.to_string()])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -48,7 +55,7 @@ fn start_server() -> ServerGuard {
 }
 
 fn bench_evaluate(c: &mut Criterion) {
-    let _server = start_server();
+    let server = start_server();
     let client = reqwest::blocking::Client::new();
 
     let mut group = c.benchmark_group("evaluate");
@@ -109,6 +116,7 @@ fn bench_evaluate(c: &mut Criterion) {
     });
 
     show_group.finish();
+    drop(server);
 }
 
 criterion_group!(benches, bench_evaluate);

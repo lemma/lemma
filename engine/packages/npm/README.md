@@ -11,8 +11,8 @@ data money: measure
   -> unit eur: 1.00
   -> decimals 2
 
-data quantity : number
-data is_vip   : false
+data quantity: number
+data is_vip:   false
 
 rule unit_price:
   20 eur
@@ -30,19 +30,19 @@ import { Lemma } from '@lemmabase/lemma-engine';
 const engine = await Lemma();
 await engine.load({ 'pricing.lemma': pricing });
 
-const response = engine.run({ spec: 'pricing', data: { quantity: 50, is_vip: false } });
+const response = engine.evaluate({ spec: 'pricing', data: { quantity: 50n, is_vip: false } });
 // response.results.unit_price → 16 eur
 // response.results.total      → 800 eur
 ```
 
-The `Response` carries every rule's value (or `veto` if no result could be computed). When inputs are still unbound, that rule includes `missing_data` (`string[]` input keys). Types, filled literals, and suggestions are on `engine.show(...)` (`Show.data`) only, not on the evaluate response.
+The `Response` carries every rule's value (or `veto` if no result could be computed). When inputs are still unbound, that rule includes `missing_data` (`string[]` input keys). Types, filled literals, and suggestions are on `engine.show(...)` only, not on the evaluate response. `Show` is a Draft 2020-12 JSON Schema for the evaluation data: validate evaluation data against it as is; Lemma metadata sits under `x-lemma-*` (`Show.properties[key]["x-lemma-type"]`, `["x-lemma-suggestion"]`, `Show["x-lemma-rules"]`).
 
 ## Why use it from JavaScript?
 
 - **Deterministic.** `(spec, data, effective_date) → result`. No DB, no clock, no ambient state. Same inputs → same outputs, every time.
-- **Explainable.** Pass `explain: true` in your `run()` options to get a per-rule explanation tree; see [api.v1.json](https://github.com/lemma/lemma/blob/main/engine/schemas/api.v1.json). Pair with the [CLI](https://github.com/lemma/lemma) for human reasoning tables.
+- **Explainable.** Pass `explain: true` in your `evaluate()` options to get a per-rule explanation tree; see [api.v1.json](https://github.com/lemma/lemma/blob/main/engine/schemas/api.v1.json). Pair with the [CLI](https://github.com/lemma/lemma) for human reasoning tables.
 - **Time-aware.** Multiple versions of the same spec coexist. Pass an `effective` date and the engine resolves the version in force on that day.
-- **Statically checked.** Type errors, missing data, cycles, measure-family mismatches - all caught at `load()` time. Bad specs never reach `run()`.
+- **Statically checked.** Type errors, missing data, cycles, measure-family mismatches - all caught at `load()` time. Bad specs never reach `evaluate()`.
 - **Runs anywhere JavaScript does.** ~2 MB package, no native binary, no postinstall script.
 - **Editor in a tab.** Includes an in-process language server and a Monaco adapter, so you can build a real Lemma editor experience client-side - diagnostics, completion, formatting... even without setting up a server.
 
@@ -116,16 +116,17 @@ A pre-wired Monaco adapter ships at `@lemmabase/lemma-engine/monaco`.
 | `Engine.withLimits(limits)` | Static: create engine with named limit overrides (unknown keys throw) |
 | `Engine.fromSnapshot(bytes)` | Static: restore engine from `snapshot()` bytes (`Uint8Array`) |
 | `install(name)` | Download a repository from LemmaBase; resolves with `{ source, id }`. Does not load. Rejects with `EngineError[]`. |
-| `list()` | Slim catalog: `ResolvedRepository[]` with `repository` and temporal `specs` rows. Always includes embedded `lemma` / `spec units`. |
+| `specs()` | Loaded specs: `Repository[]` with `repository` and temporal `specs` rows (`SpecVersion`). Always includes embedded `lemma` / `spec units`. |
 | `show(repo, name, effective?)` | Spec interface + temporal window; `repo` null for the default repository. |
 | `source(repo, spec?, effective?)` | Canonical Lemma source text. Omit `spec` for whole repository. |
-| `run({ spec, repository?, effective?, data?, rules?, explain? })` | Evaluate. `data` magnitudes: digit string or `bigint` (exact); `number` only when `Number.isSafeInteger`; decimals as strings. Omit `rules` for all rules; pass a non-empty array to scope. `[]` errors. Returns a `Response`. `explain: true` adds per-rule explanation trees. |
+| `evaluate({ spec, repository?, effective?, data?, rules?, explain? })` | Evaluate. `data` is a tree: strings, booleans, `bigint`, single-unit maps, arrays. JS `number` is rejected. Omit `rules` for all rules; pass a non-empty array to scope. `[]` errors. Returns a `Response`. `explain: true` adds per-rule explanation trees. |
 | `remove(repo, name, effective?)` | Remove a temporal spec slice. |
 | `update(repo, code, attribute?)` | Upsert identities from `code`; Path/Dependency prune siblings with that label. |
 | `limits()` | Resource limits for this engine. |
 | `snapshot()` | Opaque bytes of parsed specs + plans + limits. Restore with `Engine.fromSnapshot`. |
 | `quality()` | Structural quality recommendations across loaded specs (advisory only). |
 | `format(code, attribute?)` | Canonical formatting; throws `EngineError` on parse error. |
+| `version` | Semver of the loaded WASM build (e.g. `"0.9.12"`). |
 
 Full TypeScript types are bundled - see `lemma.d.ts`.
 

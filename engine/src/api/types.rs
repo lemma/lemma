@@ -6,12 +6,13 @@ use crate::literals::{
     RatioUnit as DomainRatioUnit, RatioUnits, TimeValue,
 };
 use crate::planning::semantics::{
-    LemmaType as DomainLemmaType, MeasureTrait as DomainMeasureTrait,
+    Dimension, LemmaType as DomainLemmaType, MeasureTrait as DomainMeasureTrait,
     TypeDefiningSpec as DomainTypeDefiningSpec, TypeExtends as DomainTypeExtends,
     TypeSpecification as DomainTypeSpecification,
 };
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 /// Exact rational factor as reduced numer/denom integer strings.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -61,6 +62,29 @@ fn optional_decimal_bound(bound: &Option<RationalInteger>) -> Option<Decimal> {
     bound.as_ref().map(planned_bound_decimal)
 }
 
+/// JSON object of dimension to exponent. A family is keyed by its root type qualified
+/// with the declaring spec (`"pricing.money"`, `"lemma units.mass"`); builtin axes are
+/// `"duration"` and `"calendar"`: `{"pricing.money": 1, "duration": -1}`.
+pub type Decomposition = BTreeMap<String, i32>;
+
+fn decomposition_from(domain: &BaseMeasureVector) -> Decomposition {
+    let mut converted = Decomposition::new();
+    for (dimension, exponent) in domain {
+        let key = match dimension {
+            Dimension::Family(family) => family.to_string(),
+            Dimension::Duration | Dimension::Calendar => dimension.name().to_string(),
+        };
+        if converted.insert(key.clone(), *exponent).is_some() {
+            panic!("BUG: distinct dimensions share API key '{key}'");
+        }
+    }
+    converted
+}
+
+fn optional_decomposition_from(domain: &Option<BaseMeasureVector>) -> Option<Decomposition> {
+    domain.as_ref().map(decomposition_from)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MeasureTrait {
@@ -82,7 +106,7 @@ pub struct MeasureUnit {
     pub name: String,
     pub factor: RationalFactor,
     pub derived_measure_factors: Vec<(String, i32)>,
-    pub decomposition: BaseMeasureVector,
+    pub decomposition: Decomposition,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub minimum: Option<Decimal>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
@@ -101,7 +125,7 @@ impl From<&DomainMeasureUnit> for MeasureUnit {
             name: unit.name.clone(),
             factor: RationalFactor::from_ratio(&unit.factor),
             derived_measure_factors: unit.derived_measure_factors.clone(),
-            decomposition: unit.decomposition.clone(),
+            decomposition: decomposition_from(&unit.decomposition),
             minimum: unit.minimum.as_ref().map(|minimum| {
                 minimum
                     .try_to_decimal()
@@ -206,7 +230,7 @@ impl From<&DomainTypeExtends> for TypeExtends {
                 defining_spec,
             } => Self::Custom {
                 parent: parent.clone(),
-                family: family.clone(),
+                family: family.to_string(),
                 defining_spec: TypeDefiningSpec::from(defining_spec),
             },
         }
@@ -214,7 +238,7 @@ impl From<&DomainTypeExtends> for TypeExtends {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "lowercase")]
+#[serde(tag = "kind", rename_all = "snake_case")]
 pub enum TypeSpecification {
     Boolean {
         help: String,
@@ -229,7 +253,7 @@ pub enum TypeSpecification {
         #[serde(default)]
         traits: Vec<MeasureTrait>,
         #[serde(default)]
-        decomposition: Option<BaseMeasureVector>,
+        decomposition: Option<Decomposition>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         unit: Option<String>,
         help: String,
@@ -320,7 +344,7 @@ pub enum TypeSpecification {
         maximum: Option<NamedBound>,
         units: Vec<MeasureUnit>,
         #[serde(default)]
-        decomposition: Option<BaseMeasureVector>,
+        decomposition: Option<Decomposition>,
         help: String,
     },
     Veto {
@@ -328,14 +352,55 @@ pub enum TypeSpecification {
     },
     Undetermined,
     Spec {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         repository: Option<String>,
         spec: String,
         effective: String,
     },
+    List {
+        element: Box<TypeSpecification>,
+        key: ListKey,
+    },
+}
+
+/// How a list addresses its rows: by row number, or by the ordered `-> key` fields.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ListKey {
+    Numbered,
+    Fields(Vec<String>),
+}
+
+impl From<&crate::planning::semantics::ListKey> for ListKey {
+    fn from(key: &crate::planning::semantics::ListKey) -> Self {
+        match key {
+            crate::planning::semantics::ListKey::Numbered => Self::Numbered,
+            crate::planning::semantics::ListKey::Fields(fields) => Self::Fields(fields.clone()),
+        }
+    }
 }
 
 impl From<&DomainTypeSpecification> for TypeSpecification {
     fn from(spec: &DomainTypeSpecification) -> Self {
+        let mut list_keys = Vec::new();
+        let mut leaf = spec;
+        while let DomainTypeSpecification::List { element, key } = leaf {
+            list_keys.push(ListKey::from(key));
+            leaf = &element.specifications;
+        }
+        let mut converted = Self::non_list_from(leaf);
+        while let Some(key) = list_keys.pop() {
+            converted = Self::List {
+                element: Box::new(converted),
+                key,
+            };
+        }
+        converted
+    }
+}
+
+impl TypeSpecification {
+    fn non_list_from(spec: &DomainTypeSpecification) -> Self {
         match spec {
             DomainTypeSpecification::Boolean { help } => Self::Boolean { help: help.clone() },
             DomainTypeSpecification::Measure {
@@ -353,7 +418,7 @@ impl From<&DomainTypeSpecification> for TypeSpecification {
                 decimals: *decimals,
                 units: measure_units_from(units),
                 traits: traits.iter().copied().map(MeasureTrait::from).collect(),
-                decomposition: decomposition.clone(),
+                decomposition: optional_decomposition_from(decomposition),
                 unit: unit.clone(),
                 help: help.clone(),
             },
@@ -478,7 +543,7 @@ impl From<&DomainTypeSpecification> for TypeSpecification {
                 minimum: optional_named_bound(minimum),
                 maximum: optional_named_bound(maximum),
                 units: measure_units_from(units),
-                decomposition: decomposition.clone(),
+                decomposition: optional_decomposition_from(decomposition),
                 help: help.clone(),
             },
             DomainTypeSpecification::Veto { message } => Self::Veto {
@@ -490,6 +555,9 @@ impl From<&DomainTypeSpecification> for TypeSpecification {
                 spec: spec.spec.clone(),
                 effective: spec.effective.to_string(),
             },
+            DomainTypeSpecification::List { .. } => {
+                unreachable!("BUG: list specifications are unwound by TypeSpecification::from")
+            }
         }
     }
 }
@@ -509,5 +577,52 @@ impl From<&DomainLemmaType> for LemmaType {
             specifications: TypeSpecification::from(&lemma_type.specifications),
             extends: TypeExtends::from(&lemma_type.extends),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::planning::semantics::TypeFamily;
+    use serde_json::json;
+
+    fn family(repository: Option<&str>, spec: &str, name: &str) -> Dimension {
+        Dimension::Family(TypeFamily {
+            repository: repository.map(str::to_string),
+            spec: spec.to_string(),
+            effective: crate::parsing::ast::EffectiveDate::Origin,
+            name: name.to_string(),
+        })
+    }
+
+    #[test]
+    fn decomposition_keys_families_by_declaring_spec() {
+        let mut domain = BaseMeasureVector::new();
+        domain.insert(family(None, "pricing", "money"), 1);
+        domain.insert(family(Some("lemma"), "units", "mass"), -1);
+        domain.insert(Dimension::Duration, -1);
+        let json = serde_json::to_value(decomposition_from(&domain)).expect("JSON");
+        assert_eq!(
+            json,
+            json!({ "pricing.money": 1, "lemma units.mass": -1, "duration": -1 })
+        );
+    }
+
+    #[test]
+    fn decomposition_keeps_same_named_families_apart() {
+        let mut domain = BaseMeasureVector::new();
+        domain.insert(family(None, "a", "money"), 1);
+        domain.insert(family(None, "b", "money"), -1);
+        let json = serde_json::to_value(decomposition_from(&domain)).expect("JSON");
+        assert_eq!(json, json!({ "a.money": 1, "b.money": -1 }));
+    }
+
+    #[test]
+    fn decomposition_keeps_builtin_apart_from_same_named_family() {
+        let mut domain = BaseMeasureVector::new();
+        domain.insert(family(None, "clock", "duration"), 1);
+        domain.insert(Dimension::Duration, -1);
+        let json = serde_json::to_value(decomposition_from(&domain)).expect("JSON");
+        assert_eq!(json, json!({ "clock.duration": 1, "duration": -1 }));
     }
 }

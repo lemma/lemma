@@ -4,12 +4,10 @@
 //! catalog instead of re-walking the index.
 
 use crate::literals::{MeasureUnits, RatioUnits};
-use crate::planning::semantics::{
-    range_element_type_specification, LemmaType, TypeExtends, TypeSpecification,
-};
+use crate::planning::semantics::{LemmaType, TypeFamily, TypeSpecification};
 use crate::planning::unit_index::UnitIndex;
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 /// Precomputed units for one measure or ratio family in expression scope.
@@ -23,64 +21,111 @@ pub(crate) struct FamilyUnitEntry {
 /// Family-keyed unit expansion data for a plan slice.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub(crate) struct FamilyUnitCatalog {
-    by_family: BTreeMap<String, FamilyUnitEntry>,
+    by_family: BTreeMap<TypeFamily, FamilyUnitEntry>,
 }
 
 impl FamilyUnitCatalog {
+    /// Units per family in unit-index order. Types resolve parent-first, so a family's
+    /// inherited units precede the units its extensions add.
     #[must_use]
     pub(crate) fn build(unit_index: &UnitIndex) -> Self {
-        let mut families: BTreeSet<String> = BTreeSet::new();
-        for lemma_type in unit_index.values() {
-            if let Some(family) = lemma_type.unit_family_name() {
-                families.insert(family.to_string());
+        let mut measure: BTreeMap<TypeFamily, MeasureUnits> = BTreeMap::new();
+        let mut ratio: BTreeMap<TypeFamily, RatioUnits> = BTreeMap::new();
+        let mut seen: BTreeSet<(TypeFamily, &str)> = BTreeSet::new();
+        for (bare, owner) in unit_index.iter_owners() {
+            let lemma_type = owner.lemma_type();
+            let Some(family) = lemma_type.unit_family() else {
+                continue;
+            };
+            if !seen.insert((family.clone(), bare)) {
+                continue;
+            }
+            match &lemma_type.specifications {
+                TypeSpecification::Measure { units, .. } => {
+                    let unit = units
+                        .get(bare)
+                        .expect("BUG: unit index owner must declare its bare unit");
+                    measure
+                        .entry(family.clone())
+                        .or_default()
+                        .push(unit.clone());
+                }
+                TypeSpecification::Ratio { units, .. } => {
+                    let unit = units
+                        .get(bare)
+                        .expect("BUG: unit index owner must declare its bare unit");
+                    ratio.entry(family.clone()).or_default().push(unit.clone());
+                }
+                _ => unreachable!("BUG: unit family owner must be a measure or ratio type"),
+            }
+        }
+        for (_, owner) in unit_index.iter_owners() {
+            let lemma_type = owner.lemma_type();
+            let Some(family) = lemma_type.unit_family() else {
+                continue;
+            };
+            match &lemma_type.specifications {
+                TypeSpecification::Measure { units, .. } => {
+                    for unit in units.iter() {
+                        if seen.insert((family.clone(), unit.name.as_str())) {
+                            measure
+                                .entry(family.clone())
+                                .or_default()
+                                .push(unit.clone());
+                        }
+                    }
+                }
+                TypeSpecification::Ratio { units, .. } => {
+                    for unit in units.iter() {
+                        if seen.insert((family.clone(), unit.name.as_str())) {
+                            ratio.entry(family.clone()).or_default().push(unit.clone());
+                        }
+                    }
+                }
+                _ => unreachable!("BUG: unit family owner must be a measure or ratio type"),
             }
         }
 
         let mut by_family = BTreeMap::new();
-        for family in families {
-            by_family.insert(family.clone(), build_family_entry(unit_index, &family));
+        for (family, units) in measure {
+            let family_bare_names = units.iter().map(|unit| unit.name.clone()).collect();
+            by_family.insert(
+                family,
+                FamilyUnitEntry {
+                    family_bare_names,
+                    merged_measure_units: Some(units),
+                    merged_ratio_units: None,
+                },
+            );
+        }
+        for (family, units) in ratio {
+            let family_bare_names = units.iter().map(|unit| unit.name.clone()).collect();
+            let previous = by_family.insert(
+                family,
+                FamilyUnitEntry {
+                    family_bare_names,
+                    merged_measure_units: None,
+                    merged_ratio_units: Some(units),
+                },
+            );
+            assert!(
+                previous.is_none(),
+                "BUG: a type family is either measure or ratio"
+            );
         }
         Self { by_family }
     }
 
-    /// Family entry for `lemma_type`, resolving measure/ratio range wrappers to their element family.
+    /// Family entry for `lemma_type`; measure and ratio ranges share their element's family.
     #[must_use]
     pub(crate) fn entry_for_type(&self, lemma_type: &LemmaType) -> Option<&FamilyUnitEntry> {
-        if let Some(family) = unit_expansion_family_name(lemma_type) {
-            return self.by_family.get(&family);
+        match &lemma_type.specifications {
+            TypeSpecification::Measure { .. }
+            | TypeSpecification::MeasureRange { .. }
+            | TypeSpecification::Ratio { .. }
+            | TypeSpecification::RatioRange { .. } => self.by_family.get(lemma_type.family()?),
+            _ => None,
         }
-        self.entry_for_anonymous_declared_units(lemma_type)
-    }
-
-    /// When the type has no family name (anonymous measure/range) but declares units,
-    /// use the unique catalog family that contains every declared bare unit.
-    fn entry_for_anonymous_declared_units(
-        &self,
-        lemma_type: &LemmaType,
-    ) -> Option<&FamilyUnitEntry> {
-        let declared = lemma_type
-            .measure_unit_names()
-            .or_else(|| lemma_type.ratio_unit_names())?;
-        if declared.is_empty() {
-            return None;
-        }
-        let mut matched_family: Option<&str> = None;
-        for (family, entry) in &self.by_family {
-            let contains_all = declared.iter().all(|name| {
-                entry
-                    .family_bare_names
-                    .iter()
-                    .any(|bare| bare.as_str() == *name)
-            });
-            if !contains_all {
-                continue;
-            }
-            if matched_family.is_some() {
-                return None;
-            }
-            matched_family = Some(family.as_str());
-        }
-        matched_family.and_then(|family| self.by_family.get(family))
     }
 
     /// Ordered bare unit names for rule-result maps: anchor declared units first, then family bares.
@@ -172,167 +217,13 @@ pub(crate) fn append_declared_unit_names(
     }
 }
 
-fn build_family_entry(unit_index: &UnitIndex, family: &str) -> FamilyUnitEntry {
-    let family_types: Vec<&Arc<LemmaType>> = unit_index
-        .values()
-        .filter(|candidate| candidate.unit_family_name() == Some(family))
-        .collect();
-
-    let mut type_by_name: HashMap<String, &Arc<LemmaType>> = HashMap::new();
-    for lemma_type in &family_types {
-        let name = lemma_type.name().to_string();
-        match type_by_name.entry(name.clone()) {
-            std::collections::hash_map::Entry::Vacant(slot) => {
-                slot.insert(*lemma_type);
-            }
-            std::collections::hash_map::Entry::Occupied(slot) => {
-                if slot.get().as_ref() != lemma_type.as_ref() {
-                    panic!(
-                        "BUG: duplicate type name '{name}' in family '{family}' maps to distinct types"
-                    );
-                }
-            }
-        }
-    }
-
-    let merged_measure_units = merged_measure_units_for_family(unit_index, family, &type_by_name);
-    let merged_ratio_units = merged_ratio_units_for_family(unit_index, family, &type_by_name);
-
-    let family_bare_names: Arc<[String]> = merged_measure_units
-        .as_ref()
-        .map(|units| {
-            units
-                .iter()
-                .map(|unit| unit.name.clone())
-                .collect::<Vec<_>>()
-                .into()
-        })
-        .or_else(|| {
-            merged_ratio_units.as_ref().map(|units| {
-                units
-                    .iter()
-                    .map(|unit| unit.name.clone())
-                    .collect::<Vec<_>>()
-                    .into()
-            })
-        })
-        .unwrap_or_else(|| Arc::from([]));
-
-    FamilyUnitEntry {
-        family_bare_names,
-        merged_measure_units,
-        merged_ratio_units,
-    }
-}
-
-fn merged_measure_units_for_family(
-    unit_index: &UnitIndex,
-    family: &str,
-    type_by_name: &HashMap<String, &Arc<LemmaType>>,
-) -> Option<MeasureUnits> {
-    let mut types: Vec<&Arc<LemmaType>> = unit_index
-        .values()
-        .filter(|candidate| candidate.measure_family_name() == Some(family))
-        .collect();
-    types.sort_by(|left, right| {
-        type_extension_depth(left.as_ref(), type_by_name)
-            .cmp(&type_extension_depth(right.as_ref(), type_by_name))
-            .then_with(|| left.name().cmp(&right.name()))
-    });
-
-    let mut merged = MeasureUnits::new();
-    let mut seen = BTreeSet::new();
-    for lemma_type in types {
-        let (TypeSpecification::Measure { units, .. }
-        | TypeSpecification::MeasureRange { units, .. }) = &lemma_type.specifications
-        else {
-            continue;
-        };
-        for unit in units.iter() {
-            if seen.insert(unit.name.clone()) {
-                merged.push(unit.clone());
-            }
-        }
-    }
-    if merged.is_empty() {
-        None
-    } else {
-        Some(merged)
-    }
-}
-
-fn merged_ratio_units_for_family(
-    unit_index: &UnitIndex,
-    family: &str,
-    type_by_name: &HashMap<String, &Arc<LemmaType>>,
-) -> Option<RatioUnits> {
-    let mut types: Vec<&Arc<LemmaType>> = unit_index
-        .values()
-        .filter(|candidate| candidate.ratio_family_name() == Some(family))
-        .collect();
-    types.sort_by(|left, right| {
-        type_extension_depth(left.as_ref(), type_by_name)
-            .cmp(&type_extension_depth(right.as_ref(), type_by_name))
-            .then_with(|| left.name().cmp(&right.name()))
-    });
-
-    let mut merged = RatioUnits::new();
-    let mut seen = BTreeSet::new();
-    for lemma_type in types {
-        let (TypeSpecification::Ratio { units, .. } | TypeSpecification::RatioRange { units, .. }) =
-            &lemma_type.specifications
-        else {
-            continue;
-        };
-        for unit in units.iter() {
-            if seen.insert(unit.name.clone()) {
-                merged.push(unit.clone());
-            }
-        }
-    }
-    if merged.is_empty() {
-        None
-    } else {
-        Some(merged)
-    }
-}
-
-fn unit_expansion_family_name(lemma_type: &LemmaType) -> Option<String> {
-    if let Some(family) = lemma_type.unit_family_name() {
-        return Some(family.to_string());
-    }
-    let element = range_element_type_specification(&lemma_type.specifications)?;
-    LemmaType::primitive(element.clone())
-        .unit_family_name()
-        .map(str::to_string)
-}
-
-fn type_extension_depth(
-    lemma_type: &LemmaType,
-    family_types: &HashMap<String, &Arc<LemmaType>>,
-) -> usize {
-    let mut depth = 0usize;
-    let mut current = lemma_type;
-    loop {
-        match &current.extends {
-            TypeExtends::Primitive => return depth,
-            TypeExtends::Custom { parent, .. } => {
-                depth += 1;
-                let Some(parent_type) = family_types.get(parent.as_str()) else {
-                    return depth;
-                };
-                current = parent_type.as_ref();
-            }
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::computation::rational::rational_one;
     use crate::literals::{MeasureUnit, MeasureUnits};
     use crate::planning::semantics::{LemmaType, TypeExtends, TypeSpecification};
+    use crate::planning::unit_index::UnitOwner;
 
     #[test]
     fn family_unit_names_union_across_extensions() {
@@ -355,6 +246,7 @@ mod tests {
             maximum: None,
             suggestion_magnitude: None,
         });
+        let family = crate::planning::semantics::tests::test_type_family("money");
         let money = Arc::new(LemmaType::new(
             "money".into(),
             TypeSpecification::Measure {
@@ -367,7 +259,7 @@ mod tests {
                 unit: None,
                 help: String::new(),
             },
-            TypeExtends::Primitive,
+            TypeExtends::custom_local("measure".to_string(), family.clone()),
         ));
         let price = Arc::new(LemmaType::new(
             "price".into(),
@@ -393,19 +285,34 @@ mod tests {
                 unit: None,
                 help: String::new(),
             },
-            TypeExtends::custom_local("money".to_string(), "money".to_string()),
+            TypeExtends::custom_local("money".to_string(), family),
         ));
 
         let mut index = UnitIndex::new();
-        index
-            .merge_measure_unit("eur".into(), &money, "money", None, "money")
-            .expect("eur");
-        index
-            .merge_measure_unit("usd".into(), &money, "money", None, "money")
-            .expect("usd");
-        index
-            .merge_measure_unit("gbp".into(), &price, "price", None, "money")
-            .expect("gbp");
+        index.insert_owner(
+            "eur".into(),
+            UnitOwner::Named {
+                import_path: Vec::new(),
+                type_name: "money".into(),
+                lemma_type: Arc::clone(&money),
+            },
+        );
+        index.insert_owner(
+            "usd".into(),
+            UnitOwner::Named {
+                import_path: Vec::new(),
+                type_name: "money".into(),
+                lemma_type: Arc::clone(&money),
+            },
+        );
+        index.insert_owner(
+            "gbp".into(),
+            UnitOwner::Named {
+                import_path: Vec::new(),
+                type_name: "price".into(),
+                lemma_type: Arc::clone(&price),
+            },
+        );
 
         let catalog = FamilyUnitCatalog::build(&index);
         let names = catalog.ordered_bare_names_for_type(money.as_ref());
@@ -445,33 +352,29 @@ mod tests {
                     unit: None,
                     help: String::new(),
                 },
-                TypeExtends::Primitive,
+                TypeExtends::custom_local(
+                    "ratio".to_string(),
+                    crate::planning::semantics::tests::test_type_family("rate"),
+                ),
             ))
         };
-        let placeholder = Arc::new(LemmaType::new(
-            "unused".into(),
-            TypeSpecification::measure(),
-            TypeExtends::Primitive,
-        ));
         let mut index = UnitIndex::new();
-        index
-            .merge_ratio_unit(
-                "percent".into(),
-                &ratio,
-                "rate",
-                Some("alpha".into()),
-                &placeholder,
-            )
-            .expect("alpha alias");
-        index
-            .merge_ratio_unit(
-                "percent".into(),
-                &ratio,
-                "rate",
-                Some("beta".into()),
-                &placeholder,
-            )
-            .expect("beta alias");
+        index.insert_owner(
+            "percent".into(),
+            UnitOwner::Named {
+                import_path: vec!["alpha".into()],
+                type_name: "rate".into(),
+                lemma_type: Arc::clone(&ratio),
+            },
+        );
+        index.insert_owner(
+            "percent".into(),
+            UnitOwner::Named {
+                import_path: vec!["beta".into()],
+                type_name: "rate".into(),
+                lemma_type: Arc::clone(&ratio),
+            },
+        );
         assert!(
             index.unique_owner("percent").is_none(),
             "dual import aliases must leave percent without a unique bare owner"

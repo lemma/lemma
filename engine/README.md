@@ -22,14 +22,13 @@ Add the crate:
 
 ```toml
 [dependencies]
-lemma-engine = "0.9.12"
+lemma-engine = "0.10.0"
 ```
 
 ### Minimal example
 
 ```rust
-use lemma::{DateTimeValue, Engine, SourceType};
-use std::collections::HashMap;
+use lemma::{DateTimeValue, Engine, IndexMap, SourceType};
 use std::sync::Arc;
 
 let mut engine = Engine::new();
@@ -47,11 +46,11 @@ engine.load([(
 )])?;
 
 let now = DateTimeValue::now();
-let response = engine.run(
+let response = engine.evaluate(
     None,
     "compensation",
     Some(&now),
-    HashMap::new(),
+    IndexMap::new(),
     None,
     false,
 )?;
@@ -66,8 +65,7 @@ for (rule_name, rule_result) in &response.results {
 ### Providing values at runtime
 
 ```rust
-use lemma::{DateTimeValue, Engine, SourceType};
-use std::collections::HashMap;
+use lemma::{DateTimeValue, Engine, IndexMap, SourceType};
 use std::sync::Arc;
 
 let mut engine = Engine::new();
@@ -93,13 +91,13 @@ engine.load([(
 )])?;
 
 let now = DateTimeValue::now();
-let response = engine.run(
+let response = engine.evaluate(
     None,
     "shipping",
     Some(&now),
-    HashMap::from([
-        ("weight".to_string(), "12 kilogram".to_string()),
-        ("destination".to_string(), "international".to_string()),
+    IndexMap::from([
+        ("weight".to_string(), "12 kilogram".into()),
+        ("destination".to_string(), "international".into()),
     ]),
     None,
     false,
@@ -108,14 +106,18 @@ let response = engine.run(
 
 ### Discovering required data
 
-`Engine::show` is static: every declared promptable data slot (with `path` for import identity), plus this spec's rule graph (`ShowRule` with result type, import `path`, default/`unless` branches, and `depends_on_rules` as `input_key` strings — local rules plus reachable imports) and temporal window. Empty `needed_by_rules` means offered for reuse (`data x: alias.slot`). Types, filled literals, and `-> suggest` hints live on `Show.data`. Default `run` evaluates this spec's outputs (empty-path rules); pass `rules` with any `Show.rules` key (e.g. `src.computed`) to target a reachable import. For run-data-aware requirements on a partial run, call `run` and inspect each rule's `missing_data`:
+`Engine::show` describes a spec without evaluating it. `Show.types` lists the data declarations of the spec itself. `Show.data` lists the inputs that rules read, keyed by input name (`quantity`, or `alias.field` for an import), each with its type, the `value` the spec sets, a `suggestion` from `-> suggest`, the `needed_by_rules` that read it, and `path` (the `uses` hops to the spec that declares it). `Show.rules` is the rule graph: each `ShowRule` has its result type, `path`, the default and `unless` branches, and `depends_on_rules`. The temporal window of the shown version is included.
+
+`lemma::api::show_document(&engine, &show)` turns this into the JSON document that the CLI, HTTP server, MCP and SDKs return: a Draft 2020-12 JSON Schema for the evaluation data (`properties`, `required`, `$defs` for list rows) with the Lemma specifics under `x-lemma-*` keys. A evaluation-data payload can be validated against it as is.
+
+By default `evaluate` evaluates the rules written in the spec itself. Pass `rules` with any `Show.rules` key, such as `src.computed`, to evaluate a rule reached through `uses`. To learn what a particular evaluation still needs, call `evaluate` and read each rule's `missing_data`:
 
 ```rust
-let response = engine.run(
+let response = engine.evaluate(
     None,
     "shipping",
     Some(&now),
-    HashMap::new(),
+    IndexMap::new(),
     Some(&["rate".to_string()]),
     false,
 )?;
@@ -127,7 +129,7 @@ for (name, result) in &response.results {
 }
 ```
 
-Bound inputs (caller run bindings, spec-filled literals, or data vetoes) are omitted from `missing_data`. Suggestions on `Show.data` do not bind until supplied in `run`'s data map.
+Inputs that already have a value (passed in the evaluation data or set by the spec) do not appear in `missing_data`. A `-> suggest` hint is only a hint: it binds nothing until the caller passes it in the evaluation data.
 
 ### Loading repositories from LemmaBase
 
@@ -158,7 +160,7 @@ See [registry docs](../cli/documentation/reference/registry.md).
 
 ## Embedded units stdlib
 
-`Engine::new()` loads the embedded `repo lemma` / `spec units` standard library internally via `SourceType::Dependency("lemma")`. It always appears in `Engine::list`. Formatted source: `engine.source(Some("lemma"), None, None)?`.
+`Engine::new()` loads the embedded `repo lemma` / `spec units` standard library internally via `SourceType::Dependency("lemma")`. It always appears in `Engine::specs`. Formatted source: `engine.source(Some("lemma"), None, None)?`.
 
 Public `load` rejects `SourceType::Dependency("lemma")`: that id is reserved for the embedded stdlib.
 
@@ -168,10 +170,10 @@ Public `load` rejects `SourceType::Dependency("lemma")`: that id is reserved for
 |--------|---------|
 | `new()` / `with_limits()` | Construct engine (stdlib pre-loaded) |
 | `load(sources)` | Load `(SourceType, text)` pairs; provenance from `SourceType` alone |
-| `list()` | All loaded repositories (`ResolvedRepository[]`: name, effective_from, effective_to per row) |
+| `specs()` | All loaded repositories (`Repository[]`, each with `SpecVersion` rows: name, effective_from, effective_to) |
 | `show(repository, spec, effective)` | Interface + temporal window (`Show`; no Lemma text) |
 | `source(repository, spec?, effective)` | Formatted Lemma source (repo-wide when `spec` omitted) |
-| `run(repository, spec, effective, data, rules, explain)` | Evaluate; each `RuleResult` may include `missing_data`; `explanation` when `explain` is true ([schema](schemas/api.v1.json)) |
+| `evaluate(repository, spec, effective, data, rules, explain)` | Evaluate; each `RuleResult` may include `missing_data`; `explanation` when `explain` is true ([schema](schemas/api.v1.json)) |
 | `update(repository, code, source_type)` | Replace identities present in `code` in one planning pass |
 | `remove(repository, spec, effective)` | Remove a temporal spec slice |
 | `snapshot()` / `from_snapshot(bytes)` | Persist / restore parsed specs + plans + limits (no re-plan); see [Rust tools](../cli/documentation/tools/rust.md#binary-snapshot) |
@@ -181,7 +183,7 @@ Free function: `lemma::resolve_effective`.
 
 ## Consumer API tiers
 
-**Tier 1: always available** (all targets): consumer verbs (`Engine`, `load`, `list`, `show`, `source`, `run`, `remove`), API types (`Show`, `Response`, `DataPath`, `ListedSpec`, `ResolvedRepository`, `DateTimeValue`, `TimezoneValue`, `Explanation`, `Cause`, `ExplanationNode`, `OperationResult`; explanation JSON uses `"type"` + `"name"`; see [`api.v1.json`](schemas/api.v1.json)), language surface for tooling (`parse`, `ParseResult`, `Lexer`, `TokenKind`, `DataValue`, `SpecRef`, `Span`, `Source`, `format_source`, `format_specs`, `format_parse_result`, `type_detail_lines`), limit constants (`MAX_*_NAME_LENGTH`). Language-surface exports are intentional for CLI/LSP/tests, not a minimal “verbs only” crate.
+**Tier 1: always available** (all targets): consumer verbs (`Engine`, `load`, `specs`, `show`, `source`, `evaluate`, `remove`), API types (`Show`, `Response`, `DataPath`, `SpecVersion`, `Repository`, `DateTimeValue`, `TimezoneValue`, `Explanation`, `Cause`, `ExplanationNode`, `OperationResult`; explanation JSON uses `"type"` + `"name"`; see [`api.v1.json`](schemas/api.v1.json)), language surface for tooling (`parse`, `ParseResult`, `Lexer`, `TokenKind`, `DataValue`, `SpecRef`, `Span`, `Source`, `format_source`, `format_specs`, `format_parse_result`, `type_detail_lines`), limit constants (`MAX_*_NAME_LENGTH`). Language-surface exports are intentional for CLI/LSP/tests, not a minimal “verbs only” crate.
 
 **Tier 2: registries (all targets):** `Registry`, `LemmaBase`, `Registries`, `RepositoryQualifier`, `Header`, `Fetch`, `HttpResponse`, `TransportFailure`, `HttpTransport`, `Install`, `InstallStep`, `Resolve`, `ResolveStep`, `RegistryBundle`, `RegistryError`, `RepositoryInstallResult`, `Context`, `LemmaRepository`, `LemmaSpec`, `LemmaSpecSet`.
 
@@ -191,9 +193,10 @@ Free function: `lemma::resolve_effective`.
 
 ## Features
 
-- **Rich type system**: percentages, mass, length, duration, temperature, pressure, power, energy, frequency, and data sizes
+- **Rich type system**: percentages, mass, length, duration, temperature, pressure, power, energy, frequency, data sizes, ranges and lists
 - **Automatic unit conversions**: convert between units inside expressions without extra code
-- **Page composition**: extend specs, bind data, and reuse rules across modules
+- **Spec composition**: extend specs, bind data, and reuse rules across modules
+- **Lists**: rows of values or spec instances, read with `sum`, `where`, `sort`, `find` and friends
 - **Audit trail**: with `explain: true`, each rule result carries a structured explanation (see [`engine/schemas/api.v1.json`](schemas/api.v1.json))
 - **JavaScript / TypeScript**: `npm install @lemmabase/lemma-engine` for browser, Node, and edge runtimes
 - **Elixir**: Hex package `lemma_engine` (precompiled NIFs)
@@ -213,7 +216,7 @@ cargo add lemma-engine
 
 ```bash
 cargo install lemma
-lemma run pricing quantity=10
+lemma evaluate pricing quantity=10
 ```
 
 ### HTTP server
@@ -242,7 +245,7 @@ Build: `node build.js` (from `engine/packages/npm/`). See [packages/npm/README.m
 <dependency>
   <groupId>com.lemmabase</groupId>
   <artifactId>lemma-engine</artifactId>
-  <version>0.9.12</version>
+  <version>0.10.0</version>
 </dependency>
 ```
 
@@ -252,13 +255,13 @@ Build/test: `cargo build -p lemma_jni` then `./mvnw verify` under `engine/packag
 
 ```elixir
 # mix.exs
-{:lemma_engine, "~> 0.9"}
+{:lemma_engine, "~> 0.10"}
 ```
 
 ```elixir
 {:ok, engine} = Lemma.new()
 :ok = Lemma.load(engine, source)
-{:ok, response} = Lemma.run(engine, %{spec: "pricing"}, %{data: %{"quantity" => "25"}})
+{:ok, response} = Lemma.evaluate(engine, %{spec: "pricing"}, %{data: %{"quantity" => "25"}})
 ```
 
 See [packages/hex/README.md](packages/hex/README.md).

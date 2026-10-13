@@ -1,9 +1,9 @@
 //! QA coverage for nested LHS paths (`with outer.inner: ...` for values; `data` for slot defs) — the binding
 //! mechanism used to push values into child specs via `with` references.
 
+use indexmap::IndexMap;
 use lemma::DateTimeValue;
 use lemma::Engine;
-use std::collections::HashMap;
 
 fn load_ok(engine: &mut Engine, code: &str) {
     engine
@@ -67,7 +67,7 @@ rule r: i.x
     load_ok(&mut engine, code);
     let now = DateTimeValue::now();
     let resp = engine
-        .run(None, "outer", Some(&now), HashMap::new(), None, false)
+        .evaluate(None, "outer", Some(&now), IndexMap::new(), None, false)
         .expect("evaluates");
     assert_eq!(rule_value(&resp, "r"), "42");
 }
@@ -90,7 +90,7 @@ rule r: m.l.v
     load_ok(&mut engine, code);
     let now = DateTimeValue::now();
     let resp = engine
-        .run(None, "outer", Some(&now), HashMap::new(), None, false)
+        .evaluate(None, "outer", Some(&now), IndexMap::new(), None, false)
         .expect("evaluates");
     assert_eq!(rule_value(&resp, "r"), "7");
 }
@@ -125,7 +125,7 @@ rule answer: r.zone
     let now = DateTimeValue::now();
 
     let missing = engine
-        .run(None, "wrap", Some(&now), HashMap::new(), None, false)
+        .evaluate(None, "wrap", Some(&now), IndexMap::new(), None, false)
         .expect("evaluates");
     assert_eq!(
         missing
@@ -136,10 +136,10 @@ rule answer: r.zone
         &["dest_zip3".to_string()]
     );
 
-    let mut data = HashMap::new();
+    let mut data = IndexMap::new();
     data.insert("dest_zip3".to_string(), "100".into());
     let resp = engine
-        .run(None, "wrap", Some(&now), data, None, false)
+        .evaluate(None, "wrap", Some(&now), data, None, false)
         .expect("evaluates");
     assert_eq!(rule_value(&resp, "answer"), "100");
 
@@ -175,7 +175,7 @@ rule answer: s.through
     load_ok(&mut engine, code);
     let now = DateTimeValue::now();
     let resp = engine
-        .run(None, "wrap", Some(&now), HashMap::new(), None, false)
+        .evaluate(None, "wrap", Some(&now), IndexMap::new(), None, false)
         .expect("evaluates");
     assert_eq!(rule_value(&resp, "answer"), "ok");
 }
@@ -332,7 +332,7 @@ rule r: i.x
     );
 }
 
-// ─── User override via RunData::resolve uses dotted input_key ────────
+// ─── User override via EvaluateData::resolve uses dotted input_key ────────
 
 #[test]
 fn user_override_of_nested_binding_via_dotted_key() {
@@ -347,11 +347,11 @@ rule r: i.x
 "#;
     let mut engine = Engine::new();
     load_ok(&mut engine, code);
-    let mut data = HashMap::new();
+    let mut data = IndexMap::new();
     data.insert("i.x".to_string(), "99".into());
     let now = DateTimeValue::now();
     let resp = engine
-        .run(None, "outer", Some(&now), data, None, false)
+        .evaluate(None, "outer", Some(&now), data, None, false)
         .expect("evaluates");
     assert_eq!(
         rule_value(&resp, "r"),
@@ -376,11 +376,11 @@ rule r: m.l.v
 "#;
     let mut engine = Engine::new();
     load_ok(&mut engine, code);
-    let mut data = HashMap::new();
+    let mut data = IndexMap::new();
     data.insert("m.l.v".to_string(), "123".into());
     let now = DateTimeValue::now();
     let resp = engine
-        .run(None, "outer", Some(&now), data, None, false)
+        .evaluate(None, "outer", Some(&now), data, None, false)
         .expect("evaluates");
     assert_eq!(rule_value(&resp, "r"), "123");
 }
@@ -396,11 +396,11 @@ rule r: x
 "#;
     let mut engine = Engine::new();
     load_ok(&mut engine, code);
-    let mut data = HashMap::new();
+    let mut data = IndexMap::new();
     data.insert("X".to_string(), "99".into());
     let now = DateTimeValue::now();
     let resp = engine
-        .run(None, "s", Some(&now), data, None, false)
+        .evaluate(None, "s", Some(&now), data, None, false)
         .expect("evaluates");
     assert_eq!(rule_value(&resp, "r"), "99");
 }

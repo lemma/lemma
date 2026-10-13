@@ -1,12 +1,12 @@
 //! Spec-declared suggestions stay on [`DataDefinition::TypeDeclaration`] in the plan;
 //! show/response expose them as suggestions only — the evaluator never commits them.
 
+use indexmap::IndexMap;
 use lemma::DateTimeValue;
 use lemma::Engine;
-use std::collections::HashMap;
 
 #[test]
-fn run_plan_does_not_commit_typedecl_suggestion() {
+fn evaluate_plan_does_not_commit_typedecl_suggestion() {
     let mut engine = Engine::new();
     engine
         .load([(
@@ -22,7 +22,7 @@ fn run_plan_does_not_commit_typedecl_suggestion() {
 
     let now = DateTimeValue::now();
     let response = engine
-        .run(None, "s", Some(&now), HashMap::new(), None, false)
+        .evaluate(None, "s", Some(&now), IndexMap::new(), None, false)
         .expect("response");
 
     assert!(
@@ -44,10 +44,10 @@ fn run_plan_does_not_commit_typedecl_suggestion() {
         rule.veto_reason
     );
 
-    let mut supplied = HashMap::new();
+    let mut supplied = IndexMap::new();
     supplied.insert("n".to_string(), "42".into());
     let response = engine
-        .run(None, "s", Some(&now), supplied, None, false)
+        .evaluate(None, "s", Some(&now), supplied, None, false)
         .expect("response with n supplied");
     assert!(
         response
@@ -88,8 +88,8 @@ fn show_shows_suggestion_not_prefilled_without_overlay() {
         .clone();
 
     assert!(
-        entry.fill.is_none(),
-        "suggestion is not fill until caller supplies"
+        entry.value.is_none(),
+        "suggestion is not value until caller supplies"
     );
     let suggestion = entry.suggestion.expect("show must expose suggestion");
     assert_eq!(
@@ -129,18 +129,18 @@ rule r: a.r
         base_x.suggestion.is_some(),
         "base spec exposes suggestion on x"
     );
-    assert!(base_x.fill.is_none(), "base spec has no fill x");
+    assert!(base_x.value.is_none(), "base spec has no value x");
 
     let template = engine
         .show(None, "a/template", Some(&now))
         .expect("template show");
     let template_x = template.data.get("a.x").expect("a.x in template show");
     assert!(
-        template_x.fill.is_some(),
-        "literal with must surface as fill"
+        template_x.value.is_some(),
+        "literal with must surface as value"
     );
     assert_eq!(
-        template_x.fill.as_ref().and_then(|v| v.number),
+        template_x.value.as_ref().and_then(|v| v.number),
         Some(rust_decimal::Decimal::from(2)),
         "literal with fills magnitude 2"
     );

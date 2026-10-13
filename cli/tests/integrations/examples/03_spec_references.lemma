@@ -7,11 +7,15 @@ Defines basic employee data that can be referenced and extended.
 
 uses lemma units
 
-data department          : "Engineering"
-data employment_duration : units.calendar -> suggest 0 year
-data is_full_time        : true
-data name                : "John Doe"
-data monthly_salary      : number -> minimum 0 -> suggest 5_000
+data department: "Engineering"
+data employment_duration: units.calendar
+  -> suggest 0 year
+
+data is_full_time: true
+data name:         "John Doe"
+data monthly_salary: number
+  -> minimum 0
+  -> suggest 5_000
 
 rule annual_salary:
   monthly_salary * 12
@@ -52,6 +56,9 @@ Shows a different employment model using spec references.
 
 uses lemma units
 
+uses person: base_employee
+  -> with is_full_time: false
+
 data money: measure
   -> unit eur: 1.00
 
@@ -59,11 +66,10 @@ data wage_rate: measure
   -> unit eur_per_second: eur/second
   -> unit eur_per_hour: eur/hour
 
-data hours_worked : 120 hour
-data hourly_rate  : wage_rate -> minimum 0 eur_per_hour -> suggest 85 eur_per_hour
-
-uses person: base_employee
-  -> with is_full_time: false
+data hours_worked: 120 hour
+data hourly_rate: wage_rate
+  -> minimum 0 eur_per_hour
+  -> suggest 85 eur_per_hour
 
 rule total_payment:
   (hourly_rate * hours_worked) as eur

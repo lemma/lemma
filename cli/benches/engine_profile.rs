@@ -1,7 +1,7 @@
 // Criterion cases synced with xtask/src/benchmarks/cli.rs PROFILE_BENCH_CASES.
 use criterion::{criterion_group, criterion_main, Criterion};
+use indexmap::IndexMap;
 use lemma::*;
-use std::collections::HashMap;
 
 fn load_engine() -> Engine {
     let examples_dir =
@@ -32,7 +32,7 @@ fn load_engine() -> Engine {
     engine
 }
 
-fn salary_data() -> HashMap<String, String> {
+fn salary_data() -> IndexMap<String, EvaluateDataValue> {
     [
         ("gross_salary", "5000 eur"),
         ("pay_period", "month"),
@@ -41,7 +41,7 @@ fn salary_data() -> HashMap<String, String> {
         ("payroll_tax_credit", "true"),
     ]
     .into_iter()
-    .map(|(k, v)| (k.to_string(), v.to_string()))
+    .map(|(k, v)| (k.to_string(), EvaluateDataValue::from(v)))
     .collect()
 }
 
@@ -56,8 +56,8 @@ fn bench_dutch_salary_profile(c: &mut Criterion) {
     group.bench_function("engine_evaluate", |b| {
         b.iter(|| {
             let resp = engine
-                .run(None, spec, Some(&now), data.clone(), None, false)
-                .expect("run");
+                .evaluate(None, spec, Some(&now), data.clone(), None, false)
+                .expect("evaluate");
             std::hint::black_box(resp);
         });
     });
@@ -65,7 +65,7 @@ fn bench_dutch_salary_profile(c: &mut Criterion) {
     group.bench_function("single_rule", |b| {
         b.iter(|| {
             let resp = engine
-                .run(
+                .evaluate(
                     None,
                     spec,
                     Some(&now),
@@ -73,15 +73,15 @@ fn bench_dutch_salary_profile(c: &mut Criterion) {
                     Some(&[String::from("periods_per_year")]),
                     false,
                 )
-                .expect("run");
+                .expect("evaluate");
             std::hint::black_box(resp);
         });
     });
 
     group.bench_function("json_envelope", |b| {
         let response = engine
-            .run(None, spec, Some(&now), data.clone(), None, false)
-            .expect("run");
+            .evaluate(None, spec, Some(&now), data.clone(), None, false)
+            .expect("evaluate");
         b.iter(|| {
             let envelope = build_envelope(&response, spec, &now);
             let json = serde_json::to_vec(&envelope).expect("serialize");
@@ -91,8 +91,8 @@ fn bench_dutch_salary_profile(c: &mut Criterion) {
 
     group.bench_function("json_raw_response", |b| {
         let response = engine
-            .run(None, spec, Some(&now), data.clone(), None, false)
-            .expect("run");
+            .evaluate(None, spec, Some(&now), data.clone(), None, false)
+            .expect("evaluate");
         b.iter(|| {
             let json =
                 serde_json::to_vec(&lemma::api::Response::from(&response)).expect("serialize");

@@ -143,9 +143,10 @@ pub(crate) fn dispatch_key_of_literal(
             Ok(moment) => Ok(DispatchKey::Time(moment.naive_utc())),
             Err(message) => Err(DispatchKeyBuildError::CalendarFailure(message)),
         },
-        ValueKind::Boolean(_) | ValueKind::Range(_, _) | ValueKind::Spec(_) => {
-            Err(DispatchKeyBuildError::Unsupported)
-        }
+        ValueKind::Boolean(_)
+        | ValueKind::Range(_, _)
+        | ValueKind::Spec(_)
+        | ValueKind::List(_) => Err(DispatchKeyBuildError::Unsupported),
     }
 }
 
@@ -176,9 +177,10 @@ pub(crate) fn dispatch_probe_of(value: &ValueKind) -> DispatchProbeOutcome<'_> {
             Ok(moment) => DispatchProbeOutcome::Probe(DispatchProbe::Time(moment.naive_utc())),
             Err(message) => DispatchProbeOutcome::CalendarFailure(message),
         },
-        ValueKind::Boolean(_) | ValueKind::Range(_, _) | ValueKind::Spec(_) => {
-            DispatchProbeOutcome::Unsupported
-        }
+        ValueKind::Boolean(_)
+        | ValueKind::Range(_, _)
+        | ValueKind::Spec(_)
+        | ValueKind::List(_) => DispatchProbeOutcome::Unsupported,
     }
 }
 
@@ -264,7 +266,10 @@ fn class_for_pair(scrutinee_type: &LemmaType, key: &LiteralValue) -> Option<Disp
             // checks that needed key.lemma_type are deferred to evaluation / planning rejects.
             Some(DispatchClass::Rational)
         }
-        ValueKind::Boolean(_) | ValueKind::Range(_, _) | ValueKind::Spec(_) => None,
+        ValueKind::Boolean(_)
+        | ValueKind::Range(_, _)
+        | ValueKind::Spec(_)
+        | ValueKind::List(_) => None,
     }
 }
 
@@ -614,7 +619,9 @@ mod tests {
     #[test]
     #[should_panic(expected = "BUG: OrderedDispatch compared keys of different classes")]
     fn comparing_keys_of_different_classes_is_a_bug() {
-        let _ = text_key("AD").try_compare(&rational_key(1).as_probe());
+        text_key("AD")
+            .try_compare(&rational_key(1).as_probe())
+            .expect("BUG: comparison must panic before returning a failure");
     }
 
     #[test]

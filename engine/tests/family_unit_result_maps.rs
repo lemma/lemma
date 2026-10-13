@@ -1,7 +1,7 @@
 //! Family unit maps: rule results and show rule schemas expose the full measure/ratio family.
 
+use indexmap::IndexMap;
 use lemma::{DateTimeValue, Engine, SourceType};
-use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -31,15 +31,15 @@ rule total: amount
     engine
 }
 
-fn run_spec(engine: &Engine, spec: &str) -> lemma::Response {
-    run_spec_in_repo(engine, None, spec)
+fn evaluate_spec(engine: &Engine, spec: &str) -> lemma::Response {
+    evaluate_spec_in_repo(engine, None, spec)
 }
 
-fn run_spec_in_repo(engine: &Engine, repository: Option<&str>, spec: &str) -> lemma::Response {
+fn evaluate_spec_in_repo(engine: &Engine, repository: Option<&str>, spec: &str) -> lemma::Response {
     let now = DateTimeValue::now();
     engine
-        .run(repository, spec, Some(&now), HashMap::new(), None, false)
-        .expect("run")
+        .evaluate(repository, spec, Some(&now), IndexMap::new(), None, false)
+        .expect("evaluate")
 }
 
 #[test]
@@ -63,7 +63,7 @@ rule total: 5 eur
             .to_string(),
         )])
         .expect("load");
-    let response = run_spec(&engine, "family_units_eval");
+    let response = evaluate_spec(&engine, "family_units_eval");
     let total = response.results.get("total").expect("total");
     assert!(!total.vetoed);
     let measure = total
@@ -135,10 +135,10 @@ rule rate_out: rate_slot
             .to_string(),
         )])
         .expect("load");
-    let data = HashMap::from([("rate_slot".to_string(), "50%".into())]);
+    let data = IndexMap::from([("rate_slot".to_string(), "50%".into())]);
     let now = DateTimeValue::now();
     let response = engine
-        .run(
+        .evaluate(
             Some("dual_alias"),
             "consumer",
             Some(&now),
@@ -146,7 +146,7 @@ rule rate_out: rate_slot
             None,
             false,
         )
-        .expect("run");
+        .expect("evaluate");
     let rate = response.results.get("rate_out").expect("rate_out");
     assert!(!rate.vetoed);
     let ratio = rate
@@ -180,7 +180,7 @@ rule need_parent: base_rate
             .to_string(),
         )])
         .expect("load");
-    let response = run_spec(&engine, "ratio_family");
+    let response = evaluate_spec(&engine, "ratio_family");
     let out = response.results.get("out").expect("out");
     assert!(!out.vetoed);
     let ratio = out
@@ -237,7 +237,7 @@ rule band: (1 eur...10 eur)
             .to_string(),
         )])
         .expect("load");
-    let response = run_spec(&engine, "money_range");
+    let response = evaluate_spec(&engine, "money_range");
     let band = response.results.get("band").expect("band");
     assert!(!band.vetoed);
     let range = band

@@ -5,6 +5,7 @@
 
 // Re-exported parsing types: downstream modules (evaluation, inversion, computation,
 // serialization) import these from `planning::semantics`, never from `parsing` directly.
+use crate::parsing::arena::{ExprId, ExprKind, ExprTree};
 pub use crate::parsing::ast::{
     ArithmeticComputation, ComparisonComputation, MathematicalComputation, NegationType,
     RangeBound, VetoExpression,
@@ -43,10 +44,11 @@ pub fn mirrored_comparison(op: ComparisonComputation) -> ComparisonComputation {
 use crate::computation::rational::{checked_div, rational_new, RationalInteger};
 use crate::parsing::ast::Constraint;
 use crate::parsing::ast::{
-    BooleanValue, CalendarPeriodUnit, CommandArg, ConversionTarget, DateCalendarKind,
+    BooleanValue, CalendarPeriodUnit, ChainStep, CommandArg, ConversionTarget, DateCalendarKind,
     DateRelativeKind, DateTimeValue, PrimitiveKind, TimeValue, TimezoneValue,
     TypeConstraintCommand,
 };
+use crate::planning::unit_index::UnitIndex;
 use crate::Error;
 use indexmap::IndexMap;
 use rust_decimal::Decimal;
@@ -66,22 +68,26 @@ use std::sync::{Arc, OnceLock};
 pub use crate::literals::{BaseMeasureVector, MeasureUnit, MeasureUnits, RatioUnit, RatioUnits};
 
 /// Combine two `BaseMeasureVector`s by adding (for multiply) or subtracting (for divide) exponents.
-/// Entries that reach zero exponent are removed (they cancel out).
+/// Entries that reach zero exponent are removed (they cancel out). `None` when a resulting
+/// exponent exceeds [`crate::limits::MAX_UNIT_EXPONENT`] in magnitude.
 pub fn combine_decompositions(
     left: &BaseMeasureVector,
     right: &BaseMeasureVector,
     is_multiply: bool,
-) -> BaseMeasureVector {
+) -> Option<BaseMeasureVector> {
     let mut result = left.clone();
     for (dim, &exp) in right {
-        let delta = if is_multiply { exp } else { -exp };
+        let delta = if is_multiply { exp } else { exp.checked_neg()? };
         let entry = result.entry(dim.clone()).or_insert(0);
-        *entry += delta;
+        *entry = entry.checked_add(delta)?;
+        if entry.unsigned_abs() > crate::limits::MAX_UNIT_EXPONENT.unsigned_abs() {
+            return None;
+        }
         if *entry == 0 {
             result.remove(dim);
         }
     }
-    result
+    Some(result)
 }
 
 /// Combine two symbolic unit signatures (sorted-by-unit-name, no-zero-exponent vectors)
@@ -395,11 +401,11 @@ fn check_temporal_width_pair_consistency(
     match (minimum, maximum) {
         (None, None) => Ok(()),
         (Some(min_w), None) => {
-            let _ = resolve(min_w, "minimum")?;
+            resolve(min_w, "minimum")?;
             Ok(())
         }
         (None, Some(max_w)) => {
-            let _ = resolve(max_w, "maximum")?;
+            resolve(max_w, "maximum")?;
             Ok(())
         }
         (Some(min_w), Some(max_w)) => {
@@ -489,7 +495,10 @@ pub fn canonicalize_signature(signature: &[(String, i32)]) -> Vec<(String, i32)>
     use std::collections::BTreeMap;
     let mut accumulator: BTreeMap<String, i32> = BTreeMap::new();
     for (name, exponent) in signature {
-        *accumulator.entry(name.clone()).or_insert(0) += exponent;
+        let entry = accumulator.entry(name.clone()).or_insert(0);
+        *entry = entry
+            .checked_add(*exponent)
+            .expect("BUG: planning bounds signature unit exponents");
     }
     accumulator
         .into_iter()
@@ -502,12 +511,62 @@ pub fn base_measure_vector_as_signature(decomposition: &BaseMeasureVector) -> Ve
     decomposition
         .iter()
         .filter(|(_, exponent)| **exponent != 0)
-        .map(|(name, exponent)| (name.clone(), *exponent))
+        .map(|(dimension, exponent)| (dimension.name().to_string(), *exponent))
         .collect()
 }
 
-pub const DURATION_DIMENSION: &str = "duration";
-pub const CALENDAR_DIMENSION: &str = "calendar";
+/// One base axis of a measure decomposition.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub enum Dimension {
+    Duration,
+    Calendar,
+    Family(TypeFamily),
+}
+
+impl Dimension {
+    /// Bare name: builtin axis or family root type name.
+    #[must_use]
+    pub fn name(&self) -> &str {
+        match self {
+            Dimension::Duration => "duration",
+            Dimension::Calendar => "calendar",
+            Dimension::Family(family) => &family.name,
+        }
+    }
+
+    #[must_use]
+    fn with_families_without_effective(&self) -> Self {
+        match self {
+            Dimension::Duration => Dimension::Duration,
+            Dimension::Calendar => Dimension::Calendar,
+            Dimension::Family(family) => Dimension::Family(family.without_effective()),
+        }
+    }
+}
+
+fn base_measure_vector_without_effective(domain: &BaseMeasureVector) -> BaseMeasureVector {
+    domain
+        .iter()
+        .map(|(dimension, exponent)| (dimension.with_families_without_effective(), *exponent))
+        .collect()
+}
+
+fn measure_units_without_effective(units: &MeasureUnits) -> MeasureUnits {
+    MeasureUnits(
+        units
+            .iter()
+            .map(|unit| MeasureUnit {
+                name: unit.name.clone(),
+                factor: unit.factor.clone(),
+                derived_measure_factors: unit.derived_measure_factors.clone(),
+                decomposition: base_measure_vector_without_effective(&unit.decomposition),
+                minimum: unit.minimum.clone(),
+                maximum: unit.maximum.clone(),
+                suggestion_magnitude: unit.suggestion_magnitude.clone(),
+            })
+            .collect(),
+    )
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -517,15 +576,11 @@ pub enum MeasureTrait {
 }
 
 pub fn duration_decomposition() -> BaseMeasureVector {
-    [(DURATION_DIMENSION.to_string(), 1i32)]
-        .into_iter()
-        .collect()
+    [(Dimension::Duration, 1i32)].into_iter().collect()
 }
 
 pub fn calendar_decomposition() -> BaseMeasureVector {
-    [(CALENDAR_DIMENSION.to_string(), 1i32)]
-        .into_iter()
-        .collect()
+    [(Dimension::Calendar, 1i32)].into_iter().collect()
 }
 
 /// Marker `LemmaType` for a Measure value whose signature has not been resolved to
@@ -642,22 +697,49 @@ pub enum TypeSpecification {
     Spec {
         spec: SpecIdentity,
     },
+    /// A list of rows of `element`, keyed by row number or named fields.
+    List {
+        #[serde(with = "crate::snapshot::shared::arc")]
+        element: Arc<LemmaType>,
+        key: ListKey,
+    },
+}
+
+/// How a list addresses its rows.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum ListKey {
+    Numbered,
+    Fields(Vec<String>),
 }
 
 /// Resolved spec a value or rule result refers to.
 ///
 /// `effective` is the resolved row's `effective_from`, not the run instant.
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct SpecIdentity {
     pub repository: Option<String>,
     pub spec: String,
     pub effective: crate::parsing::ast::EffectiveDate,
 }
 
+impl SpecIdentity {
+    #[must_use]
+    pub fn of(
+        repository: &crate::parsing::ast::LemmaRepository,
+        spec: &crate::parsing::ast::LemmaSpec,
+    ) -> Self {
+        Self {
+            repository: repository.name.clone(),
+            spec: spec.name.clone(),
+            effective: spec.effective_from.clone(),
+        }
+    }
+}
+
 impl fmt::Display for SpecIdentity {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         if let Some(repository) = &self.repository {
-            write!(f, "{repository}/")?;
+            write!(f, "{repository} ")?;
         }
         write!(f, "{}", self.spec)?;
         if let crate::parsing::ast::EffectiveDate::DateTimeValue(at) = &self.effective {
@@ -685,6 +767,19 @@ impl std::fmt::Display for TypeSpecification {
             Self::Veto { .. } => f.write_str("veto"),
             Self::Undetermined => f.write_str("undetermined"),
             Self::Spec { spec } => write!(f, "{spec}"),
+            Self::List {
+                element,
+                key: ListKey::Numbered,
+            } => write!(f, "{} list", element.specifications),
+            Self::List {
+                element,
+                key: ListKey::Fields(fields),
+            } => write!(
+                f,
+                "{} list key {}",
+                element.specifications,
+                fields.join(", ")
+            ),
         }
     }
 }
@@ -706,6 +801,58 @@ impl TypeSpecification {
             | Self::RatioRange { help, .. }
             | Self::MeasureRange { help, .. } => help.as_str(),
             Self::Veto { .. } | Self::Undetermined | Self::Spec { .. } => "",
+            Self::List { element, .. } => element.specifications.help(),
+        }
+    }
+
+    #[must_use]
+    fn with_families_without_effective(&self) -> Self {
+        match self {
+            Self::Measure {
+                minimum,
+                maximum,
+                decimals,
+                units,
+                traits,
+                decomposition,
+                unit,
+                help,
+            } => Self::Measure {
+                minimum: minimum.clone(),
+                maximum: maximum.clone(),
+                decimals: *decimals,
+                units: measure_units_without_effective(units),
+                traits: traits.clone(),
+                decomposition: decomposition
+                    .as_ref()
+                    .map(base_measure_vector_without_effective),
+                unit: unit.clone(),
+                help: help.clone(),
+            },
+            Self::MeasureRange {
+                lower,
+                upper,
+                minimum,
+                maximum,
+                units,
+                decomposition,
+                help,
+            } => Self::MeasureRange {
+                lower: lower.clone(),
+                upper: upper.clone(),
+                minimum: minimum.clone(),
+                maximum: maximum.clone(),
+                units: measure_units_without_effective(units),
+                decomposition: decomposition
+                    .as_ref()
+                    .map(base_measure_vector_without_effective),
+                help: help.clone(),
+            },
+            Self::List { element, key } => Self::List {
+                element: Arc::new(element.with_families_without_effective()),
+                key: key.clone(),
+            },
+            other => other.clone(),
         }
     }
 
@@ -783,6 +930,9 @@ fn require_literal<'a>(
     args: &'a [CommandArg],
     cmd: &str,
 ) -> Result<&'a crate::literals::Value, String> {
+    if args.len() > 1 {
+        return Err(format!("{cmd} takes exactly one value"));
+    }
     let arg = args
         .first()
         .ok_or_else(|| format!("{} requires an argument", cmd))?;
@@ -1006,8 +1156,115 @@ pub fn range_type_specification_from_endpoints(
     left.specifications.range_from_element()
 }
 
-/// Resolves a written unit token to a bare declared unit name.
-pub type UnitTokenResolver<'a> = dyn Fn(&str) -> Result<String, String> + 'a;
+/// Resolves a written unit token to a bare declared unit name against the named types
+/// visible at one planning site.
+pub enum UnitTokenResolver<'a> {
+    /// The spec's types are resolved: tokens resolve through its unit index.
+    Declared {
+        unit_index: &'a UnitIndex,
+        named_types: &'a IndexMap<String, Arc<LemmaType>>,
+    },
+    /// The spec has no resolved types: every token is unknown.
+    Undeclared,
+    /// Tokens resolve through the planning unit index of the spec being planned.
+    Planning {
+        unit_index: &'a crate::planning::unit_index::PlanningUnitIndex,
+        named_types: &'a IndexMap<String, Arc<LemmaType>>,
+    },
+    /// Tokens resolve through the first scope that knows them.
+    Search(Vec<(&'a UnitIndex, &'a IndexMap<String, Arc<LemmaType>>)>),
+    /// Tokens resolve through the unit index and must be declared on `lemma_type`
+    /// or on its range element.
+    Typed {
+        unit_index: &'a UnitIndex,
+        named_types: &'a IndexMap<String, Arc<LemmaType>>,
+        lemma_type: &'a LemmaType,
+    },
+}
+
+impl UnitTokenResolver<'_> {
+    pub fn resolve(&self, unit: &str) -> Result<String, String> {
+        match self {
+            UnitTokenResolver::Declared {
+                unit_index,
+                named_types,
+            } => unit_index
+                .resolve_with_named_types(unit, named_types)
+                .map(|(bare, _)| bare),
+            UnitTokenResolver::Undeclared => Err(unknown_unit_message(unit)),
+            UnitTokenResolver::Planning {
+                unit_index,
+                named_types,
+            } => unit_index
+                .resolve_with_named_types(unit, named_types)
+                .map(|(bare, _)| bare),
+            UnitTokenResolver::Search(scopes) => scopes
+                .iter()
+                .find_map(|(unit_index, named_types)| {
+                    unit_index
+                        .resolve_with_named_types(unit, named_types)
+                        .ok()
+                        .map(|(bare, _)| bare)
+                })
+                .ok_or_else(|| unknown_unit_message(unit)),
+            UnitTokenResolver::Typed {
+                unit_index,
+                named_types,
+                lemma_type,
+            } => resolve_declared_on_type(unit, lemma_type, unit_index, named_types),
+        }
+    }
+}
+
+fn unknown_unit_message(unit: &str) -> String {
+    format!("Unknown unit '{unit}'. Declare it on a measure or ratio type, or import it with uses.")
+}
+
+fn resolve_declared_on_type(
+    written: &str,
+    lemma_type: &LemmaType,
+    unit_index: &UnitIndex,
+    named_types: &IndexMap<String, Arc<LemmaType>>,
+) -> Result<String, String> {
+    match unit_index.resolve_with_named_types(written, named_types) {
+        Ok((bare, _)) => {
+            if unit_name_declared_on_type(lemma_type, &bare)
+                || range_element_declares_unit(lemma_type, &bare)
+            {
+                Ok(bare)
+            } else {
+                Err(format!(
+                    "Unit '{written}' resolves to '{bare}', which is not declared on type {}",
+                    lemma_type.name()
+                ))
+            }
+        }
+        Err(index_err) => {
+            if unit_name_declared_on_type(lemma_type, written)
+                || range_element_declares_unit(lemma_type, written)
+            {
+                Ok(written.to_string())
+            } else {
+                Err(index_err)
+            }
+        }
+    }
+}
+
+fn range_element_declares_unit(lemma_type: &LemmaType, unit_name: &str) -> bool {
+    let Some(element) = lemma_type.specifications.element_from_range() else {
+        return false;
+    };
+    unit_name_declared_on_type(&LemmaType::primitive(element), unit_name)
+}
+
+fn unit_name_declared_on_type(lemma_type: &LemmaType, unit_name: &str) -> bool {
+    match &lemma_type.specifications {
+        TypeSpecification::Measure { units, .. } => units.get(unit_name).is_ok(),
+        TypeSpecification::Ratio { units, .. } => units.get(unit_name).is_ok(),
+        _ => false,
+    }
+}
 
 /// Declared bare unit name on a measure or ratio element type for `token`.
 fn bare_declared_unit_on_element(
@@ -1037,7 +1294,7 @@ pub fn resolve_endpoint_unit_token(
             let Some(resolve) = resolve_unit else {
                 return Err(declared_err);
             };
-            let bare = resolve(token)?;
+            let bare = resolve.resolve(token)?;
             bare_declared_unit_on_element(element_spec, &bare).map_err(|_| {
                 format!("Unit '{token}' resolves to '{bare}', which is not declared on this type")
             })
@@ -1059,8 +1316,7 @@ pub(crate) fn lift_range_endpoint(
     match value {
         Value::NumberWithUnit(magnitude, unit_token) => {
             let bare = resolve_endpoint_unit_token(unit_token, element_spec, resolve_unit)?;
-            let rewritten = Value::NumberWithUnit(*magnitude, bare.clone());
-            let kind = parser_value_to_value_kind(&rewritten, element_spec, None)?;
+            let kind = number_with_unit_value_kind(*magnitude, &bare, element_spec)?;
             let lemma_type = match &kind {
                 ValueKind::Measure(_) | ValueKind::Ratio(_) => {
                     Arc::new(LemmaType::primitive(element_spec.clone()).with_unit(bare))
@@ -1087,46 +1343,77 @@ fn literal_value_from_parser_value(
 ) -> Result<TypedLiteral, String> {
     use crate::parsing::ast::Value;
 
+    enum Step<'a> {
+        Visit(&'a Value),
+        CombineRange,
+    }
+
+    let mut steps = vec![Step::Visit(value)];
+    let mut literals: Vec<TypedLiteral> = Vec::new();
+    while let Some(step) = steps.pop() {
+        match step {
+            Step::Visit(Value::Range(left, right)) => {
+                steps.push(Step::CombineRange);
+                steps.push(Step::Visit(right));
+                steps.push(Step::Visit(left));
+            }
+            Step::Visit(scalar) => literals.push(scalar_literal_from_parser_value(scalar)?),
+            Step::CombineRange => {
+                let right = literals
+                    .pop()
+                    .expect("BUG: range right endpoint missing from literal stack");
+                let left = literals
+                    .pop()
+                    .expect("BUG: range left endpoint missing from literal stack");
+                let compatible = match (
+                    &left.lemma_type.specifications,
+                    &right.lemma_type.specifications,
+                ) {
+                    (TypeSpecification::Date { .. }, TypeSpecification::Date { .. }) => true,
+                    (TypeSpecification::Time { .. }, TypeSpecification::Time { .. }) => true,
+                    (TypeSpecification::Number { .. }, TypeSpecification::Number { .. }) => true,
+                    (TypeSpecification::Measure { .. }, TypeSpecification::Measure { .. }) => {
+                        left.lemma_type.same_measure_family(&right.lemma_type)
+                            || left
+                                .lemma_type
+                                .compatible_with_anonymous_measure(&right.lemma_type)
+                            || right
+                                .lemma_type
+                                .compatible_with_anonymous_measure(&left.lemma_type)
+                    }
+                    (TypeSpecification::Ratio { .. }, TypeSpecification::Ratio { .. }) => true,
+                    _ => false,
+                };
+                if !compatible {
+                    return Err(format!(
+                        "range endpoints must have the same supported base type, got {} and {}",
+                        left.lemma_type.name(),
+                        right.lemma_type.name()
+                    ));
+                }
+                literals.push(TypedLiteral::range(left, right));
+            }
+        }
+    }
+    Ok(literals.pop().expect("BUG: literal walk left no result"))
+}
+
+fn scalar_literal_from_parser_value(
+    value: &crate::parsing::ast::Value,
+) -> Result<TypedLiteral, String> {
+    use crate::parsing::ast::Value;
+
     match value {
         Value::Number(n) => Ok(TypedLiteral::number(lift_parser_decimal(*n)?)),
         Value::Text(s) => Ok(TypedLiteral::text(s.clone())),
         Value::Date(dt) => Ok(TypedLiteral::date(date_time_to_semantic(dt))),
         Value::Time(t) => Ok(TypedLiteral::time(time_to_semantic(t))),
         Value::Boolean(b) => Ok(TypedLiteral::from_bool(bool::from(*b))),
-        Value::NumberWithUnit(n, unit) => Ok(TypedLiteral::number_interpreted_as_measure(
+        Value::NumberWithUnit(n, _) => Ok(TypedLiteral::number_interpreted_as_measure(
             lift_parser_decimal(*n)?,
-            unit.clone(),
         )),
-        Value::Range(left, right) => {
-            let left = literal_value_from_parser_value(left)?;
-            let right = literal_value_from_parser_value(right)?;
-            let compatible = match (
-                &left.lemma_type.specifications,
-                &right.lemma_type.specifications,
-            ) {
-                (TypeSpecification::Date { .. }, TypeSpecification::Date { .. }) => true,
-                (TypeSpecification::Time { .. }, TypeSpecification::Time { .. }) => true,
-                (TypeSpecification::Number { .. }, TypeSpecification::Number { .. }) => true,
-                (TypeSpecification::Measure { .. }, TypeSpecification::Measure { .. }) => {
-                    left.lemma_type.same_measure_family(&right.lemma_type)
-                        || left
-                            .lemma_type
-                            .compatible_with_anonymous_measure(&right.lemma_type)
-                        || right
-                            .lemma_type
-                            .compatible_with_anonymous_measure(&left.lemma_type)
-                }
-                (TypeSpecification::Ratio { .. }, TypeSpecification::Ratio { .. }) => true,
-                _ => false,
-            };
-            if !compatible {
-                return Err(format!(
-                    "range endpoints must have the same supported base type, got {} and {}",
-                    left.lemma_type.name(),
-                    right.lemma_type.name()
-                ));
-            }
-            Ok(TypedLiteral::range(left, right))
+        Value::Range(_, _) => {
+            unreachable!("BUG: range values are walked by literal_value_from_parser_value")
         }
     }
 }
@@ -1762,7 +2049,7 @@ impl TypeSpecification {
                     .try_to_decimal()
                     .expect("BUG: planned minimum must convert to decimal")
             }),
-            TypeSpecification::Measure { minimum, .. } => minimum.as_ref().map(|(bound, _unit)| {
+            TypeSpecification::Measure { minimum, .. } => minimum.as_ref().map(|(bound, _)| {
                 bound
                     .try_to_decimal()
                     .expect("BUG: planned minimum must convert to decimal")
@@ -1781,7 +2068,7 @@ impl TypeSpecification {
                     .try_to_decimal()
                     .expect("BUG: planned maximum must convert to decimal")
             }),
-            TypeSpecification::Measure { maximum, .. } => maximum.as_ref().map(|(bound, _unit)| {
+            TypeSpecification::Measure { maximum, .. } => maximum.as_ref().map(|(bound, _)| {
                 bound
                     .try_to_decimal()
                     .expect("BUG: planned maximum must convert to decimal")
@@ -1796,13 +2083,13 @@ impl TypeSpecification {
 
     /// Apply a single constraint command to this spec.
     ///
-    /// The `declared_suggestion` and `declared_fill` out-parameters receive default values
-    /// (if the command is `Suggest` or `Fill`), encoded as [`RawSuggestion`]. Defaults are
+    /// The `declared_suggestion` and `declared_value` out-parameters receive default values
+    /// (if the command is `Suggest` or `With`), encoded as [`RawSuggestion`]. Defaults are
     /// owned by the data binding or typedef entry, not by the type specification itself;
     /// callers thread `&mut Option<RawSuggestion>` for each across constraint applications
-    /// for one declaration. Duplicate `-> suggest` / `-> fill` / `minimum` / `maximum` /
+    /// for one declaration. Duplicate `-> suggest` / `-> with` / `minimum` / `maximum` /
     /// `decimals` on the same declaration are rejected by the caller seen-set before this
-    /// runs. A child typedef may override an inherited suggest, fill, or bound with one
+    /// runs. A child typedef may override an inherited suggest, with, or bound with one
     /// command of that kind. Measure scalars stay raw until unit factors are resolved;
     /// callers convert via [`bound_value_kind_from_raw_suggestion`].
     pub fn apply_constraint(
@@ -1811,9 +2098,15 @@ impl TypeSpecification {
         command: TypeConstraintCommand,
         args: &[CommandArg],
         declared_suggestion: &mut Option<RawSuggestion>,
-        declared_fill: &mut Option<RawSuggestion>,
+        declared_value: &mut Option<RawSuggestion>,
         resolve_unit: Option<&UnitTokenResolver<'_>>,
     ) -> Result<(), String> {
+        if command == TypeConstraintCommand::With
+            && args.len() > 1
+            && !matches!(self, TypeSpecification::List { .. })
+        {
+            return Err(format!("`-> with` on {self} takes exactly one value"));
+        }
         if command == TypeConstraintCommand::Trait
             && !matches!(&self, TypeSpecification::Measure { .. })
         {
@@ -1824,11 +2117,11 @@ impl TypeSpecification {
                 TypeConstraintCommand::Help => {
                     apply_type_help_command(help, args)?;
                 }
-                TypeConstraintCommand::Suggest | TypeConstraintCommand::Fill => {
+                TypeConstraintCommand::Suggest | TypeConstraintCommand::With => {
                     let (target, cmd) = match command {
                         TypeConstraintCommand::Suggest => (&mut *declared_suggestion, "suggest"),
-                        TypeConstraintCommand::Fill => (&mut *declared_fill, "fill"),
-                        _ => unreachable!("BUG: only Suggest or Fill in this arm"),
+                        TypeConstraintCommand::With => (&mut *declared_value, "with"),
+                        _ => unreachable!("BUG: only Suggest or With in this arm"),
                     };
                     let lit = require_literal(args, cmd)?;
                     reject_calendar_for_suggestion(
@@ -1852,7 +2145,7 @@ impl TypeSpecification {
                 }
                 other => {
                     return Err(format!(
-                        "Invalid command '{}' for boolean type. Valid commands: help, suggest, fill",
+                        "Invalid command '{}' for boolean type. Valid commands: help, suggest, with",
                         other
                     ));
                 }
@@ -1940,11 +2233,11 @@ impl TypeSpecification {
                 TypeConstraintCommand::Help => {
                     apply_type_help_command(help, args)?;
                 }
-                TypeConstraintCommand::Suggest | TypeConstraintCommand::Fill => {
+                TypeConstraintCommand::Suggest | TypeConstraintCommand::With => {
                     let (target, cmd) = match command {
                         TypeConstraintCommand::Suggest => (&mut *declared_suggestion, "suggest"),
-                        TypeConstraintCommand::Fill => (&mut *declared_fill, "fill"),
-                        _ => unreachable!("BUG: only Suggest or Fill in this arm"),
+                        TypeConstraintCommand::With => (&mut *declared_value, "with"),
+                        _ => unreachable!("BUG: only Suggest or With in this arm"),
                     };
                     let lit = require_literal(args, cmd)?;
                     if !traits.contains(&MeasureTrait::Calendar) {
@@ -1971,7 +2264,7 @@ impl TypeSpecification {
                 }
                 _ => {
                     return Err(format!(
-                        "Invalid command '{}' for measure type. Valid commands: unit, trait, minimum, maximum, decimals, help, suggest, fill",
+                        "Invalid command '{}' for measure type. Valid commands: unit, trait, minimum, maximum, decimals, help, suggest, with",
                         command
                     ));
                 }
@@ -2000,11 +2293,11 @@ impl TypeSpecification {
                 TypeConstraintCommand::Help => {
                     apply_type_help_command(help, args)?;
                 }
-                TypeConstraintCommand::Suggest | TypeConstraintCommand::Fill => {
+                TypeConstraintCommand::Suggest | TypeConstraintCommand::With => {
                     let (target, cmd) = match command {
                         TypeConstraintCommand::Suggest => (&mut *declared_suggestion, "suggest"),
-                        TypeConstraintCommand::Fill => (&mut *declared_fill, "fill"),
-                        _ => unreachable!("BUG: only Suggest or Fill in this arm"),
+                        TypeConstraintCommand::With => (&mut *declared_value, "with"),
+                        _ => unreachable!("BUG: only Suggest or With in this arm"),
                     };
                     let lit = require_literal(args, cmd)?;
                     reject_calendar_for_suggestion(
@@ -2028,7 +2321,7 @@ impl TypeSpecification {
                 }
                 _ => {
                     return Err(format!(
-                        "Invalid command '{}' for number type. Valid commands: minimum, maximum, decimals, help, suggest, fill",
+                        "Invalid command '{}' for number type. Valid commands: minimum, maximum, decimals, help, suggest, with",
                         command
                     ));
                 }
@@ -2059,11 +2352,11 @@ impl TypeSpecification {
                 TypeConstraintCommand::Help => {
                     apply_type_help_command(help, args)?;
                 }
-                TypeConstraintCommand::Suggest | TypeConstraintCommand::Fill => {
+                TypeConstraintCommand::Suggest | TypeConstraintCommand::With => {
                     let target = match command {
                         TypeConstraintCommand::Suggest => &mut *declared_suggestion,
-                        TypeConstraintCommand::Fill => &mut *declared_fill,
-                        _ => unreachable!("BUG: only Suggest or Fill in this arm"),
+                        TypeConstraintCommand::With => &mut *declared_value,
+                        _ => unreachable!("BUG: only Suggest or With in this arm"),
                     };
                     let (left, right) = require_suggestion_range_endpoints(
                         args,
@@ -2086,7 +2379,7 @@ impl TypeSpecification {
                 }
                 _ => {
                     return Err(format!(
-                        "Invalid command '{}' for number range type. Valid commands: lower, upper, minimum, maximum, help, suggest, fill",
+                        "Invalid command '{}' for number range type. Valid commands: lower, upper, minimum, maximum, help, suggest, with",
                         command
                     ));
                 }
@@ -2160,11 +2453,11 @@ impl TypeSpecification {
                 TypeConstraintCommand::Help => {
                     apply_type_help_command(help, args)?;
                 }
-                TypeConstraintCommand::Suggest | TypeConstraintCommand::Fill => {
+                TypeConstraintCommand::Suggest | TypeConstraintCommand::With => {
                     let (target, cmd) = match command {
                         TypeConstraintCommand::Suggest => (&mut *declared_suggestion, "suggest"),
-                        TypeConstraintCommand::Fill => (&mut *declared_fill, "fill"),
-                        _ => unreachable!("BUG: only Suggest or Fill in this arm"),
+                        TypeConstraintCommand::With => (&mut *declared_value, "with"),
+                        _ => unreachable!("BUG: only Suggest or With in this arm"),
                     };
                     let lit = require_literal(args, cmd)?;
                     reject_calendar_for_suggestion(
@@ -2200,7 +2493,7 @@ impl TypeSpecification {
                 }
                 _ => {
                     return Err(format!(
-                        "Invalid command '{}' for ratio type. Valid commands: unit, minimum, maximum, decimals, help, suggest, fill",
+                        "Invalid command '{}' for ratio type. Valid commands: unit, minimum, maximum, decimals, help, suggest, with",
                         command
                     ));
                 }
@@ -2214,39 +2507,9 @@ impl TypeSpecification {
                 help,
             } => match command {
                 TypeConstraintCommand::Unit => {
-                    let (unit_name, value_dec) = match args {
-                        [CommandArg::Label(name), CommandArg::UnitExpr(crate::parsing::ast::UnitArg::Factor(v))] => {
-                            (name.clone(), *v)
-                        }
-                        _ => {
-                            return Err(
-                                "unit requires a unit name followed by a numeric conversion factor (e.g., 'unit percent 100'). Compound unit expressions are not supported for ratio range types."
-                                    .to_string(),
-                            );
-                        }
-                    };
-                    let value = crate::computation::rational::decimal_to_rational(value_dec)
-                        .map_err(|e| {
-                            format!(
-                                "ratio unit value is not exactly representable as a rational: {e}"
-                            )
-                        })?;
-                    if let Some(existing) = units.0.iter().find(|u| u.name == unit_name) {
-                        if existing.value != value {
-                            return Err(format!(
-                                "Unit '{unit_name}' is already defined in this type's inherited units; \
-                                 cannot change factor. Add a new unit name instead."
-                            ));
-                        }
-                    } else {
-                        units.0.push(RatioUnit {
-                            name: unit_name,
-                            value,
-                            minimum: None,
-                            maximum: None,
-                            suggestion_magnitude: None,
-                        });
-                    }
+                    return Err(format!(
+                        "'unit' is not allowed on 'ratio range' type '{type_name}'. Declare units on a ratio type and write 'data x: <that type> range'."
+                    ));
                 }
                 TypeConstraintCommand::Lower => {
                     *lower = Some(ratio_bound_to_canonical_rational(args, "lower", units)?);
@@ -2267,11 +2530,11 @@ impl TypeSpecification {
                 TypeConstraintCommand::Help => {
                     apply_type_help_command(help, args)?;
                 }
-                TypeConstraintCommand::Suggest | TypeConstraintCommand::Fill => {
+                TypeConstraintCommand::Suggest | TypeConstraintCommand::With => {
                     let target = match command {
                         TypeConstraintCommand::Suggest => &mut *declared_suggestion,
-                        TypeConstraintCommand::Fill => &mut *declared_fill,
-                        _ => unreachable!("BUG: only Suggest or Fill in this arm"),
+                        TypeConstraintCommand::With => &mut *declared_value,
+                        _ => unreachable!("BUG: only Suggest or With in this arm"),
                     };
                     let (left, right) = require_suggestion_range_endpoints(
                         args,
@@ -2304,7 +2567,7 @@ impl TypeSpecification {
                 }
                 _ => {
                     return Err(format!(
-                        "Invalid command '{}' for ratio range type. Valid commands: unit, lower, upper, minimum, maximum, help, suggest, fill",
+                        "Invalid command '{}' for ratio range type. Valid commands: lower, upper, minimum, maximum, help, suggest, with",
                         command
                     ));
                 }
@@ -2334,11 +2597,11 @@ impl TypeSpecification {
                 TypeConstraintCommand::Help => {
                     apply_type_help_command(help, args)?;
                 }
-                TypeConstraintCommand::Suggest | TypeConstraintCommand::Fill => {
+                TypeConstraintCommand::Suggest | TypeConstraintCommand::With => {
                     let (target, cmd) = match command {
                         TypeConstraintCommand::Suggest => (&mut *declared_suggestion, "suggest"),
-                        TypeConstraintCommand::Fill => (&mut *declared_fill, "fill"),
-                        _ => unreachable!("BUG: only Suggest or Fill in this arm"),
+                        TypeConstraintCommand::With => (&mut *declared_value, "with"),
+                        _ => unreachable!("BUG: only Suggest or With in this arm"),
                     };
                     let lit = require_literal(args, cmd)?;
                     reject_calendar_for_suggestion(
@@ -2361,7 +2624,7 @@ impl TypeSpecification {
                 }
                 _ => {
                     return Err(format!(
-                        "Invalid command '{}' for text type. Valid commands: options, length, help, suggest, fill",
+                        "Invalid command '{}' for text type. Valid commands: options, length, help, suggest, with",
                         command
                     ));
                 }
@@ -2382,11 +2645,11 @@ impl TypeSpecification {
                 TypeConstraintCommand::Help => {
                     apply_type_help_command(help, args)?;
                 }
-                TypeConstraintCommand::Suggest | TypeConstraintCommand::Fill => {
+                TypeConstraintCommand::Suggest | TypeConstraintCommand::With => {
                     let (target, cmd) = match command {
                         TypeConstraintCommand::Suggest => (&mut *declared_suggestion, "suggest"),
-                        TypeConstraintCommand::Fill => (&mut *declared_fill, "fill"),
-                        _ => unreachable!("BUG: only Suggest or Fill in this arm"),
+                        TypeConstraintCommand::With => (&mut *declared_value, "with"),
+                        _ => unreachable!("BUG: only Suggest or With in this arm"),
                     };
                     let lit = require_literal(args, cmd)?;
                     reject_calendar_for_suggestion(
@@ -2411,7 +2674,7 @@ impl TypeSpecification {
                 }
                 _ => {
                     return Err(format!(
-                        "Invalid command '{}' for date type. Valid commands: minimum, maximum, help, suggest, fill",
+                        "Invalid command '{}' for date type. Valid commands: minimum, maximum, help, suggest, with",
                         command
                     ));
                 }
@@ -2438,11 +2701,11 @@ impl TypeSpecification {
                 TypeConstraintCommand::Help => {
                     apply_type_help_command(help, args)?;
                 }
-                TypeConstraintCommand::Suggest | TypeConstraintCommand::Fill => {
+                TypeConstraintCommand::Suggest | TypeConstraintCommand::With => {
                     let target = match command {
                         TypeConstraintCommand::Suggest => &mut *declared_suggestion,
-                        TypeConstraintCommand::Fill => &mut *declared_fill,
-                        _ => unreachable!("BUG: only Suggest or Fill in this arm"),
+                        TypeConstraintCommand::With => &mut *declared_value,
+                        _ => unreachable!("BUG: only Suggest or With in this arm"),
                     };
                     let (left, right) = require_suggestion_range_endpoints(
                         args,
@@ -2465,7 +2728,7 @@ impl TypeSpecification {
                 }
                 _ => {
                     return Err(format!(
-                        "Invalid command '{}' for date range type. Valid commands: lower, upper, minimum, maximum, help, suggest, fill",
+                        "Invalid command '{}' for date range type. Valid commands: lower, upper, minimum, maximum, help, suggest, with",
                         command
                     ));
                 }
@@ -2486,11 +2749,11 @@ impl TypeSpecification {
                 TypeConstraintCommand::Help => {
                     apply_type_help_command(help, args)?;
                 }
-                TypeConstraintCommand::Suggest | TypeConstraintCommand::Fill => {
+                TypeConstraintCommand::Suggest | TypeConstraintCommand::With => {
                     let (target, cmd) = match command {
                         TypeConstraintCommand::Suggest => (&mut *declared_suggestion, "suggest"),
-                        TypeConstraintCommand::Fill => (&mut *declared_fill, "fill"),
-                        _ => unreachable!("BUG: only Suggest or Fill in this arm"),
+                        TypeConstraintCommand::With => (&mut *declared_value, "with"),
+                        _ => unreachable!("BUG: only Suggest or With in this arm"),
                     };
                     let lit = require_literal(args, cmd)?;
                     reject_calendar_for_suggestion(
@@ -2514,7 +2777,7 @@ impl TypeSpecification {
                 }
                 _ => {
                     return Err(format!(
-                        "Invalid command '{}' for time type. Valid commands: minimum, maximum, help, suggest, fill",
+                        "Invalid command '{}' for time type. Valid commands: minimum, maximum, help, suggest, with",
                         command
                     ));
                 }
@@ -2541,11 +2804,11 @@ impl TypeSpecification {
                 TypeConstraintCommand::Help => {
                     apply_type_help_command(help, args)?;
                 }
-                TypeConstraintCommand::Suggest | TypeConstraintCommand::Fill => {
+                TypeConstraintCommand::Suggest | TypeConstraintCommand::With => {
                     let target = match command {
                         TypeConstraintCommand::Suggest => &mut *declared_suggestion,
-                        TypeConstraintCommand::Fill => &mut *declared_fill,
-                        _ => unreachable!("BUG: only Suggest or Fill in this arm"),
+                        TypeConstraintCommand::With => &mut *declared_value,
+                        _ => unreachable!("BUG: only Suggest or With in this arm"),
                     };
                     let (left, right) = require_suggestion_range_endpoints(
                         args,
@@ -2568,7 +2831,7 @@ impl TypeSpecification {
                 }
                 _ => {
                     return Err(format!(
-                        "Invalid command '{}' for time range type. Valid commands: lower, upper, minimum, maximum, help, suggest, fill",
+                        "Invalid command '{}' for time range type. Valid commands: lower, upper, minimum, maximum, help, suggest, with",
                         command
                     ));
                 }
@@ -2583,45 +2846,9 @@ impl TypeSpecification {
                 help,
             } => match command {
                 TypeConstraintCommand::Unit => {
-                    let (unit_name, value, derived_measure_factors) = match args {
-                        [CommandArg::Label(name), CommandArg::UnitExpr(crate::parsing::ast::UnitArg::Factor(v))] => {
-                            (name.clone(), *v, Vec::new())
-                        }
-                        [CommandArg::Label(name), CommandArg::UnitExpr(crate::parsing::ast::UnitArg::Expr(
-                            prefix,
-                            factors,
-                        ))] => {
-                            let raw: Vec<(String, i32)> = factors
-                                .iter()
-                                .map(|f| (f.measure_ref.clone(), f.exp))
-                                .collect();
-                            (name.clone(), *prefix, raw)
-                        }
-                        _ => {
-                            return Err(
-                                "unit requires a unit name followed by a conversion factor or compound unit expression (e.g., 'unit eur 1.00' or 'unit mps meter/second')"
-                                    .to_string(),
-                            );
-                        }
-                    };
-                    if let Some(existing) = units.0.iter().find(|u| u.name == unit_name) {
-                        let new_factor = crate::computation::rational::decimal_to_rational(value)
-                            .map_err(|failure| failure.to_string())?;
-                        if existing.factor != new_factor
-                            || existing.derived_measure_factors != derived_measure_factors
-                        {
-                            return Err(format!(
-                                "Unit '{unit_name}' is already defined in this type's inherited units; \
-                                 cannot change factor or decomposition. Add a new unit name instead."
-                            ));
-                        }
-                    } else {
-                        units.0.push(MeasureUnit::from_decimal_factor(
-                            unit_name,
-                            value,
-                            derived_measure_factors,
-                        )?);
-                    }
+                    return Err(format!(
+                        "'unit' is not allowed on 'measure range' type '{type_name}'. Declare units on a measure type and write 'data x: <that type> range'."
+                    ));
                 }
                 TypeConstraintCommand::Lower => {
                     *lower = Some(parse_measure_declared_bound(
@@ -2646,11 +2873,11 @@ impl TypeSpecification {
                 TypeConstraintCommand::Help => {
                     apply_type_help_command(help, args)?;
                 }
-                TypeConstraintCommand::Suggest | TypeConstraintCommand::Fill => {
+                TypeConstraintCommand::Suggest | TypeConstraintCommand::With => {
                     let target = match command {
                         TypeConstraintCommand::Suggest => &mut *declared_suggestion,
-                        TypeConstraintCommand::Fill => &mut *declared_fill,
-                        _ => unreachable!("BUG: only Suggest or Fill in this arm"),
+                        TypeConstraintCommand::With => &mut *declared_value,
+                        _ => unreachable!("BUG: only Suggest or With in this arm"),
                     };
                     let (left, right) = require_suggestion_range_endpoints(
                         args,
@@ -2683,7 +2910,7 @@ impl TypeSpecification {
                 }
                 _ => {
                     return Err(format!(
-                        "Invalid command '{}' for measure range type. Valid commands: unit, lower, upper, minimum, maximum, help, suggest, fill",
+                        "Invalid command '{}' for measure range type. Valid commands: lower, upper, minimum, maximum, help, suggest, with",
                         command
                     ));
                 }
@@ -2705,6 +2932,50 @@ impl TypeSpecification {
                     "Invalid command '{command}' for spec type. A spec instance has no data constraints"
                 ));
             }
+            TypeSpecification::List { element, .. } => match command {
+                TypeConstraintCommand::Help => {
+                    let mut unused_suggestion = None;
+                    let mut unused_value = None;
+                    Arc::make_mut(element).specifications.apply_constraint(
+                        type_name,
+                        command,
+                        args,
+                        &mut unused_suggestion,
+                        &mut unused_value,
+                        resolve_unit,
+                    )?;
+                }
+                TypeConstraintCommand::With => {
+                    let mut rows = match declared_value.take() {
+                        Some(RawSuggestion::List(existing)) => existing,
+                        None => Vec::new(),
+                        Some(other) => unreachable!(
+                            "BUG: list declared value must be RawSuggestion::List, got {other:?}"
+                        ),
+                    };
+                    for arg in args {
+                        let mut row_value = None;
+                        let mut unused_suggestion = None;
+                        Arc::make_mut(element).specifications.apply_constraint(
+                            type_name,
+                            TypeConstraintCommand::With,
+                            std::slice::from_ref(arg),
+                            &mut unused_suggestion,
+                            &mut row_value,
+                            resolve_unit,
+                        )?;
+                        rows.push(
+                            row_value.expect("BUG: -> with on a list row must produce a value"),
+                        );
+                    }
+                    *declared_value = Some(RawSuggestion::List(rows));
+                }
+                other => {
+                    return Err(format!(
+                        "Invalid command '{other}' for list type. Valid commands: with, help"
+                    ));
+                }
+            },
         }
         Ok(())
     }
@@ -2788,23 +3059,53 @@ pub fn parse_value_from_string(
     type_spec: &TypeSpecification,
     source: &Source,
 ) -> Result<crate::parsing::ast::Value, Error> {
+    match type_spec {
+        TypeSpecification::NumberRange { .. }
+        | TypeSpecification::MeasureRange { .. }
+        | TypeSpecification::DateRange { .. }
+        | TypeSpecification::TimeRange { .. }
+        | TypeSpecification::RatioRange { .. } => {
+            let element_spec = range_element_type_specification(type_spec).unwrap_or_else(|| {
+                unreachable!(
+                    "BUG: range_element_type_specification missing arm for known range type"
+                )
+            });
+            parse_range_value_from_string(value_str, &element_spec, source)
+        }
+        _ => parse_scalar_value_from_string(value_str, type_spec, source),
+    }
+}
+
+fn parse_range_value_from_string(
+    value_str: &str,
+    element_spec: &TypeSpecification,
+    source: &Source,
+) -> Result<crate::parsing::ast::Value, Error> {
     use crate::parsing::ast::Value;
 
     let to_err = |msg: String| Error::validation(msg, Some(source.clone()), None::<String>);
 
-    let parse_range_value = |element_spec: TypeSpecification| -> Result<Value, Error> {
-        let (left_str, right_str) = value_str.split_once("...").ok_or_else(|| {
-            to_err("Range value must use '...' between the two endpoints".to_string())
-        })?;
-        if left_str.trim().is_empty() || right_str.trim().is_empty() {
-            return Err(to_err(
-                "Range value must contain a non-empty left and right endpoint".to_string(),
-            ));
-        }
-        let left = parse_value_from_string(left_str.trim(), &element_spec, source)?;
-        let right = parse_value_from_string(right_str.trim(), &element_spec, source)?;
-        Ok(Value::Range(Box::new(left), Box::new(right)))
-    };
+    let (left_str, right_str) = value_str.split_once("...").ok_or_else(|| {
+        to_err("Range value must use '...' between the two endpoints".to_string())
+    })?;
+    if left_str.trim().is_empty() || right_str.trim().is_empty() {
+        return Err(to_err(
+            "Range value must contain a non-empty left and right endpoint".to_string(),
+        ));
+    }
+    let left = parse_scalar_value_from_string(left_str.trim(), element_spec, source)?;
+    let right = parse_scalar_value_from_string(right_str.trim(), element_spec, source)?;
+    Ok(Value::Range(Box::new(left), Box::new(right)))
+}
+
+fn parse_scalar_value_from_string(
+    value_str: &str,
+    type_spec: &TypeSpecification,
+    source: &Source,
+) -> Result<crate::parsing::ast::Value, Error> {
+    use crate::parsing::ast::Value;
+
+    let to_err = |msg: String| Error::validation(msg, Some(source.clone()), None::<String>);
 
     match type_spec {
         TypeSpecification::Text { .. } => value_str
@@ -2838,10 +3139,7 @@ pub fn parse_value_from_string(
         | TypeSpecification::DateRange { .. }
         | TypeSpecification::TimeRange { .. }
         | TypeSpecification::RatioRange { .. } => {
-            let element_spec = range_element_type_specification(type_spec).unwrap_or_else(|| {
-                unreachable!("BUG: range_element_type_specification missing arm for known range type")
-            });
-            parse_range_value(element_spec)
+            unreachable!("BUG: range types are parsed by parse_range_value_from_string")
         }
         TypeSpecification::Veto { .. } => Err(to_err(
             "Veto type cannot be parsed from string".to_string(),
@@ -2850,7 +3148,10 @@ pub fn parse_value_from_string(
             "BUG: parse_value_from_string called with Undetermined sentinel type; this type exists only during type inference"
         ),
         TypeSpecification::Spec { .. } => Err(to_err(
-            "spec values are not run-data scalars".to_string(),
+            "spec values are not evaluation-data scalars".to_string(),
+        )),
+        TypeSpecification::List { .. } => Err(to_err(
+            "list values are not evaluation-data scalars".to_string(),
         )),
     }
 }
@@ -2918,6 +3219,7 @@ pub enum SemanticConversionTarget {
     Unit {
         unit_name: String,
         /// Measure/ratio type resolved in the spec where the conversion was written.
+        #[serde(with = "crate::snapshot::shared::arc")]
         owning_type: Arc<LemmaType>,
     },
 }
@@ -2952,22 +3254,43 @@ impl fmt::Display for SemanticConversionTarget {
     }
 }
 
-/// Timezone for semantic date/time values
+/// Timezone for semantic date/time values: UTC offset in signed whole minutes, same
+/// representation and bounds as [`TimezoneValue`].
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct SemanticTimezone {
-    pub offset_hours: i8,
-    pub offset_minutes: u8,
+    pub offset_minutes: i16,
+}
+
+impl SemanticTimezone {
+    /// `None` when `seconds` is not a whole number of minutes within ±23:59.
+    pub fn from_offset_seconds(seconds: i32) -> Option<Self> {
+        TimezoneValue::from_offset_seconds(seconds).map(|tz| Self::from(&tz))
+    }
+
+    pub fn offset_seconds(&self) -> i32 {
+        i32::from(self.offset_minutes) * 60
+    }
+}
+
+impl From<&TimezoneValue> for SemanticTimezone {
+    fn from(tz: &TimezoneValue) -> Self {
+        Self {
+            offset_minutes: tz.offset_minutes,
+        }
+    }
+}
+
+impl From<&SemanticTimezone> for TimezoneValue {
+    fn from(tz: &SemanticTimezone) -> Self {
+        Self {
+            offset_minutes: tz.offset_minutes,
+        }
+    }
 }
 
 impl fmt::Display for SemanticTimezone {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        if self.offset_hours == 0 && self.offset_minutes == 0 {
-            write!(f, "Z")
-        } else {
-            let sign = if self.offset_hours >= 0 { "+" } else { "-" };
-            let hour = self.offset_hours.abs();
-            write!(f, "{}{:02}:{:02}", sign, hour, self.offset_minutes)
-        }
+        TimezoneValue::from(self).fmt(f)
     }
 }
 
@@ -2988,11 +3311,7 @@ impl FromStr for SemanticTimezone {
     type Err = String;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let tz = TimezoneValue::from_str(s)?;
-        Ok(Self {
-            offset_hours: tz.offset_hours,
-            offset_minutes: tz.offset_minutes,
-        })
+        Ok(Self::from(&TimezoneValue::from_str(s)?))
     }
 }
 
@@ -3117,11 +3436,12 @@ pub enum RawSuggestion {
         value: ValueKind,
         unit_name: String,
     },
+    List(Vec<RawSuggestion>),
 }
 
 /// Canonical suggestion/fill value plus the written measure unit when one was declared.
 ///
-/// `unit` is the unit from `-> suggest 100 inr` / `-> fill 5 eur`; Show
+/// `unit` is the unit from `-> suggest 100 inr` / `-> with 5 eur`; Show
 /// display stamps it so the one-liner matches the written unit, not the type's first unit.
 /// Shared via [`Arc`] so value-table clones bump a refcount instead of allocating.
 /// For ranges this stays `None`; each endpoint carries its own unit on its type.
@@ -3168,30 +3488,69 @@ pub fn bound_value_kind_from_raw_suggestion(
     specifications: &TypeSpecification,
     type_name: &str,
 ) -> Result<BoundValueKind, String> {
-    match raw {
-        RawSuggestion::Value(vk) => Ok(BoundValueKind::unbound(vk)),
-        RawSuggestion::UnitBound { value, unit_name } => Ok(BoundValueKind {
-            value,
-            unit: Some(Arc::from(unit_name)),
-        }),
-        RawSuggestion::Measure {
-            magnitude,
-            unit_name,
-        } => {
-            let TypeSpecification::Measure { units, .. } = specifications else {
-                return Err(format!(
-                    "BUG: RawSuggestion::Measure for non-measure type '{type_name}'"
-                ));
-            };
-            let canonical = measure_declared_bound_to_canonical(
-                &magnitude, &unit_name, units, type_name, "suggest",
-            )?;
-            Ok(BoundValueKind {
-                value: ValueKind::Measure(canonical),
-                unit: Some(Arc::from(unit_name)),
-            })
+    enum Step<'a> {
+        Visit(RawSuggestion, &'a TypeSpecification),
+        CollectList {
+            element: &'a Arc<LemmaType>,
+            rows: usize,
+        },
+    }
+
+    let mut steps = vec![Step::Visit(raw, specifications)];
+    let mut bounds: Vec<BoundValueKind> = Vec::new();
+    while let Some(step) = steps.pop() {
+        match step {
+            Step::Visit(raw, specifications) => match raw {
+                RawSuggestion::Value(vk) => bounds.push(BoundValueKind::unbound(vk)),
+                RawSuggestion::UnitBound { value, unit_name } => bounds.push(BoundValueKind {
+                    value,
+                    unit: Some(Arc::from(unit_name)),
+                }),
+                RawSuggestion::Measure {
+                    magnitude,
+                    unit_name,
+                } => {
+                    let TypeSpecification::Measure { units, .. } = specifications else {
+                        unreachable!(
+                            "BUG: RawSuggestion::Measure for non-measure type '{type_name}'"
+                        );
+                    };
+                    let canonical = measure_declared_bound_to_canonical(
+                        &magnitude, &unit_name, units, type_name, "suggest",
+                    )?;
+                    bounds.push(BoundValueKind {
+                        value: ValueKind::Measure(canonical),
+                        unit: Some(Arc::from(unit_name)),
+                    });
+                }
+                RawSuggestion::List(rows) => {
+                    let TypeSpecification::List { element, .. } = specifications else {
+                        unreachable!("BUG: RawSuggestion::List for non-list type '{type_name}'");
+                    };
+                    steps.push(Step::CollectList {
+                        element,
+                        rows: rows.len(),
+                    });
+                    for row in rows.into_iter().rev() {
+                        steps.push(Step::Visit(row, &element.specifications));
+                    }
+                }
+            },
+            Step::CollectList { element, rows } => {
+                let start = bounds
+                    .len()
+                    .checked_sub(rows)
+                    .expect("BUG: list rows missing from bound stack");
+                let converted: Vec<TypedLiteral> = bounds
+                    .split_off(start)
+                    .iter()
+                    .map(|bound| typed_literal_from_bound(bound, element))
+                    .collect();
+                bounds.push(BoundValueKind::unbound(ValueKind::List(converted)));
+            }
         }
     }
+    Ok(bounds.pop().expect("BUG: bound walk left no result"))
 }
 
 /// Display one-liner unit: `as` / schema > settled > fill > suggest > none (first declared).
@@ -3306,8 +3665,10 @@ pub enum ValueKind {
     Ratio(RationalInteger),
     /// Range endpoints carry their own type (and written unit for measure/ratio).
     Range(Box<TypedLiteral>, Box<TypedLiteral>),
-    /// A spec instance. The prefix is the `uses` path in the consumer plan.
-    Spec(SpecInstance),
+    /// A spec instance: a `uses` path in the consumer plan, or one row of an instance list.
+    Spec(SpecValue),
+    /// Ordered rows of one type. Each row keeps its own type (written unit for measures).
+    List(Vec<TypedLiteral>),
 }
 
 impl ValueKind {
@@ -3342,7 +3703,21 @@ impl ValueKind {
             ValueKind::Range(left, right) => {
                 left.value.structural_byte_size() + 3 + right.value.structural_byte_size()
             }
-            ValueKind::Spec(instance) => instance.structural_byte_size(),
+            ValueKind::Spec(SpecValue::Fixed(instance)) => instance.structural_byte_size(),
+            ValueKind::Spec(SpecValue::Row(row)) => row
+                .bindings
+                .values()
+                .map(|binding| match binding {
+                    crate::computation::OperationResult::Value(bound) => {
+                        bound.value.structural_byte_size()
+                    }
+                    crate::computation::OperationResult::Veto(_) => 0,
+                })
+                .sum(),
+            ValueKind::List(rows) => rows
+                .iter()
+                .map(|row| row.value.structural_byte_size())
+                .sum(),
         }
     }
 }
@@ -3384,15 +3759,22 @@ impl fmt::Display for ValueKind {
                     timezone: t
                         .timezone
                         .as_ref()
-                        .map(|tz| crate::parsing::ast::TimezoneValue {
-                            offset_hours: tz.offset_hours,
-                            offset_minutes: tz.offset_minutes,
-                        }),
+                        .map(crate::parsing::ast::TimezoneValue::from),
                 })
             ),
             ValueKind::Boolean(b) => write!(f, "{}", b),
             ValueKind::Range(left, right) => write!(f, "{}...{}", left, right),
-            ValueKind::Spec(instance) => write!(f, "{instance}"),
+            ValueKind::Spec(value) => write!(f, "{value}"),
+            ValueKind::List(rows) => {
+                write!(f, "list[")?;
+                for (i, row) in rows.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "{row}")?;
+                }
+                write!(f, "]")
+            }
         }
     }
 }
@@ -3451,6 +3833,123 @@ impl fmt::Display for SpecInstance {
     }
 }
 
+/// Value of a spec-typed expression.
+///
+/// `Fixed` is a `uses` instance in the consumer plan. `Row` is one row of an
+/// instance list; it never appears in a plan, only in a request's value table.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum SpecValue {
+    Fixed(SpecInstance),
+    #[serde(skip)]
+    Row(Arc<RowInstance>),
+}
+
+impl fmt::Display for SpecValue {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            SpecValue::Fixed(instance) => write!(f, "{instance}"),
+            SpecValue::Row(row) => write!(f, "{}", row.origin),
+        }
+    }
+}
+
+/// One row of an instance list: its row spec, where it came from, and its bound fields.
+///
+/// `bindings` are keyed by data paths of the row spec's template plan. A field
+/// without a binding reads the template's own default or is missing.
+///
+/// Hashed by value (including nested self-list rows in bindings). Lookup and
+/// Dropping a key walks its nested bindings to their depth, which
+/// [`crate::limits::ResourceLimits::max_list_depth`] bounds before evaluation (default 32). Keying by `Arc` pointer identity would
+/// be cheaper but only safe while every read shares the same `Arc`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RowInstance {
+    pub identity: SpecIdentity,
+    pub origin: RowOrigin,
+    /// Declaration / caller / `-> with` field order (not `DataPath` sort).
+    pub bindings: IndexMap<DataPath, crate::computation::OperationResult>,
+}
+
+impl std::hash::Hash for RowInstance {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.identity.hash(state);
+        self.origin.hash(state);
+        self.bindings.len().hash(state);
+        let mut entries: Vec<_> = self.bindings.iter().collect();
+        entries.sort_by(|(a, _), (b, _)| a.cmp(b));
+        for (path, result) in entries {
+            path.hash(state);
+            result.hash(state);
+        }
+    }
+}
+
+/// Where a row of an instance list came from. Names missing fields and explanations.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum RowOrigin {
+    /// Row `number` (1-based) of list `list`: a source row or a run-data row.
+    Numbered { list: String, number: usize },
+    /// Row appended by an expression `-> with` as row `number` (1-based) of the result.
+    Appended { number: usize },
+}
+
+/// 1-based numbered origin of a list row (`items.2`).
+#[must_use]
+pub fn numbered_row_origin(list_key: &str, number: usize) -> String {
+    format!("{list_key}.{number}")
+}
+
+/// Input key of a field of a numbered list row (`items.2.weight`).
+#[must_use]
+pub fn row_field_input_key(list_key: &str, number: usize, field_key: &str) -> String {
+    format!("{}.{field_key}", numbered_row_origin(list_key, number))
+}
+
+impl fmt::Display for RowOrigin {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            RowOrigin::Numbered { list, number } => {
+                write!(f, "{}", numbered_row_origin(list, *number))
+            }
+            RowOrigin::Appended { number } => write!(f, "appended row {number}"),
+        }
+    }
+}
+
+/// One evaluated instance-list row as a typed literal.
+#[must_use]
+pub fn row_literal(
+    identity: SpecIdentity,
+    origin: RowOrigin,
+    bindings: IndexMap<DataPath, crate::computation::OperationResult>,
+    lemma_type: Arc<LemmaType>,
+) -> TypedLiteral {
+    TypedLiteral {
+        value: ValueKind::Spec(SpecValue::Row(Arc::new(RowInstance {
+            identity,
+            origin,
+            bindings,
+        }))),
+        lemma_type,
+    }
+}
+
+/// Field of a row read through the row spec's template plan.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum RowEnd {
+    Data(DataPath),
+    Rule(RulePath),
+}
+
+impl fmt::Display for RowEnd {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            RowEnd::Data(path) => write!(f, "{}", path.input_key()),
+            RowEnd::Rule(path) => write!(f, "{}", path.input_key()),
+        }
+    }
+}
+
 /// Where a field read on one candidate instance lands.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SpecMemberEnd {
@@ -3495,15 +3994,26 @@ impl DataPath {
         }
     }
 
+    /// Alias hops then the data name: the segments of [`Self::input_key`].
+    pub fn input_key_segments(&self) -> impl Iterator<Item = &str> {
+        self.segments
+            .iter()
+            .map(|segment| segment.uses.as_str())
+            .chain(std::iter::once(self.data.as_str()))
+    }
+
     /// Dot-separated key used for matching user-provided data values (e.g. `"order.payment_method"`).
     /// Same string as [`Display`]: alias hops only, no repository or spec names.
     pub fn input_key(&self) -> String {
-        let mut s = String::new();
-        for segment in &self.segments {
-            s.push_str(&segment.uses);
+        let mut segments = self.input_key_segments();
+        let mut s = segments
+            .next()
+            .expect("BUG: DataPath always has a data name segment")
+            .to_string();
+        for segment in segments {
             s.push('.');
+            s.push_str(segment);
         }
-        s.push_str(&self.data);
         s
     }
 }
@@ -3549,26 +4059,11 @@ impl RulePath {
 ///
 /// Created during planning from AST Expression. All unresolved references
 /// are converted to DataPath/RulePath, and all literals are typed.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct Expression {
-    pub kind: ExpressionKind,
-    pub source_location: Option<Source>,
-}
-
-impl Expression {
-    /// Create an expression with an optional source location.
-    pub fn with_source(kind: ExpressionKind, source_location: Option<Source>) -> Self {
-        Self {
-            kind,
-            source_location,
-        }
-    }
-
-    /// Collect all DataPath references from this resolved expression tree
-    pub fn collect_data_paths(&self, data: &mut std::collections::HashSet<DataPath>) {
-        self.kind.collect_data_paths(data);
-    }
-}
+/// Resolved expression tree (all references resolved to paths, all literals typed).
+///
+/// Nodes live in a flat table and reference children by [`ExprId`]. Created during
+/// planning from the AST; all unresolved references are converted to DataPath/RulePath.
+pub type Expression = ExprTree<ExpressionKind>;
 
 /// Resolved expression kind (only resolved variants, no unresolved references)
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -3580,86 +4075,250 @@ pub enum ExpressionKind {
     DataPath(DataPath),
     /// Resolved rule path
     RulePath(RulePath),
-    LogicalAnd(Arc<Expression>, Arc<Expression>),
-    Arithmetic(Arc<Expression>, ArithmeticComputation, Arc<Expression>),
-    Comparison(Arc<Expression>, ComparisonComputation, Arc<Expression>),
-    UnitConversion(Arc<Expression>, SemanticConversionTarget),
-    LogicalNegation(Arc<Expression>, NegationType),
-    MathematicalComputation(MathematicalComputation, Arc<Expression>),
+    /// `first and steps[0].operand and ...`, operands in source order.
+    LogicalAnd {
+        first: ExprId,
+        steps: Vec<ChainStep<()>>,
+    },
+    /// Left fold of `first` over `steps`; every step's operator has one precedence level.
+    Arithmetic {
+        first: ExprId,
+        steps: Vec<ChainStep<ArithmeticComputation>>,
+    },
+    Comparison(ExprId, ComparisonComputation, ExprId),
+    UnitConversion(ExprId, SemanticConversionTarget),
+    LogicalNegation(ExprId, NegationType),
+    MathematicalComputation(MathematicalComputation, ExprId),
     Veto(VetoExpression),
     /// The `now` keyword — resolved at evaluation to the effective datetime.
     Now,
     /// Date-relative sugar: `<date_expr> in past` / `in future`
-    DateRelative(DateRelativeKind, Arc<Expression>),
+    DateRelative(DateRelativeKind, ExprId),
     /// Calendar-period sugar: `<date_expr> in [past|future] calendar year|month|week`
-    DateCalendar(DateCalendarKind, CalendarPeriodUnit, Arc<Expression>),
-    RangeLiteral(Arc<Expression>, Arc<Expression>),
-    PastFutureRange(DateRelativeKind, Arc<Expression>),
-    RangeContainment(Arc<Expression>, Arc<Expression>),
+    DateCalendar(DateCalendarKind, CalendarPeriodUnit, ExprId),
+    RangeLiteral(ExprId, ExprId),
+    PastFutureRange(DateRelativeKind, ExprId),
+    RangeContainment(ExprId, ExprId),
     /// Ordered endpoint of a range (`lower` included, `upper` excluded).
-    RangeBound(RangeBound, Arc<Expression>),
+    RangeBound(RangeBound, ExprId),
     /// Whether evaluating the operand produced a veto (no value). Parses as `is veto` syntax.
-    ResultIsVeto(Arc<Expression>),
-    /// Field of a spec-valued rule: `top_bracket.tax`, or `top_bracket.finance.fee`.
+    ResultIsVeto(ExprId),
+    /// Field of a spec value: `top_bracket.tax`, `top_bracket.finance.fee`, or
+    /// `(staff -> first).bonus`.
     ///
-    /// `targets` is filled after candidate instances of `base` are known. Each
-    /// target is one instance the base can yield.
+    /// `targets` is filled after candidate `uses` instances of `base` are known. Each
+    /// target is one fixed instance the base can yield. A base that yields list rows
+    /// reads the field through the row spec's template plan instead.
     SpecMember {
-        base: RulePath,
+        base: ExprId,
         path: Vec<String>,
         name: String,
         targets: Vec<SpecMemberTarget>,
     },
+    /// Field of the current row of the list command at `level` (0 = outermost).
+    RowField {
+        level: u32,
+        identity: SpecIdentity,
+        end: RowEnd,
+    },
     /// Unless structure: (condition, result) pairs in source order; last true condition wins.
     /// First arm is the default (condition is always-true literal).
-    Piecewise(Vec<(Arc<Expression>, Arc<Expression>)>),
+    Piecewise(Vec<(ExprId, ExprId)>),
+    /// `row_level` is set when the list holds instance rows: arguments read the
+    /// current row through [`Self::RowField`] at that level.
+    ListCommand {
+        list: ExprId,
+        op: ListOp,
+        row_level: Option<u32>,
+    },
 }
 
-impl ExpressionKind {
-    /// Collect all DataPath references from this expression kind
-    pub(crate) fn collect_data_paths(&self, data: &mut std::collections::HashSet<DataPath>) {
+/// Planned postfix list command.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum ListOp {
+    Find {
+        keys: Vec<ExprId>,
+    },
+    First,
+    Last,
+    Count,
+    Reduce {
+        kind: ListReduce,
+        argument: Option<ExprId>,
+    },
+    Predicate {
+        kind: ListPredKind,
+        op: crate::parsing::ast::RowCondition,
+        right: ExprId,
+    },
+    InstancePredicate {
+        kind: ListPredKind,
+        expr: ExprId,
+    },
+    Sort {
+        descending: bool,
+        argument: Option<ExprId>,
+    },
+    Top {
+        n: ExprId,
+    },
+    With {
+        rows: Vec<ExprId>,
+    },
+    /// Append one instance row; each field is a row-spec data path and its value.
+    WithRow {
+        fields: Vec<(DataPath, ExprId)>,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum ListReduce {
+    Sum,
+    Avg,
+    Product,
+    Min,
+    Max,
+}
+
+impl ListReduce {
+    pub fn keyword(self) -> &'static str {
         match self {
-            ExpressionKind::DataPath(fp) => {
-                data.insert(fp.clone());
+            ListReduce::Sum => "sum",
+            ListReduce::Avg => "avg",
+            ListReduce::Product => "product",
+            ListReduce::Min => "min",
+            ListReduce::Max => "max",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum ListPredKind {
+    Any,
+    All,
+    Where,
+}
+
+impl ListPredKind {
+    pub fn keyword(self) -> &'static str {
+        match self {
+            ListPredKind::Any => "any",
+            ListPredKind::All => "all",
+            ListPredKind::Where => "where",
+        }
+    }
+}
+
+impl ExprKind for ExpressionKind {
+    fn for_each_child(&self, mut f: impl FnMut(ExprId)) {
+        match self {
+            ExpressionKind::Literal(_)
+            | ExpressionKind::DataPath(_)
+            | ExpressionKind::RulePath(_)
+            | ExpressionKind::Veto(_)
+            | ExpressionKind::Now
+            | ExpressionKind::RowField { .. } => {}
+            ExpressionKind::LogicalAnd { first, steps } => {
+                f(*first);
+                steps.iter().for_each(|step| f(step.operand));
             }
-            ExpressionKind::LogicalAnd(left, right) => {
-                left.collect_data_paths(data);
-                right.collect_data_paths(data);
+            ExpressionKind::Arithmetic { first, steps } => {
+                f(*first);
+                steps.iter().for_each(|step| f(step.operand));
             }
-            ExpressionKind::Arithmetic(left, _, right)
-            | ExpressionKind::Comparison(left, _, right)
+            ExpressionKind::Comparison(left, _, right)
             | ExpressionKind::RangeLiteral(left, right)
             | ExpressionKind::RangeContainment(left, right) => {
-                left.collect_data_paths(data);
-                right.collect_data_paths(data);
+                f(*left);
+                f(*right);
             }
             ExpressionKind::UnitConversion(inner, _)
             | ExpressionKind::LogicalNegation(inner, _)
             | ExpressionKind::MathematicalComputation(_, inner)
+            | ExpressionKind::DateRelative(_, inner)
+            | ExpressionKind::DateCalendar(_, _, inner)
             | ExpressionKind::PastFutureRange(_, inner)
-            | ExpressionKind::RangeBound(_, inner) => {
-                inner.collect_data_paths(data);
+            | ExpressionKind::RangeBound(_, inner)
+            | ExpressionKind::ResultIsVeto(inner)
+            | ExpressionKind::SpecMember { base: inner, .. } => f(*inner),
+            ExpressionKind::Piecewise(arms) => arms.iter().for_each(|(condition, result)| {
+                f(*condition);
+                f(*result);
+            }),
+            ExpressionKind::ListCommand { list, op, .. } => {
+                f(*list);
+                op.for_each_child(f);
             }
-            ExpressionKind::DateRelative(_, date_expr) => {
-                date_expr.collect_data_paths(data);
-            }
-            ExpressionKind::DateCalendar(_, _, date_expr) => {
-                date_expr.collect_data_paths(data);
-            }
+        }
+    }
+
+    fn children_mut(&mut self) -> Vec<&mut ExprId> {
+        match self {
             ExpressionKind::Literal(_)
+            | ExpressionKind::DataPath(_)
             | ExpressionKind::RulePath(_)
             | ExpressionKind::Veto(_)
             | ExpressionKind::Now
-            | ExpressionKind::SpecMember { .. } => {}
-            ExpressionKind::ResultIsVeto(operand) => {
-                operand.collect_data_paths(data);
+            | ExpressionKind::RowField { .. } => Vec::new(),
+            ExpressionKind::LogicalAnd { first, steps } => std::iter::once(first)
+                .chain(steps.iter_mut().map(|step| &mut step.operand))
+                .collect(),
+            ExpressionKind::Arithmetic { first, steps } => std::iter::once(first)
+                .chain(steps.iter_mut().map(|step| &mut step.operand))
+                .collect(),
+            ExpressionKind::Comparison(left, _, right)
+            | ExpressionKind::RangeLiteral(left, right)
+            | ExpressionKind::RangeContainment(left, right) => vec![left, right],
+            ExpressionKind::UnitConversion(inner, _)
+            | ExpressionKind::LogicalNegation(inner, _)
+            | ExpressionKind::MathematicalComputation(_, inner)
+            | ExpressionKind::DateRelative(_, inner)
+            | ExpressionKind::DateCalendar(_, _, inner)
+            | ExpressionKind::PastFutureRange(_, inner)
+            | ExpressionKind::RangeBound(_, inner)
+            | ExpressionKind::ResultIsVeto(inner) => vec![inner],
+            ExpressionKind::SpecMember { base, .. } => vec![base],
+            ExpressionKind::Piecewise(arms) => arms
+                .iter_mut()
+                .flat_map(|(condition, result)| [condition, result])
+                .collect(),
+            ExpressionKind::ListCommand { list, op, .. } => {
+                let mut children = vec![list];
+                children.extend(op.children_mut());
+                children
             }
-            ExpressionKind::Piecewise(arms) => {
-                for (condition, result) in arms {
-                    condition.collect_data_paths(data);
-                    result.collect_data_paths(data);
-                }
+        }
+    }
+}
+
+impl ListOp {
+    fn for_each_child(&self, mut f: impl FnMut(ExprId)) {
+        match self {
+            ListOp::First | ListOp::Last | ListOp::Count => {}
+            ListOp::Find { keys } => keys.iter().copied().for_each(f),
+            ListOp::Reduce { argument, .. } | ListOp::Sort { argument, .. } => {
+                argument.iter().copied().for_each(f)
             }
+            ListOp::Predicate { right, .. } => f(*right),
+            ListOp::InstancePredicate { expr, .. } => f(*expr),
+            ListOp::Top { n } => f(*n),
+            ListOp::With { rows } => rows.iter().copied().for_each(f),
+            ListOp::WithRow { fields } => fields.iter().for_each(|(_, value)| f(*value)),
+        }
+    }
+
+    fn children_mut(&mut self) -> Vec<&mut ExprId> {
+        match self {
+            ListOp::First | ListOp::Last | ListOp::Count => Vec::new(),
+            ListOp::Find { keys } => keys.iter_mut().collect(),
+            ListOp::Reduce { argument, .. } | ListOp::Sort { argument, .. } => {
+                argument.iter_mut().collect()
+            }
+            ListOp::Predicate { right, .. } => vec![right],
+            ListOp::InstancePredicate { expr, .. } => vec![expr],
+            ListOp::Top { n } => vec![n],
+            ListOp::With { rows } => rows.iter_mut().collect(),
+            ListOp::WithRow { fields } => fields.iter_mut().map(|(_, value)| value).collect(),
         }
     }
 }
@@ -3677,16 +4336,75 @@ pub enum TypeDefiningSpec {
     Import,
 }
 
+/// Root of a custom type's extension chain: the spec version that declares the root type,
+/// and its name. Types share a unit family only when they share this root declaration;
+/// a local `money` and an imported `pricing.money` are different families. Two versions
+/// of `pricing` declare different `pricing <date>.money` families; values from different
+/// versions do not mix. Interface drift across unpinned versions compares structure with
+/// [`LemmaType::same_interface`], which ignores the family's effective date.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct TypeFamily {
+    pub repository: Option<String>,
+    pub spec: String,
+    pub effective: crate::parsing::ast::EffectiveDate,
+    pub name: String,
+}
+
+impl TypeFamily {
+    #[must_use]
+    pub fn declared_in(spec: &SpecIdentity, name: &str) -> Self {
+        Self {
+            repository: spec.repository.clone(),
+            spec: spec.spec.clone(),
+            effective: spec.effective.clone(),
+            name: name.to_string(),
+        }
+    }
+
+    /// Whether `spec` (this exact version) declares this family's root.
+    #[must_use]
+    pub fn is_declared_in(&self, spec: &SpecIdentity) -> bool {
+        self.repository == spec.repository
+            && self.spec == spec.spec
+            && self.effective == spec.effective
+    }
+
+    /// Family identity with the version erased (interface comparisons only).
+    #[must_use]
+    pub fn without_effective(&self) -> Self {
+        Self {
+            repository: self.repository.clone(),
+            spec: self.spec.clone(),
+            effective: crate::parsing::ast::EffectiveDate::Origin,
+            name: self.name.clone(),
+        }
+    }
+}
+
+/// `[<repo> ]<spec>[ <date>].<type>`: the root type named with its declaring spec version.
+impl fmt::Display for TypeFamily {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if let Some(repository) = &self.repository {
+            write!(f, "{repository} ")?;
+        }
+        write!(f, "{}", self.spec)?;
+        if let crate::parsing::ast::EffectiveDate::DateTimeValue(at) = &self.effective {
+            write!(f, " {at}")?;
+        }
+        write!(f, ".{}", self.name)
+    }
+}
+
 /// What this type extends (primitive built-in or custom type by name).
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum TypeExtends {
     /// Extends a primitive built-in type (number, boolean, text, etc.)
     Primitive,
-    /// Extends a custom type: parent is the immediate parent type name; family is the root of the extension chain (topmost custom type name).
+    /// Extends a custom type: parent is the immediate parent type name; family is the root of the extension chain.
     /// `defining_spec` records whether the parent chain is local or imported from another spec.
     Custom {
         parent: String,
-        family: String,
+        family: TypeFamily,
         defining_spec: TypeDefiningSpec,
     },
 }
@@ -3737,7 +4455,7 @@ impl std::hash::Hash for TypeExtends {
 impl TypeExtends {
     /// Custom extension in the same spec as the defining type (no cross-spec import for the parent chain).
     #[must_use]
-    pub fn custom_local(parent: String, family: String) -> Self {
+    pub fn custom_local(parent: String, family: TypeFamily) -> Self {
         TypeExtends::Custom {
             parent,
             family,
@@ -3751,6 +4469,22 @@ impl TypeExtends {
         match self {
             TypeExtends::Primitive => None,
             TypeExtends::Custom { parent, .. } => Some(parent.as_str()),
+        }
+    }
+
+    #[must_use]
+    fn with_families_without_effective(&self) -> Self {
+        match self {
+            TypeExtends::Primitive => TypeExtends::Primitive,
+            TypeExtends::Custom {
+                parent,
+                family,
+                defining_spec,
+            } => TypeExtends::Custom {
+                parent: parent.clone(),
+                family: family.without_effective(),
+                defining_spec: defining_spec.clone(),
+            },
         }
     }
 }
@@ -4032,6 +4766,39 @@ impl LemmaType {
         matches!(&self.specifications, TypeSpecification::Spec { .. })
     }
 
+    pub fn is_list(&self) -> bool {
+        matches!(&self.specifications, TypeSpecification::List { .. })
+    }
+
+    pub fn list_element_spec(&self) -> Option<&TypeSpecification> {
+        match &self.specifications {
+            TypeSpecification::List { element, .. } => Some(&element.specifications),
+            _ => None,
+        }
+    }
+
+    pub fn list_of(element: Arc<LemmaType>) -> Self {
+        Self {
+            name: Some(format!("{} list", element.name())),
+            specifications: TypeSpecification::List {
+                element,
+                key: ListKey::Numbered,
+            },
+            extends: TypeExtends::Primitive,
+        }
+    }
+
+    /// Element type of a list type (`money` for `money list`).
+    pub fn list_element_lemma_type(&self) -> &Arc<LemmaType> {
+        let TypeSpecification::List { element, .. } = &self.specifications else {
+            panic!(
+                "BUG: list_element_lemma_type on non-list type {}",
+                self.name()
+            );
+        };
+        element
+    }
+
     /// Spec identity when this type is a spec instance.
     #[must_use]
     pub fn spec_identity(&self) -> Option<&SpecIdentity> {
@@ -4071,38 +4838,47 @@ impl LemmaType {
                 | (Veto { .. }, Veto { .. })
                 | (Undetermined, Undetermined)
                 | (Spec { .. }, Spec { .. })
+                | (List { .. }, List { .. })
         )
     }
 
-    /// For measure types, returns the family name (root of the extension chain). For Custom extends, returns the family field; for Primitive, returns the type's own name (the type is the root). For non-measure types, returns None.
+    /// Root of the custom extension chain; `None` for primitive and anonymous types.
+    #[must_use]
+    pub fn family(&self) -> Option<&TypeFamily> {
+        match &self.extends {
+            TypeExtends::Custom { family, .. } => Some(family),
+            TypeExtends::Primitive => None,
+        }
+    }
+
+    /// Unit family of a measure type.
+    #[must_use]
+    pub fn measure_family(&self) -> Option<&TypeFamily> {
+        self.is_measure().then(|| self.family()).flatten()
+    }
+
+    /// Unit family of a ratio type.
+    #[must_use]
+    pub fn ratio_family(&self) -> Option<&TypeFamily> {
+        self.is_ratio().then(|| self.family()).flatten()
+    }
+
+    /// Unit family of a measure or ratio type.
+    #[must_use]
+    pub(crate) fn unit_family(&self) -> Option<&TypeFamily> {
+        self.measure_family().or_else(|| self.ratio_family())
+    }
+
+    /// Root type name of [`Self::measure_family`], for display.
     #[must_use]
     pub fn measure_family_name(&self) -> Option<&str> {
-        if !self.is_measure() {
-            return None;
-        }
-        match &self.extends {
-            TypeExtends::Custom { family, .. } => Some(family.as_str()),
-            TypeExtends::Primitive => self.name.as_deref(),
-        }
+        self.measure_family().map(|family| family.name.as_str())
     }
 
-    /// For ratio types, returns the family name (root of the extension chain).
+    /// Root type name of [`Self::ratio_family`], for display.
     #[must_use]
     pub fn ratio_family_name(&self) -> Option<&str> {
-        if !self.is_ratio() {
-            return None;
-        }
-        match &self.extends {
-            TypeExtends::Custom { family, .. } => Some(family.as_str()),
-            TypeExtends::Primitive => self.name.as_deref(),
-        }
-    }
-
-    /// Measure or ratio family root name.
-    #[must_use]
-    pub(crate) fn unit_family_name(&self) -> Option<&str> {
-        self.measure_family_name()
-            .or_else(|| self.ratio_family_name())
+        self.ratio_family().map(|family| family.name.as_str())
     }
 
     /// Same base kind and, for measures / measure ranges, the same dimensions:
@@ -4122,6 +4898,19 @@ impl LemmaType {
         ) = (&self.specifications, &other.specifications)
         {
             return self_spec == other_spec;
+        }
+        if let (
+            TypeSpecification::List {
+                element: self_element,
+                key: self_key,
+            },
+            TypeSpecification::List {
+                element: other_element,
+                key: other_key,
+            },
+        ) = (&self.specifications, &other.specifications)
+        {
+            return self_key == other_key && self_element.same_value_type(other_element);
         }
         if self.is_measure_range() {
             let self_element = self
@@ -4156,9 +4945,27 @@ impl LemmaType {
         if !self.is_measure() || !other.is_measure() {
             return false;
         }
-        match (self.measure_family_name(), other.measure_family_name()) {
+        match (self.measure_family(), other.measure_family()) {
             (Some(self_family), Some(other_family)) => self_family == other_family,
             _ => false,
+        }
+    }
+
+    /// Structural equality for interface drift: same as [`PartialEq`] but family
+    /// versions (`TypeFamily::effective`) are ignored. Unpinned imports spanning
+    /// unchanged versions of a dependency compare equal; real changes still differ.
+    #[must_use]
+    pub fn same_interface(&self, other: &Self) -> bool {
+        self.with_families_without_effective() == other.with_families_without_effective()
+    }
+
+    /// Clone with every [`TypeFamily::effective`] set to [`EffectiveDate::Origin`].
+    #[must_use]
+    pub fn with_families_without_effective(&self) -> Self {
+        Self {
+            name: self.name.clone(),
+            specifications: self.specifications.with_families_without_effective(),
+            extends: self.extends.with_families_without_effective(),
         }
     }
 
@@ -4277,6 +5084,7 @@ impl LemmaType {
             TypeSpecification::Spec { .. } => unreachable!(
                 "BUG: example_value called on a spec type; spec instances are not prompted data"
             ),
+            TypeSpecification::List { element, .. } => element.example_value(),
         }
     }
 
@@ -4319,10 +5127,11 @@ impl LemmaType {
                 if let Some(first) = units.iter().next() {
                     return vec![(first.name.clone(), 1)];
                 }
-                decomposition
-                    .as_ref()
-                    .map(base_measure_vector_as_signature)
-                    .unwrap_or_default()
+                base_measure_vector_as_signature(
+                    decomposition
+                        .as_ref()
+                        .expect("BUG: measure type without units must carry a decomposition"),
+                )
             }
             TypeSpecification::MeasureRange {
                 units,
@@ -4335,10 +5144,11 @@ impl LemmaType {
                 if let Some(first) = units.iter().next() {
                     return vec![(first.name.clone(), 1)];
                 }
-                decomposition
-                    .as_ref()
-                    .map(base_measure_vector_as_signature)
-                    .unwrap_or_default()
+                base_measure_vector_as_signature(
+                    decomposition
+                        .as_ref()
+                        .expect("BUG: measure type without units must carry a decomposition"),
+                )
             }
             _ => unreachable!(
                 "BUG: measure_runtime_signature called on non-measure type {}",
@@ -4442,7 +5252,7 @@ impl LemmaType {
         format!("Data {}: {}", self.label_for_data_input(input_key), detail)
     }
 
-    /// Whether an empty [`RunDataValue`] should veto before parse (text may accept `""`).
+    /// Whether an empty [`EvaluateDataValue`] should veto before parse (text may accept `""`).
     #[must_use]
     pub fn empty_runtime_input_vetoes(&self) -> bool {
         !matches!(self.specifications, TypeSpecification::Text { .. })
@@ -4690,6 +5500,7 @@ impl LiteralValue {
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct TypedLiteral {
     pub value: ValueKind,
+    #[serde(with = "crate::snapshot::shared::arc")]
     pub lemma_type: Arc<LemmaType>,
 }
 
@@ -4745,88 +5556,6 @@ impl LiteralValue {
         }
     }
 
-    /// Type arg ignored — type lives on the node / caller.
-    pub fn measure_with_type(n: RationalInteger, _lemma_type: Arc<LemmaType>) -> Self {
-        Self::measure(n)
-    }
-
-    pub fn measure_with_bound_unit(
-        n: RationalInteger,
-        _unit_name: impl Into<String>,
-        _lemma_type: Arc<LemmaType>,
-    ) -> Self {
-        Self::measure(n)
-    }
-
-    pub fn measure_with_signature(n: RationalInteger, _lemma_type: Arc<LemmaType>) -> Self {
-        Self::measure(n)
-    }
-
-    pub fn number_with_type(n: RationalInteger, _lemma_type: Arc<LemmaType>) -> Self {
-        Self::number(n)
-    }
-
-    pub fn number_with_type_from_decimal(decimal: Decimal, _lemma_type: Arc<LemmaType>) -> Self {
-        Self::number_from_decimal(decimal)
-    }
-
-    pub fn ratio_with_type(r: RationalInteger, _lemma_type: Arc<LemmaType>) -> Self {
-        Self::ratio(r)
-    }
-
-    pub fn ratio_with_bound_unit(
-        r: RationalInteger,
-        _unit_name: impl Into<String>,
-        _lemma_type: Arc<LemmaType>,
-    ) -> Self {
-        Self::ratio(r)
-    }
-
-    pub fn text_with_type(s: String, _lemma_type: Arc<LemmaType>) -> Self {
-        Self::text(s)
-    }
-
-    pub fn date_with_type(dt: SemanticDateTime, _lemma_type: Arc<LemmaType>) -> Self {
-        Self::date(dt)
-    }
-
-    pub fn time_with_type(t: SemanticTime, _lemma_type: Arc<LemmaType>) -> Self {
-        Self::time(t)
-    }
-
-    pub fn calendar(
-        value: RationalInteger,
-        _unit: SemanticCalendarUnit,
-        _lemma_type: Arc<LemmaType>,
-    ) -> Self {
-        Self::measure(value)
-    }
-
-    pub fn calendar_from_decimal(
-        value: Decimal,
-        unit: SemanticCalendarUnit,
-        lemma_type: Arc<LemmaType>,
-    ) -> Self {
-        Self::calendar(
-            crate::literals::rational_from_parsed_decimal(value)
-                .expect("BUG: calendar literal from decimal must lift at boundary"),
-            unit,
-            lemma_type,
-        )
-    }
-
-    pub fn calendar_with_type(
-        value: RationalInteger,
-        unit: SemanticCalendarUnit,
-        lemma_type: Arc<LemmaType>,
-    ) -> Self {
-        Self::calendar(value, unit, lemma_type)
-    }
-
-    pub fn number_interpreted_as_measure(value: RationalInteger, _unit_name: String) -> Self {
-        Self::measure(value)
-    }
-
     pub fn from_bool(b: bool) -> Self {
         Self {
             value: ValueKind::Boolean(b),
@@ -4875,6 +5604,11 @@ impl LiteralValue {
             ValueKind::Range(left, right) => {
                 format!("{}...{}", left.display_value(), right.display_value())
             }
+            ValueKind::List(rows) => rows
+                .iter()
+                .map(|row| row.display_value())
+                .collect::<Vec<_>>()
+                .join(", "),
             _ => format!("{}", self.value),
         }
     }
@@ -4890,6 +5624,11 @@ impl LiteralValue {
             ValueKind::Range(left, right) => {
                 format!("{}...{}", left.display_value(), right.display_value())
             }
+            ValueKind::List(rows) => rows
+                .iter()
+                .map(|row| row.display_value())
+                .collect::<Vec<_>>()
+                .join(", "),
             _ => format!("{}", self.value),
         }
     }
@@ -5104,18 +5843,11 @@ impl TypedLiteral {
         }
     }
 
-    /// Number interpreted as a measure value in the given unit.
-    pub fn number_interpreted_as_measure(value: RationalInteger, unit_name: String) -> Self {
-        let lemma_type = if unit_name.is_empty() {
-            Arc::new(anonymous_measure_type())
-        } else {
-            let mut decomp = BaseMeasureVector::new();
-            decomp.insert(unit_name, 1);
-            Arc::new(LemmaType::anonymous_for_decomposition(decomp))
-        };
+    /// Unit literal outside a measure type context: no family, so no dimensions.
+    pub fn number_interpreted_as_measure(value: RationalInteger) -> Self {
         Self {
             value: ValueKind::Measure(value),
-            lemma_type,
+            lemma_type: Arc::new(anonymous_measure_type()),
         }
     }
 
@@ -5267,6 +5999,19 @@ pub enum ReferenceTarget {
     Rule(RulePath),
 }
 
+/// One site binding on a named `uses` import (`-> with` or path-fill).
+///
+/// Keys live on [`DataDefinition::Import::overlay`] as paths local to the imported
+/// spec. Literals are defaults (run data may override); references are wiring.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum ImportOverlay {
+    Literal(BoundValueKind),
+    Reference {
+        target: ReferenceTarget,
+        constraints: Option<Vec<Constraint>>,
+    },
+}
+
 /// Where a [`DataDefinition::Reference`] chain ends. Computed once per slice in
 /// [`crate::planning::graph::Graph::validate`] after `compute_data_reference_order`
 /// rejected cycles.
@@ -5283,6 +6028,7 @@ pub enum DataDefinition {
     /// Value-holding data: current literal (spec or `with` binding).
     Value {
         value: LiteralValue,
+        #[serde(with = "crate::snapshot::shared::arc")]
         resolved_type: Arc<LemmaType>,
         source: Source,
     },
@@ -5292,19 +6038,30 @@ pub enum DataDefinition {
     /// uses it instead of re-deriving suggestions from [`TypeSpecification`].
     /// The evaluator never commits a suggestion — unbound stays MissingData.
     TypeDeclaration {
+        #[serde(with = "crate::snapshot::shared::arc")]
         resolved_type: Arc<LemmaType>,
         declared_suggestion: Option<BoundValueKind>,
-        declared_fill: Option<BoundValueKind>,
+        declared_value: Option<BoundValueKind>,
         source: Source,
     },
-    /// Import (`uses`): alias for another spec; nested members are flattened onto the plan.
+    /// Import (`uses`): alias for another spec.
     ///
-    /// `repository` and `effective` are the resolved row, so a rule can return this
-    /// alias as a spec value.
+    /// The imported body is the [`crate::planning::execution_plan::ExecutionPlan`]
+    /// template keyed by [`Self::Import::identity`] (same store as instance-list
+    /// row templates). Site `-> with` / path-fill bindings live in [`Self::Import::overlay`]
+    /// (keys local to the imported spec); they never rewrite the shared template.
     Import {
-        target_name: String,
-        repository: Option<String>,
-        effective: crate::parsing::ast::EffectiveDate,
+        identity: SpecIdentity,
+        /// Local data paths on the imported spec → site binding.
+        overlay: IndexMap<DataPath, ImportOverlay>,
+        source: Source,
+    },
+    /// Instance list (`uses x: spec list`). `resolved_type` is the list type.
+    /// Rows live in [`crate::planning::execution_plan::ExecutionPlan::instance_lists`];
+    /// evaluation builds the list value from them unless run data replaces it.
+    InstanceList {
+        #[serde(with = "crate::snapshot::shared::arc")]
+        resolved_type: Arc<LemmaType>,
         source: Source,
     },
     /// Value-copy reference to another data or a rule result.
@@ -5329,14 +6086,15 @@ pub enum DataDefinition {
     /// stays MissingData.
     ///
     /// The reference itself is evaluated by copying the target's value (data path)
-    /// or the target rule's result in topological order; caller values in
-    /// [`crate::evaluation::run_data::RunData`] override the reference.
+    /// or the target rule's result in topological order. It is wiring, not input:
+    /// [`crate::evaluation::evaluate_data::EvaluateData`] naming it is a request Error.
     Reference {
         target: ReferenceTarget,
+        #[serde(with = "crate::snapshot::shared::arc")]
         resolved_type: Arc<LemmaType>,
         local_constraints: Option<Vec<Constraint>>,
         local_suggestion: Option<BoundValueKind>,
-        local_fill: Option<BoundValueKind>,
+        local_value: Option<BoundValueKind>,
         source: Source,
     },
 }
@@ -5353,6 +6111,7 @@ impl DataDefinition {
             DataDefinition::Value { resolved_type, .. } => Some(resolved_type),
             DataDefinition::TypeDeclaration { resolved_type, .. } => Some(resolved_type),
             DataDefinition::Reference { resolved_type, .. } => Some(resolved_type),
+            DataDefinition::InstanceList { resolved_type, .. } => Some(resolved_type),
             DataDefinition::Import { .. } => None,
         }
     }
@@ -5363,41 +6122,43 @@ impl DataDefinition {
         self.lemma_type()
     }
 
-    /// Returns the literal value when the data already holds one, including `-> fill`
+    /// Returns the literal value when the data already holds one, including `-> with`
     /// on a type declaration or reference. A data-target `Reference`'s copied value
     /// is produced by the evaluator at runtime, so at plan-time it has no value yet.
     pub fn value(&self) -> Option<LiteralValue> {
         match self {
             DataDefinition::Value { value, .. } => Some(value.clone()),
             DataDefinition::TypeDeclaration {
-                declared_fill: Some(dv),
+                declared_value: Some(dv),
                 ..
             } => Some(dv.to_literal()),
             DataDefinition::Reference {
-                local_fill: Some(dv),
+                local_value: Some(dv),
                 resolved_type: _,
                 ..
             } => Some(dv.to_literal()),
             DataDefinition::TypeDeclaration { .. }
             | DataDefinition::Import { .. }
+            | DataDefinition::InstanceList { .. }
             | DataDefinition::Reference { .. } => None,
         }
     }
 
     /// Fill value with optional written measure unit binding (Show display).
-    pub(crate) fn bound_fill(&self) -> Option<&BoundValueKind> {
+    pub(crate) fn bound_value(&self) -> Option<&BoundValueKind> {
         match self {
             DataDefinition::TypeDeclaration {
-                declared_fill: Some(dv),
+                declared_value: Some(dv),
                 ..
             }
             | DataDefinition::Reference {
-                local_fill: Some(dv),
+                local_value: Some(dv),
                 ..
             } => Some(dv),
             DataDefinition::Value { .. }
             | DataDefinition::TypeDeclaration { .. }
             | DataDefinition::Reference { .. }
+            | DataDefinition::InstanceList { .. }
             | DataDefinition::Import { .. } => None,
         }
     }
@@ -5418,6 +6179,7 @@ impl DataDefinition {
             DataDefinition::Value { .. }
             | DataDefinition::TypeDeclaration { .. }
             | DataDefinition::Reference { .. }
+            | DataDefinition::InstanceList { .. }
             | DataDefinition::Import { .. } => None,
         }
     }
@@ -5428,6 +6190,7 @@ impl DataDefinition {
             DataDefinition::Value { source, .. } => source,
             DataDefinition::TypeDeclaration { source, .. } => source,
             DataDefinition::Import { source, .. } => source,
+            DataDefinition::InstanceList { source, .. } => source,
             DataDefinition::Reference { source, .. } => source,
         }
     }
@@ -5492,6 +6255,7 @@ pub(crate) fn value_kind_matches_spec(value: &ValueKind, type_spec: &TypeSpecifi
             | (TypeSpecification::Veto { .. }, _)
             | (TypeSpecification::Undetermined, _)
             | (TypeSpecification::Spec { .. }, ValueKind::Spec(_))
+            | (TypeSpecification::List { .. }, ValueKind::List(_))
     )
 }
 
@@ -5558,6 +6322,32 @@ pub fn refresh_measure_literal_canonical_magnitude(
     Ok(())
 }
 
+fn number_with_unit_value_kind(
+    magnitude: rust_decimal::Decimal,
+    unit_name: &str,
+    type_spec: &TypeSpecification,
+) -> Result<ValueKind, String> {
+    use crate::computation::rational::{checked_div, checked_mul, decimal_to_rational};
+    match type_spec {
+        TypeSpecification::Ratio { units, .. } => {
+            let unit = units.get(unit_name)?;
+            let magnitude_rational = decimal_to_rational(magnitude)
+                .map_err(|failure| format!("ratio literal failed rational lift: {failure}"))?;
+            let canonical_rational = checked_div(&magnitude_rational, &unit.value)
+                .map_err(|failure| format!("ratio literal: unit conversion failed: {failure}"))?;
+            Ok(ValueKind::Ratio(canonical_rational))
+        }
+        TypeSpecification::Measure { units, .. } => {
+            let rational = lift_parser_decimal(magnitude)?;
+            let unit = units.get(unit_name)?;
+            let canonical = checked_mul(&rational, &unit.factor)
+                .map_err(|failure| format!("measure canonicalization overflow: {failure}"))?;
+            Ok(ValueKind::Measure(canonical))
+        }
+        _ => Err("number_with_unit literal requires a measure or ratio type".to_string()),
+    }
+}
+
 /// Convert parser [`Value`] to [`ValueKind`] using the target type (canonicalizes ratio at bind).
 ///
 /// When `resolve_unit` is set, qualified range-endpoint unit tokens are resolved to bare
@@ -5570,25 +6360,8 @@ pub fn parser_value_to_value_kind(
     use crate::computation::rational::decimal_to_rational;
     use crate::literals::Value;
     match (value, type_spec) {
-        (Value::NumberWithUnit(magnitude, unit_name), TypeSpecification::Ratio { units, .. }) => {
-            use crate::computation::rational::checked_div;
-            let unit = units.get(unit_name.as_str())?;
-            let magnitude_rational = decimal_to_rational(*magnitude)
-                .map_err(|failure| format!("ratio literal failed rational lift: {failure}"))?;
-            let canonical_rational = checked_div(&magnitude_rational, &unit.value)
-                .map_err(|failure| format!("ratio literal: unit conversion failed: {failure}"))?;
-            Ok(ValueKind::Ratio(canonical_rational))
-        }
-        (Value::NumberWithUnit(magnitude, unit_name), TypeSpecification::Measure { units, .. }) => {
-            use crate::computation::rational::checked_mul;
-            let rational = lift_parser_decimal(*magnitude)?;
-            let unit = units.get(unit_name.as_str())?;
-            let canonical = checked_mul(&rational, &unit.factor)
-                .map_err(|failure| format!("measure canonicalization overflow: {failure}"))?;
-            Ok(ValueKind::Measure(canonical))
-        }
-        (Value::NumberWithUnit(_, _), _) => {
-            Err("number_with_unit literal requires a measure or ratio type".to_string())
+        (Value::NumberWithUnit(magnitude, unit_name), _) => {
+            number_with_unit_value_kind(*magnitude, unit_name, type_spec)
         }
         (Value::Number(n), TypeSpecification::Number { .. }) => {
             Ok(ValueKind::Number(lift_parser_decimal(*n)?))
@@ -5655,10 +6428,7 @@ pub(crate) fn date_time_to_semantic(dt: &crate::parsing::ast::DateTimeValue) -> 
         minute: dt.minute,
         second: dt.second,
         microsecond: dt.microsecond,
-        timezone: dt.timezone.as_ref().map(|tz| SemanticTimezone {
-            offset_hours: tz.offset_hours,
-            offset_minutes: tz.offset_minutes,
-        }),
+        timezone: dt.timezone.as_ref().map(SemanticTimezone::from),
     }
 }
 
@@ -5669,10 +6439,7 @@ pub(crate) fn time_to_semantic(t: &crate::parsing::ast::TimeValue) -> SemanticTi
         minute: t.minute.into(),
         second: t.second.into(),
         microsecond: t.microsecond,
-        timezone: t.timezone.as_ref().map(|tz| SemanticTimezone {
-            offset_hours: tz.offset_hours,
-            offset_minutes: tz.offset_minutes,
-        }),
+        timezone: t.timezone.as_ref().map(SemanticTimezone::from),
     }
 }
 
@@ -5740,41 +6507,65 @@ static PRIMITIVE_DATE: OnceLock<Arc<LemmaType>> = OnceLock::new();
 static PRIMITIVE_DATE_RANGE: OnceLock<Arc<LemmaType>> = OnceLock::new();
 static PRIMITIVE_TIME: OnceLock<Arc<LemmaType>> = OnceLock::new();
 static PRIMITIVE_RATIO: OnceLock<Arc<LemmaType>> = OnceLock::new();
+static PRIMITIVE_MEASURE: OnceLock<Arc<LemmaType>> = OnceLock::new();
+static PRIMITIVE_MEASURE_RANGE: OnceLock<Arc<LemmaType>> = OnceLock::new();
+static PRIMITIVE_NUMBER_RANGE: OnceLock<Arc<LemmaType>> = OnceLock::new();
+static PRIMITIVE_RATIO_RANGE: OnceLock<Arc<LemmaType>> = OnceLock::new();
+static PRIMITIVE_TIME_RANGE: OnceLock<Arc<LemmaType>> = OnceLock::new();
 
 #[must_use]
 pub fn primitive_boolean_arc() -> &'static Arc<LemmaType> {
-    PRIMITIVE_BOOLEAN.get_or_init(|| Arc::new(LemmaType::primitive(TypeSpecification::boolean())))
+    lemma_type_for_primitive(PrimitiveKind::Boolean)
 }
 
 #[must_use]
 pub fn primitive_number_arc() -> &'static Arc<LemmaType> {
-    PRIMITIVE_NUMBER.get_or_init(|| Arc::new(LemmaType::primitive(TypeSpecification::number())))
+    lemma_type_for_primitive(PrimitiveKind::Number)
 }
 
 #[must_use]
 pub fn primitive_text_arc() -> &'static Arc<LemmaType> {
-    PRIMITIVE_TEXT.get_or_init(|| Arc::new(LemmaType::primitive(TypeSpecification::text())))
+    lemma_type_for_primitive(PrimitiveKind::Text)
 }
 
 #[must_use]
 pub fn primitive_date_arc() -> &'static Arc<LemmaType> {
-    PRIMITIVE_DATE.get_or_init(|| Arc::new(LemmaType::primitive(TypeSpecification::date())))
+    lemma_type_for_primitive(PrimitiveKind::Date)
 }
 
 #[must_use]
 pub fn primitive_date_range_arc() -> &'static Arc<LemmaType> {
-    PRIMITIVE_DATE_RANGE
-        .get_or_init(|| Arc::new(LemmaType::primitive(TypeSpecification::date_range())))
+    lemma_type_for_primitive(PrimitiveKind::DateRange)
 }
 
 #[must_use]
 pub fn primitive_time_arc() -> &'static Arc<LemmaType> {
-    PRIMITIVE_TIME.get_or_init(|| Arc::new(LemmaType::primitive(TypeSpecification::time())))
+    lemma_type_for_primitive(PrimitiveKind::Time)
 }
 
 #[must_use]
 pub fn primitive_ratio_arc() -> &'static Arc<LemmaType> {
-    PRIMITIVE_RATIO.get_or_init(|| Arc::new(LemmaType::primitive(TypeSpecification::ratio())))
+    lemma_type_for_primitive(PrimitiveKind::Ratio)
+}
+
+/// Singleton primitive `LemmaType` for `kind`. Same `Arc` for the same primitive for the process.
+#[must_use]
+pub fn lemma_type_for_primitive(kind: PrimitiveKind) -> &'static Arc<LemmaType> {
+    let cell = match kind {
+        PrimitiveKind::Boolean => &PRIMITIVE_BOOLEAN,
+        PrimitiveKind::Number => &PRIMITIVE_NUMBER,
+        PrimitiveKind::Text => &PRIMITIVE_TEXT,
+        PrimitiveKind::Date => &PRIMITIVE_DATE,
+        PrimitiveKind::DateRange => &PRIMITIVE_DATE_RANGE,
+        PrimitiveKind::Time => &PRIMITIVE_TIME,
+        PrimitiveKind::Ratio => &PRIMITIVE_RATIO,
+        PrimitiveKind::Measure => &PRIMITIVE_MEASURE,
+        PrimitiveKind::MeasureRange => &PRIMITIVE_MEASURE_RANGE,
+        PrimitiveKind::NumberRange => &PRIMITIVE_NUMBER_RANGE,
+        PrimitiveKind::RatioRange => &PRIMITIVE_RATIO_RANGE,
+        PrimitiveKind::TimeRange => &PRIMITIVE_TIME_RANGE,
+    };
+    cell.get_or_init(|| Arc::new(LemmaType::primitive(type_spec_for_primitive(kind))))
 }
 
 /// Map PrimitiveKind to TypeSpecification. Single source of truth for primitive type resolution.
@@ -5924,24 +6715,32 @@ fn format_ratio_canonical_for_display(
     canonical: &crate::computation::rational::RationalInteger,
     lemma_type: &LemmaType,
 ) -> String {
-    use crate::computation::rational::{checked_mul, rational_new};
+    use crate::computation::rational::checked_mul;
 
+    let units = match &lemma_type.specifications {
+        TypeSpecification::Ratio { units, .. } | TypeSpecification::RatioRange { units, .. } => {
+            units
+        }
+        _ => unreachable!(
+            "BUG: ratio display with non-ratio type {}",
+            lemma_type.name()
+        ),
+    };
     let display_unit = lemma_type
         .unit()
         .or_else(|| lemma_type.ratio_primary_unit());
-
-    match display_unit {
-        Some("percent") => match checked_mul(canonical, &rational_new(100, 1)) {
-            Ok(scaled) => format_number_with_unit_for_display(&scaled, "percent"),
-            Err(_) => format!("{} percent", canonical.display_str()),
-        },
-        Some("permille") => match checked_mul(canonical, &rational_new(1000, 1)) {
-            Ok(scaled) => format_number_with_unit_for_display(&scaled, "permille"),
-            Err(_) => format!("{} permille", canonical.display_str()),
-        },
-        Some(unit_name) => format_number_with_unit_for_display(canonical, unit_name),
-        None => format_rational_magnitude_for_display(canonical),
-    }
+    let Some(unit_name) = display_unit else {
+        return format_rational_magnitude_for_display(canonical);
+    };
+    let unit = units.get(unit_name).unwrap_or_else(|_| {
+        panic!(
+            "BUG: ratio display unit '{unit_name}' is not declared on type {}",
+            lemma_type.name()
+        )
+    });
+    let in_unit = checked_mul(canonical, &unit.value)
+        .expect("BUG: de-canonicalization for ratio display must not fail");
+    format_number_with_unit_for_display(&in_unit, unit_name)
 }
 
 impl fmt::Display for LiteralValue {
@@ -5972,14 +6771,20 @@ pub(crate) mod tests {
     use crate::parsing::ast::{BooleanValue, DateTimeValue, PrimitiveKind, TimeValue};
     use rust_decimal::Decimal;
     use std::str::FromStr;
-    use std::sync::{Arc, OnceLock};
 
-    static PRIMITIVE_MEASURE: OnceLock<Arc<LemmaType>> = OnceLock::new();
+    #[must_use]
+    pub(crate) fn test_type_family(name: &str) -> TypeFamily {
+        TypeFamily {
+            repository: None,
+            spec: "test".to_string(),
+            effective: crate::parsing::ast::EffectiveDate::Origin,
+            name: name.to_string(),
+        }
+    }
 
     #[must_use]
     pub(crate) fn primitive_measure_arc() -> &'static Arc<LemmaType> {
-        PRIMITIVE_MEASURE
-            .get_or_init(|| Arc::new(LemmaType::primitive(TypeSpecification::measure())))
+        crate::planning::semantics::lemma_type_for_primitive(PrimitiveKind::Measure)
     }
 
     #[must_use]
@@ -6020,7 +6825,8 @@ pub(crate) mod tests {
                 | TypeSpecification::Time { help, .. } => help,
                 TypeSpecification::Veto { .. }
                 | TypeSpecification::Undetermined
-                | TypeSpecification::Spec { .. } => {
+                | TypeSpecification::Spec { .. }
+                | TypeSpecification::List { .. } => {
                     unreachable!(
                         "BUG: primitive kind {:?} mapped to non-primitive spec",
                         kind
@@ -6319,14 +7125,11 @@ pub(crate) mod tests {
             extends: TypeExtends::Primitive,
         };
         let money_type = Arc::new(money_type);
-        let val = LiteralValue::measure_with_type(
-            decimal_to_rational(Decimal::from_str("1.8").unwrap()).unwrap(),
-            money_type.clone(),
-        );
+        let val =
+            LiteralValue::measure(decimal_to_rational(Decimal::from_str("1.8").unwrap()).unwrap());
         assert_eq!(val.display_value_with_type(money_type.as_ref()), "1.80 eur");
-        let more_precision = LiteralValue::measure_with_type(
+        let more_precision = LiteralValue::measure(
             decimal_to_rational(Decimal::from_str("1.80000").unwrap()).unwrap(),
-            money_type.clone(),
         );
         assert_eq!(
             more_precision.display_value_with_type(money_type.as_ref()),
@@ -6354,9 +7157,8 @@ pub(crate) mod tests {
             },
             extends: TypeExtends::Primitive,
         });
-        let val_any = LiteralValue::measure_with_type(
+        let val_any = LiteralValue::measure(
             decimal_to_rational(Decimal::from_str("42.50").unwrap()).unwrap(),
-            Arc::clone(&measure_no_decimals),
         );
         assert_eq!(
             val_any.display_value_with_type(measure_no_decimals.as_ref()),
@@ -6378,14 +7180,13 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn test_measure_family_name_primitive_root() {
-        let measure_spec = TypeSpecification::measure();
+    fn test_measure_family_name_none_without_declaring_spec() {
         let money_primitive = LemmaType::new(
             "money".to_string(),
-            measure_spec.clone(),
+            TypeSpecification::measure(),
             TypeExtends::Primitive,
         );
-        assert_eq!(money_primitive.measure_family_name(), Some("money"));
+        assert_eq!(money_primitive.measure_family_name(), None);
     }
 
     #[test]
@@ -6394,26 +7195,31 @@ pub(crate) mod tests {
         let money_custom = LemmaType::new(
             "money".to_string(),
             measure_spec,
-            TypeExtends::custom_local("money".to_string(), "money".to_string()),
+            TypeExtends::custom_local("money".to_string(), test_type_family("money")),
         );
         assert_eq!(money_custom.measure_family_name(), Some("money"));
     }
 
     #[test]
-    fn test_same_measure_family_same_name_different_extends() {
-        let measure_spec = TypeSpecification::measure();
-        let money_primitive = LemmaType::new(
+    fn test_same_named_roots_in_different_specs_are_different_families() {
+        let declared_in = |spec: &str| TypeFamily {
+            repository: None,
+            spec: spec.to_string(),
+            effective: crate::parsing::ast::EffectiveDate::Origin,
+            name: "money".to_string(),
+        };
+        let pricing_money = LemmaType::new(
             "money".to_string(),
-            measure_spec.clone(),
-            TypeExtends::Primitive,
+            TypeSpecification::measure(),
+            TypeExtends::custom_local("measure".to_string(), declared_in("pricing")),
         );
-        let money_custom = LemmaType::new(
+        let shop_money = LemmaType::new(
             "money".to_string(),
-            measure_spec,
-            TypeExtends::custom_local("money".to_string(), "money".to_string()),
+            TypeSpecification::measure(),
+            TypeExtends::custom_local("measure".to_string(), declared_in("shop")),
         );
-        assert!(money_primitive.same_measure_family(&money_custom));
-        assert!(money_custom.same_measure_family(&money_primitive));
+        assert!(!pricing_money.same_measure_family(&shop_money));
+        assert!(!shop_money.same_measure_family(&pricing_money));
     }
 
     #[test]
@@ -6422,12 +7228,12 @@ pub(crate) mod tests {
         let type_x = LemmaType::new(
             "x".to_string(),
             measure_spec.clone(),
-            TypeExtends::Primitive,
+            TypeExtends::custom_local("measure".to_string(), test_type_family("x")),
         );
         let type_x2 = LemmaType::new(
             "x2".to_string(),
             measure_spec,
-            TypeExtends::custom_local("x".to_string(), "x".to_string()),
+            TypeExtends::custom_local("x".to_string(), test_type_family("x")),
         );
         assert_eq!(type_x.measure_family_name(), Some("x"));
         assert_eq!(type_x2.measure_family_name(), Some("x"));
@@ -6441,12 +7247,12 @@ pub(crate) mod tests {
         let type_x2_a = LemmaType::new(
             "x2a".to_string(),
             measure_spec.clone(),
-            TypeExtends::custom_local("x".to_string(), "x".to_string()),
+            TypeExtends::custom_local("x".to_string(), test_type_family("x")),
         );
         let type_x2_b = LemmaType::new(
             "x2b".to_string(),
             measure_spec,
-            TypeExtends::custom_local("x".to_string(), "x".to_string()),
+            TypeExtends::custom_local("x".to_string(), test_type_family("x")),
         );
         assert!(type_x2_a.same_measure_family(&type_x2_b));
     }
@@ -6501,14 +7307,14 @@ pub(crate) mod tests {
         let local = LemmaType::new(
             "t".to_string(),
             measure_spec.clone(),
-            TypeExtends::custom_local("money".to_string(), "money".to_string()),
+            TypeExtends::custom_local("money".to_string(), test_type_family("money")),
         );
         let imported = LemmaType::new(
             "t".to_string(),
             measure_spec,
             TypeExtends::Custom {
                 parent: "money".to_string(),
-                family: "money".to_string(),
+                family: test_type_family("money"),
                 defining_spec: TypeDefiningSpec::Import,
             },
         );
@@ -6523,7 +7329,7 @@ pub(crate) mod tests {
             measure_spec.clone(),
             TypeExtends::Custom {
                 parent: "money".to_string(),
-                family: "money".to_string(),
+                family: test_type_family("money"),
                 defining_spec: TypeDefiningSpec::Import,
             },
         );
@@ -6532,7 +7338,7 @@ pub(crate) mod tests {
             measure_spec,
             TypeExtends::Custom {
                 parent: "money".to_string(),
-                family: "money".to_string(),
+                family: test_type_family("money"),
                 defining_spec: TypeDefiningSpec::Import,
             },
         );
@@ -6940,7 +7746,8 @@ pub(crate) mod tests {
     fn signature_factor_panics_on_unresolved_name() {
         let unit_index = crate::planning::unit_index::UnitIndex::new();
         let bad_sig = sig(&[("nonexistent_unit_xyz", 1)]);
-        let _ = signature_factor(&bad_sig, &unit_index, None);
+        signature_factor(&bad_sig, &unit_index, None)
+            .expect("BUG: signature_factor must panic before returning a failure");
     }
 
     #[test]
@@ -7233,6 +8040,58 @@ pub(crate) mod tests {
             other => panic!("expected Spec, got {other:?}"),
         }
         assert!(!tax.same_value_type(&other_repo));
+    }
+
+    #[test]
+    fn spec_identity_displays_repository_space_spec_space_effective() {
+        use crate::parsing::ast::EffectiveDate;
+        let workspace = SpecIdentity {
+            repository: None,
+            spec: "tax_bracket".to_string(),
+            effective: EffectiveDate::Origin,
+        };
+        assert_eq!(workspace.to_string(), "tax_bracket");
+        let dated = SpecIdentity {
+            repository: Some("@jack/finance".to_string()),
+            spec: "tax_bracket".to_string(),
+            effective: EffectiveDate::DateTimeValue(
+                DateTimeValue::from_str("2026-01-01").expect("date"),
+            ),
+        };
+        assert_eq!(
+            dated.to_string(),
+            format!(
+                "@jack/finance tax_bracket {}",
+                DateTimeValue::from_str("2026-01-01").expect("date")
+            )
+        );
+    }
+
+    #[test]
+    fn type_family_displays_declaring_spec_then_type() {
+        let workspace = TypeFamily {
+            repository: None,
+            spec: "pricing".to_string(),
+            effective: crate::parsing::ast::EffectiveDate::Origin,
+            name: "money".to_string(),
+        };
+        assert_eq!(workspace.to_string(), "pricing.money");
+        let stdlib = TypeFamily {
+            repository: Some("lemma".to_string()),
+            spec: "units".to_string(),
+            effective: crate::parsing::ast::EffectiveDate::Origin,
+            name: "mass".to_string(),
+        };
+        assert_eq!(stdlib.to_string(), "lemma units.mass");
+        let dated = TypeFamily {
+            repository: None,
+            spec: "pricing".to_string(),
+            effective: crate::parsing::ast::EffectiveDate::DateTimeValue(
+                DateTimeValue::from_str("2024-01-01").expect("date"),
+            ),
+            name: "money".to_string(),
+        };
+        assert_eq!(dated.to_string(), "pricing 2024-01-01.money");
     }
 
     #[test]

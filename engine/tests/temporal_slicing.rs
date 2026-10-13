@@ -4,8 +4,8 @@
 //! planning must produce one ExecutionPlan per temporal slice and each
 //! slice must independently validate.
 
-use lemma::{DateGranularity, DateTimeValue, Engine};
-use std::collections::HashMap;
+use indexmap::IndexMap;
+use lemma::{DateGranularity, DateTimeValue, Engine, EvaluateDataValue};
 
 fn date(year: i32, month: u32, day: u32) -> DateTimeValue {
     DateTimeValue {
@@ -23,11 +23,11 @@ fn date(year: i32, month: u32, day: u32) -> DateTimeValue {
 
 fn eval(engine: &Engine, spec_name: &str, effective: &DateTimeValue) -> lemma::Response {
     engine
-        .run(
+        .evaluate(
             None,
             spec_name,
             Some(effective),
-            HashMap::new(),
+            IndexMap::new(),
             None,
             false,
         )
@@ -40,12 +40,12 @@ fn eval_with(
     effective: &DateTimeValue,
     data: Vec<(&str, &str)>,
 ) -> lemma::Response {
-    let map: HashMap<String, String> = data
+    let map: IndexMap<String, EvaluateDataValue> = data
         .into_iter()
-        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .map(|(k, v)| (k.to_string(), v.into()))
         .collect();
     engine
-        .run(None, spec_name, Some(effective), map, None, false)
+        .evaluate(None, spec_name, Some(effective), map, None, false)
         .unwrap()
 }
 
@@ -543,7 +543,7 @@ rule adjusted: value * base.multiplier
         .load([(
             lemma::SourceType::Path(std::sync::Arc::new(std::path::PathBuf::from("top.lemma"))),
             r#"
-spec top 2025-01-01
+spec root_spec 2025-01-01
 uses mid: intermediate
 rule result: mid.adjusted
 "#
@@ -551,8 +551,16 @@ rule result: mid.adjusted
         )])
         .unwrap();
 
-    assert_rule_value(&eval(&engine, "top", &date(2025, 3, 1)), "result", "20");
-    assert_rule_value(&eval(&engine, "top", &date(2025, 9, 1)), "result", "30");
+    assert_rule_value(
+        &eval(&engine, "root_spec", &date(2025, 3, 1)),
+        "result",
+        "20",
+    );
+    assert_rule_value(
+        &eval(&engine, "root_spec", &date(2025, 9, 1)),
+        "result",
+        "30",
+    );
 }
 
 #[test]
@@ -600,7 +608,7 @@ rule value: base * d.factor
         .load([(
             lemma::SourceType::Path(std::sync::Arc::new(std::path::PathBuf::from("top.lemma"))),
             r#"
-spec top 2025-01-01
+spec root_spec 2025-01-01
 uses m: middle
 rule result: m.value
 "#
@@ -609,11 +617,23 @@ rule result: m.value
         .unwrap();
 
     // [Jan, Apr): middle v1 (base=10) * deep v1 (factor=2) = 20
-    assert_rule_value(&eval(&engine, "top", &date(2025, 2, 1)), "result", "20");
+    assert_rule_value(
+        &eval(&engine, "root_spec", &date(2025, 2, 1)),
+        "result",
+        "20",
+    );
     // [Apr, Jun): middle v2 (base=100) * deep v1 (factor=2) = 200
-    assert_rule_value(&eval(&engine, "top", &date(2025, 5, 1)), "result", "200");
+    assert_rule_value(
+        &eval(&engine, "root_spec", &date(2025, 5, 1)),
+        "result",
+        "200",
+    );
     // [Jun, +∞): middle v2 (base=100) * deep v2 (factor=5) = 500
-    assert_rule_value(&eval(&engine, "top", &date(2025, 9, 1)), "result", "500");
+    assert_rule_value(
+        &eval(&engine, "root_spec", &date(2025, 9, 1)),
+        "result",
+        "500",
+    );
 }
 
 #[test]
@@ -667,7 +687,7 @@ rule tripled: s.value * 3
         .load([(
             lemma::SourceType::Path(std::sync::Arc::new(std::path::PathBuf::from("top.lemma"))),
             r#"
-spec top 2025-01-01
+spec root_spec 2025-01-01
 uses l: left_branch
 uses r: right_branch
 rule total: l.doubled + r.tripled
@@ -677,9 +697,17 @@ rule total: l.doubled + r.tripled
         .unwrap();
 
     // Before June: 10*2 + 10*3 = 50
-    assert_rule_value(&eval(&engine, "top", &date(2025, 3, 1)), "total", "50");
+    assert_rule_value(
+        &eval(&engine, "root_spec", &date(2025, 3, 1)),
+        "total",
+        "50",
+    );
     // After June: 20*2 + 20*3 = 100
-    assert_rule_value(&eval(&engine, "top", &date(2025, 9, 1)), "total", "100");
+    assert_rule_value(
+        &eval(&engine, "root_spec", &date(2025, 9, 1)),
+        "total",
+        "100",
+    );
 }
 
 #[test]
@@ -740,7 +768,7 @@ rule result: s.base * 2
         .load([(
             lemma::SourceType::Path(std::sync::Arc::new(std::path::PathBuf::from("top.lemma"))),
             r#"
-spec top 2025-01-01
+spec root_spec 2025-01-01
 uses l: left
 uses r: right
 rule total: l.result + r.result
@@ -750,11 +778,23 @@ rule total: l.result + r.result
         .unwrap();
 
     // [Jan, Apr): left v1 (10+1=11) + right (10*2=20) = 31
-    assert_rule_value(&eval(&engine, "top", &date(2025, 2, 1)), "total", "31");
+    assert_rule_value(
+        &eval(&engine, "root_spec", &date(2025, 2, 1)),
+        "total",
+        "31",
+    );
     // [Apr, Aug): left v2 (10+2=12) + right (10*2=20) = 32
-    assert_rule_value(&eval(&engine, "top", &date(2025, 5, 1)), "total", "32");
+    assert_rule_value(
+        &eval(&engine, "root_spec", &date(2025, 5, 1)),
+        "total",
+        "32",
+    );
     // [Aug, +∞): left v2 (50+2=52) + right (50*2=100) = 152
-    assert_rule_value(&eval(&engine, "top", &date(2025, 9, 1)), "total", "152");
+    assert_rule_value(
+        &eval(&engine, "root_spec", &date(2025, 9, 1)),
+        "total",
+        "152",
+    );
 }
 
 // ============================================================================
@@ -1284,14 +1324,14 @@ data extra_number: 999
             r#"
 spec app 2025-01-01
 uses s: settings
-rule max: s.limit
+rule ceiling: s.limit
 "#
             .to_string(),
         )])
         .unwrap();
 
-    assert_rule_value(&eval(&engine, "app", &date(2025, 3, 1)), "max", "10");
-    assert_rule_value(&eval(&engine, "app", &date(2025, 8, 1)), "max", "20");
+    assert_rule_value(&eval(&engine, "app", &date(2025, 3, 1)), "ceiling", "10");
+    assert_rule_value(&eval(&engine, "app", &date(2025, 8, 1)), "ceiling", "20");
 }
 
 #[test]

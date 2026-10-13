@@ -54,6 +54,26 @@ pub enum TokenKind {
     Ceil,
     Round,
 
+    // List keywords
+    List,
+    Key,
+    Find,
+    First,
+    Last,
+    Sum,
+    Avg,
+    Product,
+    Count,
+    Min,
+    Max,
+    Any,
+    All,
+    Where,
+    Sort,
+    Top,
+    Asc,
+    Desc,
+
     // Range endpoint operators
     Lower,
     Upper,
@@ -71,6 +91,7 @@ pub enum TokenKind {
     Comma,
     Percent,
     PercentPercent,
+    Mod,
     Caret,
     Gt,
     Lt,
@@ -82,7 +103,6 @@ pub enum TokenKind {
     Arrow,
     Ellipsis,
     Dot,
-    At,
     LParen,
     RParen,
 
@@ -95,6 +115,9 @@ pub enum TokenKind {
 
     // Identifiers
     Identifier,
+
+    /// Opaque spec / repo / registry name: optional `@` + `[A-Za-z0-9_./-]+`.
+    LogicalName,
 
     // End of file
     Eof,
@@ -144,6 +167,24 @@ impl std::fmt::Display for TokenKind {
             TokenKind::Floor => write!(f, "'floor'"),
             TokenKind::Ceil => write!(f, "'ceil'"),
             TokenKind::Round => write!(f, "'round'"),
+            TokenKind::List => write!(f, "'list'"),
+            TokenKind::Key => write!(f, "'key'"),
+            TokenKind::Find => write!(f, "'find'"),
+            TokenKind::First => write!(f, "'first'"),
+            TokenKind::Last => write!(f, "'last'"),
+            TokenKind::Sum => write!(f, "'sum'"),
+            TokenKind::Avg => write!(f, "'avg'"),
+            TokenKind::Product => write!(f, "'product'"),
+            TokenKind::Count => write!(f, "'count'"),
+            TokenKind::Min => write!(f, "'min'"),
+            TokenKind::Max => write!(f, "'max'"),
+            TokenKind::Any => write!(f, "'any'"),
+            TokenKind::All => write!(f, "'all'"),
+            TokenKind::Where => write!(f, "'where'"),
+            TokenKind::Sort => write!(f, "'sort'"),
+            TokenKind::Top => write!(f, "'top'"),
+            TokenKind::Asc => write!(f, "'asc'"),
+            TokenKind::Desc => write!(f, "'desc'"),
             TokenKind::Lower => write!(f, "'lower'"),
             TokenKind::Upper => write!(f, "'upper'"),
             TokenKind::Permille => write!(f, "'permille'"),
@@ -155,6 +196,7 @@ impl std::fmt::Display for TokenKind {
             TokenKind::Comma => write!(f, "','"),
             TokenKind::Percent => write!(f, "'%'"),
             TokenKind::PercentPercent => write!(f, "'%%'"),
+            TokenKind::Mod => write!(f, "'mod'"),
             TokenKind::Caret => write!(f, "'^'"),
             TokenKind::Gt => write!(f, "'>'"),
             TokenKind::Lt => write!(f, "'<'"),
@@ -164,13 +206,13 @@ impl std::fmt::Display for TokenKind {
             TokenKind::Arrow => write!(f, "'->'"),
             TokenKind::Ellipsis => write!(f, "'...'"),
             TokenKind::Dot => write!(f, "'.'"),
-            TokenKind::At => write!(f, "'@'"),
             TokenKind::LParen => write!(f, "'('"),
             TokenKind::RParen => write!(f, "')'"),
             TokenKind::NumberLit => write!(f, "a number"),
             TokenKind::StringLit => write!(f, "a string"),
             TokenKind::Commentary => write!(f, "commentary block"),
             TokenKind::Identifier => write!(f, "an identifier"),
+            TokenKind::LogicalName => write!(f, "a name"),
             TokenKind::Eof => write!(f, "end of file"),
         }
     }
@@ -261,6 +303,43 @@ impl Lexer {
             return Ok(token);
         }
         self.lex_token()
+    }
+
+    /// Opaque spec / repo / registry name for name positions only.
+    ///
+    /// If a normal peek already materialized a prefix token, rewind and rescan
+    /// so connectors (`/`, `.`, `-`) are absorbed into one [`TokenKind::LogicalName`].
+    pub fn next_logical_name(&mut self) -> Result<Token, Error> {
+        if let Some(tok) = &self.peeked {
+            if tok.kind == TokenKind::LogicalName {
+                return self.next_token();
+            }
+            let start_byte = tok.span.start;
+            let start_line = tok.span.line;
+            let start_col = tok.span.col;
+            self.peeked = None;
+            self.peeked2 = None;
+            self.rewind_to(start_byte, start_line, start_col);
+            return self.scan_integral_logical_name(start_byte, start_line, start_col);
+        }
+        self.skip_whitespace();
+        let start_byte = self.byte_offset;
+        let start_line = self.line;
+        let start_col = self.col;
+        self.scan_integral_logical_name(start_byte, start_line, start_col)
+    }
+
+    fn rewind_to(&mut self, byte_offset: usize, line: usize, col: usize) {
+        let mut pos = 0;
+        let mut bytes = 0;
+        while bytes < byte_offset && pos < self.source.len() {
+            bytes += self.source[pos].len_utf8();
+            pos += 1;
+        }
+        self.pos = pos;
+        self.byte_offset = byte_offset;
+        self.line = line;
+        self.col = col;
     }
 
     /// Saved lexer position for speculative parsing.
@@ -388,26 +467,74 @@ impl Lexer {
             return Ok(Token { kind, span, text });
         }
 
-        // Identifier or keyword (starts with letter or @)
+        // Identifier or keyword
         if ch.is_ascii_alphabetic() || ch == '_' {
             return Ok(self.scan_identifier(start_byte, start_line, start_col));
         }
 
-        // @ prefix for registry references
+        // Registry qualifier: `@` + opaque name characters
         if ch == '@' {
-            self.advance();
-            let span = self.make_span(start_byte, start_line, start_col);
-            return Ok(Token {
-                kind: TokenKind::At,
-                span,
-                text: "@".to_string(),
-            });
+            return self.scan_integral_logical_name(start_byte, start_line, start_col);
         }
 
         // Unknown character
         self.advance();
         let span = self.make_span(start_byte, start_line, start_col);
         Err(self.make_error(format!("Unexpected character '{}'", ch), span))
+    }
+
+    fn is_logical_name_char(ch: char) -> bool {
+        ch.is_ascii_alphanumeric() || matches!(ch, '_' | '.' | '/' | '-')
+    }
+
+    fn scan_integral_logical_name(
+        &mut self,
+        start_byte: usize,
+        start_line: usize,
+        start_col: usize,
+    ) -> Result<Token, Error> {
+        let mut text = String::new();
+        let had_at = self.current_char() == Some('@');
+        if had_at {
+            text.push('@');
+            self.advance();
+        }
+        let Some(first) = self.current_char() else {
+            let span = self.make_span(start_byte, start_line, start_col);
+            return Err(self.make_error(
+                if had_at {
+                    "Expected a name after '@'"
+                } else {
+                    "Expected a name"
+                },
+                span,
+            ));
+        };
+        if !Self::is_logical_name_char(first) {
+            let span = self.make_span(start_byte, start_line, start_col);
+            return Err(self.make_error(
+                if had_at {
+                    format!("Expected a name after '@', found '{}'", first)
+                } else {
+                    format!("Expected a name, found '{}'", first)
+                },
+                span,
+            ));
+        }
+        while let Some(ch) = self.current_char() {
+            if Self::is_logical_name_char(ch) {
+                text.push(ch);
+                self.advance();
+            } else {
+                break;
+            }
+        }
+        let span = self.make_span(start_byte, start_line, start_col);
+        Ok(Token {
+            kind: TokenKind::LogicalName,
+            span,
+            text,
+        })
     }
 
     fn scan_triple_quote(
@@ -505,9 +632,9 @@ impl Lexer {
     ) -> Result<Token, Error> {
         let mut text = String::new();
 
-        // Integer part: digits with optional _ or , separators
+        // Integer part: digits with optional `_` separators
         while let Some(ch) = self.current_char() {
-            if ch.is_ascii_digit() || ch == '_' || ch == ',' {
+            if ch.is_ascii_digit() || ch == '_' {
                 text.push(ch);
                 self.advance();
             } else {
@@ -650,56 +777,85 @@ impl Lexer {
     }
 }
 
-fn keyword_from_identifier(text: &str) -> TokenKind {
-    // ASCII fold without allocating a lowercased String on every identifier.
-    match text {
-        s if s.eq_ignore_ascii_case("spec") => TokenKind::Spec,
-        s if s.eq_ignore_ascii_case("repo") => TokenKind::Repo,
-        s if s.eq_ignore_ascii_case("data") => TokenKind::Data,
-        s if s.eq_ignore_ascii_case("rule") => TokenKind::Rule,
-        s if s.eq_ignore_ascii_case("unless") => TokenKind::Unless,
-        s if s.eq_ignore_ascii_case("then") => TokenKind::Then,
-        s if s.eq_ignore_ascii_case("not") => TokenKind::Not,
-        s if s.eq_ignore_ascii_case("and") => TokenKind::And,
-        s if s.eq_ignore_ascii_case("in") => TokenKind::In,
-        s if s.eq_ignore_ascii_case("as") => TokenKind::As,
-        s if s.eq_ignore_ascii_case("uses") => TokenKind::Uses,
-        s if s.eq_ignore_ascii_case("with") => TokenKind::With,
-        s if s.eq_ignore_ascii_case("meta") => TokenKind::Meta,
-        s if s.eq_ignore_ascii_case("veto") => TokenKind::Veto,
-        s if s.eq_ignore_ascii_case("now") => TokenKind::Now,
-        s if s.eq_ignore_ascii_case("past") => TokenKind::Past,
-        s if s.eq_ignore_ascii_case("future") => TokenKind::Future,
-        s if s.eq_ignore_ascii_case("true") => TokenKind::True,
-        s if s.eq_ignore_ascii_case("false") => TokenKind::False,
-        s if s.eq_ignore_ascii_case("yes") => TokenKind::Yes,
-        s if s.eq_ignore_ascii_case("no") => TokenKind::No,
-        s if s.eq_ignore_ascii_case("measure") => TokenKind::MeasureKw,
-        s if s.eq_ignore_ascii_case("number") => TokenKind::NumberKw,
-        s if s.eq_ignore_ascii_case("text") => TokenKind::TextKw,
-        s if s.eq_ignore_ascii_case("date") => TokenKind::DateKw,
-        s if s.eq_ignore_ascii_case("time") => TokenKind::TimeKw,
-        s if s.eq_ignore_ascii_case("boolean") => TokenKind::BooleanKw,
-        s if s.eq_ignore_ascii_case("ratio") => TokenKind::RatioKw,
-        s if s.eq_ignore_ascii_case("sqrt") => TokenKind::Sqrt,
-        s if s.eq_ignore_ascii_case("sin") => TokenKind::Sin,
-        s if s.eq_ignore_ascii_case("cos") => TokenKind::Cos,
-        s if s.eq_ignore_ascii_case("tan") => TokenKind::Tan,
-        s if s.eq_ignore_ascii_case("asin") => TokenKind::Asin,
-        s if s.eq_ignore_ascii_case("acos") => TokenKind::Acos,
-        s if s.eq_ignore_ascii_case("atan") => TokenKind::Atan,
-        s if s.eq_ignore_ascii_case("log") => TokenKind::Log,
-        s if s.eq_ignore_ascii_case("exp") => TokenKind::Exp,
-        s if s.eq_ignore_ascii_case("abs") => TokenKind::Abs,
-        s if s.eq_ignore_ascii_case("floor") => TokenKind::Floor,
-        s if s.eq_ignore_ascii_case("ceil") => TokenKind::Ceil,
-        s if s.eq_ignore_ascii_case("round") => TokenKind::Round,
-        s if s.eq_ignore_ascii_case("lower") => TokenKind::Lower,
-        s if s.eq_ignore_ascii_case("upper") => TokenKind::Upper,
-        s if s.eq_ignore_ascii_case("is") => TokenKind::Is,
-        s if s.eq_ignore_ascii_case("permille") => TokenKind::Permille,
-        _ => TokenKind::Identifier,
-    }
+macro_rules! lemma_keywords {
+    ($(($spell:literal, $kind:ident)),+ $(,)?) => {
+        /// Spellings shared by [`keyword_from_identifier`] and LSP completion.
+        pub const COMPLETION_KEYWORD_LABELS: &[&str] = &[$($spell),+];
+
+        fn keyword_from_identifier(text: &str) -> TokenKind {
+            match text {
+                $(s if s.eq_ignore_ascii_case($spell) => TokenKind::$kind,)+
+                _ => TokenKind::Identifier,
+            }
+        }
+    };
+}
+
+lemma_keywords! {
+    ("spec", Spec),
+    ("repo", Repo),
+    ("data", Data),
+    ("rule", Rule),
+    ("unless", Unless),
+    ("then", Then),
+    ("not", Not),
+    ("and", And),
+    ("in", In),
+    ("as", As),
+    ("uses", Uses),
+    ("with", With),
+    ("meta", Meta),
+    ("veto", Veto),
+    ("now", Now),
+    ("past", Past),
+    ("future", Future),
+    ("true", True),
+    ("false", False),
+    ("yes", Yes),
+    ("no", No),
+    ("measure", MeasureKw),
+    ("number", NumberKw),
+    ("text", TextKw),
+    ("date", DateKw),
+    ("time", TimeKw),
+    ("boolean", BooleanKw),
+    ("ratio", RatioKw),
+    ("sqrt", Sqrt),
+    ("sin", Sin),
+    ("cos", Cos),
+    ("tan", Tan),
+    ("asin", Asin),
+    ("acos", Acos),
+    ("atan", Atan),
+    ("log", Log),
+    ("exp", Exp),
+    ("abs", Abs),
+    ("floor", Floor),
+    ("ceil", Ceil),
+    ("round", Round),
+    ("list", List),
+    ("key", Key),
+    ("find", Find),
+    ("first", First),
+    ("last", Last),
+    ("sum", Sum),
+    ("avg", Avg),
+    ("product", Product),
+    ("count", Count),
+    ("min", Min),
+    ("max", Max),
+    ("any", Any),
+    ("all", All),
+    ("where", Where),
+    ("sort", Sort),
+    ("top", Top),
+    ("asc", Asc),
+    ("desc", Desc),
+    ("lower", Lower),
+    ("upper", Upper),
+    ("is", Is),
+    ("permille", Permille),
+    ("mod", Mod),
 }
 
 /// Structural keywords can never be used as identifiers (data/rule names).
@@ -723,6 +879,11 @@ pub fn is_keyword(kind: &TokenKind) -> bool {
             | TokenKind::Meta
             | TokenKind::Veto
             | TokenKind::Now
+            | TokenKind::Is
+            | TokenKind::Past
+            | TokenKind::Future
+            | TokenKind::Permille
+            | TokenKind::Mod
             | TokenKind::Sqrt
             | TokenKind::Sin
             | TokenKind::Cos
@@ -736,6 +897,24 @@ pub fn is_keyword(kind: &TokenKind) -> bool {
             | TokenKind::Floor
             | TokenKind::Ceil
             | TokenKind::Round
+            | TokenKind::List
+            | TokenKind::Key
+            | TokenKind::Find
+            | TokenKind::First
+            | TokenKind::Last
+            | TokenKind::Sum
+            | TokenKind::Avg
+            | TokenKind::Product
+            | TokenKind::Count
+            | TokenKind::Min
+            | TokenKind::Max
+            | TokenKind::Any
+            | TokenKind::All
+            | TokenKind::Where
+            | TokenKind::Sort
+            | TokenKind::Top
+            | TokenKind::Asc
+            | TokenKind::Desc
             | TokenKind::Lower
             | TokenKind::Upper
             | TokenKind::True
@@ -811,17 +990,16 @@ pub fn is_math_function(kind: &TokenKind) -> bool {
 }
 
 /// Returns true if the token kind can start the body of a spec
-/// (`data`, `with`, `rule`, `meta`, or `uses`).
+/// (`data`, `rule`, `meta`, or `uses`).
 pub fn is_spec_body_keyword(kind: &TokenKind) -> bool {
     matches!(
         kind,
-        TokenKind::Data | TokenKind::With | TokenKind::Rule | TokenKind::Meta | TokenKind::Uses
+        TokenKind::Data | TokenKind::Rule | TokenKind::Meta | TokenKind::Uses
     )
 }
 
 /// Returns true if the token kind can be used as a label or reference segment
-/// (identifier, or non-reserved contextual keyword such as `past` / `future` /
-/// `permille` / `is`).
+/// (identifier, or one of the keywords `past` / `future` / `permille` / `is` in label position).
 pub fn can_be_label(kind: &TokenKind) -> bool {
     matches!(
         kind,
@@ -833,23 +1011,30 @@ pub fn can_be_label(kind: &TokenKind) -> bool {
     )
 }
 
+/// Returns true if the token kind can name a unit (`5 eur`, `-> unit eur: 1`).
+/// `is`, `past`, `future`, `permille` are reserved and never units: after a number they start a
+/// comparison, a date window, or a literal suffix.
+#[must_use]
+pub fn can_be_unit_name(kind: &TokenKind) -> bool {
+    matches!(kind, TokenKind::Identifier)
+}
+
+/// True when a bare (non-`@`) repository name spelling is a reserved keyword.
+#[must_use]
+pub fn is_reserved_repository_name(name: &str) -> bool {
+    is_keyword(&keyword_from_identifier(name))
+}
+
+/// True when the opaque spelling is allowed as a `spec` name: a plain identifier, not a keyword.
+#[must_use]
+pub fn can_be_spec_name_spelling(name: &str) -> bool {
+    matches!(keyword_from_identifier(name), TokenKind::Identifier)
+}
+
 /// `calendar` in `in calendar month` / `past calendar year` — not a type keyword.
 #[must_use]
 pub fn token_is_calendar_period_marker(tok: &Token) -> bool {
     tok.kind == TokenKind::Identifier && tok.text == "calendar"
-}
-
-/// Slash-/dot-separated registry path segments (`@org/repo/...`). Keywords that are
-/// reserved at the structural level (`spec`, `rule`, etc.) are allowed inside
-/// multi-segment paths (e.g. `@org/repo`) but callers must reject them when they
-/// appear as the entire stand-alone name (e.g. `repo spec`).
-#[must_use]
-pub fn can_be_repository_qualifier_segment(kind: &TokenKind) -> bool {
-    matches!(kind, TokenKind::Identifier)
-        || is_keyword(kind)
-        || can_be_label(kind)
-        || is_boolean_keyword(kind)
-        || is_math_function(kind)
 }
 
 #[cfg(test)]
@@ -882,6 +1067,24 @@ mod tests {
     }
 
     #[test]
+    fn completion_keyword_labels_match_identifier_lex() {
+        for label in COMPLETION_KEYWORD_LABELS {
+            let kinds = lex_kinds(label).unwrap();
+            assert_eq!(
+                kinds.last(),
+                Some(&TokenKind::Eof),
+                "keyword {label} must be a single token"
+            );
+            assert_eq!(kinds.len(), 2, "keyword {label} lexed as {kinds:?}");
+            assert_ne!(
+                kinds[0],
+                TokenKind::Identifier,
+                "catalog entry {label} must be a keyword token"
+            );
+        }
+    }
+
+    #[test]
     fn string_literal_at_max_length_is_accepted() {
         let content = "a".repeat(crate::limits::MAX_TEXT_VALUE_LENGTH);
         let tokens = lex_all(&format!("\"{content}\"")).unwrap();
@@ -901,7 +1104,7 @@ mod tests {
 
     #[test]
     fn number_literal_with_separators_lexes() {
-        let tokens = lex_all("9,999,999,999,999,999,999,999,999,999").unwrap();
+        let tokens = lex_all("9_999_999_999_999_999_999_999_999_999").unwrap();
         assert_eq!(tokens[0].kind, TokenKind::NumberLit);
     }
 
@@ -1065,10 +1268,61 @@ mod tests {
     }
 
     #[test]
-    fn lex_at_sign() {
-        let kinds = lex_kinds("@user").unwrap();
-        assert_eq!(kinds[0], TokenKind::At);
-        assert_eq!(kinds[1], TokenKind::Identifier);
+    fn lex_registry_logical_name() {
+        let tokens = lex_all("@iso/countries").unwrap();
+        assert_eq!(tokens[0].kind, TokenKind::LogicalName);
+        assert_eq!(tokens[0].text, "@iso/countries");
+        assert_eq!(tokens[1].kind, TokenKind::Eof);
+    }
+
+    #[test]
+    fn lex_bare_at_is_error() {
+        assert!(lex_all("@").is_err());
+    }
+
+    #[test]
+    fn next_logical_name_absorbs_slashes() {
+        let mut lexer = Lexer::new(
+            "contracts/employment/jack",
+            &crate::parsing::source::SourceType::Volatile,
+        );
+        let tok = lexer.next_logical_name().unwrap();
+        assert_eq!(tok.kind, TokenKind::LogicalName);
+        assert_eq!(tok.text, "contracts/employment/jack");
+    }
+
+    #[test]
+    fn next_logical_name_after_peeked_identifier_rewinds() {
+        let mut lexer = Lexer::new(
+            "finance/units",
+            &crate::parsing::source::SourceType::Volatile,
+        );
+        assert_eq!(lexer.peek().unwrap().kind, TokenKind::Identifier);
+        let tok = lexer.next_logical_name().unwrap();
+        assert_eq!(tok.kind, TokenKind::LogicalName);
+        assert_eq!(tok.text, "finance/units");
+    }
+
+    #[test]
+    fn division_and_units_keep_slash_token() {
+        let kinds = lex_kinds("a / b").unwrap();
+        assert_eq!(
+            &kinds[..3],
+            &[
+                TokenKind::Identifier,
+                TokenKind::Slash,
+                TokenKind::Identifier
+            ]
+        );
+        let kinds = lex_kinds("meter/second").unwrap();
+        assert_eq!(
+            &kinds[..3],
+            &[
+                TokenKind::Identifier,
+                TokenKind::Slash,
+                TokenKind::Identifier
+            ]
+        );
     }
 
     #[test]
@@ -1096,12 +1350,15 @@ mod tests {
     }
 
     #[test]
-    fn lex_spec_name_with_slashes() {
-        let tokens = lex_all("spec contracts/employment/jack").unwrap();
-        assert_eq!(tokens[0].kind, TokenKind::Spec);
-        // The lexer will see "contracts" as identifier, then "/" as Slash
-        // The parser will handle assembling the spec name.
-        assert_eq!(tokens[1].kind, TokenKind::Identifier);
+    fn lex_spec_keyword_then_slashed_name_via_next_logical_name() {
+        let mut lexer = Lexer::new(
+            "spec contracts/employment/jack",
+            &crate::parsing::source::SourceType::Volatile,
+        );
+        assert_eq!(lexer.next_token().unwrap().kind, TokenKind::Spec);
+        let name = lexer.next_logical_name().unwrap();
+        assert_eq!(name.kind, TokenKind::LogicalName);
+        assert_eq!(name.text, "contracts/employment/jack");
     }
 
     #[test]
@@ -1213,9 +1470,18 @@ mod tests {
 
     #[test]
     fn lex_number_with_commas() {
-        let tokens = lex_all("1,000,000").unwrap();
-        assert_eq!(tokens[0].kind, TokenKind::NumberLit);
-        assert_eq!(tokens[0].text, "1,000,000");
+        let kinds = lex_kinds("1,000,000").unwrap();
+        assert_eq!(
+            kinds,
+            vec![
+                TokenKind::NumberLit,
+                TokenKind::Comma,
+                TokenKind::NumberLit,
+                TokenKind::Comma,
+                TokenKind::NumberLit,
+                TokenKind::Eof,
+            ]
+        );
     }
 
     #[test]

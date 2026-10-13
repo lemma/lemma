@@ -3,15 +3,22 @@
 mod error_encoding;
 
 use error_encoding::encode_error;
-use lemma::{DateTimeValue, Engine, ResourceLimits, SourceType};
+use indexmap::IndexMap;
+use lemma::{DateTimeValue, Engine, EvaluateDataValue, ResourceLimits, SourceType};
 use rustler::types::atom;
 use rustler::types::MapIterator;
+use rustler::TermType;
 use rustler::{Binary, Encoder, Env, NifResult, OwnedBinary, Resource, ResourceArc, Term};
 use serde_json::json;
-use std::collections::HashMap;
 use std::sync::Mutex;
 
 pub struct LemmaEngineResource(pub Mutex<Engine>);
+
+fn poisoned_engine_lock() -> rustler::Error {
+    rustler::Error::RaiseTerm(Box::new(
+        "Engine lock poisoned by an earlier panic in the lemma engine; create a new engine. The panic message is on stderr".to_string(),
+    ))
+}
 
 impl Resource for LemmaEngineResource {}
 
@@ -25,8 +32,13 @@ fn registries() -> &'static lemma::Registries {
     REGISTRIES.get_or_init(lemma::Registries::default)
 }
 
-fn load(env: Env, _info: Term) -> bool {
+fn load(env: Env, _: Term) -> bool {
     env.register::<LemmaEngineResource>().is_ok() && env.register::<InstallResource>().is_ok()
+}
+
+#[rustler::nif]
+fn lemma_version() -> &'static str {
+    env!("CARGO_PKG_VERSION")
 }
 
 #[rustler::nif]
@@ -61,10 +73,7 @@ fn lemma_load<'a>(
             return Ok((rustler::Atom::from_str(env, "error")?, list).encode(env));
         }
     };
-    let mut engine = resource
-        .0
-        .lock()
-        .map_err(|_| rustler::Error::RaiseTerm(Box::new("Engine lock poisoned".to_string())))?;
+    let mut engine = resource.0.lock().map_err(|_| poisoned_engine_lock())?;
     match engine.load(batch) {
         Ok(()) => Ok(rustler::Atom::from_str(env, "ok")?.encode(env)),
         Err(load_err) => {
@@ -128,15 +137,15 @@ fn sources_from_label_pairs(
 }
 
 #[rustler::nif]
-fn lemma_list<'a>(env: Env<'a>, resource: ResourceArc<LemmaEngineResource>) -> NifResult<Term<'a>> {
-    let engine = resource
-        .0
-        .lock()
-        .map_err(|_| rustler::Error::RaiseTerm(Box::new("Engine lock poisoned".to_string())))?;
+fn lemma_specs<'a>(
+    env: Env<'a>,
+    resource: ResourceArc<LemmaEngineResource>,
+) -> NifResult<Term<'a>> {
+    let engine = resource.0.lock().map_err(|_| poisoned_engine_lock())?;
 
-    let repos = engine.list();
+    let repos = engine.specs();
     let json = serde_json::to_vec(&repos).map_err(|e| {
-        rustler::Error::RaiseTerm(Box::new(format!("List serialization failed: {e}")))
+        rustler::Error::RaiseTerm(Box::new(format!("Specs serialization failed: {e}")))
     })?;
     let mut owned = OwnedBinary::new(json.len()).ok_or_else(|| {
         rustler::Error::RaiseTerm(Box::new("Binary allocation failed".to_string()))
@@ -154,10 +163,7 @@ fn lemma_show<'a>(
     spec: String,
     effective_opt: Option<String>,
 ) -> NifResult<Term<'a>> {
-    let engine = resource
-        .0
-        .lock()
-        .map_err(|_| rustler::Error::RaiseTerm(Box::new("Engine lock poisoned".to_string())))?;
+    let engine = resource.0.lock().map_err(|_| poisoned_engine_lock())?;
     let effective = match effective_opt {
         Some(s) => Some(s.parse::<DateTimeValue>().map_err(|e| {
             rustler::Error::RaiseTerm(Box::new(format!("Invalid effective date: {}", e)))
@@ -170,9 +176,10 @@ fn lemma_show<'a>(
         .filter(|s| !s.is_empty());
     match engine.show(repo, &spec, effective.as_ref()) {
         Ok(view) => {
-            let json = serde_json::to_vec(&lemma::api::Show::from(&view)).map_err(|e| {
-                rustler::Error::RaiseTerm(Box::new(format!("Show serialization failed: {}", e)))
-            })?;
+            let json =
+                serde_json::to_vec(&lemma::api::show_document(&engine, &view)).map_err(|e| {
+                    rustler::Error::RaiseTerm(Box::new(format!("Show serialization failed: {}", e)))
+                })?;
             let mut owned = OwnedBinary::new(json.len()).ok_or_else(|| {
                 rustler::Error::RaiseTerm(Box::new("Binary allocation failed".to_string()))
             })?;
@@ -195,10 +202,7 @@ fn lemma_source<'a>(
     spec: Option<String>,
     effective_opt: Option<String>,
 ) -> NifResult<Term<'a>> {
-    let engine = resource
-        .0
-        .lock()
-        .map_err(|_| rustler::Error::RaiseTerm(Box::new("Engine lock poisoned".to_string())))?;
+    let engine = resource.0.lock().map_err(|_| poisoned_engine_lock())?;
     let repo = repository
         .as_deref()
         .map(str::trim)
@@ -227,16 +231,20 @@ fn lemma_run<'a>(
     target: Term<'a>,
     options: Term<'a>,
 ) -> NifResult<Term<'a>> {
-    let (repository, spec, effective_opt) = decode_run_target(target)?;
-    let RunOptions {
-        data: data_values,
+    let (repository, spec, effective_opt) = decode_evaluate_target(target)?;
+    let EvaluateOptions {
+        data: data_term,
         rules,
         explain,
-    } = decode_run_options(options)?;
-    let engine = resource
-        .0
-        .lock()
-        .map_err(|_| rustler::Error::RaiseTerm(Box::new("Engine lock poisoned".to_string())))?;
+    } = decode_evaluate_options(options)?;
+    let data_values = match data_term.map(map_term_to_data_values).transpose() {
+        Ok(values) => values.unwrap_or_default(),
+        Err(err) => {
+            let term = encode_error(env, &err)?;
+            return Ok((rustler::Atom::from_str(env, "error")?, term).encode(env));
+        }
+    };
+    let engine = resource.0.lock().map_err(|_| poisoned_engine_lock())?;
     let effective = match effective_opt {
         Some(s) => Some(&s.parse::<DateTimeValue>().map_err(|e| {
             rustler::Error::RaiseTerm(Box::new(format!("Invalid effective date: {}", e)))
@@ -256,7 +264,7 @@ fn lemma_run<'a>(
         }
         Some(names) => Some(names),
     };
-    match engine.run(
+    match engine.evaluate(
         repo,
         &spec,
         effective,
@@ -290,10 +298,7 @@ fn lemma_remove<'a>(
     spec_name: String,
     effective: Option<String>,
 ) -> NifResult<Term<'a>> {
-    let mut engine = resource
-        .0
-        .lock()
-        .map_err(|_| rustler::Error::RaiseTerm(Box::new("Engine lock poisoned".to_string())))?;
+    let mut engine = resource.0.lock().map_err(|_| poisoned_engine_lock())?;
     let effective_dt = match effective {
         None => None,
         Some(s) => Some(s.parse::<DateTimeValue>().map_err(|e| {
@@ -321,10 +326,7 @@ fn lemma_update<'a>(
     code: String,
     attribute: Option<String>,
 ) -> NifResult<Term<'a>> {
-    let mut engine = resource
-        .0
-        .lock()
-        .map_err(|_| rustler::Error::RaiseTerm(Box::new("Engine lock poisoned".to_string())))?;
+    let mut engine = resource.0.lock().map_err(|_| poisoned_engine_lock())?;
     let repo = repository
         .as_deref()
         .map(str::trim)
@@ -353,10 +355,7 @@ fn lemma_limits<'a>(
     env: Env<'a>,
     resource: ResourceArc<LemmaEngineResource>,
 ) -> NifResult<Term<'a>> {
-    let engine = resource
-        .0
-        .lock()
-        .map_err(|_| rustler::Error::RaiseTerm(Box::new("Engine lock poisoned".to_string())))?;
+    let engine = resource.0.lock().map_err(|_| poisoned_engine_lock())?;
     let json = serde_json::to_vec(engine.limits()).map_err(|e| {
         rustler::Error::RaiseTerm(Box::new(format!("BUG: limits serialization failed: {e}")))
     })?;
@@ -372,10 +371,7 @@ fn lemma_snapshot<'a>(
     env: Env<'a>,
     resource: ResourceArc<LemmaEngineResource>,
 ) -> NifResult<Term<'a>> {
-    let engine = resource
-        .0
-        .lock()
-        .map_err(|_| rustler::Error::RaiseTerm(Box::new("Engine lock poisoned".to_string())))?;
+    let engine = resource.0.lock().map_err(|_| poisoned_engine_lock())?;
     match engine.snapshot() {
         Ok(bytes) => {
             let mut owned = OwnedBinary::new(bytes.len())
@@ -410,10 +406,7 @@ fn lemma_quality<'a>(
     env: Env<'a>,
     resource: ResourceArc<LemmaEngineResource>,
 ) -> NifResult<Term<'a>> {
-    let engine = resource
-        .0
-        .lock()
-        .map_err(|_| rustler::Error::RaiseTerm(Box::new("Engine lock poisoned".to_string())))?;
+    let engine = resource.0.lock().map_err(|_| poisoned_engine_lock())?;
     let json = serde_json::to_vec(&engine.quality()).map_err(|e| {
         rustler::Error::RaiseTerm(Box::new(format!("BUG: quality serialization failed: {e}")))
     })?;
@@ -442,10 +435,7 @@ fn lemma_generate_openapi<'a>(
     explain: bool,
     effective_opt: Option<String>,
 ) -> NifResult<Term<'a>> {
-    let engine = resource
-        .0
-        .lock()
-        .map_err(|_| rustler::Error::RaiseTerm(Box::new("Engine lock poisoned".to_string())))?;
+    let engine = resource.0.lock().map_err(|_| poisoned_engine_lock())?;
 
     let effective = match effective_opt {
         None => DateTimeValue::now(),
@@ -475,10 +465,7 @@ fn lemma_temporal_api_sources<'a>(
     env: Env<'a>,
     resource: ResourceArc<LemmaEngineResource>,
 ) -> NifResult<Term<'a>> {
-    let engine = resource
-        .0
-        .lock()
-        .map_err(|_| rustler::Error::RaiseTerm(Box::new("Engine lock poisoned".to_string())))?;
+    let engine = resource.0.lock().map_err(|_| poisoned_engine_lock())?;
 
     let sources = lemma_openapi::temporal_api_sources(&engine);
     let rows: Vec<_> = sources
@@ -531,15 +518,217 @@ fn map_key_string(term: Term) -> Result<String, rustler::Error> {
     term.decode::<String>().map_err(|_| rustler::Error::BadArg)
 }
 
-fn map_term_to_data_values(term: Term) -> Result<HashMap<String, String>, rustler::Error> {
-    let iter = MapIterator::new(term).ok_or(rustler::Error::BadArg)?;
-    let mut result = HashMap::new();
-    for (key, value) in iter {
-        let key_str = map_key_string(key)?;
-        let value_str = term_to_string(value)?;
-        result.insert(key_str, value_str.to_string());
+fn data_map_key(term: Term) -> Result<String, lemma::Error> {
+    if let Ok(s) = term.atom_to_string() {
+        return Ok(s);
     }
-    Ok(result)
+    term.decode::<String>().map_err(|_| {
+        lemma::Error::request("data map keys must be strings or atoms", None::<String>)
+    })
+}
+
+/// Top-level `data` map: each value's error is attributed to its key.
+fn data_map_entries(term: Term) -> Result<Vec<(String, EvaluateDataValue)>, lemma::Error> {
+    let iter = MapIterator::new(term).expect("BUG: caller checked term is a map");
+    let mut entries = Vec::new();
+    for (key, value) in iter {
+        let key = data_map_key(key)?;
+        let parsed = term_to_evaluate_data(value)
+            .map_err(|e| lemma::attribute_evaluate_data_error(e, &key))?;
+        if let Some(parsed) = parsed {
+            entries.push((key, parsed));
+        }
+    }
+    Ok(entries)
+}
+
+fn map_term_to_data_values(
+    term: Term,
+) -> Result<IndexMap<String, EvaluateDataValue>, lemma::Error> {
+    if term.as_c_arg() == atom::nil().as_c_arg() {
+        return Ok(IndexMap::new());
+    }
+    if term.get_type() != TermType::Map {
+        return Err(lemma::Error::request("data must be a map", None::<String>));
+    }
+    lemma::evaluate_data_from_entries(data_map_entries(term)?)
+}
+
+fn scalar_evaluate_data(term: Term) -> Result<Option<EvaluateDataValue>, lemma::Error> {
+    match term.get_type() {
+        TermType::Atom => {
+            if term.as_c_arg() == atom::nil().as_c_arg() {
+                return Ok(None);
+            }
+            match term.decode::<bool>() {
+                Ok(b) => Ok(Some(EvaluateDataValue::Boolean(b))),
+                Err(_) => Err(lemma::Error::request(
+                    format!(
+                        "atom :{} is not a data value",
+                        term.atom_to_string()
+                            .expect("BUG: atom term must convert to string")
+                    ),
+                    Some("pass a binary string"),
+                )),
+            }
+        }
+        TermType::Binary => term
+            .decode::<String>()
+            .map(|s| Some(EvaluateDataValue::Literal(s)))
+            .map_err(|_| lemma::Error::request("data binary must be UTF-8", None::<String>)),
+        TermType::Integer => {
+            let value: rustler::BigInt = term
+                .decode()
+                .expect("BUG: integer term must decode to BigInt");
+            Ok(Some(EvaluateDataValue::Literal(value.to_string())))
+        }
+        TermType::Float => {
+            let value: f64 = term.decode().expect("BUG: float term must decode to f64");
+            Err(lemma::Error::request(
+                format!("pass as string: \"{value}\""),
+                Some("Elixir floats have no exact native type; use a binary or integer"),
+            ))
+        }
+        TermType::Map | TermType::List => {
+            panic!("BUG: map and list terms are walked by term_to_evaluate_data")
+        }
+        _ => Err(lemma::Error::request(
+            "data value must be a binary, boolean, integer, map, or list",
+            None::<String>,
+        )),
+    }
+}
+
+/// Non-null Hex term to run data. `nil` means omit; a `nil` list item is a request error.
+/// Frames replace recursion, so nesting depth never grows the native stack.
+fn term_to_evaluate_data(term: Term) -> Result<Option<EvaluateDataValue>, lemma::Error> {
+    let mut frames: Vec<HexFrame<'_>> = Vec::new();
+    let mut step = HexStep::Descend(term);
+    loop {
+        step = match step {
+            HexStep::Descend(term) => match term.get_type() {
+                TermType::Map => {
+                    frames.push(HexFrame::Map {
+                        entries: Box::new(
+                            MapIterator::new(term).expect("BUG: caller checked term is a map"),
+                        ),
+                        pending_key: None,
+                        out: Vec::new(),
+                    });
+                    HexStep::NextChild
+                }
+                TermType::List => {
+                    let items: Vec<Term> = term.decode().map_err(|_| {
+                        lemma::Error::request("data list must be proper", None::<String>)
+                    })?;
+                    frames.push(HexFrame::List {
+                        items: items.into_iter(),
+                        delivered: 0,
+                        out: Vec::new(),
+                    });
+                    HexStep::NextChild
+                }
+                _ => HexStep::Deliver(scalar_evaluate_data(term)?),
+            },
+            HexStep::NextChild => {
+                let frame = frames
+                    .last_mut()
+                    .expect("BUG: hex frame stack empty while reading a child");
+                match frame.next_child()? {
+                    Some(child) => HexStep::Descend(child),
+                    None => {
+                        let frame = frames
+                            .pop()
+                            .expect("BUG: hex frame stack empty on completion");
+                        HexStep::Deliver(frame.finish()?)
+                    }
+                }
+            }
+            HexStep::Deliver(item) => match frames.last_mut() {
+                None => return Ok(item),
+                Some(frame) => {
+                    frame.push(item)?;
+                    HexStep::NextChild
+                }
+            },
+        };
+    }
+}
+
+enum HexStep<'a> {
+    Descend(Term<'a>),
+    NextChild,
+    Deliver(Option<EvaluateDataValue>),
+}
+
+enum HexFrame<'a> {
+    Map {
+        entries: Box<MapIterator<'a>>,
+        pending_key: Option<String>,
+        out: Vec<(String, EvaluateDataValue)>,
+    },
+    List {
+        items: std::vec::IntoIter<Term<'a>>,
+        delivered: usize,
+        out: Vec<EvaluateDataValue>,
+    },
+}
+
+impl<'a> HexFrame<'a> {
+    fn next_child(&mut self) -> Result<Option<Term<'a>>, lemma::Error> {
+        match self {
+            HexFrame::Map {
+                entries,
+                pending_key,
+                ..
+            } => match entries.next() {
+                None => Ok(None),
+                Some((key, value)) => {
+                    *pending_key = Some(data_map_key(key)?);
+                    Ok(Some(value))
+                }
+            },
+            HexFrame::List {
+                items, delivered, ..
+            } => {
+                let child = items.next();
+                if child.is_some() {
+                    *delivered += 1;
+                }
+                Ok(child)
+            }
+        }
+    }
+
+    fn push(&mut self, item: Option<EvaluateDataValue>) -> Result<(), lemma::Error> {
+        match self {
+            HexFrame::Map {
+                pending_key, out, ..
+            } => {
+                let key = pending_key
+                    .take()
+                    .expect("BUG: hex map child delivered without its key");
+                if let Some(value) = item {
+                    out.push((key, value));
+                }
+                Ok(())
+            }
+            HexFrame::List { delivered, out, .. } => match item {
+                Some(value) => {
+                    out.push(value);
+                    Ok(())
+                }
+                None => Err(lemma::evaluate_data_null_list_item(*delivered)),
+            },
+        }
+    }
+
+    fn finish(self) -> Result<Option<EvaluateDataValue>, lemma::Error> {
+        match self {
+            HexFrame::Map { out, .. } => lemma::evaluate_data_map_from_entries(out).map(Some),
+            HexFrame::List { out, .. } => Ok(Some(EvaluateDataValue::List(out))),
+        }
+    }
 }
 
 fn optional_string(term: Term) -> Result<Option<String>, rustler::Error> {
@@ -552,7 +741,7 @@ fn optional_string(term: Term) -> Result<Option<String>, rustler::Error> {
     ))
 }
 
-fn decode_run_target(
+fn decode_evaluate_target(
     term: Term,
 ) -> Result<(Option<String>, String, Option<String>), rustler::Error> {
     let iter = MapIterator::new(term).ok_or(rustler::Error::BadArg)?;
@@ -573,39 +762,39 @@ fn decode_run_target(
             "effective" => effective = optional_string(value)?,
             other => {
                 return Err(rustler::Error::RaiseTerm(Box::new(format!(
-                    "unknown run target key: '{other}'"
+                    "unknown evaluate target key: '{other}'"
                 ))));
             }
         }
     }
     let spec = spec.ok_or(rustler::Error::RaiseTerm(Box::new(
-        "run target must include :spec".to_string(),
+        "evaluate target must include :spec".to_string(),
     )))?;
     Ok((repository, spec, effective))
 }
 
-struct RunOptions {
-    data: HashMap<String, String>,
+struct EvaluateOptions<'a> {
+    data: Option<Term<'a>>,
     rules: Option<Vec<String>>,
     explain: bool,
 }
 
-fn decode_run_options(term: Term) -> Result<RunOptions, rustler::Error> {
+fn decode_evaluate_options(term: Term) -> Result<EvaluateOptions, rustler::Error> {
     if term.as_c_arg() == atom::nil().as_c_arg() {
-        return Ok(RunOptions {
-            data: HashMap::new(),
+        return Ok(EvaluateOptions {
+            data: None,
             rules: None,
             explain: false,
         });
     }
     let iter = MapIterator::new(term).ok_or(rustler::Error::BadArg)?;
-    let mut data = HashMap::new();
+    let mut data = None;
     let mut rules = None;
     let mut explain = false;
     for (key, value) in iter {
         let key_str = map_key_string(key)?;
         match key_str.as_str() {
-            "data" => data = map_term_to_data_values(value)?,
+            "data" => data = Some(value),
             "rules" => {
                 if value.as_c_arg() == atom::nil().as_c_arg() {
                     rules = None;
@@ -620,36 +809,16 @@ fn decode_run_options(term: Term) -> Result<RunOptions, rustler::Error> {
             "explain" => explain = value.decode::<bool>().map_err(|_| rustler::Error::BadArg)?,
             other => {
                 return Err(rustler::Error::RaiseTerm(Box::new(format!(
-                    "unknown run options key: '{other}'"
+                    "unknown evaluate options key: '{other}'"
                 ))));
             }
         }
     }
-    Ok(RunOptions {
+    Ok(EvaluateOptions {
         data,
         rules,
         explain,
     })
-}
-
-fn term_to_string(term: Term) -> Result<String, rustler::Error> {
-    if let Ok(s) = term.atom_to_string() {
-        return Ok(s);
-    }
-    if let Ok(s) = term.decode::<String>() {
-        return Ok(s);
-    }
-    if let Ok(i) = term.decode::<i64>() {
-        return Ok(i.to_string());
-    }
-    if term.decode::<f64>().is_ok() {
-        return Err(rustler::Error::RaiseTerm(Box::new(
-            "decimal values must be passed as strings to preserve exactness".to_string(),
-        )));
-    }
-    Err(rustler::Error::RaiseTerm(Box::new(
-        "data value must be a string, integer, or atom".to_string(),
-    )))
 }
 
 fn mcp_args(json: &str) -> Result<serde_json::Value, rustler::Error> {
@@ -718,10 +887,7 @@ fn mcp_run_impl<'a>(
     args_json: String,
 ) -> NifResult<Term<'a>> {
     let args = mcp_args(&args_json)?;
-    let engine = resource
-        .0
-        .lock()
-        .map_err(|_| rustler::Error::RaiseTerm(Box::new("Engine lock poisoned".to_string())))?;
+    let engine = resource.0.lock().map_err(|_| poisoned_engine_lock())?;
     mcp_tool_result(env, lemma::mcp::run(&engine, &args))
 }
 
@@ -744,17 +910,14 @@ fn mcp_evaluate<'a>(
 }
 
 #[rustler::nif(schedule = "DirtyCpu")]
-fn mcp_list<'a>(
+fn mcp_specs<'a>(
     env: Env<'a>,
     resource: ResourceArc<LemmaEngineResource>,
     args_json: String,
 ) -> NifResult<Term<'a>> {
     let args = mcp_args(&args_json)?;
-    let engine = resource
-        .0
-        .lock()
-        .map_err(|_| rustler::Error::RaiseTerm(Box::new("Engine lock poisoned".to_string())))?;
-    mcp_tool_result(env, lemma::mcp::list(&engine, &args))
+    let engine = resource.0.lock().map_err(|_| poisoned_engine_lock())?;
+    mcp_tool_result(env, lemma::mcp::specs(&engine, &args))
 }
 
 #[rustler::nif(schedule = "DirtyCpu")]
@@ -764,10 +927,7 @@ fn mcp_show<'a>(
     args_json: String,
 ) -> NifResult<Term<'a>> {
     let args = mcp_args(&args_json)?;
-    let engine = resource
-        .0
-        .lock()
-        .map_err(|_| rustler::Error::RaiseTerm(Box::new("Engine lock poisoned".to_string())))?;
+    let engine = resource.0.lock().map_err(|_| poisoned_engine_lock())?;
     mcp_tool_result(env, lemma::mcp::show(&engine, &args))
 }
 
@@ -778,10 +938,7 @@ fn mcp_source<'a>(
     args_json: String,
 ) -> NifResult<Term<'a>> {
     let args = mcp_args(&args_json)?;
-    let engine = resource
-        .0
-        .lock()
-        .map_err(|_| rustler::Error::RaiseTerm(Box::new("Engine lock poisoned".to_string())))?;
+    let engine = resource.0.lock().map_err(|_| poisoned_engine_lock())?;
     mcp_tool_result(env, lemma::mcp::source(&engine, &args))
 }
 
@@ -804,10 +961,7 @@ fn lemma_install_start<'a>(
     repository: String,
 ) -> NifResult<Term<'a>> {
     let limits = {
-        let engine = resource
-            .0
-            .lock()
-            .map_err(|_| rustler::Error::RaiseTerm(Box::new("Engine lock poisoned".to_string())))?;
+        let engine = resource.0.lock().map_err(|_| poisoned_engine_lock())?;
         engine.limits().clone()
     };
     let (install, step) = lemma::Install::start(registries(), &repository, limits);

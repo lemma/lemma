@@ -1,7 +1,7 @@
+use indexmap::IndexMap;
 use lemma::DateTimeValue;
 use lemma::Engine;
 use rust_decimal::Decimal;
-use std::collections::HashMap;
 /// Rule references work through one level of spec reference.
 #[test]
 fn test_single_level_spec_ref_with_rule_reference() {
@@ -41,7 +41,7 @@ rule line_total: pricing.final_price * quantity
 
     let now = DateTimeValue::now();
     let response = engine
-        .run(None, "line_item", Some(&now), HashMap::new(), None, true)
+        .evaluate(None, "line_item", Some(&now), IndexMap::new(), None, true)
         .unwrap();
     let line_total = response
         .results
@@ -89,7 +89,7 @@ rule middle_calc: base_ref.doubled + 50
 "#;
 
     let top_spec = r#"
-spec top
+spec root_spec
 uses middle_ref: middle
 rule top_calc: middle_ref.middle_calc
 "#;
@@ -106,7 +106,7 @@ rule top_calc: middle_ref.middle_calc
 
     let now = DateTimeValue::now();
     let response = engine
-        .run(None, "top", Some(&now), HashMap::new(), None, true)
+        .evaluate(None, "root_spec", Some(&now), IndexMap::new(), None, true)
         .unwrap();
 
     let top_calc = response
@@ -176,7 +176,7 @@ uses config: base
 "#;
 
     let top_spec = r#"
-spec top
+spec root_spec
 uses settings: middle
 rule final_value: settings.config.value * 2
 "#;
@@ -193,7 +193,7 @@ rule final_value: settings.config.value * 2
 
     let now = DateTimeValue::now();
     let response = engine
-        .run(None, "top", Some(&now), HashMap::new(), None, true)
+        .evaluate(None, "root_spec", Some(&now), IndexMap::new(), None, true)
         .unwrap();
     let final_value = response
         .results
@@ -262,7 +262,7 @@ rule order_total: line.line_total
 
     let now = DateTimeValue::now();
     let response = engine
-        .run(None, "order", Some(&now), HashMap::new(), None, true)
+        .evaluate(None, "order", Some(&now), IndexMap::new(), None, true)
         .unwrap();
 
     let order_total = response
@@ -332,7 +332,7 @@ rule difference: total2 - total1
 
     let now = DateTimeValue::now();
     let response = engine
-        .run(None, "comparison", Some(&now), HashMap::new(), None, true)
+        .evaluate(None, "comparison", Some(&now), IndexMap::new(), None, true)
         .unwrap();
 
     let total1 = response
@@ -429,8 +429,8 @@ rule tripled: value * 3
 spec combined
 uses c1: config1
 uses c2: config2
-rule sum: c1.doubled + c2.tripled
-rule product: c1.value * c2.value
+rule added: c1.doubled + c2.tripled
+rule multiplied: c1.value * c2.value
 "#;
 
     engine
@@ -445,18 +445,18 @@ rule product: c1.value * c2.value
 
     let now = DateTimeValue::now();
     let response = engine
-        .run(None, "combined", Some(&now), HashMap::new(), None, true)
+        .evaluate(None, "combined", Some(&now), IndexMap::new(), None, true)
         .unwrap();
 
     let sum = response
         .results
         .values()
-        .find(|r| r.rule.name == "sum")
+        .find(|r| r.rule.name == "added")
         .unwrap();
     let product = response
         .results
         .values()
-        .find(|r| r.rule.name == "product")
+        .find(|r| r.rule.name == "multiplied")
         .unwrap();
 
     // sum: (100 * 2) + (50 * 3) = 200 + 150 = 350
@@ -517,7 +517,7 @@ rule x_squared_plus_ten: base_config.x_squared + 10
 "#;
 
     let top_spec = r#"
-spec top
+spec root_spec
 uses middle_config: middle
 rule final_result: middle_config.x_squared_plus_ten * 2
 "#;
@@ -545,7 +545,7 @@ rule final_result: middle_config.x_squared_plus_ten * 2
 
     let now = DateTimeValue::now();
     let response = engine
-        .run(None, "top", Some(&now), HashMap::new(), None, true)
+        .evaluate(None, "root_spec", Some(&now), IndexMap::new(), None, true)
         .unwrap();
 
     let final_result = response
@@ -611,7 +611,7 @@ rule price_difference: retail_final - wholesale_final
 
     let now = DateTimeValue::now();
     let response = engine
-        .run(None, "scenarios", Some(&now), HashMap::new(), None, true)
+        .evaluate(None, "scenarios", Some(&now), IndexMap::new(), None, true)
         .unwrap();
 
     let retail_final = response
@@ -717,5 +717,69 @@ rule yy: cc.y
         (msg.contains("uses") && msg.contains("spec"))
             || msg.contains("Dotted paths require `with`"),
         "expected spec-import or dotted-LHS rejection, got: {msg}"
+    );
+}
+
+/// Consumer deep `with` overrides the template's own binding of that nested slot.
+/// Direct path and a template rule that reads the same slot both see the override.
+#[test]
+fn consumer_deep_binding_overrides_template_binding_on_every_read() {
+    let mut engine = Engine::new();
+    let specs = r#"
+spec leaf
+data x: number
+
+spec mid
+uses j: leaf
+  -> with x: 1
+rule mx: j.x
+
+spec outer
+uses i: mid
+  -> with j.x: 2
+rule direct: i.j.x
+rule via: i.mx
+"#;
+    engine
+        .load([(lemma::SourceType::Volatile, specs.to_string())])
+        .expect("load");
+    let now = DateTimeValue::now();
+    let response = engine
+        .evaluate(None, "outer", Some(&now), IndexMap::new(), None, false)
+        .expect("evaluate");
+    for rule in ["direct", "via"] {
+        assert_eq!(
+            response.get(rule).expect("rule result").result(),
+            Some("2"),
+            "{rule} must read outer's deep binding"
+        );
+    }
+}
+
+/// A `with` binding to an owner rule that reads the bound import rule is a cycle.
+#[test]
+fn with_rule_binding_through_import_rule_cycle_is_rejected() {
+    let mut engine = Engine::new();
+    let specs = r#"
+spec inner
+data x: number
+rule y: x
+
+spec outer
+uses s: inner
+  -> with x: r
+rule r: s.y
+"#;
+    let errs = engine
+        .load([(lemma::SourceType::Volatile, specs.to_string())])
+        .unwrap_err();
+    let msg = errs
+        .iter()
+        .map(|e| e.to_string())
+        .collect::<Vec<_>>()
+        .join("; ");
+    assert!(
+        msg.contains("Circular dependency (rules: r, s.y)"),
+        "expected overlay cycle rejection, got: {msg}"
     );
 }

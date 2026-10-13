@@ -1,5 +1,4 @@
-use std::collections::HashMap;
-
+use indexmap::IndexMap;
 use lemma::DateTimeValue;
 use lemma::{Engine, ValueKind};
 
@@ -21,7 +20,7 @@ rule to_hours: duration as hour
 
     let now = DateTimeValue::now();
     let response = engine
-        .run(None, "test", Some(&now), HashMap::new(), None, true)
+        .evaluate(None, "test", Some(&now), IndexMap::new(), None, true)
         .unwrap();
     let rule_result = response
         .results

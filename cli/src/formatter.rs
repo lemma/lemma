@@ -1,11 +1,6 @@
 use lemma::{format_explanation, Response, RuleResult};
 use super_table::{presets, Cell, CellAlignment, Table};
 
-pub struct RepositorySpecGroup<'a> {
-    pub repository: Option<&'a str>,
-    pub specs: &'a [String],
-}
-
 pub struct Formatter;
 
 impl Default for Formatter {
@@ -57,7 +52,7 @@ impl Formatter {
         output
     }
 
-    /// JSON for a run response. When `include_explanations` is false, strip
+    /// JSON for a evaluate response. When `include_explanations` is false, strip
     /// per-rule `explanation` trees.
     pub fn response_json_value(
         &self,
@@ -85,33 +80,6 @@ impl Formatter {
     ) -> String {
         serde_json::to_string_pretty(&self.response_json_value(response, include_explanations))
             .expect("BUG: failed to serialize response JSON")
-    }
-
-    pub fn format_repository_spec_list(&self, groups: &[RepositorySpecGroup<'_>]) -> String {
-        let mut output = String::new();
-        for (index, group) in groups.iter().enumerate() {
-            if index > 0 {
-                output.push('\n');
-            }
-            match group.repository {
-                None => {
-                    for spec in group.specs {
-                        output.push_str(spec);
-                        output.push('\n');
-                    }
-                }
-                Some(repository) => {
-                    output.push_str(repository);
-                    output.push('\n');
-                    for spec in group.specs {
-                        output.push_str("  ");
-                        output.push_str(spec);
-                        output.push('\n');
-                    }
-                }
-            }
-        }
-        output
     }
 
     fn format_rule_result(&self, result: &RuleResult) -> String {

@@ -1,8 +1,8 @@
 //! Cross-temporal same-name `uses`: a later `spec finance …` body may depend on an
 //! earlier body via `uses finance 2026` or `uses fin: finance 2026`.
 
+use indexmap::IndexMap;
 use lemma::{DateGranularity, DateTimeValue, Engine, SourceType};
-use std::collections::HashMap;
 use std::sync::Arc;
 
 fn date(year: i32, month: u32, day: u32) -> DateTimeValue {
@@ -21,11 +21,11 @@ fn date(year: i32, month: u32, day: u32) -> DateTimeValue {
 
 fn eval(engine: &Engine, spec_name: &str, effective: &DateTimeValue) -> lemma::Response {
     engine
-        .run(
+        .evaluate(
             None,
             spec_name,
             Some(effective),
-            HashMap::new(),
+            IndexMap::new(),
             None,
             false,
         )

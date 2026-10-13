@@ -1,6 +1,6 @@
-use lemma::{DateTimeValue, Engine, SourceType};
+use indexmap::IndexMap;
+use lemma::{DateTimeValue, Engine, EvaluateDataValue, SourceType};
 use rust_decimal::Decimal;
-use std::collections::HashMap;
 use std::str::FromStr;
 
 fn load(engine: &mut Engine, code: &str) {
@@ -12,12 +12,12 @@ fn load(engine: &mut Engine, code: &str) {
 fn run(
     engine: &Engine,
     spec: &str,
-    data: HashMap<String, String>,
+    data: IndexMap<String, EvaluateDataValue>,
     explain: bool,
 ) -> lemma::Response {
     let now = DateTimeValue::now();
     engine
-        .run(None, spec, Some(&now), data, None, explain)
+        .evaluate(None, spec, Some(&now), data, None, explain)
         .expect("evaluation must complete")
 }
 
@@ -43,7 +43,7 @@ rule third: 1 / 3
 "#,
     );
 
-    let response = run(&engine, "precision", HashMap::new(), false);
+    let response = run(&engine, "precision", IndexMap::new(), false);
     let result = rule_result(&response, "third");
     assert!(!result.vetoed);
     assert_eq!(
@@ -63,7 +63,7 @@ rule dust: 1 / (10 ^ 30)
 "#,
     );
 
-    let response = run(&engine, "tiny", HashMap::new(), false);
+    let response = run(&engine, "tiny", IndexMap::new(), false);
     let result = rule_result(&response, "dust");
     assert!(!result.vetoed);
     assert_eq!(
@@ -80,15 +80,15 @@ fn magnitude_overflow_vetoes_at_output() {
 spec overflow
 data max_val: {max}
 data two: 2
-rule product: max_val * two
+rule multiplied: max_val * two
 "#
     );
 
     let mut engine = Engine::new();
     load(&mut engine, &code);
 
-    let response = run(&engine, "overflow", HashMap::new(), false);
-    let result = rule_result(&response, "product");
+    let response = run(&engine, "overflow", IndexMap::new(), false);
+    let result = rule_result(&response, "multiplied");
     assert!(result.vetoed);
     assert_eq!(
         result.veto_reason.as_deref(),
@@ -112,7 +112,12 @@ rule safe: huge / two
     let mut engine = Engine::new();
     load(&mut engine, &code);
 
-    let response = run(&engine, "magnitude_overflow_boundary", HashMap::new(), true);
+    let response = run(
+        &engine,
+        "magnitude_overflow_boundary",
+        IndexMap::new(),
+        true,
+    );
     let huge = rule_result(&response, "huge");
     assert!(huge.vetoed);
     assert_eq!(
@@ -128,7 +133,7 @@ rule safe: huge / two
     let response = run(
         &engine,
         "magnitude_overflow_boundary",
-        HashMap::new(),
+        IndexMap::new(),
         false,
     );
     let safe = rule_result(&response, "safe");
@@ -156,7 +161,7 @@ rule r: money
     let response = run(
         &engine,
         "weight",
-        HashMap::from([("money".to_string(), "1000 eur".into())]),
+        IndexMap::from([("money".to_string(), "1000 eur".into())]),
         false,
     );
     let result = rule_result(&response, "r");
@@ -182,7 +187,7 @@ rule r: price
     let rejected = run(
         &engine,
         "price_check",
-        HashMap::from([("price".to_string(), "1.234".into())]),
+        IndexMap::from([("price".to_string(), "1.234".into())]),
         false,
     );
     let result = rule_result(&rejected, "r");
@@ -207,7 +212,7 @@ rule r: price
     let accepted = run(
         &engine,
         "price_check",
-        HashMap::from([("price".to_string(), "1.23".into())]),
+        IndexMap::from([("price".to_string(), "1.23".into())]),
         false,
     );
     let result = rule_result(&accepted, "r");
@@ -233,7 +238,7 @@ rule r: cost
     let rejected = run(
         &engine,
         "delivery",
-        HashMap::from([("cost".to_string(), "1.234 eur".into())]),
+        IndexMap::from([("cost".to_string(), "1.234 eur".into())]),
         false,
     );
     let result = rule_result(&rejected, "r");
@@ -251,7 +256,7 @@ rule r: cost
     let accepted = run(
         &engine,
         "delivery",
-        HashMap::from([("cost".to_string(), "1.23 eur".into())]),
+        IndexMap::from([("cost".to_string(), "1.23 eur".into())]),
         false,
     );
     let result = rule_result(&accepted, "r");

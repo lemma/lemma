@@ -15,7 +15,7 @@ You can run entirely offline if every `@` repository is already available as sou
 
 ## Resolve first, then load
 
-`Engine` never auto-fetches on `load` or `run`. Every external `@` reference must be resolved into source text first, then loaded.
+`Engine` never auto-fetches on `load` or `evaluate`. Every external `@` reference must be resolved into source text first, then loaded.
 
 Sans-IO protocol (engine):
 

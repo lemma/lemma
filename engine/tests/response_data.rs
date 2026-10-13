@@ -1,8 +1,8 @@
-//! Per-rule `missing_data` from `Engine::run` (structural − bound − released).
+//! Per-rule `missing_data` from `Engine::evaluate` (structural − bound − released).
 //! Types/suggestions stay on `Engine::show`.
 
+use indexmap::IndexMap;
 use lemma::{DateTimeValue, Engine, VetoType};
-use std::collections::HashMap;
 
 fn missing(response: &lemma::Response, rule: &str) -> Vec<String> {
     response
@@ -16,7 +16,7 @@ fn missing(response: &lemma::Response, rule: &str) -> Vec<String> {
 const CHOOSER_LEMMA: &str = r#"
 spec chooser
 
-data mode: text -> options "simple" "complex"
+data mode: text -> options "simple", "complex"
 data simple_input: number
 data complex_input_a: number
 data complex_input_b: number
@@ -46,10 +46,10 @@ rule other: unrelated * 2
         .expect("spec must load");
 
     let now = DateTimeValue::now();
-    let mut inputs = HashMap::new();
+    let mut inputs = IndexMap::new();
     inputs.insert("threshold".to_string(), "4".into());
     let response = engine
-        .run(
+        .evaluate(
             None,
             "demo",
             Some(&now),
@@ -87,10 +87,10 @@ rule main: supplied + missing
         .expect("spec must load");
 
     let now = DateTimeValue::now();
-    let mut inputs = HashMap::new();
+    let mut inputs = IndexMap::new();
     inputs.insert("supplied".to_string(), "4".into());
     let response = engine
-        .run(None, "demo", Some(&now), inputs, None, false)
+        .evaluate(None, "demo", Some(&now), inputs, None, false)
         .expect("evaluation must succeed");
 
     assert_eq!(missing(&response, "main"), vec!["missing".to_string()]);
@@ -115,7 +115,7 @@ rule main: a + b + c
 
     let now = DateTimeValue::now();
     let response = engine
-        .run(None, "demo", Some(&now), HashMap::new(), None, false)
+        .evaluate(None, "demo", Some(&now), IndexMap::new(), None, false)
         .expect("evaluation must succeed");
 
     assert_eq!(
@@ -160,7 +160,7 @@ rule r: i.slot
 
     let now = DateTimeValue::now();
     let response = engine
-        .run(None, "outer", Some(&now), HashMap::new(), None, false)
+        .evaluate(None, "outer", Some(&now), IndexMap::new(), None, false)
         .expect("evaluation must succeed");
 
     let md = missing(&response, "r");
@@ -189,7 +189,7 @@ rule main: prefilled + suggested + required
 
     let now = DateTimeValue::now();
     let response = engine
-        .run(None, "demo", Some(&now), HashMap::new(), None, false)
+        .evaluate(None, "demo", Some(&now), IndexMap::new(), None, false)
         .expect("evaluation must succeed");
 
     let md = missing(&response, "main");
@@ -212,7 +212,7 @@ rule main: prefilled + suggested + required
         .suggestion
         .as_ref()
         .is_some_and(|s| s.number == Some(rust_decimal::Decimal::from(5))));
-    assert!(suggested.fill.is_none());
+    assert!(suggested.value.is_none());
 
     let main = response.results.get("main").expect("main rule");
     assert!(main.vetoed, "required operand missing");
@@ -234,10 +234,10 @@ rule main: amount * 2
         .expect("spec must load");
 
     let now = DateTimeValue::now();
-    let mut inputs = HashMap::new();
+    let mut inputs = IndexMap::new();
     inputs.insert("amount".to_string(), "-5".into());
     let response = engine
-        .run(None, "demo", Some(&now), inputs, None, false)
+        .evaluate(None, "demo", Some(&now), inputs, None, false)
         .expect("evaluation must succeed");
 
     assert!(
@@ -261,10 +261,10 @@ fn missing_data_prunes_dead_branch_after_unless_discriminator() {
         .expect("spec must load");
 
     let now = DateTimeValue::now();
-    let mut inputs = HashMap::new();
+    let mut inputs = IndexMap::new();
     inputs.insert("mode".to_string(), "simple".into());
     let response = engine
-        .run(
+        .evaluate(
             None,
             "chooser",
             Some(&now),
@@ -288,10 +288,10 @@ fn missing_data_prunes_simple_branch_when_mode_is_complex() {
         .expect("spec must load");
 
     let now = DateTimeValue::now();
-    let mut inputs = HashMap::new();
+    let mut inputs = IndexMap::new();
     inputs.insert("mode".to_string(), "complex".into());
     let response = engine
-        .run(
+        .evaluate(
             None,
             "chooser",
             Some(&now),
@@ -316,11 +316,11 @@ fn missing_data_order_follows_evaluation_order() {
 
     let now = DateTimeValue::now();
     let response = engine
-        .run(
+        .evaluate(
             None,
             "chooser",
             Some(&now),
-            HashMap::new(),
+            IndexMap::new(),
             Some(&["result".to_string()]),
             false,
         )
@@ -361,7 +361,7 @@ rule main: n
         .is_some_and(|s| s.number == Some(rust_decimal::Decimal::from(42))));
 
     let response = engine
-        .run(None, "demo", Some(&now), HashMap::new(), None, false)
-        .expect("run");
+        .evaluate(None, "demo", Some(&now), IndexMap::new(), None, false)
+        .expect("evaluate");
     assert_eq!(missing(&response, "main"), vec!["n".to_string()]);
 }

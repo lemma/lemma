@@ -8,20 +8,17 @@ pub const VSCODE_EXTENSION_REL: &str = "engine/lsp/editors/vscode";
 const VSCE_BIN: &str = "vsce";
 const OVSX_BIN: &str = "ovsx";
 
-fn cargo_bin() -> String {
-    std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string())
-}
-
-fn run_npm(vscode_dir: &Path, args: &[&str]) -> Result<(), String> {
+/// Run `npm <args>` in `dir`; non-zero exit or any warning line in its output is an error.
+pub(crate) fn run_npm(dir: &Path, args: &[&str]) -> Result<(), String> {
     let output = Command::new("npm")
-        .current_dir(vscode_dir)
+        .current_dir(dir)
         .args(args)
         .output()
         .map_err(|e| {
             format!(
                 "failed to run npm {} in {}: {e}",
                 args.join(" "),
-                vscode_dir.display()
+                dir.display()
             )
         })?;
     let combined = format!(
@@ -73,7 +70,7 @@ fn run_npm_exec_capture(vscode_dir: &Path, bin: &str, args: &[&str]) -> Result<S
 }
 
 fn build_release_lemma(root: &Path) -> Result<(), String> {
-    let status = Command::new(cargo_bin())
+    let status = Command::new(crate::cargo_bin())
         .current_dir(root)
         .args(["build", "--release", "-p", "lemma"])
         .status()

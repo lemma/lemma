@@ -1,7 +1,7 @@
 //! Aggressive bug-hunting scenarios
 
-use lemma::{DateTimeValue, Engine, SourceType};
-use std::collections::HashMap;
+use indexmap::IndexMap;
+use lemma::{DateTimeValue, Engine, EvaluateDataValue, SourceType};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -9,14 +9,14 @@ fn src(name: &str) -> SourceType {
     SourceType::Path(Arc::new(PathBuf::from(name)))
 }
 
-fn run_spec(engine: &Engine, spec: &str, data: &[(&str, &str)]) -> lemma::Response {
+fn evaluate_spec(engine: &Engine, spec: &str, data: &[(&str, &str)]) -> lemma::Response {
     let now = DateTimeValue::now();
-    let data_map: HashMap<String, String> = data
+    let data_map: IndexMap<String, EvaluateDataValue> = data
         .iter()
-        .map(|(k, v)| (k.to_string(), (*v).to_string()))
+        .map(|(k, v)| (k.to_string(), (*v).into()))
         .collect();
     engine
-        .run(None, spec, Some(&now), data_map, None, false)
+        .evaluate(None, spec, Some(&now), data_map, None, false)
         .unwrap()
 }
 
@@ -69,7 +69,7 @@ rule total_pay: (hourly_rate * hours_worked) as eur
         )])
         .unwrap();
 
-    let resp = run_spec(&engine, "as_prec", &[("hourly_rate", "50 eur_per_hour")]);
+    let resp = evaluate_spec(&engine, "as_prec", &[("hourly_rate", "50 eur_per_hour")]);
     let display = rule_display(&resp, "total_pay");
     // 50 eur/hour * 160 hour = 8000 eur
     assert_eq!(display, "8000 eur", "50 eur/hour * 160 hour = 8000 eur");
@@ -133,7 +133,7 @@ rule runway: (balance / burn_rate) as month
         )])
         .unwrap();
 
-    let resp = run_spec(&engine, "burn", &[]);
+    let resp = evaluate_spec(&engine, "burn", &[]);
     let display = rule_display(&resp, "runway");
     assert_eq!(
         display, "12 month",
@@ -165,7 +165,7 @@ rule exact_ten: discount is 10%
         )])
         .unwrap();
 
-    let resp = run_spec(&engine, "ratio_cmp", &[("discount", "25%")]);
+    let resp = evaluate_spec(&engine, "ratio_cmp", &[("discount", "25%")]);
     assert_eq!(rule_display(&resp, "big_discount"), "true", "25% > 20%");
     assert_eq!(
         rule_display(&resp, "small_discount"),
@@ -174,7 +174,7 @@ rule exact_ten: discount is 10%
     );
     assert_eq!(rule_display(&resp, "exact_ten"), "false", "25% is not 10%");
 
-    let resp = run_spec(&engine, "ratio_cmp", &[("discount", "10%")]);
+    let resp = evaluate_spec(&engine, "ratio_cmp", &[("discount", "10%")]);
     assert_eq!(rule_display(&resp, "exact_ten"), "true", "10% is 10%");
 }
 
@@ -206,7 +206,7 @@ rule combined: validated > 10 and flag
 
     // value=-5 makes validated veto. combined depends on validated > 10.
     // A veto in a comparison should propagate.
-    let resp = run_spec(&engine, "veto_bool", &[("value", "-5"), ("flag", "true")]);
+    let resp = evaluate_spec(&engine, "veto_bool", &[("value", "-5"), ("flag", "true")]);
     assert!(rule_vetoed(&resp, "validated"), "negative value vetoes");
     assert!(
         rule_vetoed(&resp, "combined"),
@@ -243,7 +243,7 @@ rule check_step3: step3 is veto
         .unwrap();
 
     // input=-1: step1 vetoes, step2 vetoes (depends on step1), step3 vetoes
-    let resp = run_spec(&engine, "deep_veto", &[("input", "-1")]);
+    let resp = evaluate_spec(&engine, "deep_veto", &[("input", "-1")]);
     assert!(
         rule_vetoed(&resp, "step3"),
         "step3 should veto transitively"
@@ -255,7 +255,7 @@ rule check_step3: step3 is veto
     );
 
     // input=5: everything is fine
-    let resp = run_spec(&engine, "deep_veto", &[("input", "5")]);
+    let resp = evaluate_spec(&engine, "deep_veto", &[("input", "5")]);
     assert!(!rule_vetoed(&resp, "step3"));
     assert_eq!(
         rule_display(&resp, "check_step3"),
@@ -289,12 +289,12 @@ rule exactly_three: weight is 3 kilogram
         )])
         .unwrap();
 
-    let resp = run_spec(&engine, "quantity_cmp", &[("weight", "3 kilogram")]);
+    let resp = evaluate_spec(&engine, "quantity_cmp", &[("weight", "3 kilogram")]);
     assert_eq!(rule_display(&resp, "over_five"), "false");
     assert_eq!(rule_display(&resp, "under_one"), "false");
     assert_eq!(rule_display(&resp, "exactly_three"), "true");
 
-    let resp = run_spec(&engine, "quantity_cmp", &[("weight", "10 kilogram")]);
+    let resp = evaluate_spec(&engine, "quantity_cmp", &[("weight", "10 kilogram")]);
     assert_eq!(rule_display(&resp, "over_five"), "true");
 }
 
@@ -327,7 +327,7 @@ rule ten_items: price * 10
         )])
         .unwrap();
 
-    let resp = run_spec(&engine, "money_test", &[("price", "19.99 eur")]);
+    let resp = evaluate_spec(&engine, "money_test", &[("price", "19.99 eur")]);
     // 19.99 * 21% = 4.1979 → displayed with 2 decimals? or full precision?
     let tax = rule_display(&resp, "tax_amount");
     // Should be exact: 19.99 * 0.21 = 4.1979
@@ -370,12 +370,12 @@ rule result: 0
 
     // input=2000: validated vetoes. Scan last-unless-first: `is veto` wins first;
     // the compare arm above is never evaluated.
-    let resp = run_spec(&engine, "unless_veto_cond", &[("input", "2000")]);
+    let resp = evaluate_spec(&engine, "unless_veto_cond", &[("input", "2000")]);
     let display = rule_display(&resp, "result");
     assert_eq!(display, "0", "is veto arm must win when validated vetoes");
 
     // input=100: validated = 100. 100 > 50 → result = 100
-    let resp = run_spec(&engine, "unless_veto_cond", &[("input", "100")]);
+    let resp = evaluate_spec(&engine, "unless_veto_cond", &[("input", "100")]);
     assert_eq!(rule_display(&resp, "result"), "100");
 }
 
@@ -401,7 +401,7 @@ rule result: 0
         )])
         .unwrap();
 
-    let resp = run_spec(&engine, "unless_veto_prop", &[("input", "2000")]);
+    let resp = evaluate_spec(&engine, "unless_veto_prop", &[("input", "2000")]);
     let result = resp
         .results
         .values()
@@ -443,7 +443,7 @@ rule mult_first: a * b + c
     // a=2, b=3, c=4
     // add_then_mult = 2 + 3*4 = 2 + 12 = 14 (if precedence correct)
     //                 vs (2+3)*4 = 20 (if wrong)
-    let resp = run_spec(&engine, "precedence", &[("a", "2"), ("b", "3"), ("c", "4")]);
+    let resp = evaluate_spec(&engine, "precedence", &[("a", "2"), ("b", "3"), ("c", "4")]);
     let result = rule_display(&resp, "add_then_mult");
     assert_eq!(
         result, "14",
@@ -482,7 +482,7 @@ rule is_hello: label is "hello"
         )])
         .expect("empty string in -> option must be a valid Spec");
 
-    let resp = run_spec(&engine, "empty_text", &[("label", "")]);
+    let resp = evaluate_spec(&engine, "empty_text", &[("label", "")]);
     assert_eq!(rule_display(&resp, "is_empty"), "true");
     assert_eq!(rule_display(&resp, "is_hello"), "false");
 }
@@ -504,28 +504,28 @@ spec precision
 data tiny: number
 data large: number
 
-rule product: tiny * large
-rule sum: tiny + tiny + tiny + tiny + tiny + tiny + tiny + tiny + tiny + tiny
+rule multiplied: tiny * large
+rule added: tiny + tiny + tiny + tiny + tiny + tiny + tiny + tiny + tiny + tiny
 "#
             .to_string(),
         )])
         .unwrap();
 
-    let resp = run_spec(
+    let resp = evaluate_spec(
         &engine,
         "precision",
         &[("tiny", "0.0000001"), ("large", "10000000")],
     );
     assert_eq!(
-        rule_display(&resp, "product"),
+        rule_display(&resp, "multiplied"),
         "1",
         "0.0000001 * 10000000 = 1 exactly"
     );
 
     // 0.0000001 * 10 = 0.000001
-    let resp = run_spec(&engine, "precision", &[("tiny", "0.1"), ("large", "3")]);
+    let resp = evaluate_spec(&engine, "precision", &[("tiny", "0.1"), ("large", "3")]);
     // sum = 0.1 * 10 = 1.0 (exact rational arithmetic, no float drift)
-    let sum = rule_display(&resp, "sum");
+    let sum = rule_display(&resp, "added");
     assert_eq!(sum, "1", "0.1 added 10 times = 1 (exact rational)");
 }
 
@@ -628,16 +628,16 @@ rule category: "normal"
         .unwrap();
 
     // 3 kilogram = 3000 gram, which is > 100g but < 5kg → "normal"
-    let resp = run_spec(&engine, "cross_unit", &[("weight", "3 kilogram")]);
+    let resp = evaluate_spec(&engine, "cross_unit", &[("weight", "3 kilogram")]);
     assert_eq!(rule_display(&resp, "category"), "normal");
 
     // 50 gram < 100 gram → "tiny" (last matching)
-    let resp = run_spec(&engine, "cross_unit", &[("weight", "50 gram")]);
+    let resp = evaluate_spec(&engine, "cross_unit", &[("weight", "50 gram")]);
     assert_eq!(rule_display(&resp, "category"), "tiny");
 
     // 10 kilogram > 5 kilogram → "heavy"
     // But also 10kg > 100g so "tiny" would NOT match (10kg is NOT < 100g)
-    let resp = run_spec(&engine, "cross_unit", &[("weight", "10 kilogram")]);
+    let resp = evaluate_spec(&engine, "cross_unit", &[("weight", "10 kilogram")]);
     assert_eq!(rule_display(&resp, "category"), "heavy");
 }
 

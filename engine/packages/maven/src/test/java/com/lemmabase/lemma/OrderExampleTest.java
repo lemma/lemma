@@ -25,8 +25,8 @@ final class OrderExampleTest {
           """);
 
       Response response =
-          engine.run(
-              RunRequest.of("order")
+          engine.evaluate(
+              EvaluateRequest.of("order")
                   .data(
                       Map.of(
                           "quantity", 3,

@@ -1,7 +1,10 @@
 //! Time range: containment, span as duration, planning rejections.
 
-use lemma::{DateGranularity, DateTimeValue, Engine, LiteralValue, TimezoneValue, ValueKind};
-use std::collections::HashMap;
+use indexmap::IndexMap;
+use lemma::{
+    DateGranularity, DateTimeValue, Engine, EvaluateDataValue, LiteralValue, TimezoneValue,
+    ValueKind,
+};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -18,23 +21,20 @@ fn default_effective() -> DateTimeValue {
         minute: 0,
         second: 0,
         microsecond: 0,
-        timezone: Some(TimezoneValue {
-            offset_hours: 0,
-            offset_minutes: 0,
-        }),
+        timezone: Some(TimezoneValue { offset_minutes: 0 }),
         granularity: DateGranularity::DateTime,
     }
 }
 
 fn eval_bool(code: &str, spec_name: &str, rule_name: &str) -> bool {
-    eval_bool_with_data(code, spec_name, rule_name, HashMap::new())
+    eval_bool_with_data(code, spec_name, rule_name, IndexMap::new())
 }
 
 fn eval_bool_with_data(
     code: &str,
     spec_name: &str,
     rule_name: &str,
-    data: HashMap<String, String>,
+    data: IndexMap<String, EvaluateDataValue>,
 ) -> bool {
     match eval_literal_with_data(code, spec_name, rule_name, data).value {
         ValueKind::Boolean(val) => val,
@@ -46,7 +46,7 @@ fn eval_literal_with_data(
     code: &str,
     spec_name: &str,
     rule_name: &str,
-    data: HashMap<String, String>,
+    data: IndexMap<String, EvaluateDataValue>,
 ) -> LiteralValue {
     let mut engine = Engine::new();
     engine
@@ -54,7 +54,7 @@ fn eval_literal_with_data(
         .expect("Should parse and plan");
     let effective = default_effective();
     let response = engine
-        .run(
+        .evaluate(
             None,
             spec_name,
             Some(&effective),
@@ -90,11 +90,11 @@ fn eval_rule(code: &str, spec_name: &str, rule_name: &str) -> String {
         .expect("Should parse and plan");
     let effective = default_effective();
     let response = engine
-        .run(
+        .evaluate(
             None,
             spec_name,
             Some(&effective),
-            HashMap::new(),
+            IndexMap::new(),
             Some(&[rule_name.to_string()]),
             true,
         )
@@ -135,7 +135,7 @@ data window: time range -> suggest 09:00...17:00
 rule inside: 12:30 in window
 rule includes_start: 09:00 in window
 rule upper_excluded: 17:00 in window"#;
-    let mut data = HashMap::new();
+    let mut data = IndexMap::new();
     data.insert("window".to_string(), "09:00...17:00".into());
     assert!(eval_bool_with_data(code, "test", "inside", data.clone()));
     assert!(eval_bool_with_data(

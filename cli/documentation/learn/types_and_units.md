@@ -24,26 +24,47 @@ See [Primitive types in the language reference](../reference/readme.md#primitive
 
 ## Qualifying units
 
-Optionally qualify units. A unit name has one declaring type in scope.
+Qualify a unit when its bare name is ambiguous in scope; otherwise qualification is optional.
 
 | Form | Meaning |
 |------|---------|
-| `kilogram` | Bare: the type that declares the unit |
+| `kilogram` | Bare: the one type in scope that declares the unit |
 | `my_weight.kilogram` | Extension (or owning) type |
 | `units.mass.kilogram` | Import alias + type |
 
-Bare `5 kilogram` binds the declarer. Qualified forms are `Type.unit` or `alias.Type.unit` (not `alias.unit`). A second independent type that declares the same unit name is a planning error. Extensions inherit: bare stays on the declarer; use qualification or cast for the extension.
+Bare `5 kilogram` binds the declarer. Qualified forms are `Type.unit` or `alias.Type.unit` (not `alias.unit`). When two independent types in scope declare the same unit name, bare use is a planning error that lists the qualified forms; write one of them. Extensions inherit: bare stays on the declarer; use qualification or cast for the extension.
 
-Custom units on `ratio` types follow the same rule: declare `basis_points` (or any other custom name) on only one type in the spec. Builtin `percent` and `permille` are shared — every named ratio type may use them.
+Custom units on `ratio` types follow the same rule. Builtin `percent` and `permille` (`%` / `%%`) are primitive: always usable bare, and part of every ratio type. `as percent` / `as permille` always works; `as` into a uniquely in-scope custom ratio unit works from any ratio.
 
 ```lemma
 spec wages
 
-data money: measure -> unit eur: 1
-data price: money -> decimals 2
+data money: measure
+  -> unit eur: 1
 
-rule bare: 5 eur
-rule priced: 5 price.eur
+data price: money
+  -> decimals 2
+
+rule bare:
+  5 eur
+
+rule priced:
+  5 price.eur
+```
+
+```lemma
+spec packing
+
+uses lemma units
+
+data crate_weight: measure
+  -> unit kilogram: 25
+
+rule crates:
+  4 crate_weight.kilogram
+
+rule net:
+  80 units.mass.kilogram
 ```
 ## Arithmetic
 
@@ -51,18 +72,22 @@ rule priced: 5 price.eur
 spec arithmetic_examples
 
 data price:     100
-data tax:      21
-data quantity:      3
+data tax:       21
+data quantity:  3
 data principal: 1_000
 data rate:      0.05
-data year:     10
+data year:      10
 
-rule total: (price + tax) * quantity
+rule total:
+  (price + tax) * quantity
 
-rule compound: principal * (1 + rate) ^ year
+rule compound:
+  principal * (1 + rate) ^ year
 ```
 
-Operators: `+`, `-`, `*`, `/`, `%`, `^`
+Operators: `+`, `-`, `*`, `/`, `mod`, `^`
+
+`a mod b` is the remainder of `a / b`, floored, so it takes the sign of the divisor: `-7 mod 3` is `2`. The `%` sign is reserved for percent literals such as `50%`.
 
 ## Comparison
 
@@ -73,11 +98,14 @@ data status: text
 data age:    number
 data income: number
 
-rule status_ok: status is "approved"
+rule status_ok:
+  status is "approved"
 
-rule not_cancelled: status is not "cancelled"
+rule not_cancelled:
+  status is not "cancelled"
 
-rule is_eligible: age >= 18 and income > 30_000
+rule is_eligible:
+  age >= 18 and income > 30_000
 ```
 
 Operators: `>`, `<`, `>=`, `<=`, `is`, `is not`, `is veto`, `is not veto`
@@ -92,7 +120,9 @@ data income_verified: boolean
 data has_bankruptcy:  boolean
 
 rule can_approve_loan:
-  credit_score >= 650 and income_verified and not has_bankruptcy
+  credit_score >= 650
+  and income_verified
+  and not has_bankruptcy
 ```
 
 Operators: `and`, `not` (there is no `or`: Unless chains accommodate such logic)
@@ -106,14 +136,17 @@ data a:     3
 data b:     4
 data angle: 0.5
 
-rule hypotenuse: sqrt (a ^ 2 + b ^ 2)
+rule hypotenuse:
+  sqrt(a ^ 2 + b ^ 2)
 
-rule sine_value: sin angle
+rule sine_value:
+  sin angle
 
-rule log_value: log 10
+rule log_value:
+  log 10
 ```
 
-Prefix operators (parentheses optional): `sqrt`, `sin`, `cos`, `tan`, `log`, `exp`, `abs`, `floor`, `ceil`, `round`, `lower`, `upper`. The operand is one range operand, so `floor total + 1` is `(floor total) + 1`. `lower` and `upper` read a range's endpoints (see [Ranges](#ranges)).
+Prefix operators: `sqrt`, `sin`, `cos`, `tan`, `log`, `exp`, `abs`, `floor`, `ceil`, `round`, `lower`, `upper`, and also `not`. Write `floor(total) + 1` to add to the result, or `floor (total + 1)` to floor the sum. Without parentheses the argument is one operand and nothing but `then`, `unless`, `)`, `,` or the end may follow, so `floor total` is fine and `floor total + 1` is a parse error. `lower` and `upper` read a range's endpoints (see [Ranges](#ranges)).
 
 ## Standard library: `uses lemma units`
 
@@ -130,9 +163,14 @@ data package_weight: 12 kilogram
 data shift_length:   8 hour
 data route_distance: 45 kilometer
 
-rule weight_grams:  package_weight as gram
-rule is_heavy:      package_weight > 20 kilogram
-rule is_long_shift: shift_length >= 8 hour
+rule weight_grams:
+  package_weight as gram
+
+rule is_heavy:
+  package_weight > 20 kilogram
+
+rule is_long_shift:
+  shift_length >= 8 hour
 ```
 
 Duration units (`hour`, `day`, `week`, ...) come from `units.duration`; calendar periods (`year`, `month`) from `units.calendar`. Prefer the stdlib types over redefining kilogram or hour in every Spec.
@@ -150,9 +188,11 @@ data money: measure
 
 data price: 100 eur
 
-rule price_usd: price as usd
+rule price_usd:
+  price as usd
 
-rule as_percent: 0.25 as percent
+rule as_percent:
+  0.25 as percent
 ```
 
 Durations convert the same way:
@@ -164,14 +204,15 @@ uses lemma units
 
 data workweek: 40 hour
 
-rule workweek_days: workweek as day
+rule workweek_days:
+  workweek as day
 ```
 
 Strip to a bare number with a chained cast: `amount as eur as number`. See [Type cast in the language reference](../reference/readme.md#type-cast-as).
 
 ## Ranges
 
-Intervals use `lo...hi` (lower inclusive, upper exclusive). Test membership with `in`; project width with `(lo...hi) as <unit>`. Read an endpoint with `lower` / `upper`: `lower` is the included end, `upper` is the excluded end (`upper (5...10)` is `10`, and `10` is not `in` the range). `...` binds tighter, so `lower 5...10` is the lower end of that range. Range slots use `number range`, `date range`, `time range`, `measure range`, `ratio range`, or a named `<type> range`. Constrain endpoints with `-> lower` / `-> upper` and span width with `-> minimum` / `-> maximum`. Those commands are not the operators, and `lower` / `upper` cannot be data or rule names:
+Intervals use `lo...hi` (lower inclusive, upper exclusive). Test membership with `in`; project width with `(lo...hi) as <unit>`. Read an endpoint with `lower` / `upper`: `lower` is the included end, `upper` is the excluded end (`upper(5...10)` is `10`, and `10` is not `in` the range). `...` binds tighter, so `lower 5...10` is the lower end of that range. Range slots use `number range`, `date range`, `time range`, `measure range`, `ratio range`, or a named `<type> range`. Constrain endpoints with `-> lower` / `-> upper` and span width with `-> minimum` / `-> maximum`. Those commands are not the operators, and `lower` / `upper` cannot be data or rule names:
 
 ```lemma
 spec eligibility
@@ -180,20 +221,23 @@ uses lemma units
 
 data age:   25 year
 data score: 50
-
 data window: date range
   -> lower 2020-01-01
   -> upper 2030-12-31
   -> minimum 1 day
   -> maximum 90 day
 
-rule in_working_age: age in 18 year...67 year
+rule in_working_age:
+  age in 18 year...67 year
 
-rule in_band: score in 0...100
+rule in_band:
+  score in 0...100
 
-rule days_in_q2: (2024-04-01...2024-07-01) as day
+rule days_in_q2:
+  2024-04-01...2024-07-01 as day
 
-rule window_start: lower window
+rule window_start:
+  lower window
 ```
 
 See [Ranges in the language reference](../reference/readme.md#ranges) and [Data commands](../reference/readme.md#data-commands).
@@ -210,11 +254,14 @@ uses lemma units
 data today:    2024-09-30
 data deadline: 2024-12-31
 
-rule days_until_deadline: (today...deadline) as day
+rule days_until_deadline:
+  today...deadline as day
 
-rule is_overdue: today > deadline
+rule is_overdue:
+  today > deadline
 
-rule follow_up_date: deadline + 14 day
+rule follow_up_date:
+  deadline + 14 day
 ```
 
 ### Calendar vs duration arithmetic
@@ -234,10 +281,17 @@ uses lemma units
 
 data event_date: date
 
-rule was_before_now: (event_date in past)
-rule recent:         event_date in past 7 day
-rule this_year:      event_date in calendar year
-rule last_month:     event_date in past calendar month
+rule was_before_now:
+  event_date in past
+
+rule recent:
+  event_date in past 7 day
+
+rule this_year:
+  event_date in calendar year
+
+rule last_month:
+  event_date in past calendar month
 ```
 
 Also: `in future`, `future N day`, `in past|future calendar year|month|week`, `not in calendar …`, and bare windows `past 7 day`. Full table: [Date predicates in the language reference](../reference/readme.md#date-predicates-and-windows).
@@ -271,19 +325,20 @@ data money: measure
   -> unit eur: 1.00
   -> decimals 2
 
-data product: text
+data drink: text
   -> option "latte"
   -> option "cappuccino"
 
 rule base_price:
   veto "Unknown product"
-  unless product is "latte"      then 3.50 eur
-  unless product is "cappuccino" then 3.50 eur
+  unless drink is "latte"      then 3.50 eur
+  unless drink is "cappuccino" then 3.50 eur
 
-rule total: base_price * 2
+rule total:
+  base_price * 2
 ```
 
-If `product` is not provided, `base_price` vetoes with "Missing data: product", not the default arm's message. The `total` Rule also vetoes because its dependency has no value.
+If `drink` is not provided, `base_price` vetoes with "Missing data: drink", not the default arm's message. The `total` Rule also vetoes because its dependency has no value.
 
 ### Bounds on data, not veto in rules
 
@@ -311,7 +366,8 @@ data weight: units.mass
 
 data use_estimated: boolean
 
-rule shipping_weight: weight
+rule shipping_weight:
+  weight
   unless use_estimated then 5 kilogram
 ```
 
@@ -321,7 +377,7 @@ If `weight` is missing or vetoed on constraints but `use_estimated` is true, `sh
 
 When a Data field has no value (not provided), Rules that depend on it Veto with a "Missing data" reason. See the lookup example above when `product` is absent.
 
-After a `MissingData` on one operand of an arithmetic or comparison operator, evaluation still walks the other operand: a definitive veto there settles the result, and nested control can record for explain and prune. `and` is different: a left conjunct that is `MissingData`, vetoed, or `false` ends the evaluation of that `and`; the right conjunct is never visited, so its inputs never appear on `missing_data`. Intake keeps unbound keys on `missing_data` only when some completion can still produce a **value**. For `and`, an unbound left stays `MissingData` (`false and …` can still answer). Product and other operators that need both values settle on a definitive factor and clear keys that cannot un-veto. `is veto` stays a boolean probe and does not change this intake rule.
+After a `MissingData` on one operand of an arithmetic or comparison operator, evaluation still walks the other operand: a definitive veto there settles the result, and nested control can record for explain and prune. `and` is order-independent. A `false` operand decides the `and` whatever the other operands are, so a missing or vetoed sibling never appears on `missing_data`. Without a `false` operand, the first missing or vetoed operand in source order decides the result, and every operand not yet known to be `true` stays on `missing_data`, since a later `false` could still decide. Intake keeps unbound keys on `missing_data` only when some completion can still produce a **value**. Product and other operators that need both values settle on a definitive factor and clear keys that cannot un-veto. `is veto` stays a boolean probe and does not change this intake rule.
 
 ### `is veto` (boolean test)
 
@@ -335,7 +391,8 @@ data price: number
 
 data quantity: number
 
-rule line_total: price * quantity
+rule line_total:
+  price * quantity
   unless price is veto then 0
 ```
 
@@ -356,11 +413,11 @@ Lemma distinguishes three outcomes:
 | Outcome | When | Example |
 |---------|------|---------|
 | Planning Error | Invalid Spec (wrong types, unsupported operations) | `5 and "text"` (logical AND requires boolean operands); `1 / 0` (literal division by zero) |
-| Request Error | Malformed run request (before evaluation) | Duplicate run data keys that canonicalize to the same name (`Age` and `age`) |
-| Veto | Domain "no value" at runtime | Division by zero from Data, missing Data, invalid Data override, user `veto "..."`, date overflow |
+| Request Error | Malformed evaluate request (before evaluation) | Duplicate evaluation data keys that canonicalize to the same name (`Age` and `age`) |
+| Veto | Domain "no value" | Division by zero from Data, missing Data, invalid Data override, user `veto "..."`, date overflow |
 | Panic | Bug (invariant violated; should never happen after planning) | Internal consistency failure |
 
-After planning succeeds, a well-formed run completes with Rule results (values or Vetoes). Data overrides that violate type constraints, minimum/maximum bounds, or allowed options bind as a Veto on that Data (dependent Rules veto); they are not a planning error. Unknown run data keys and import aliases are ignored; a `MissingData` veto may suggest a near match from ignored keys. Duplicate canonical keys in the same request are a request Error and abort before evaluation.
+After planning succeeds, a well-formed evaluate completes with Rule results (values or Vetoes). Data overrides that violate type constraints, minimum/maximum bounds, or allowed options bind as a Veto on that Data (dependent Rules veto); they are not a planning error. Unknown evaluation data keys and import aliases are ignored; a `MissingData` veto may suggest a near match from ignored keys. Duplicate canonical keys in the same request are a request Error and abort before evaluation. Numbers accept an optional sign, underscores, and an exponent (`1e3`).
 
 Veto is only for domain-level "no value", not for type errors or invalid operations in the Spec itself. Those are caught at planning time.
 

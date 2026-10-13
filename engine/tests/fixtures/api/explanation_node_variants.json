@@ -36,6 +36,44 @@
       "operator": "multiply",
       "expression": "surcharge * multiplier",
       "operands": [{ "type": "veto", "message": "surcharge unavailable" }]
+    },
+    {
+      "type": "filter",
+      "condition": "enabled",
+      "matched": 1,
+      "total": 2,
+      "children": [
+        {
+          "type": "row",
+          "number": 2,
+          "fields": [
+            {
+              "type": "rule_ref",
+              "id": 0,
+              "name": "cost",
+              "result": "200.00 eur",
+              "measure": { "eur": "200.00" }
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "rules": [
+    {
+      "id": 0,
+      "name": "cost",
+      "result": "200.00 eur",
+      "measure": { "eur": "200.00" },
+      "body": "price * weight",
+      "children": [
+        {
+          "type": "data",
+          "name": "price",
+          "result": "4.00 eur_per_kg",
+          "measure": { "eur_per_kg": "4.00" }
+        }
+      ]
     }
   ]
 }

@@ -8,6 +8,7 @@ use lemma::Engine;
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 use walkdir::WalkDir;
@@ -352,7 +353,9 @@ fn plant_watches(
     };
 
     for target in current.difference(&desired_set) {
-        let _ = watcher.unwatch(&target.0);
+        watcher
+            .unwatch(&target.0)
+            .map_err(|error| WorkspaceDiskError::Io(std::io::Error::other(error)))?;
     }
     for target in desired_set.difference(&current) {
         let mode = if target.1 {
@@ -383,7 +386,14 @@ impl Drop for WatchGuard {
             Ok(guard) => guard,
             Err(poisoned) => poisoned.into_inner(),
         };
-        let _ = slot.take();
+        *slot = None;
+    }
+}
+
+/// Sends one watch event. A dropped receiver means the watch is being torn down.
+fn deliver<T>(sink: &Sender<T>, event: T) {
+    if sink.send(event).is_err() {
+        // receiver gone: the owning guard is being dropped
     }
 }
 
@@ -393,12 +403,12 @@ impl Drop for WatchGuard {
 /// it, and on ancestors of discovered workspace `.lemma` files; plus `lemma_deps/`
 /// recursively when that directory exists.
 ///
-/// `on_change` runs on the notify debouncer thread: `Ok(())` when the discover
-/// snapshot changed; `Err` when discover/watch maintenance failed. Callers that
-/// need async work must spawn their own runtime/thread.
+/// Every event is sent to `on_change` from the notify debouncer thread: `Ok(())` when
+/// the discover snapshot changed; `Err` when discover/watch maintenance failed. The
+/// receiver owns any async or blocking work.
 pub fn watch_lemma_workspace(
     workdir: PathBuf,
-    on_change: Arc<dyn Fn(Result<(), WorkspaceDiskError>) + Send + Sync + 'static>,
+    on_change: Sender<Result<(), WorkspaceDiskError>>,
 ) -> Result<WatchGuard, WorkspaceDiskError> {
     let initial_snapshot = collect_modified_times(&workdir)?;
     let last_snapshot: Arc<Mutex<ModifiedSnapshot>> = Arc::new(Mutex::new(initial_snapshot));
@@ -407,26 +417,28 @@ pub fn watch_lemma_workspace(
     let debouncer_slot: Arc<
         Mutex<Option<notify_debouncer_mini::Debouncer<notify::RecommendedWatcher>>>,
     > = Arc::new(Mutex::new(None));
-    let on_change = Arc::clone(&on_change);
 
     let workdir_for_callback = workdir.clone();
     let snapshot_for_callback = Arc::clone(&last_snapshot);
     let watched_for_callback = Arc::clone(&currently_watched);
     let slot_for_callback = Arc::clone(&debouncer_slot);
-    let on_change_for_callback = Arc::clone(&on_change);
+    let on_change_for_callback = on_change;
 
     let mut debouncer = notify_debouncer_mini::new_debouncer(
         Duration::from_millis(500),
         move |result: Result<Vec<notify_debouncer_mini::DebouncedEvent>, notify::Error>| {
             if let Err(error) = result {
-                on_change_for_callback(Err(WorkspaceDiskError::Io(std::io::Error::other(error))));
+                deliver(
+                    &on_change_for_callback,
+                    Err(WorkspaceDiskError::Io(std::io::Error::other(error))),
+                );
                 return;
             }
 
             let current_snapshot = match collect_modified_times(&workdir_for_callback) {
                 Ok(snapshot) => snapshot,
                 Err(error) => {
-                    on_change_for_callback(Err(error));
+                    deliver(&on_change_for_callback, Err(error));
                     return;
                 }
             };
@@ -450,7 +462,7 @@ pub fn watch_lemma_workspace(
                         &workdir_for_callback,
                         &watched_for_callback,
                     ) {
-                        on_change_for_callback(Err(error));
+                        deliver(&on_change_for_callback, Err(error));
                     }
                 }
                 return;
@@ -464,7 +476,7 @@ pub fn watch_lemma_workspace(
                 *previous = current_snapshot;
             }
 
-            on_change_for_callback(Ok(()));
+            deliver(&on_change_for_callback, Ok(()));
 
             let mut slot = match slot_for_callback.lock() {
                 Ok(guard) => guard,
@@ -476,7 +488,7 @@ pub fn watch_lemma_workspace(
                     &workdir_for_callback,
                     &watched_for_callback,
                 ) {
-                    on_change_for_callback(Err(error));
+                    deliver(&on_change_for_callback, Err(error));
                 }
             }
         },
@@ -546,37 +558,33 @@ impl lemma_lsp::workspace_files::WorkspaceFiles for CliWorkspaceFiles {
     fn watch(
         &self,
         root: PathBuf,
-        on_change: Arc<
-            dyn Fn(
-                    Result<
-                        Vec<lemma_lsp::workspace_files::DiskLemmaFile>,
-                        lemma_lsp::workspace_files::WorkspaceFilesError,
-                    >,
-                ) + Send
-                + Sync,
+        on_change: Sender<
+            Result<
+                Vec<lemma_lsp::workspace_files::DiskLemmaFile>,
+                lemma_lsp::workspace_files::WorkspaceFilesError,
+            >,
         >,
     ) -> Result<
         lemma_lsp::workspace_files::WatchGuard,
         lemma_lsp::workspace_files::WorkspaceFilesError,
     > {
-        let root_for_callback = root.clone();
-        let guard = watch_lemma_workspace(
-            root,
-            Arc::new(move |watch_result| match watch_result {
-                Ok(()) => {
-                    let result = read_disk_lemma_files(&root_for_callback).map_err(|error| {
+        let (watch_events, changes) = std::sync::mpsc::channel();
+        let guard = watch_lemma_workspace(root.clone(), watch_events).map_err(|error| {
+            lemma_lsp::workspace_files::WorkspaceFilesError::new(error.to_string())
+        })?;
+        std::thread::spawn(move || {
+            for watch_result in changes {
+                let event = match watch_result {
+                    Ok(()) => read_disk_lemma_files(&root).map_err(|error| {
                         lemma_lsp::workspace_files::WorkspaceFilesError::new(error.to_string())
-                    });
-                    on_change(result);
-                }
-                Err(error) => {
-                    on_change(Err(lemma_lsp::workspace_files::WorkspaceFilesError::new(
+                    }),
+                    Err(error) => Err(lemma_lsp::workspace_files::WorkspaceFilesError::new(
                         error.to_string(),
-                    )));
-                }
-            }),
-        )
-        .map_err(|error| lemma_lsp::workspace_files::WorkspaceFilesError::new(error.to_string()))?;
+                    )),
+                };
+                deliver(&on_change, event);
+            }
+        });
 
         Ok(lemma_lsp::workspace_files::WatchGuard::from_keep_alive(
             Box::new(guard),
@@ -590,6 +598,20 @@ mod tests {
     use std::fs;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::Duration;
+
+    fn flag_on_ok(
+        fired: Arc<AtomicBool>,
+    ) -> std::sync::mpsc::Sender<Result<(), WorkspaceDiskError>> {
+        let (sink, events) = std::sync::mpsc::channel::<Result<(), WorkspaceDiskError>>();
+        std::thread::spawn(move || {
+            for result in events {
+                if result.is_ok() {
+                    fired.store(true, Ordering::SeqCst);
+                }
+            }
+        });
+        sink
+    }
 
     fn write_file(path: &Path, contents: &str) {
         if let Some(parent) = path.parent() {
@@ -679,13 +701,9 @@ mod tests {
 
         let fired = Arc::new(AtomicBool::new(false));
         let fired_flag = Arc::clone(&fired);
-        let _guard = watch_lemma_workspace(
+        let guard = watch_lemma_workspace(
             root.path().to_path_buf(),
-            Arc::new(move |result| {
-                if result.is_ok() {
-                    fired_flag.store(true, Ordering::SeqCst);
-                }
-            }),
+            flag_on_ok(Arc::clone(&fired_flag)),
         )
         .expect("start watch");
 
@@ -695,6 +713,7 @@ mod tests {
         );
 
         wait_until_fired(&fired, "watch did not fire after creating lemma_deps file");
+        drop(guard);
     }
 
     #[test]
@@ -706,13 +725,9 @@ mod tests {
 
         let fired = Arc::new(AtomicBool::new(false));
         let fired_flag = Arc::clone(&fired);
-        let _guard = watch_lemma_workspace(
+        let guard = watch_lemma_workspace(
             root.path().to_path_buf(),
-            Arc::new(move |result| {
-                if result.is_ok() {
-                    fired_flag.store(true, Ordering::SeqCst);
-                }
-            }),
+            flag_on_ok(Arc::clone(&fired_flag)),
         )
         .expect("start watch");
 
@@ -726,6 +741,7 @@ mod tests {
             !fired.load(Ordering::SeqCst),
             "gitignored target/*.lemma must not change discover snapshot"
         );
+        drop(guard);
     }
 
     #[test]
@@ -736,13 +752,9 @@ mod tests {
 
         let fired = Arc::new(AtomicBool::new(false));
         let fired_flag = Arc::clone(&fired);
-        let _guard = watch_lemma_workspace(
+        let guard = watch_lemma_workspace(
             root.path().to_path_buf(),
-            Arc::new(move |result| {
-                if result.is_ok() {
-                    fired_flag.store(true, Ordering::SeqCst);
-                }
-            }),
+            flag_on_ok(Arc::clone(&fired_flag)),
         )
         .expect("start watch");
 
@@ -752,6 +764,7 @@ mod tests {
             &fired,
             "watch did not fire after modifying discovered workspace file",
         );
+        drop(guard);
     }
 
     #[test]
@@ -761,13 +774,9 @@ mod tests {
 
         let fired = Arc::new(AtomicBool::new(false));
         let fired_flag = Arc::clone(&fired);
-        let _guard = watch_lemma_workspace(
+        let guard = watch_lemma_workspace(
             root.path().to_path_buf(),
-            Arc::new(move |result| {
-                if result.is_ok() {
-                    fired_flag.store(true, Ordering::SeqCst);
-                }
-            }),
+            flag_on_ok(Arc::clone(&fired_flag)),
         )
         .expect("start watch");
 
@@ -780,6 +789,7 @@ mod tests {
             &fired,
             "watch did not fire after creating sibling workspace file",
         );
+        drop(guard);
     }
 
     #[test]
@@ -789,13 +799,9 @@ mod tests {
 
         let fired = Arc::new(AtomicBool::new(false));
         let fired_flag = Arc::clone(&fired);
-        let _guard = watch_lemma_workspace(
+        let guard = watch_lemma_workspace(
             root.path().to_path_buf(),
-            Arc::new(move |result| {
-                if result.is_ok() {
-                    fired_flag.store(true, Ordering::SeqCst);
-                }
-            }),
+            flag_on_ok(Arc::clone(&fired_flag)),
         )
         .expect("start watch");
 
@@ -810,6 +816,7 @@ mod tests {
             &fired,
             "watch did not fire after creating nested workspace file",
         );
+        drop(guard);
     }
 
     #[test]
@@ -820,13 +827,9 @@ mod tests {
 
         let fired = Arc::new(AtomicBool::new(false));
         let fired_flag = Arc::clone(&fired);
-        let _guard = watch_lemma_workspace(
+        let guard = watch_lemma_workspace(
             root.path().to_path_buf(),
-            Arc::new(move |result| {
-                if result.is_ok() {
-                    fired_flag.store(true, Ordering::SeqCst);
-                }
-            }),
+            flag_on_ok(Arc::clone(&fired_flag)),
         )
         .expect("start watch");
 
@@ -841,6 +844,7 @@ mod tests {
             &fired,
             "watch did not fire after creating lemma_deps then a dep file",
         );
+        drop(guard);
     }
 
     #[test]
@@ -853,11 +857,7 @@ mod tests {
         let fired_flag = Arc::clone(&fired);
         let guard = watch_lemma_workspace(
             root.path().to_path_buf(),
-            Arc::new(move |result| {
-                if result.is_ok() {
-                    fired_flag.store(true, Ordering::SeqCst);
-                }
-            }),
+            flag_on_ok(Arc::clone(&fired_flag)),
         )
         .expect("start watch");
 

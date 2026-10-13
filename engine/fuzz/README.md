@@ -41,6 +41,7 @@ cargo +nightly fuzz run fuzz_parser -- -max_total_time=3600
 3. `fuzz_literals` - Literal value parsing (numbers, strings, units)
 4. `fuzz_deeply_nested` - Nested expressions to test stack limits
 5. `fuzz_data_bindings` - Data binding parsing and evaluation
+6. `fuzz_snapshot_decode` - Snapshot decoding of arbitrary bytes (malformed input returns `Err`; a decoded snapshot must encode again)
 
 ### Running Specific Targets
 

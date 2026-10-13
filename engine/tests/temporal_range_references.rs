@@ -2,8 +2,8 @@
 //!
 //! Normative source: [Composing specs](../../cli/documentation/learn/composing_specs.md).
 
+use indexmap::IndexMap;
 use lemma::{DateGranularity, DateTimeValue, Engine, SourceType};
-use std::collections::HashMap;
 
 fn date(year: i32, month: u32, day: u32) -> DateTimeValue {
     DateTimeValue {
@@ -21,11 +21,11 @@ fn date(year: i32, month: u32, day: u32) -> DateTimeValue {
 
 fn eval(engine: &Engine, spec_name: &str, effective: &DateTimeValue) -> lemma::Response {
     engine
-        .run(
+        .evaluate(
             None,
             spec_name,
             Some(effective),
-            HashMap::new(),
+            IndexMap::new(),
             None,
             false,
         )

@@ -2,9 +2,9 @@
 //! `collect_needed_data_paths` to treat unless arms as dead. Only caller overlay
 //! may skip branch inputs. Covers static show and per-rule `missing_data`.
 
+use indexmap::IndexMap;
 use lemma::DateTimeValue;
 use lemma::Engine;
-use std::collections::HashMap;
 
 const PRICING_SPEC: &str = r#"
 spec pricing
@@ -51,8 +51,8 @@ fn show_includes_prefilled_value_in_live_unless() {
         show.data.keys().collect::<Vec<_>>()
     );
     assert!(
-        show.data["is_member"].fill.is_some(),
-        "is_member must carry fill from spec literal"
+        show.data["is_member"].value.is_some(),
+        "is_member must carry value from spec literal"
     );
 }
 
@@ -86,8 +86,8 @@ rule total: quantity
         .get("base_price")
         .expect("base_price entry must exist");
     assert!(
-        entry.fill.is_some(),
-        "base_price must show spec fill literal"
+        entry.value.is_some(),
+        "base_price must show spec value literal"
     );
 }
 
@@ -112,26 +112,25 @@ rule total: 1
         .show(None, "t", Some(&now))
         .expect("show must succeed");
 
-    let flag = show
-        .data
-        .get("flag")
-        .expect("flag must remain in show catalog when declared");
     assert!(
-        flag.needed_by_rules.is_empty(),
-        "statically false unless must leave flag with empty needed_by_rules: {:?}",
-        flag.needed_by_rules
+        show.types.contains_key("flag"),
+        "flag stays in Types when declared"
+    );
+    assert!(
+        !show.data.contains_key("flag"),
+        "statically false unless drops flag from Data (not needed by rules)"
     );
 
     let response = engine
-        .run(
+        .evaluate(
             None,
             "t",
             Some(&now),
-            HashMap::new(),
+            IndexMap::new(),
             Some(&["discount".to_string()]),
             false,
         )
-        .expect("run must succeed");
+        .expect("evaluate must succeed");
     let names = missing_data_union(&response);
     assert!(
         !names.contains(&"flag".to_string()),
@@ -146,7 +145,7 @@ fn prefilled_is_member_bound_not_in_missing_data() {
         .load([(lemma::SourceType::Volatile, PRICING_SPEC.to_string())])
         .expect("pricing spec must load");
     let now = DateTimeValue::now();
-    let mut inputs = HashMap::new();
+    let mut inputs = IndexMap::new();
     inputs.insert("quantity".to_string(), "5".into());
 
     let show = engine
@@ -157,12 +156,12 @@ fn prefilled_is_member_bound_not_in_missing_data() {
         "is_member must stay in show when unless arm may still apply"
     );
     assert!(
-        show.data["is_member"].fill.is_some(),
-        "is_member must carry fill in show"
+        show.data["is_member"].value.is_some(),
+        "is_member must carry value in show"
     );
 
     let response = engine
-        .run(
+        .evaluate(
             None,
             "pricing",
             Some(&now),
@@ -196,12 +195,12 @@ fn eval_honors_supplied_override_for_unless_arm() {
         .expect("show must succeed");
     assert!(default_show.data.contains_key("is_member"));
 
-    let mut inputs = HashMap::new();
+    let mut inputs = IndexMap::new();
     inputs.insert("quantity".to_string(), "5".into());
     inputs.insert("is_member".to_string(), "true".into());
 
     let response = engine
-        .run(
+        .evaluate(
             None,
             "pricing",
             Some(&now),

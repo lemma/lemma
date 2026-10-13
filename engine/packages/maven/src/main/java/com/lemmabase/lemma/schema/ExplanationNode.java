@@ -101,23 +101,28 @@ public sealed interface ExplanationNode {
   }
 
   /**
-   * Rule.
+   * Root rule explanation under {@code RuleResult.explanation}. Nested rule uses are
+   * {@link RuleRef} into {@code rules}.
    *
    * @param name name
    * @param result flattened RuleResultValue (one-liner plus typed maps)
    * @param body body
    * @param causes causes
    * @param children children
+   * @param rules narrated rules reachable from this root
    */
   record Rule(
       String name,
       RuleResultValue result,
       String body,
       @Nullable List<Cause> causes,
-      @Nullable List<ExplanationNode> children)
-      implements ExplanationNode {
-    /** {@inheritDoc} */
-    @Override
+      @Nullable List<ExplanationNode> children,
+      @Nullable List<ExplainedRule> rules) {
+    /**
+     * Returns the node type tag.
+     *
+     * @return type tag
+     */
     public String type() {
       return "rule";
     }
@@ -146,6 +151,7 @@ public sealed interface ExplanationNode {
       String body = null;
       List<Cause> causes = null;
       List<ExplanationNode> children = null;
+      List<ExplainedRule> rules = null;
       while (p.nextToken() != JsonToken.END_OBJECT) {
         String field = p.currentName();
         p.nextToken();
@@ -166,6 +172,7 @@ public sealed interface ExplanationNode {
           case "body" -> body = JsonReading.readString(p);
           case "causes" -> causes = JsonReading.readList(p, Cause::read);
           case "children" -> children = JsonReading.readList(p, ExplanationNode::read);
+          case "rules" -> rules = JsonReading.readList(p, ExplainedRule::read);
           default -> JsonReading.unknownField(field, "ExplanationNode.Rule");
         }
       }
@@ -194,7 +201,300 @@ public sealed interface ExplanationNode {
               unit),
           body,
           causes,
+          children,
+          rules);
+    }
+  }
+
+  /**
+   * One narrated rule body in a root explanation's {@code rules} table.
+   *
+   * @param id dense id from 0 in first-reach order
+   * @param name name
+   * @param result flattened RuleResultValue
+   * @param body body
+   * @param causes causes
+   * @param children children
+   */
+  record ExplainedRule(
+      int id,
+      String name,
+      RuleResultValue result,
+      String body,
+      @Nullable List<Cause> causes,
+      @Nullable List<ExplanationNode> children) {
+    /**
+     * Parses JSON.
+     *
+     * @param p parser at value start
+     * @return parsed value
+     * @throws IOException if JSON IO fails
+     */
+    public static ExplainedRule read(JsonParser p) throws IOException {
+      JsonReading.expectStartObject(p, "ExplainedRule");
+      Integer id = null;
+      String name = null;
+      String result = null;
+      Map<String, BigDecimal> measure = null;
+      Map<String, BigDecimal> ratio = null;
+      BigDecimal number = null;
+      Boolean booleanValue = null;
+      String text = null;
+      LocalDate date = null;
+      LocalTime time = null;
+      RuleResultValue.CalendarResult calendar = null;
+      RuleResultValue.RangeResult range = null;
+      String unit = null;
+      String body = null;
+      List<Cause> causes = null;
+      List<ExplanationNode> children = null;
+      while (p.nextToken() != JsonToken.END_OBJECT) {
+        String field = p.currentName();
+        p.nextToken();
+        switch (field) {
+          case "id" -> id = JsonReading.readInt(p);
+          case "name" -> name = JsonReading.readString(p);
+          case "result" -> result = JsonReading.readString(p);
+          case "measure" -> measure = JsonReading.readMap(p, JsonReading::readDecimal);
+          case "ratio" -> ratio = JsonReading.readMap(p, JsonReading::readDecimal);
+          case "number" -> number = JsonReading.readDecimal(p);
+          case "boolean" -> booleanValue = JsonReading.readBoolean(p);
+          case "text" -> text = JsonReading.readString(p);
+          case "date" -> date = JsonReading.readLocalDate(p);
+          case "time" -> time = JsonReading.readLocalTime(p);
+          case "calendar" -> calendar = RuleResultValue.CalendarResult.read(p);
+          case "range" -> range = RuleResultValue.RangeResult.read(p);
+          case "unit" -> unit = JsonReading.readString(p);
+          case "body" -> body = JsonReading.readString(p);
+          case "causes" -> causes = JsonReading.readList(p, Cause::read);
+          case "children" -> children = JsonReading.readList(p, ExplanationNode::read);
+          default -> JsonReading.unknownField(field, "ExplainedRule");
+        }
+      }
+      if (id == null) {
+        JsonReading.missingRequired("id", "ExplainedRule");
+      }
+      if (name == null) {
+        JsonReading.missingRequired("name", "ExplainedRule");
+      }
+      if (result == null) {
+        JsonReading.missingRequired("result", "ExplainedRule");
+      }
+      if (body == null) {
+        JsonReading.missingRequired("body", "ExplainedRule");
+      }
+      return new ExplainedRule(
+          id,
+          name,
+          typedValue(
+              result,
+              measure,
+              ratio,
+              number,
+              booleanValue,
+              text,
+              date,
+              time,
+              calendar,
+              range,
+              unit),
+          body,
+          causes,
           children);
+    }
+  }
+
+  /**
+   * Reference to an {@link ExplainedRule} in the enclosing root explanation's {@code rules} table.
+   *
+   * @param id rules table id
+   * @param name name
+   * @param result flattened RuleResultValue
+   */
+  record RuleRef(int id, String name, RuleResultValue result) implements ExplanationNode {
+    /** {@inheritDoc} */
+    @Override
+    public String type() {
+      return "rule_ref";
+    }
+
+    /**
+     * Parses JSON.
+     *
+     * @param p parser at value start
+     * @return parsed value
+     * @throws IOException if JSON IO fails
+     */
+    public static RuleRef read(JsonParser p) throws IOException {
+      JsonReading.expectStartObject(p, "ExplanationNode.RuleRef");
+      Integer id = null;
+      String name = null;
+      String result = null;
+      Map<String, BigDecimal> measure = null;
+      Map<String, BigDecimal> ratio = null;
+      BigDecimal number = null;
+      Boolean booleanValue = null;
+      String text = null;
+      LocalDate date = null;
+      LocalTime time = null;
+      RuleResultValue.CalendarResult calendar = null;
+      RuleResultValue.RangeResult range = null;
+      String unit = null;
+      while (p.nextToken() != JsonToken.END_OBJECT) {
+        String field = p.currentName();
+        p.nextToken();
+        switch (field) {
+          case "type" -> expectType(p, "rule_ref");
+          case "id" -> id = JsonReading.readInt(p);
+          case "name" -> name = JsonReading.readString(p);
+          case "result" -> result = JsonReading.readString(p);
+          case "measure" -> measure = JsonReading.readMap(p, JsonReading::readDecimal);
+          case "ratio" -> ratio = JsonReading.readMap(p, JsonReading::readDecimal);
+          case "number" -> number = JsonReading.readDecimal(p);
+          case "boolean" -> booleanValue = JsonReading.readBoolean(p);
+          case "text" -> text = JsonReading.readString(p);
+          case "date" -> date = JsonReading.readLocalDate(p);
+          case "time" -> time = JsonReading.readLocalTime(p);
+          case "calendar" -> calendar = RuleResultValue.CalendarResult.read(p);
+          case "range" -> range = RuleResultValue.RangeResult.read(p);
+          case "unit" -> unit = JsonReading.readString(p);
+          default -> JsonReading.unknownField(field, "ExplanationNode.RuleRef");
+        }
+      }
+      if (id == null) {
+        JsonReading.missingRequired("id", "ExplanationNode.RuleRef");
+      }
+      if (name == null) {
+        JsonReading.missingRequired("name", "ExplanationNode.RuleRef");
+      }
+      if (result == null) {
+        JsonReading.missingRequired("result", "ExplanationNode.RuleRef");
+      }
+      return new RuleRef(
+          id,
+          name,
+          typedValue(
+              result,
+              measure,
+              ratio,
+              number,
+              booleanValue,
+              text,
+              date,
+              time,
+              calendar,
+              range,
+              unit));
+    }
+  }
+
+  /**
+   * One instance-list row a list command read.
+   *
+   * @param number 1-based row number
+   * @param appended true when appended by an expression {@code -> with}
+   * @param key key field nodes in {@code -> key} order
+   * @param fields fields read on the row
+   */
+  record Row(
+      int number,
+      boolean appended,
+      @Nullable List<ExplanationNode> key,
+      List<ExplanationNode> fields)
+      implements ExplanationNode {
+    /** {@inheritDoc} */
+    @Override
+    public String type() {
+      return "row";
+    }
+
+    /**
+     * Parses JSON.
+     *
+     * @param p parser at value start
+     * @return parsed value
+     * @throws IOException if JSON IO fails
+     */
+    public static Row read(JsonParser p) throws IOException {
+      JsonReading.expectStartObject(p, "ExplanationNode.Row");
+      Integer number = null;
+      boolean appended = false;
+      List<ExplanationNode> key = null;
+      List<ExplanationNode> fields = null;
+      while (p.nextToken() != JsonToken.END_OBJECT) {
+        String field = p.currentName();
+        p.nextToken();
+        switch (field) {
+          case "type" -> expectType(p, "row");
+          case "number" -> number = JsonReading.readInt(p);
+          case "appended" -> appended = JsonReading.readBoolean(p);
+          case "key" -> key = JsonReading.readList(p, ExplanationNode::read);
+          case "fields" -> fields = JsonReading.readList(p, ExplanationNode::read);
+          default -> JsonReading.unknownField(field, "ExplanationNode.Row");
+        }
+      }
+      if (number == null) {
+        JsonReading.missingRequired("number", "ExplanationNode.Row");
+      }
+      if (fields == null) {
+        JsonReading.missingRequired("fields", "ExplanationNode.Row");
+      }
+      return new Row(number, appended, key, fields);
+    }
+  }
+
+  /**
+   * Summary of a {@code where} filter.
+   *
+   * @param condition condition text
+   * @param matched rows that matched
+   * @param total rows in the input list
+   * @param children nested filters or row nodes
+   */
+  record Filter(
+      String condition, int matched, int total, @Nullable List<ExplanationNode> children)
+      implements ExplanationNode {
+    /** {@inheritDoc} */
+    @Override
+    public String type() {
+      return "filter";
+    }
+
+    /**
+     * Parses JSON.
+     *
+     * @param p parser at value start
+     * @return parsed value
+     * @throws IOException if JSON IO fails
+     */
+    public static Filter read(JsonParser p) throws IOException {
+      JsonReading.expectStartObject(p, "ExplanationNode.Filter");
+      String condition = null;
+      Integer matched = null;
+      Integer total = null;
+      List<ExplanationNode> children = null;
+      while (p.nextToken() != JsonToken.END_OBJECT) {
+        String field = p.currentName();
+        p.nextToken();
+        switch (field) {
+          case "type" -> expectType(p, "filter");
+          case "condition" -> condition = JsonReading.readString(p);
+          case "matched" -> matched = JsonReading.readInt(p);
+          case "total" -> total = JsonReading.readInt(p);
+          case "children" -> children = JsonReading.readList(p, ExplanationNode::read);
+          default -> JsonReading.unknownField(field, "ExplanationNode.Filter");
+        }
+      }
+      if (condition == null) {
+        JsonReading.missingRequired("condition", "ExplanationNode.Filter");
+      }
+      if (matched == null) {
+        JsonReading.missingRequired("matched", "ExplanationNode.Filter");
+      }
+      if (total == null) {
+        JsonReading.missingRequired("total", "ExplanationNode.Filter");
+      }
+      return new Filter(condition, matched, total, children);
     }
   }
 
@@ -519,12 +819,14 @@ public sealed interface ExplanationNode {
     }
     try (JsonParser reader = JsonReading.parserFor(json)) {
       return switch (type) {
-        case "rule" -> Rule.read(reader);
+        case "rule_ref" -> RuleRef.read(reader);
         case "compose" -> Compose.read(reader);
         case "data" -> Data.read(reader);
         case "data_unused" -> DataUnused.read(reader);
         case "conversion" -> Conversion.read(reader);
         case "veto" -> Veto.read(reader);
+        case "row" -> Row.read(reader);
+        case "filter" -> Filter.read(reader);
         default -> throw new LemmaBugError("BUG: unknown type value: " + type);
       };
     }

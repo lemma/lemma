@@ -1,16 +1,27 @@
 defmodule Lemma.ShowData do
   @moduledoc """
-  One declared data slot in a spec, as returned in `Lemma.Show.data`.
+  One evaluation-data input of a spec, as returned in `Lemma.Show.data`: one `properties`
+  entry of the Show JSON Schema document, keyed by its input key.
 
-  Empty `needed_by_rules` means offered for reuse (`data x: alias.slot`), not an
-  eval intake key for this spec.
+  Empty `needed_by_rules` (`x-lemma-needed-by-rules`) means offered for reuse
+  (`data x: alias.slot`), not an eval intake key for this spec.
 
-  `path` is the import hops to this slot; empty means this spec.
+  `path` (`x-lemma-path`) is the import hops to this slot; empty means this spec.
 
-  `type` is the raw `LemmaType` JSON map, a Rust discriminated union tagged by its
-  `"kind"` string. It is intentionally left untyped here: pattern-match on it
-  directly (e.g. `%{"kind" => "measure", "units" => units} = entry.type`) rather than
-  routing through a parallel Elixir struct hierarchy for 12 type kinds.
+  `type` is the raw `x-lemma-type` map (`ShowPropertyType`): a LemmaType without
+  `help` and without text `options`/`length`. Those live on the property schema as
+  `description`, `enum` and `minLength`/`maxLength` (`schema`). Pattern-match on
+  `type` by `"kind"` (e.g. `%{"kind" => "measure", "units" => units} = entry.type`).
+  A `"list"` type carries `"element"` (a bare type specification; `"kind" => "spec"`
+  for instance lists) and `"key"` (`"numbered"` or `%{"fields" => [...]}`).
+
+  `value` (`x-lemma-value`) of an instance list lists its source rows in order: each
+  item of `"list"` has only `"fields"`, the fields that row sets, keyed relative to
+  the row spec; neither the list nor its rows carry `"result"`. A literal field is a
+  typed `RuleResultValue`; a referenced field carries only `"reference"` (the input
+  key of the referenced data). A list has no `value` when it has no source rows.
+
+  `schema` is the raw property schema map, for validating evaluation data.
   """
 
   alias Lemma.PathSegment
@@ -18,28 +29,29 @@ defmodule Lemma.ShowData do
   @type t :: %__MODULE__{
           type: map(),
           path: [PathSegment.t()],
-          fill: map() | nil,
+          value: map() | nil,
           suggestion: map() | nil,
-          needed_by_rules: [String.t()]
+          needed_by_rules: [String.t()],
+          schema: map()
         }
 
-  @enforce_keys [:type, :path]
-  defstruct type: nil, path: [], fill: nil, suggestion: nil, needed_by_rules: []
+  @enforce_keys [:type, :path, :needed_by_rules, :schema]
+  defstruct [:type, :path, :value, :suggestion, :needed_by_rules, :schema]
 
   @doc """
-  Builds a `Lemma.ShowData` from one value of the decoded `Lemma.show/4` JSON
-  `"data"` map. `fill`/`suggestion` are absent (not `null`) from the API JSON
-  when unset; `Map.get/3` yields `nil` for both. `path` is required (empty list
-  is valid).
+  Builds a `Lemma.ShowData` from one value of the decoded Show document's
+  `"properties"` (or a row schema's `"properties"`). `x-lemma-value` and
+  `x-lemma-suggestion` are absent when unset; both yield `nil`.
   """
   @spec from_map(map()) :: t()
   def from_map(map) when is_map(map) do
     %__MODULE__{
-      type: Map.fetch!(map, "type"),
-      path: map |> Map.fetch!("path") |> Enum.map(&PathSegment.from_map/1),
-      fill: Map.get(map, "fill"),
-      suggestion: Map.get(map, "suggestion"),
-      needed_by_rules: Map.get(map, "needed_by_rules", [])
+      type: Map.fetch!(map, "x-lemma-type"),
+      path: map |> Map.fetch!("x-lemma-path") |> Enum.map(&PathSegment.from_map/1),
+      value: Map.get(map, "x-lemma-value"),
+      suggestion: Map.get(map, "x-lemma-suggestion"),
+      needed_by_rules: Map.fetch!(map, "x-lemma-needed-by-rules"),
+      schema: map
     }
   end
 end

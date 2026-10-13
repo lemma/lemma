@@ -1,5 +1,6 @@
 //! Regression: temporal inheritance chains with large unless lookup tables (alpha2.lemma shape).
 
+use indexmap::IndexMap;
 use lemma::{DateGranularity, DateTimeValue, Engine, SourceType};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -70,10 +71,10 @@ fn alpha2_analog_199_branches_compiles_and_evaluates() {
         .show(None, "lookup", Some(&effective))
         .expect("plan at latest slice");
 
-    let mut data = std::collections::HashMap::new();
+    let mut data = IndexMap::new();
     data.insert("code".to_string(), "C042".into());
     let response = engine
-        .run(
+        .evaluate(
             None,
             "lookup",
             Some(&effective),
@@ -88,10 +89,10 @@ fn alpha2_analog_199_branches_compiles_and_evaluates() {
         Some("Name 042".to_string())
     );
 
-    let mut data = std::collections::HashMap::new();
+    let mut data = IndexMap::new();
     data.insert("code".to_string(), "L17".into());
     let response = engine
-        .run(
+        .evaluate(
             None,
             "lookup",
             Some(&effective),
@@ -120,10 +121,10 @@ fn alpha2_analog_explanation_states_evaluated_conditions() {
 
     let effective = date(2025, 1, 1);
 
-    let mut data = std::collections::HashMap::new();
+    let mut data = IndexMap::new();
     data.insert("code".to_string(), "L17".into());
     let response = engine
-        .run(
+        .evaluate(
             None,
             "lookup",
             Some(&effective),
@@ -154,10 +155,10 @@ fn alpha2_analog_explanation_states_evaluated_conditions() {
         explanation.causes
     );
 
-    let mut data = std::collections::HashMap::new();
+    let mut data = IndexMap::new();
     data.insert("code".to_string(), "C042".into());
     let response = engine
-        .run(
+        .evaluate(
             None,
             "lookup",
             Some(&effective),

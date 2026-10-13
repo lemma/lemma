@@ -2,13 +2,13 @@ defmodule Lemma.Mcp do
   @moduledoc """
   Pure Lemma MCP tools: engine + JSON args in, catalog or tool result text out.
 
-  Read tools mirror the engine catalog: `run`, `list`, `show`, `source`,
+  Read tools mirror the engine catalog: `evaluate`, `specs`, `show`, `source`,
   `check`, `guide`. Admin/write tools stay in the CLI MCP server only.
 
-  `run/2` always includes explanations and returns formatted ASCII trees
-  (plus a Missing data block when inputs are unbound). Args match SDK `run`:
+  `evaluate/2` always includes explanations and returns formatted ASCII trees
+  (plus a Missing data block when inputs are unbound). Args match SDK `evaluate`:
     `spec`, optional `repository`, `rules`, `data` (object), `effective`.
-  Do not pass `explain`.
+  Do not pass `explain`. User phrasing "ask Lemma" means `evaluate`.
   """
 
   @type engine :: Lemma.engine()
@@ -35,28 +35,26 @@ defmodule Lemma.Mcp do
     Lemma.Native.mcp_read_resource(uri)
   end
 
-  @spec run(engine(), args()) ::
-          {:ok, String.t()}
-          | {:error, :invalid_arguments | :not_found | :diagnostics, String.t()}
-  def run(engine, args) when is_map(args) do
-    Lemma.Native.mcp_run(engine, Jason.encode!(args))
-  end
-
-  @doc """
-  Deprecated alias of `run/2`. Prefer `Lemma.Mcp.run/2`.
-  """
   @spec evaluate(engine(), args()) ::
           {:ok, String.t()}
           | {:error, :invalid_arguments | :not_found | :diagnostics, String.t()}
   def evaluate(engine, args) when is_map(args) do
-    run(engine, args)
+    Lemma.Native.mcp_evaluate(engine, Jason.encode!(args))
   end
 
-  @spec list(engine(), args()) ::
+  @deprecated "Use evaluate/2"
+  @spec run(engine(), args()) ::
           {:ok, String.t()}
           | {:error, :invalid_arguments | :not_found | :diagnostics, String.t()}
-  def list(engine, args) when is_map(args) do
-    Lemma.Native.mcp_list(engine, Jason.encode!(args))
+  def run(engine, args) when is_map(args) do
+    evaluate(engine, args)
+  end
+
+  @spec specs(engine(), args()) ::
+          {:ok, String.t()}
+          | {:error, :invalid_arguments | :not_found | :diagnostics, String.t()}
+  def specs(engine, args) when is_map(args) do
+    Lemma.Native.mcp_specs(engine, Jason.encode!(args))
   end
 
   @spec show(engine(), args()) ::

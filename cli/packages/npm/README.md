@@ -37,12 +37,12 @@ cargo install lemma
 ## Common commands
 
 ```bash
-npx lemma run shipping
-npx lemma run tax_calculation --rules=tax_owed
-npx lemma run tax_calculation income=75000 filing_status="married"
-npx lemma list
+npx lemma evaluate shipping
+npx lemma evaluate tax_calculation --rules=tax_owed
+npx lemma evaluate tax_calculation income=75000 filing_status="married"
+npx lemma specs
 npx lemma show pricing
-npx lemma server --prefix ./examples --port 8012
+npx lemma server --path ./examples --port 8012
 ```
 
 Each command supports `--help`.

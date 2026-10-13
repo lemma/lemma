@@ -33,6 +33,82 @@ impl<'de> Deserialize<'de> for BigUint {
     }
 }
 
+/// Per-thread operation counts so tests can assert algorithmic work deterministically.
+#[cfg(test)]
+pub(crate) mod work_counters {
+    use std::cell::Cell;
+
+    thread_local! {
+        static COUNTS: Cell<WorkCounts> = const { Cell::new(WorkCounts::ZERO) };
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct WorkCounts {
+        pub gcd_calls: u64,
+        pub gcd_steps: u64,
+        pub gcd_max_operand_bits: u64,
+        pub div_rem_calls: u64,
+    }
+
+    impl WorkCounts {
+        const ZERO: Self = Self {
+            gcd_calls: 0,
+            gcd_steps: 0,
+            gcd_max_operand_bits: 0,
+            div_rem_calls: 0,
+        };
+    }
+
+    pub fn reset() {
+        COUNTS.set(WorkCounts::ZERO);
+    }
+
+    pub fn snapshot() -> WorkCounts {
+        COUNTS.get()
+    }
+
+    fn update(change: impl FnOnce(&mut WorkCounts)) {
+        let mut counts = COUNTS.get();
+        change(&mut counts);
+        COUNTS.set(counts);
+    }
+
+    pub(super) fn record_gcd_call(left_bits: u64, right_bits: u64) {
+        update(|counts| {
+            counts.gcd_calls += 1;
+            counts.gcd_max_operand_bits =
+                counts.gcd_max_operand_bits.max(left_bits).max(right_bits);
+        });
+    }
+
+    pub(super) fn record_gcd_step() {
+        update(|counts| counts.gcd_steps += 1);
+    }
+
+    pub(super) fn record_div_rem() {
+        update(|counts| counts.div_rem_calls += 1);
+    }
+}
+
+/// Most digits a `Vec<BigDigit>` can hold: its byte length is capped at `isize::MAX`.
+pub const MAX_DIGITS: usize = isize::MAX as usize / std::mem::size_of::<BigDigit>();
+
+/// True when `base^exponent` provably needs more than `MAX_DIGITS` digits, for a base
+/// of `base_bits` bits. Uses the lower bound `(base_bits - 1) * exponent + 1` on the
+/// result's bit length. `false` does not promise that the allocation succeeds.
+fn power_exceeds_allocation(base_bits: u64, exponent: &BigUint) -> Result<bool, AllocError> {
+    if base_bits <= 1 {
+        return Ok(false);
+    }
+    let lower_bits = exponent
+        .try_mul(&BigUint::try_from_u64(base_bits - 1)?)?
+        .try_add(&BigUint::one())?;
+    let limit_bits =
+        BigUint::try_from_u64(u64::try_from(MAX_DIGITS).expect("BUG: usize digit limit fits u64"))?
+            .try_mul_u32(BITS)?;
+    Ok(lower_bits.cmp(&limit_bits) == Ordering::Greater)
+}
+
 impl BigUint {
     pub fn zero() -> Self {
         Self { digits: vec![0] }
@@ -90,17 +166,20 @@ impl BigUint {
         Ok(Self { digits })
     }
 
+    /// Parses decimal digits. Other input is a caller bug and panics; only allocation returns `Err`.
     pub fn try_from_str_radix(s: &str, radix: u32) -> Result<Self, AllocError> {
         if radix != 10 {
-            return Err(AllocError);
+            panic!("BUG: BigUint literals are parsed in radix 10 only");
         }
         let s = s.trim();
         if s.is_empty() {
-            return Err(AllocError);
+            panic!("BUG: empty BigUint literal");
         }
         let mut result = Self::zero();
         for ch in s.chars() {
-            let digit = ch.to_digit(radix).ok_or(AllocError)?;
+            let digit = ch
+                .to_digit(radix)
+                .expect("BUG: BigUint literal holds only decimal digits");
             result = result.try_mul_u32(10)?.try_add_u32(digit)?;
         }
         Ok(result)
@@ -120,7 +199,7 @@ impl BigUint {
             return 0;
         }
         let top = self.digits[self.digits.len() - 1];
-        (self.digits.len() as u64 - 1) * u64::from(BITS) + (64 - top.leading_zeros() as u64)
+        (self.digits.len() as u64 - 1) * u64::from(BITS) + u64::from(BITS - top.leading_zeros())
     }
 
     pub fn cmp(&self, other: &Self) -> Ordering {
@@ -155,7 +234,7 @@ impl BigUint {
 
     pub fn try_sub(&self, other: &Self) -> Result<Self, AllocError> {
         if self.cmp(other) == Ordering::Less {
-            return Err(AllocError);
+            panic!("BUG: BigUint subtraction underflow");
         }
         let len = self.digits.len();
         let mut out = try_with_capacity(len)?;
@@ -194,8 +273,10 @@ impl BigUint {
     }
 
     pub fn try_div_rem(&self, other: &Self) -> Result<(Self, Self), AllocError> {
+        #[cfg(test)]
+        work_counters::record_div_rem();
         if other.is_zero() {
-            return Err(AllocError);
+            panic!("BUG: BigUint division by zero; callers reject zero divisors first");
         }
         if self.is_zero() {
             return Ok((Self::zero(), Self::zero()));
@@ -216,68 +297,157 @@ impl BigUint {
         let (q, r) = if shift == 0 {
             div_rem_core(self.try_clone()?, &other.digits)?
         } else {
-            let shifted_dividend = self.try_shl(shift)?;
-            let shifted_divisor = other.try_shl(shift)?;
+            let shifted_dividend = self.try_shl(u64::from(shift))?;
+            let shifted_divisor = other.try_shl(u64::from(shift))?;
             let (q, r) = div_rem_core(shifted_dividend, &shifted_divisor.digits)?;
             (q, r.try_shr(shift)?)
         };
         Ok((q, r))
     }
 
+    /// Binary gcd: shifts and subtractions in place. When the operands differ in digit
+    /// length, one remainder step first brings the larger below the smaller, so the binary
+    /// loop takes at most `2 * bits(smaller)` steps.
     pub fn try_gcd(&self, other: &Self) -> Result<Self, AllocError> {
-        let mut a = self.try_clone()?;
-        let mut b = other.try_clone()?;
-        while !b.is_zero() {
-            let (_, r) = a.try_div_rem(&b)?;
-            a = b;
-            b = r;
+        #[cfg(test)]
+        work_counters::record_gcd_call(self.bits(), other.bits());
+        if self.is_zero() {
+            return other.try_clone();
         }
-        Ok(a)
+        if other.is_zero() {
+            return self.try_clone();
+        }
+        let (larger, smaller) = if self.cmp(other) == Ordering::Less {
+            (other, self)
+        } else {
+            (self, other)
+        };
+        let mut a = if larger.digits.len() > smaller.digits.len() {
+            let (_, remainder) = larger.try_div_rem(smaller)?;
+            if remainder.is_zero() {
+                return smaller.try_clone();
+            }
+            remainder
+        } else {
+            larger.try_clone()?
+        };
+        let mut b = smaller.try_clone()?;
+        let a_zeros = a.trailing_zeros();
+        let common_zeros = a_zeros.min(b.trailing_zeros());
+        a.shr_in_place(a_zeros);
+        loop {
+            #[cfg(test)]
+            work_counters::record_gcd_step();
+            b.shr_in_place(b.trailing_zeros());
+            if a.cmp(&b) == Ordering::Greater {
+                std::mem::swap(&mut a, &mut b);
+            }
+            sub_in_place(&mut b.digits, &a.digits);
+            b.normalize();
+            if b.is_zero() {
+                return a.try_shl(common_zeros);
+            }
+        }
     }
 
-    pub fn try_pow_u32(&self, exp: u32) -> Result<Self, AllocError> {
-        if exp == 0 {
-            return Ok(Self::one());
+    /// Number of trailing zero bits. `self` must be non-zero.
+    fn trailing_zeros(&self) -> u64 {
+        let zero_digits = self
+            .digits
+            .iter()
+            .position(|&digit| digit != 0)
+            .expect("BUG: trailing_zeros of zero");
+        u64::try_from(zero_digits).expect("BUG: digit count fits u64") * u64::from(BITS)
+            + u64::from(self.digits[zero_digits].trailing_zeros())
+    }
+
+    fn shr_in_place(&mut self, bits: u64) {
+        let digit_shift = usize::try_from(bits / u64::from(BITS))
+            .expect("BUG: shift is at most the bit length of an existing value");
+        if digit_shift >= self.digits.len() {
+            self.digits.truncate(1);
+            self.digits[0] = 0;
+            return;
         }
+        self.digits.drain(..digit_shift);
+        let bit_shift = (bits % u64::from(BITS)) as u32;
+        if bit_shift != 0 {
+            let len = self.digits.len();
+            for i in 0..len {
+                let high = if i + 1 < len {
+                    self.digits[i + 1] << (BITS - bit_shift)
+                } else {
+                    0
+                };
+                self.digits[i] = (self.digits[i] >> bit_shift) | high;
+            }
+        }
+        self.normalize();
+    }
+
+    pub fn bit(&self, index: u64) -> bool {
+        let digit = self.digits
+            [usize::try_from(index / u64::from(BITS)).expect("BUG: bit index within digits")];
+        (digit >> (index % u64::from(BITS))) & 1 == 1
+    }
+
+    pub fn is_odd(&self) -> bool {
+        self.digits[0] & 1 == 1
+    }
+
+    pub fn try_pow(&self, exponent: &Self) -> Result<Self, AllocError> {
+        if exponent.is_zero() {
+            return Self::try_from_u32(1);
+        }
+        if power_exceeds_allocation(self.bits(), exponent)? {
+            return Err(AllocError);
+        }
+        let total_bits = exponent.bits();
         let mut base = self.try_clone()?;
         let mut result = Self::one();
-        let mut e = exp;
-        while e > 0 {
-            if e & 1 == 1 {
+        for index in 0..total_bits {
+            if exponent.bit(index) {
                 result = result.try_mul(&base)?;
             }
-            e >>= 1;
-            if e > 0 {
+            if index + 1 < total_bits {
                 base = base.try_mul(&base)?;
             }
         }
         Ok(result)
     }
 
-    pub fn try_nth_root(&self, n: u32) -> Result<Self, AllocError> {
-        if n == 0 {
-            return Err(AllocError);
+    /// Floor of the `n`-th root. `n` must be at least 1.
+    pub fn try_nth_root(&self, n: &Self) -> Result<Self, AllocError> {
+        if n.is_zero() {
+            panic!("BUG: root degree must be at least 1");
         }
         if self.is_zero() {
             return Ok(Self::zero());
         }
-        if n == 1 {
+        if n.is_one() || self.is_one() {
             return self.try_clone();
         }
+        if n.cmp(&Self::try_from_u128(u128::from(self.bits()))?) == Ordering::Greater {
+            return Self::try_from_u32(1);
+        }
+        let degree = n
+            .to_u128()
+            .expect("BUG: root degree is at most the bit length of the value");
+        let two = Self::try_from_u32(2)?;
+        let root_bits_bound = Self::try_from_u128(u128::from(self.bits()) / degree + 1)?;
         let mut lo = Self::zero();
-        let mut hi = self.try_add(&Self::one())?;
+        let mut hi = two.try_pow(&root_bits_bound)?;
         while lo.cmp(&hi) == Ordering::Less {
-            let two = Self::try_from_u32(2)?;
             let mid = {
                 let sum = lo.try_add(&hi)?;
                 let (q, _) = sum.try_div_rem(&two)?;
                 q
             };
-            let mid_pow = mid.try_pow_u32(n)?;
+            let mid_pow = mid.try_pow(n)?;
             match mid_pow.cmp(self) {
                 Ordering::Less | Ordering::Equal => {
                     let next = mid.try_add(&Self::one())?;
-                    let next_pow = next.try_pow_u32(n)?;
+                    let next_pow = next.try_pow(n)?;
                     if next_pow.cmp(self) == Ordering::Greater {
                         return Ok(mid);
                     }
@@ -337,14 +507,19 @@ impl BigUint {
         Some(result)
     }
 
-    fn try_shl(&self, bits: u32) -> Result<Self, AllocError> {
+    fn try_shl(&self, bits: u64) -> Result<Self, AllocError> {
         if bits == 0 || self.is_zero() {
             return self.try_clone();
         }
-        let digit_shift = (bits / BITS) as usize;
-        let bit_shift = bits % BITS;
+        let digit_shift = usize::try_from(bits / u64::from(BITS)).map_err(|_| AllocError)?;
+        let bit_shift = (bits % u64::from(BITS)) as u32;
         let extra = usize::from(bit_shift > 0);
-        let new_len = self.digits.len() + digit_shift + extra;
+        let new_len = self
+            .digits
+            .len()
+            .checked_add(digit_shift)
+            .and_then(|len| len.checked_add(extra))
+            .ok_or(AllocError)?;
         let mut out = try_with_capacity(new_len)?;
         out.resize(new_len, 0);
         if bit_shift == 0 {
@@ -471,7 +646,7 @@ fn div_wide(hi: BigDigit, lo: BigDigit, divisor: BigDigit) -> (BigDigit, BigDigi
 
 fn div_rem_digit(mut a: BigUint, b: BigDigit) -> Result<(BigUint, BigUint), AllocError> {
     if b == 0 {
-        return Err(AllocError);
+        panic!("BUG: BigUint division by zero; callers reject zero divisors first");
     }
     let mut rem = 0;
     for d in a.digits.iter_mut().rev() {
@@ -577,6 +752,138 @@ impl fmt::Display for BigUint {
 mod tests {
     use super::*;
 
+    fn euclid_gcd(left: &BigUint, right: &BigUint) -> BigUint {
+        let mut a = left.clone();
+        let mut b = right.clone();
+        while !b.is_zero() {
+            let (_, r) = a.try_div_rem(&b).unwrap();
+            a = b;
+            b = r;
+        }
+        a
+    }
+
+    fn pow(base: u32, exponent: u32) -> BigUint {
+        BigUint::try_from_u32(base)
+            .unwrap()
+            .try_pow(&BigUint::try_from_u32(exponent).unwrap())
+            .unwrap()
+    }
+
+    fn product(factors: &[&BigUint]) -> BigUint {
+        factors
+            .iter()
+            .fold(BigUint::one(), |acc, factor| acc.try_mul(factor).unwrap())
+    }
+
+    fn gcd_fixture_pairs() -> Vec<(BigUint, BigUint)> {
+        let small = |value: u128| BigUint::try_from_u128(value).unwrap();
+        let mersenne = |exponent: u32| pow(2, exponent).try_sub(&BigUint::one()).unwrap();
+        vec![
+            (small(0), small(0)),
+            (small(0), small(5)),
+            (small(5), small(0)),
+            (small(1), small(1)),
+            (small(12), small(18)),
+            (small(18), small(12)),
+            (small(17), small(17)),
+            (small(u128::MAX), small(u128::MAX - 1)),
+            (pow(2, 64), pow(2, 40)),
+            (pow(2, 40), pow(2, 64)),
+            (mersenne(127), mersenne(89)),
+            (
+                product(&[&pow(2, 100), &pow(3, 50)]),
+                product(&[&pow(2, 60), &pow(5, 30)]),
+            ),
+            (
+                product(&[&pow(7, 300), &pow(11, 200), &mersenne(61)]),
+                product(&[&pow(7, 250), &pow(13, 180), &mersenne(61)]),
+            ),
+            (pow(3, 2000), pow(3, 1999)),
+            (
+                mersenne(3000),
+                pow(2, 3000).try_add(&BigUint::one()).unwrap(),
+            ),
+        ]
+    }
+
+    #[test]
+    fn try_gcd_matches_euclid_reference() {
+        for (left, right) in gcd_fixture_pairs() {
+            assert_eq!(
+                left.try_gcd(&right).unwrap(),
+                euclid_gcd(&left, &right),
+                "gcd({left}, {right})"
+            );
+        }
+    }
+
+    #[test]
+    fn try_gcd_of_cap_sized_inputs_uses_no_division_and_linear_steps() {
+        let common = pow(2, 100);
+        let cases = [
+            (
+                product(&[&common, &pow(3, 19_000)]),
+                product(&[&pow(2, 200), &pow(5, 13_000)]),
+                common,
+            ),
+            (
+                pow(3, 20_000),
+                pow(2, 32_767).try_sub(&BigUint::one()).unwrap(),
+                BigUint::one(),
+            ),
+        ];
+        for (left, right, expected) in cases {
+            work_counters::reset();
+            assert_eq!(left.try_gcd(&right).unwrap(), expected);
+            let counts = work_counters::snapshot();
+            assert_eq!(counts.gcd_calls, 1);
+            assert!(
+                counts.div_rem_calls <= 1,
+                "gcd took {} long divisions, at most one balances the operands",
+                counts.div_rem_calls
+            );
+            let bound = 2 * (left.bits() + right.bits());
+            assert!(
+                counts.gcd_steps < bound,
+                "gcd took {} steps, bound {bound}",
+                counts.gcd_steps
+            );
+        }
+    }
+
+    #[test]
+    fn try_gcd_steps_are_bounded_by_the_smaller_operand() {
+        let huge = pow(3, 20_000);
+        let cases = [
+            (huge.clone(), BigUint::one(), BigUint::one()),
+            (BigUint::one(), huge.clone(), BigUint::one()),
+            (huge.clone(), pow(3, 7), pow(3, 7)),
+            (
+                huge.clone(),
+                pow(2, 64).try_add(&BigUint::one()).unwrap(),
+                BigUint::one(),
+            ),
+            (
+                product(&[&huge, &pow(2, 9)]),
+                pow(6, 12),
+                pow(6, 9).try_mul(&pow(3, 3)).unwrap(),
+            ),
+        ];
+        for (left, right, expected) in cases {
+            work_counters::reset();
+            assert_eq!(left.try_gcd(&right).unwrap(), expected);
+            let counts = work_counters::snapshot();
+            assert!(counts.div_rem_calls <= 1);
+            let bound = 2 * left.bits().min(right.bits()) + 1;
+            assert!(
+                counts.gcd_steps <= bound,
+                "gcd took {} steps, bound {bound}",
+                counts.gcd_steps
+            );
+        }
+    }
+
     #[test]
     fn try_mul_small() {
         let a = BigUint::try_from_u32(12345).unwrap();
@@ -595,10 +902,66 @@ mod tests {
     }
 
     #[test]
-    fn try_div_rem_zero_divisor_returns_alloc_error() {
+    fn nth_root_exact_and_floor_for_high_degree() {
+        let thirteen = BigUint::try_from_u32(13).unwrap();
+        let base = BigUint::try_from_u32(12_345).unwrap();
+        let value = base.try_pow(&thirteen).unwrap();
+        assert_eq!(value.try_nth_root(&thirteen).unwrap(), base);
+        let just_below = value.try_sub(&BigUint::one()).unwrap();
+        assert_eq!(
+            just_below.try_nth_root(&thirteen).unwrap(),
+            BigUint::try_from_u32(12_344).unwrap()
+        );
+        let two = BigUint::try_from_u32(2).unwrap();
+        let degree_above_bit_length = BigUint::try_from_u32(100_000).unwrap();
+        assert_eq!(
+            two.try_nth_root(&degree_above_bit_length).unwrap(),
+            BigUint::one()
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "BUG: BigUint division by zero")]
+    fn try_div_rem_zero_divisor_is_a_bug() {
         let a = BigUint::try_from_u32(2).unwrap();
         let zero = BigUint::try_from_u32(0).unwrap();
-        assert!(a.try_div_rem(&zero).is_err());
+        a.try_div_rem(&zero).unwrap();
+    }
+
+    #[test]
+    fn try_pow_with_bignum_exponent_matches_small_exponent() {
+        let base = BigUint::try_from_u32(3).unwrap();
+        let exponent = BigUint::try_from_u32(40).unwrap();
+        assert_eq!(
+            base.try_pow(&exponent).unwrap(),
+            BigUint::try_from_u128(3u128.pow(40)).unwrap()
+        );
+        let zero = BigUint::zero();
+        assert_eq!(base.try_pow(&zero).unwrap(), BigUint::one());
+    }
+
+    #[test]
+    fn power_exceeds_allocation_refuses_only_provably_unallocatable_results() {
+        let two_pow_70 = BigUint::try_from_u128(1u128 << 70).unwrap();
+        let two_pow_60 = BigUint::try_from_u128(1u128 << 60).unwrap();
+        assert!(!power_exceeds_allocation(0, &two_pow_70).unwrap());
+        assert!(!power_exceeds_allocation(1, &two_pow_70).unwrap());
+        assert!(power_exceeds_allocation(2, &two_pow_70).unwrap());
+        assert!(!power_exceeds_allocation(2, &two_pow_60).unwrap());
+    }
+
+    #[test]
+    fn try_pow_refuses_result_beyond_max_digits() {
+        let base = BigUint::try_from_u32(2).unwrap();
+        let exponent = BigUint::try_from_u128(1u128 << 70).unwrap();
+        assert_eq!(base.try_pow(&exponent), Err(AllocError));
+    }
+
+    #[test]
+    fn try_pow_of_one_with_huge_exponent_is_one() {
+        let one = BigUint::one();
+        let exponent = BigUint::try_from_u128(1u128 << 100).unwrap();
+        assert_eq!(one.try_pow(&exponent).unwrap(), BigUint::one());
     }
 
     #[test]

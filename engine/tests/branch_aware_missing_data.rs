@@ -3,10 +3,10 @@
 //! These tests encode **intended** behavior for normalized expression evaluation and
 //! needs_data derived from live Piecewise arms.
 
+use indexmap::IndexMap;
 use lemma::DateGranularity;
 use lemma::DateTimeValue;
 use lemma::Engine;
-use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -72,16 +72,16 @@ fn missing_data_empty_when_all_datas_provided() {
 
     let now = DateTimeValue::now();
 
-    let mut data = HashMap::new();
-    data.insert("product".to_string(), "latte".into());
+    let mut data = IndexMap::new();
+    data.insert("sku".to_string(), "latte".into());
     data.insert("size".to_string(), "medium".into());
     data.insert("number_of_cups".to_string(), "1".into());
     data.insert("has_loyalty_card".to_string(), "false".into());
     data.insert("age".to_string(), "30".into());
 
     let response = engine
-        .run(None, "coffee_order", Some(&now), data, None, false)
-        .expect("run");
+        .evaluate(None, "coffee_order", Some(&now), data, None, false)
+        .expect("evaluate");
     for result in response.results.values() {
         assert!(
             result.missing_data().is_empty(),
@@ -105,31 +105,31 @@ fn missing_data_includes_product_when_no_inputs() {
 
     let now = DateTimeValue::now();
     let response = engine
-        .run(
+        .evaluate(
             None,
             "coffee_order",
             Some(&now),
-            HashMap::new(),
+            IndexMap::new(),
             None,
             false,
         )
-        .expect("run");
+        .expect("evaluate");
 
     let base_price = rule_by_name(&response, "base_price");
     assert!(
         base_price.is_missing_data(),
-        "base_price must be MissingData when product is unbound: {:?}",
+        "base_price must be MissingData when sku is unbound: {:?}",
         base_price.veto_reason
     );
     assert_eq!(
         base_price.missing_data(),
-        ["product".to_string()].as_slice(),
-        "base_price missing_data must list product, got {:?}",
+        ["sku".to_string()].as_slice(),
+        "base_price missing_data must list sku, got {:?}",
         base_price.missing_data()
     );
     assert_eq!(
         base_price.veto_reason.as_deref(),
-        Some("Missing data: product"),
+        Some("Missing data: sku"),
         "got {:?}",
         base_price.veto_reason
     );
@@ -141,10 +141,10 @@ fn missing_data_includes_product_when_no_inputs() {
 fn rule_ref_dependent_propagates_missing_data_not_default_veto_message() {
     let code = r#"
 spec pricing
-data product: text
+data sku: text
   -> option "latte"
 rule base_price: veto "Unknown product"
-  unless product is "latte" then 3
+  unless sku is "latte" then 3
 rule total: base_price * 2
 "#;
     let mut engine = Engine::new();
@@ -152,8 +152,8 @@ rule total: base_price * 2
 
     let now = DateTimeValue::now();
     let response = engine
-        .run(None, "pricing", Some(&now), HashMap::new(), None, false)
-        .expect("run");
+        .evaluate(None, "pricing", Some(&now), IndexMap::new(), None, false)
+        .expect("evaluate");
 
     assert_veto_reason_contains(rule_by_name(&response, "base_price"), "Missing data");
     assert_veto_reason_contains(rule_by_name(&response, "total"), "Missing data");
@@ -172,17 +172,17 @@ fn coffee_order_dependent_rules_propagate_missing_product_not_default_veto() {
 
     let now = DateTimeValue::now();
     let response = engine
-        .run(
+        .evaluate(
             None,
             "coffee_order",
             Some(&now),
-            HashMap::new(),
+            IndexMap::new(),
             None,
             false,
         )
-        .expect("run");
+        .expect("evaluate");
 
-    assert_veto_reason_contains(rule_by_name(&response, "base_price"), "product");
+    assert_veto_reason_contains(rule_by_name(&response, "base_price"), "sku");
     for name in ["price_per_cup", "subtotal", "discount_amount", "total"] {
         let rr = rule_by_name(&response, name);
         assert_veto_reason_contains(rr, "Missing data");
@@ -213,11 +213,11 @@ rule gross_annual: gross * periods_per_year
     load_volatile(&mut engine, code);
 
     let now = DateTimeValue::now();
-    let mut data = HashMap::new();
+    let mut data = IndexMap::new();
     data.insert("gross".to_string(), "5000".into());
     let response = engine
-        .run(None, "payroll", Some(&now), data, None, false)
-        .expect("run");
+        .evaluate(None, "payroll", Some(&now), data, None, false)
+        .expect("evaluate");
 
     assert_veto_reason_contains(rule_by_name(&response, "periods_per_year"), "pay_period");
     let gross_annual = rule_by_name(&response, "gross_annual");
@@ -244,11 +244,11 @@ fn net_salary_per_period_outputs_veto_when_pay_period_missing() {
         .expect("load");
 
     let effective = effective_2026();
-    let mut data = HashMap::new();
+    let mut data = IndexMap::new();
     data.insert("gross_salary".to_string(), "5000 eur".into());
     let response = engine
-        .run(None, "net_salary", Some(&effective), data, None, false)
-        .expect("run");
+        .evaluate(None, "net_salary", Some(&effective), data, None, false)
+        .expect("evaluate");
 
     assert_veto_reason_contains(rule_by_name(&response, "periods_per_year"), "pay_period");
 

@@ -1,7 +1,7 @@
 //! Magnitude-preserving math (`ceil`, `floor`, `round`, `abs`) on measure operands.
 
-use lemma::{Engine, SourceType};
-use std::collections::HashMap;
+use indexmap::IndexMap;
+use lemma::{Engine, EvaluateDataValue, SourceType};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -28,13 +28,18 @@ fn load_err(code: &str) -> String {
     }
 }
 
-fn eval_display(code: &str, spec: &str, rule: &str, data: HashMap<String, String>) -> String {
+fn eval_display(
+    code: &str,
+    spec: &str,
+    rule: &str,
+    data: IndexMap<String, EvaluateDataValue>,
+) -> String {
     let mut engine = Engine::new();
     engine
         .load([(source(), code.to_string())])
         .expect("spec must load");
     let response = engine
-        .run(None, spec, None, data, None, false)
+        .evaluate(None, spec, None, data, None, false)
         .expect("spec must evaluate");
     let result = response
         .results
@@ -59,7 +64,7 @@ uses lemma units
 data storage_duration: 10 day
 rule weeks_billed: ceil (storage_duration as week)"#;
     load_ok(code);
-    let displayed = eval_display(code, "duration_math", "weeks_billed", HashMap::new());
+    let displayed = eval_display(code, "duration_math", "weeks_billed", IndexMap::new());
     assert!(
         displayed.contains('2') && displayed.to_lowercase().contains("week"),
         "10 day as week ceiled must be 2 week, got: {displayed}"
@@ -81,7 +86,7 @@ rule storage_cost_per_pallet:
         code,
         "warehousing",
         "storage_cost_per_pallet",
-        HashMap::new(),
+        IndexMap::new(),
     );
     assert!(
         displayed.contains("20") && displayed.to_lowercase().contains("eur"),
@@ -93,22 +98,21 @@ rule storage_cost_per_pallet:
 fn floor_round_abs_on_measure() {
     let code = r#"spec mass_math
 uses lemma units
-data mass: measure -> unit kilogram: 1
 data weight: 2.6 kilogram
 rule floored: floor weight
 rule rounded: round weight
 rule absolute: abs (0 kilogram - weight)"#;
     load_ok(code);
     assert_eq!(
-        eval_display(code, "mass_math", "floored", HashMap::new()),
+        eval_display(code, "mass_math", "floored", IndexMap::new()),
         "2 kilogram"
     );
     assert_eq!(
-        eval_display(code, "mass_math", "rounded", HashMap::new()),
+        eval_display(code, "mass_math", "rounded", IndexMap::new()),
         "3 kilogram"
     );
     assert_eq!(
-        eval_display(code, "mass_math", "absolute", HashMap::new()),
+        eval_display(code, "mass_math", "absolute", IndexMap::new()),
         "2.6 kilogram"
     );
 }
@@ -135,7 +139,7 @@ data elapsed: 20 second
 rule speed:
   ceil (dist / elapsed)"#;
     load_ok(code);
-    let displayed = eval_display(code, "compound_ceil", "speed", HashMap::new());
+    let displayed = eval_display(code, "compound_ceil", "speed", IndexMap::new());
     assert!(
         displayed.contains('5') && displayed.to_lowercase().contains("meter_per_second"),
         "ceil(100 meter / 20 second) must be 5 meter_per_second via units.velocity, got: {displayed}"
@@ -149,7 +153,7 @@ uses lemma units
 data storage_duration: -10 day
 rule weeks_billed: ceil (storage_duration as week)"#;
     load_ok(code);
-    let displayed = eval_display(code, "negative_duration", "weeks_billed", HashMap::new());
+    let displayed = eval_display(code, "negative_duration", "weeks_billed", IndexMap::new());
     assert!(
         displayed.contains("-1") && displayed.to_lowercase().contains("week"),
         "-10 day as week ceiled must be -1 week, got: {displayed}"

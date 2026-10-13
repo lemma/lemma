@@ -1,5 +1,5 @@
+use indexmap::IndexMap;
 use lemma::{DateTimeValue, Engine, ErrorKind};
-use std::collections::HashMap;
 
 #[test]
 fn accept_and_reject_are_not_boolean_data_literals() {
@@ -55,11 +55,11 @@ rule reject: accept
         .expect("accept/reject as identifiers must load");
 
     let now = DateTimeValue::now();
-    let mut data = HashMap::new();
+    let mut data = IndexMap::new();
     data.insert("accept".to_string(), "1".into());
     let response = engine
-        .run(None, "test", Some(&now), data, None, false)
-        .expect("run");
+        .evaluate(None, "test", Some(&now), data, None, false)
+        .expect("evaluate");
     let reject = response.results.get("reject").expect("reject rule");
     assert!(!reject.vetoed);
     assert_eq!(reject.result(), Some("1"));

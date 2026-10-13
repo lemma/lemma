@@ -1,7 +1,7 @@
 //! Additional edge-case scenarios targeting potential bugs
 
-use lemma::{DateTimeValue, Engine, SourceType};
-use std::collections::HashMap;
+use indexmap::IndexMap;
+use lemma::{DateTimeValue, Engine, EvaluateDataValue, SourceType};
 use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -10,14 +10,14 @@ fn src(name: &str) -> SourceType {
     SourceType::Path(Arc::new(PathBuf::from(name)))
 }
 
-fn run_spec(engine: &Engine, spec: &str, data: &[(&str, &str)]) -> lemma::Response {
+fn evaluate_spec(engine: &Engine, spec: &str, data: &[(&str, &str)]) -> lemma::Response {
     let now = DateTimeValue::now();
-    let data_map: HashMap<String, String> = data
+    let data_map: IndexMap<String, EvaluateDataValue> = data
         .iter()
-        .map(|(k, v)| (k.to_string(), (*v).to_string()))
+        .map(|(k, v)| (k.to_string(), (*v).into()))
         .collect();
     engine
-        .run(None, spec, Some(&now), data_map, None, false)
+        .evaluate(None, spec, Some(&now), data_map, None, false)
         .unwrap()
 }
 
@@ -64,12 +64,12 @@ rule result: base ^ exponent
         .unwrap();
 
     // 2^10 = 1024
-    let resp = run_spec(&engine, "big_math", &[("base", "2"), ("exponent", "10")]);
+    let resp = evaluate_spec(&engine, "big_math", &[("base", "2"), ("exponent", "10")]);
     let display = rule_display(&resp, "result");
     assert_eq!(display, "1024", "2^10 = 1024");
 
     // 10^0 = 1
-    let resp = run_spec(&engine, "big_math", &[("base", "10"), ("exponent", "0")]);
+    let resp = evaluate_spec(&engine, "big_math", &[("base", "10"), ("exponent", "0")]);
     let display = rule_display(&resp, "result");
     assert_eq!(display, "1", "10^0 = 1");
 }
@@ -90,23 +90,23 @@ spec negatives
 data a: number
 data b: number
 
-rule sum: a + b
+rule added: a + b
 rule diff: a - b
-rule product: a * b
+rule multiplied: a * b
 rule negated: 0 - a
 "#
             .to_string(),
         )])
         .unwrap();
 
-    let resp = run_spec(&engine, "negatives", &[("a", "-5"), ("b", "3")]);
-    let sum = rule_display(&resp, "sum");
+    let resp = evaluate_spec(&engine, "negatives", &[("a", "-5"), ("b", "3")]);
+    let sum = rule_display(&resp, "added");
     assert_eq!(sum, "-2", "-5 + 3 = -2");
 
     let diff = rule_display(&resp, "diff");
     assert_eq!(diff, "-8", "-5 - 3 = -8");
 
-    let product = rule_display(&resp, "product");
+    let product = rule_display(&resp, "multiplied");
     assert_eq!(product, "-15", "-5 * 3 = -15");
 
     let negated = rule_display(&resp, "negated");
@@ -131,7 +131,7 @@ spec middle
 uses b: base
 rule doubled: b.factor * 3
 
-spec top
+spec root_spec
 uses m: middle
 rule final: m.doubled + 1
 "#
@@ -139,7 +139,7 @@ rule final: m.doubled + 1
         )])
         .unwrap();
 
-    let resp = run_spec(&engine, "top", &[]);
+    let resp = evaluate_spec(&engine, "root_spec", &[]);
     let display = rule_display(&resp, "final");
     assert_eq!(display, "7", "2 * 3 + 1 = 7");
 }
@@ -167,7 +167,7 @@ rule eighth: quarter - 50% * quarter
         )])
         .unwrap();
 
-    let resp = run_spec(&engine, "chain_pct", &[]);
+    let resp = evaluate_spec(&engine, "chain_pct", &[]);
     assert_eq!(rule_display(&resp, "half"), "500");
     assert_eq!(rule_display(&resp, "quarter"), "250");
     assert_eq!(rule_display(&resp, "eighth"), "125");
@@ -199,7 +199,7 @@ rule result: 0
         .unwrap();
 
     // value=200 (triggers veto), override_flag=true (later clause wins)
-    let resp = run_spec(
+    let resp = evaluate_spec(
         &engine,
         "veto_override",
         &[("value", "200"), ("override_flag", "true")],
@@ -212,7 +212,7 @@ rule result: 0
     assert_eq!(rule_display(&resp, "result"), "999");
 
     // value=200 (triggers veto), override_flag=false (veto is last match)
-    let resp = run_spec(
+    let resp = evaluate_spec(
         &engine,
         "veto_override",
         &[("value", "200"), ("override_flag", "false")],
@@ -246,7 +246,7 @@ rule zero_check: 0 * price
         )])
         .unwrap();
 
-    let resp = run_spec(
+    let resp = evaluate_spec(
         &engine,
         "zero_mult",
         &[("quantity", "0"), ("price", "9999")],
@@ -284,11 +284,11 @@ rule is_not_pending: status is not "pending"
         )])
         .unwrap();
 
-    let resp = run_spec(&engine, "text_cmp", &[("status", "active")]);
+    let resp = evaluate_spec(&engine, "text_cmp", &[("status", "active")]);
     assert_eq!(rule_display(&resp, "is_active"), "true");
     assert_eq!(rule_display(&resp, "is_not_pending"), "true");
 
-    let resp = run_spec(&engine, "text_cmp", &[("status", "pending")]);
+    let resp = evaluate_spec(&engine, "text_cmp", &[("status", "pending")]);
     assert_eq!(rule_display(&resp, "is_active"), "false");
     assert_eq!(rule_display(&resp, "is_not_pending"), "false");
 }
@@ -319,7 +319,7 @@ rule result: "none"
         .unwrap();
 
     // All true → last matching is "all_three"
-    let resp = run_spec(
+    let resp = evaluate_spec(
         &engine,
         "complex_and",
         &[("a", "true"), ("b", "true"), ("c", "true")],
@@ -327,7 +327,7 @@ rule result: "none"
     assert_eq!(rule_display(&resp, "result"), "all_three");
 
     // a=true, b=true, c=false → only "a_and_b" matches
-    let resp = run_spec(
+    let resp = evaluate_spec(
         &engine,
         "complex_and",
         &[("a", "true"), ("b", "true"), ("c", "false")],
@@ -335,7 +335,7 @@ rule result: "none"
     assert_eq!(rule_display(&resp, "result"), "a_and_b");
 
     // a=true, b=false, c=true → no unless matches → "none"
-    let resp = run_spec(
+    let resp = evaluate_spec(
         &engine,
         "complex_and",
         &[("a", "true"), ("b", "false"), ("c", "true")],
@@ -365,7 +365,7 @@ rule raw_mult: base * discount
         )])
         .unwrap();
 
-    let resp = run_spec(
+    let resp = evaluate_spec(
         &engine,
         "ratio_math",
         &[("discount", "25%"), ("base", "400")],
@@ -425,18 +425,20 @@ rule result: amount * r.rate
 
     // Evaluate at 2024-06-01 → rate = 5%
     let effective = DateTimeValue::from_str("2024-06-01").unwrap();
-    let data: HashMap<String, String> = [("amount".to_string(), "1000".into())].into();
+    let data: IndexMap<String, EvaluateDataValue> =
+        [("amount".to_string(), EvaluateDataValue::from("1000"))].into();
     let resp = engine
-        .run(None, "calculator", Some(&effective), data, None, false)
+        .evaluate(None, "calculator", Some(&effective), data, None, false)
         .unwrap();
     let display = rule_display(&resp, "result");
     assert_eq!(display, "50", "2024: 1000 * 5% = 50");
 
     // Evaluate at 2025-06-01 → rate = 7%
     let effective = DateTimeValue::from_str("2025-06-01").unwrap();
-    let data: HashMap<String, String> = [("amount".to_string(), "1000".into())].into();
+    let data: IndexMap<String, EvaluateDataValue> =
+        [("amount".to_string(), EvaluateDataValue::from("1000"))].into();
     let resp = engine
-        .run(None, "calculator", Some(&effective), data, None, false)
+        .evaluate(None, "calculator", Some(&effective), data, None, false)
         .unwrap();
     let display = rule_display(&resp, "result");
     assert_eq!(display, "70", "2025: 1000 * 7% = 70");
@@ -465,7 +467,7 @@ rule root_of_one: sqrt(1)
         )])
         .unwrap();
 
-    let resp = run_spec(&engine, "sqrt_test", &[("value", "144")]);
+    let resp = evaluate_spec(&engine, "sqrt_test", &[("value", "144")]);
     assert_eq!(rule_display(&resp, "root"), "12", "sqrt(144) = 12");
     assert_eq!(rule_display(&resp, "root_of_zero"), "0", "sqrt(0) = 0");
     assert_eq!(rule_display(&resp, "root_of_one"), "1", "sqrt(1) = 1");
@@ -494,7 +496,7 @@ rule third: a / b
         )])
         .unwrap();
 
-    let resp = run_spec(&engine, "repeating", &[("a", "1"), ("b", "3")]);
+    let resp = evaluate_spec(&engine, "repeating", &[("a", "1"), ("b", "3")]);
     // Should display with reasonable precision, not crash or produce infinite string
     let display = rule_display(&resp, "third");
     assert!(!display.is_empty(), "1/3 should have a display value");
@@ -525,7 +527,7 @@ rule category: "default"
         .unwrap();
 
     // x=50: neither >100 nor <0, so default applies
-    let resp = run_spec(&engine, "fallthrough", &[("x", "50")]);
+    let resp = evaluate_spec(&engine, "fallthrough", &[("x", "50")]);
     assert_eq!(rule_display(&resp, "category"), "default");
 }
 
@@ -556,7 +558,7 @@ rule step5: step4 + 10
         .unwrap();
 
     // input=5: step1=6, step2=12, step3=9, step4=4.5, step5=14.5
-    let resp = run_spec(&engine, "chain", &[("input", "5")]);
+    let resp = evaluate_spec(&engine, "chain", &[("input", "5")]);
     assert_eq!(
         rule_display(&resp, "step5"),
         "14.5",
@@ -587,7 +589,7 @@ rule gram_value: weight as gram as number
         )])
         .unwrap();
 
-    let resp = run_spec(&engine, "unit_strip", &[]);
+    let resp = evaluate_spec(&engine, "unit_strip", &[]);
     assert_eq!(
         rule_display(&resp, "kg_value"),
         "5",
@@ -617,13 +619,13 @@ data active: boolean
 data score: number
 
 rule is_inactive: not active
-rule below_threshold: not score >= 70
+rule below_threshold: not(score >= 70)
 "#
             .to_string(),
         )])
         .unwrap();
 
-    let resp = run_spec(&engine, "not_test", &[("active", "true"), ("score", "80")]);
+    let resp = evaluate_spec(&engine, "not_test", &[("active", "true"), ("score", "80")]);
     assert_eq!(
         rule_display(&resp, "is_inactive"),
         "false",
@@ -635,7 +637,7 @@ rule below_threshold: not score >= 70
         "not (80>=70) = false"
     );
 
-    let resp = run_spec(&engine, "not_test", &[("active", "false"), ("score", "50")]);
+    let resp = evaluate_spec(&engine, "not_test", &[("active", "false"), ("score", "50")]);
     assert_eq!(
         rule_display(&resp, "is_inactive"),
         "true",
@@ -674,7 +676,7 @@ rule custom_total: c.total
         )])
         .unwrap();
 
-    let resp = run_spec(&engine, "custom", &[]);
+    let resp = evaluate_spec(&engine, "custom", &[]);
     // c.total should use overridden tax_rate of 25%
     // tax_amount = 100 * 0.25 = 25, total = 100 + 25 = 125
     assert_eq!(

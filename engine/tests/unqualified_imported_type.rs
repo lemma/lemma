@@ -1,8 +1,8 @@
-//! Unqualified imported type resolution: `data age: calendar` resolves to an
-//! imported type when exactly one import exports that name.
+//! Imported types need the alias: `data age: units.calendar`.
+//! A bare name that an import declares is a planning Error naming that alias.
 
-use lemma::{DateTimeValue, Engine, SourceType};
-use std::collections::HashMap;
+use indexmap::IndexMap;
+use lemma::{DateTimeValue, Engine, EvaluateDataValue, SourceType};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -36,11 +36,16 @@ fn load_err_joined(code: &str) -> String {
         .join("\n")
 }
 
-fn eval_rule(engine: &mut Engine, spec: &str, data: HashMap<String, String>, rule: &str) -> String {
+fn eval_rule(
+    engine: &mut Engine,
+    spec: &str,
+    data: IndexMap<String, EvaluateDataValue>,
+    rule: &str,
+) -> String {
     let now = DateTimeValue::now();
     let response = engine
-        .run(None, spec, Some(&now), data, None, false)
-        .expect("run");
+        .evaluate(None, spec, Some(&now), data, None, false)
+        .expect("evaluate");
     response
         .results
         .get(rule)
@@ -50,55 +55,70 @@ fn eval_rule(engine: &mut Engine, spec: &str, data: HashMap<String, String>, rul
         .to_string()
 }
 
-// ---------------------------------------------------------------------------
-// 1. Bare imported type resolves and evaluates
-// ---------------------------------------------------------------------------
 #[test]
-fn unqualified_imported_type_resolves() {
-    let code = r#"spec test
+fn bare_imported_type_errors_naming_alias() {
+    let joined = load_err_joined(
+        r#"spec test
 uses lemma units
 data age: calendar
-rule value: age as year"#;
-    let mut engine = load_ok(code);
-    let mut data = HashMap::new();
-    data.insert("age".to_string(), "42 year".into());
-    let result = eval_rule(&mut engine, "test", data, "value");
-    assert_eq!(result, "42 year");
+rule value: age as year"#,
+    );
+    assert!(
+        joined.contains("units.calendar"),
+        "expected alias hint, got: {joined}"
+    );
 }
 
-// ---------------------------------------------------------------------------
-// 2. Bare imported type with constraint
-// ---------------------------------------------------------------------------
 #[test]
-fn unqualified_imported_type_with_constraints() {
+fn bare_imported_type_error_reported_once_when_spec_is_imported() {
+    let mut engine = Engine::new();
+    let errors = engine
+        .load([(
+            path_source("production.lemma"),
+            r#"spec production
+uses lemma units
+data material_weight: mass
+rule heavy: material_weight > 0 kilogram
+
+spec manufacturing
+uses production
+rule ok: production.heavy"#
+                .to_string(),
+        )])
+        .expect_err("expected bare-import error");
+    let rendered: Vec<String> = errors.iter().map(|e| e.to_string()).collect();
+    assert_eq!(rendered.len(), 1, "expected one error, got: {rendered:#?}");
+    assert!(
+        rendered[0].contains("In spec 'production'") && rendered[0].contains("units.mass"),
+        "expected error attributed to production, got: {}",
+        rendered[0]
+    );
+}
+
+#[test]
+fn imported_type_with_constraints_needs_alias() {
     let code = r#"spec test
 uses lemma units
-data age: calendar -> minimum 1 year
+data age: units.calendar -> minimum 1 year
 rule value: age as year"#;
     let mut engine = load_ok(code);
-    let mut data = HashMap::new();
+    let mut data = IndexMap::new();
     data.insert("age".to_string(), "36 month".into());
     let result = eval_rule(&mut engine, "test", data, "value");
     assert_eq!(result, "3 year");
 }
 
-// ---------------------------------------------------------------------------
-// 3. Bare imported type + range suffix
-// ---------------------------------------------------------------------------
 #[test]
-fn unqualified_imported_type_range() {
+fn imported_type_range_needs_alias() {
     let code = r#"spec test
 uses lemma units
-data span: calendar range
+data span: units.calendar range
 rule value: span"#;
     load_ok(code);
 }
 
-// ---------------------------------------------------------------------------
-// 4. Ambiguous: two imports export same type name
-// ---------------------------------------------------------------------------
 #[test]
-fn unqualified_ambiguous_type_errors() {
+fn bare_imported_type_from_two_imports_lists_both_aliases() {
     let lib_a = r#"spec lib_a
 data duration: measure
   -> unit second: 1
@@ -121,19 +141,15 @@ rule value: elapsed"#;
         .expect("lib_b loads");
     let err = engine
         .load([(path_source("consumer.lemma"), consumer.to_string())])
-        .expect_err("expected ambiguity error");
+        .expect_err("expected bare-import error");
     let joined = err
         .iter()
         .map(|e| e.to_string())
         .collect::<Vec<_>>()
         .join("\n");
     assert!(
-        joined.to_lowercase().contains("ambiguous"),
-        "expected 'ambiguous' in error, got: {joined}"
-    );
-    assert!(
-        joined.contains("lib_a") && joined.contains("lib_b"),
-        "expected both import aliases in error, got: {joined}"
+        joined.contains("lib_a.duration") && joined.contains("lib_b.duration"),
+        "expected both qualified forms, got: {joined}"
     );
 }
 
@@ -150,7 +166,7 @@ data length: measure
 data height: length
 rule value: height as rod"#;
     let mut engine = load_ok(code);
-    let mut data = HashMap::new();
+    let mut data = IndexMap::new();
     data.insert("height".to_string(), "33 span".into());
     let result = eval_rule(&mut engine, "test", data, "value");
     assert_eq!(result, "2 rod");
@@ -198,8 +214,64 @@ uses lemma units
 data age: units.calendar
 rule value: age as year"#;
     let mut engine = load_ok(code);
-    let mut data = HashMap::new();
+    let mut data = IndexMap::new();
     data.insert("age".to_string(), "36 month".into());
     let result = eval_rule(&mut engine, "test", data, "value");
     assert_eq!(result, "3 year");
+}
+
+// ---------------------------------------------------------------------------
+// Local type with the same name as an imported type
+// ---------------------------------------------------------------------------
+
+const PRICING_AND_SHOP: &str = r#"
+spec pricing
+data money: measure
+  -> unit eur: 1.00
+
+spec shop
+uses pricing
+data money: measure
+  -> unit usd: 1.00
+  -> unit cent: 0.01
+"#;
+
+#[test]
+fn imported_unit_stays_in_scope_beside_same_named_local_type() {
+    let mut engine = load_ok(&format!("{PRICING_AND_SHOP}rule fee: 5 eur\n"));
+    assert_eq!(
+        eval_rule(&mut engine, "shop", IndexMap::new(), "fee"),
+        "5 eur"
+    );
+}
+
+#[test]
+fn qualified_imported_type_beside_same_named_local_type_binds_its_units() {
+    let mut engine = load_ok(&format!(
+        "{PRICING_AND_SHOP}data fee: pricing.money\n  -> with 5 eur\nrule out: fee\n"
+    ));
+    assert_eq!(
+        eval_rule(&mut engine, "shop", IndexMap::new(), "out"),
+        "5 eur"
+    );
+}
+
+#[test]
+fn same_named_local_and_imported_types_are_distinct_families() {
+    let joined = load_err_joined(&format!(
+        "{PRICING_AND_SHOP}data a: pricing.money\n  -> with 5 eur\ndata b: money\n  -> with 3 usd\nrule s: a + b\n"
+    ));
+    assert!(
+        joined.contains("Cannot add unrelated measure types: a and b"),
+        "expected a family mismatch error, got: {joined}"
+    );
+}
+
+#[test]
+fn local_unit_conversion_ignores_same_named_imported_family() {
+    let mut engine = load_ok(&format!("{PRICING_AND_SHOP}rule c: 250 cent as usd\n"));
+    assert_eq!(
+        eval_rule(&mut engine, "shop", IndexMap::new(), "c"),
+        "2.5 usd"
+    );
 }

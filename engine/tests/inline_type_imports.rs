@@ -1,6 +1,6 @@
+use indexmap::IndexMap;
 use lemma::DateTimeValue;
 use lemma::{Engine, Error};
-use std::collections::HashMap;
 
 #[test]
 fn test_inline_data_import() -> Result<(), Error> {
@@ -31,9 +31,9 @@ rule is_adult: user_age >= 18
         .expect("add test spec");
     let now = DateTimeValue::now();
 
-    let mut data = HashMap::new();
+    let mut data = IndexMap::new();
     data.insert("user_age".to_string(), "25".into());
-    let response = engine.run(None, "test", Some(&now), data, None, false)?;
+    let response = engine.evaluate(None, "test", Some(&now), data, None, false)?;
 
     // The data should be evaluated correctly with the imported type
 
@@ -86,9 +86,9 @@ rule is_senior: user_age >= 65
         .expect("add test spec");
     let now = DateTimeValue::now();
 
-    let mut data = HashMap::new();
+    let mut data = IndexMap::new();
     data.insert("user_age".to_string(), "70".into());
-    let response = engine.run(None, "test", Some(&now), data, None, false)?;
+    let response = engine.evaluate(None, "test", Some(&now), data, None, false)?;
 
     // Check the rule result
     let is_senior_result = response

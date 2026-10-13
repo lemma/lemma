@@ -4,8 +4,8 @@
 //! not change — selected result, veto propagation, released data and narration.
 //! Plan-shape assertions live in `engine/src/tests/transitive_normalization_plan_shape.rs`.
 
-use lemma::{format_explanation, DateTimeValue, Engine, Response, RuleResult};
-use std::collections::HashMap;
+use indexmap::IndexMap;
+use lemma::{format_explanation, DateTimeValue, Engine, EvaluateDataValue, Response, RuleResult};
 
 fn engine_for(code: &str) -> Engine {
     let mut engine = Engine::new();
@@ -17,12 +17,12 @@ fn engine_for(code: &str) -> Engine {
 
 fn run(engine: &Engine, spec: &str, bindings: &[(&str, &str)], explain: bool) -> Response {
     let now = DateTimeValue::now();
-    let data: HashMap<String, String> = bindings
+    let data: IndexMap<String, EvaluateDataValue> = bindings
         .iter()
-        .map(|(key, value)| ((*key).to_string(), (*value).to_string()))
+        .map(|(key, value)| ((*key).to_string(), (*value).into()))
         .collect();
     engine
-        .run(None, spec, Some(&now), data, None, explain)
+        .evaluate(None, spec, Some(&now), data, None, explain)
         .expect("evaluation must succeed")
 }
 
@@ -580,5 +580,198 @@ fn a_vetoed_scrutinee_narrates_a_condition_from_the_pre_image() {
     assert_eq!(
         explanation.body, "code is DE",
         "the reverse scan starts at the last arm and propagates its veto"
+    );
+}
+
+/// Issue #92: a residual that is a bare boolean data leaf stays a Piecewise inside
+/// each key region. Every arm body is the literal `true`, so the three arms share
+/// one body id.
+const ISSUE_NEGATED: &str = r#"
+spec repro
+data model: text
+data quantity: number
+data remote_negated: boolean
+data hybrid_negated: boolean
+data onsite_negated: boolean
+rule negated: false
+  unless model is "remote" and remote_negated then true
+  unless model is "hybrid" and hybrid_negated then true
+  unless model is "onsite" and onsite_negated then true
+rule accepted: quantity is 1 and not negated
+"#;
+
+#[test]
+fn issue_92_negated_matrix_agrees_in_value_and_explain_modes() {
+    let engine = engine_for(ISSUE_NEGATED);
+    for model in ["remote", "hybrid", "onsite", "other"] {
+        let flag = format!("{model}_negated");
+        for value in ["false", "true"] {
+            let mut bindings: Vec<(&str, &str)> = vec![
+                ("model", model),
+                ("quantity", "1"),
+                ("remote_negated", "false"),
+                ("hybrid_negated", "false"),
+                ("onsite_negated", "false"),
+            ];
+            if model != "other" {
+                bindings
+                    .iter_mut()
+                    .find(|(key, _)| *key == flag.as_str())
+                    .expect("flag bound")
+                    .1 = value;
+            }
+            let expected_negated = value == "true" && model != "other";
+            for explain in [false, true] {
+                let response = run(&engine, "repro", &bindings, explain);
+                assert_eq!(
+                    display(&response, "negated"),
+                    expected_negated.to_string(),
+                    "model={model} {flag}={value} explain={explain}"
+                );
+                assert_eq!(
+                    display(&response, "accepted"),
+                    (!expected_negated).to_string(),
+                    "model={model} {flag}={value} explain={explain}"
+                );
+                if explain && expected_negated {
+                    let explanation = rule(&response, "negated")
+                        .explanation
+                        .as_ref()
+                        .expect("explanation built");
+                    let ascii = format_explanation(explanation);
+                    assert!(
+                        ascii.contains(&format!("model is {model}")),
+                        "explanation must name the winning unless, got {ascii}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn issue_92_missing_residual_reports_only_the_selected_flag() {
+    let engine = engine_for(ISSUE_NEGATED);
+    let response = run(
+        &engine,
+        "repro",
+        &[("model", "remote"), ("quantity", "1")],
+        false,
+    );
+    let negated = rule(&response, "negated");
+    assert!(negated.vetoed, "remote_negated is needed: {negated:?}");
+    assert_eq!(
+        negated.missing_data(),
+        vec!["remote_negated".to_string()],
+        "only the selected region's residual is needed"
+    );
+}
+
+/// Residual `n > m` compares two data, so it does not fold into a nested dispatch.
+const TWO_DATA_RESIDUAL: &str = r#"
+spec residual
+data model: text
+data n: number
+data m: number
+rule r: 0
+  unless model is "a" and n > m then 1
+  unless model is "b" and n > m then 2
+"#;
+
+#[test]
+fn issue_92_two_data_residual_agrees_in_both_modes() {
+    let engine = engine_for(TWO_DATA_RESIDUAL);
+    for (model, n, m, expected) in [
+        ("a", "5", "3", "1"),
+        ("a", "1", "3", "0"),
+        ("b", "5", "3", "2"),
+        ("b", "1", "3", "0"),
+        ("c", "5", "3", "0"),
+    ] {
+        for explain in [false, true] {
+            assert_eq!(
+                display(
+                    &run(
+                        &engine,
+                        "residual",
+                        &[("model", model), ("n", n), ("m", m)],
+                        explain
+                    ),
+                    "r"
+                ),
+                expected,
+                "model={model} n={n} m={m} explain={explain}"
+            );
+        }
+    }
+}
+
+/// Boolean residuals with numeric bodies; no residual is a comparison.
+const BOOLEAN_RESIDUAL: &str = r#"
+spec flags
+data model: text
+data flag: boolean
+data flag2: boolean
+rule r: 0
+  unless model is "a" and flag then 1
+  unless model is "b" and flag2 then 2
+"#;
+
+#[test]
+fn issue_92_boolean_residual_with_numeric_bodies_agrees_in_both_modes() {
+    let engine = engine_for(BOOLEAN_RESIDUAL);
+    for (model, flag, flag2, expected) in [
+        ("a", "true", "false", "1"),
+        ("a", "false", "false", "0"),
+        ("b", "false", "true", "2"),
+        ("b", "false", "false", "0"),
+        ("c", "true", "true", "0"),
+    ] {
+        for explain in [false, true] {
+            assert_eq!(
+                display(
+                    &run(
+                        &engine,
+                        "flags",
+                        &[("model", model), ("flag", flag), ("flag2", flag2)],
+                        explain
+                    ),
+                    "r"
+                ),
+                expected,
+                "model={model} flag={flag} flag2={flag2} explain={explain}"
+            );
+        }
+    }
+}
+
+/// The `b` region decides from `extra` alone; the `c` arm sits above it and its
+/// residual `flag_c` is never read by the evaluator for `model is b`.
+const RESIDUAL_ABOVE_WINNER: &str = r#"
+spec above
+data model: text
+data extra: boolean
+data amount: number
+data flag_c: boolean
+rule r: 0
+  unless model is "b" and extra then amount
+  unless flag_c and model is "c" then 3
+"#;
+
+#[test]
+fn issue_92_missing_data_ignores_residuals_of_regions_the_evaluator_does_not_read() {
+    let engine = engine_for(RESIDUAL_ABOVE_WINNER);
+    let response = run(
+        &engine,
+        "above",
+        &[("model", "b"), ("extra", "true")],
+        false,
+    );
+    let result = rule(&response, "r");
+    assert!(result.vetoed, "amount is needed: {result:?}");
+    assert_eq!(
+        result.missing_data(),
+        vec!["amount".to_string()],
+        "flag_c belongs to the c region, which the b selection never reads"
     );
 }

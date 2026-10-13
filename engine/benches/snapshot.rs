@@ -1,10 +1,11 @@
 //! Snapshot encode / restore on the logistics ladder (1050 to 126000 rate cells).
 //!
 //! Prints one markdown row per rung: load time and live heap of the loaded
-//! engine, snapshot bytes, encode and restore medians, allocations per restore,
-//! live heap of the restored engine and its ratio to the loaded engine. The
-//! restored engine must evaluate the terminal rule to the same display string as
-//! the loaded engine; a mismatch is a bug and aborts the bench.
+//! engine, snapshot bytes, encode / restore / eval medians, allocations per
+//! restore, live heap of the restored engine and its ratio to the loaded engine.
+//! Eval is shipment inputs + `Engine::evaluate` → `cheapest` (catalog already in the
+//! plan). The restored engine must evaluate the terminal rule to the same display
+//! string as the loaded engine; a mismatch is a bug and aborts the bench.
 
 use stats_alloc::{Region, Stats, StatsAlloc, INSTRUMENTED_SYSTEM};
 use std::alloc::System;
@@ -14,8 +15,7 @@ use std::time::{Duration, Instant};
 #[global_allocator]
 static GLOBAL: &StatsAlloc<System> = &INSTRUMENTED_SYSTEM;
 
-#[path = "common/logistics.rs"]
-mod logistics;
+use lemma_fixtures::logistics;
 
 use lemma::{Engine, SourceType};
 use logistics::LogisticsFixture;
@@ -43,7 +43,7 @@ fn median_ms(samples: &mut [Duration]) -> f64 {
 fn terminal_display(engine: &Engine) -> String {
     let rules = [LogisticsFixture::TERMINAL_RULE.to_string()];
     let response = engine
-        .run(
+        .evaluate(
             None,
             LogisticsFixture::SPEC_NAME,
             None,
@@ -70,12 +70,17 @@ struct Row {
     snapshot_bytes: usize,
     encode_ms: f64,
     restore_ms: f64,
+    eval_ms: f64,
     restore_allocations: usize,
     restored_heap_bytes: i128,
 }
 
 fn measure(rate_cells: usize) -> Row {
     let fixture = logistics::logistics(rate_cells);
+    assert!(
+        fixture.catalog_json.is_none(),
+        "BUG: embedded logistics must not carry catalog_json"
+    );
     let source_bytes = fixture.source.len();
 
     let load_region = Region::new(GLOBAL);
@@ -88,6 +93,17 @@ fn measure(rate_cells: usize) -> Row {
     let loaded_heap_bytes = live_bytes(&load_region.change());
 
     let expected_display = terminal_display(&engine);
+
+    let mut eval_samples = Vec::with_capacity(MEASURED_ITERATIONS);
+    for iteration in 0..WARMUP_ITERATIONS + MEASURED_ITERATIONS {
+        let started = Instant::now();
+        let display = terminal_display(&engine);
+        assert_eq!(display, expected_display);
+        let elapsed = started.elapsed();
+        if iteration >= WARMUP_ITERATIONS {
+            eval_samples.push(elapsed);
+        }
+    }
 
     let mut encode_samples = Vec::with_capacity(MEASURED_ITERATIONS);
     let mut snapshot = Vec::new();
@@ -139,6 +155,7 @@ fn measure(rate_cells: usize) -> Row {
         snapshot_bytes,
         encode_ms: median_ms(&mut encode_samples),
         restore_ms: median_ms(&mut restore_samples),
+        eval_ms: median_ms(&mut eval_samples),
         restore_allocations: restore_allocations / MEASURED_ITERATIONS,
         restored_heap_bytes,
     }
@@ -148,12 +165,12 @@ fn main() {
     let mut table = String::new();
     writeln!(
         &mut table,
-        "| Profile | Rate cells | Source bytes | Load | Loaded heap | Snapshot bytes | Encode median | Restore median | Allocations/restore | Restored heap | Restored / loaded heap |"
+        "| Profile | Rate cells | Source bytes | Load | Loaded heap | Snapshot bytes | Encode median | Restore median | Eval median | Allocations/restore | Restored heap | Restored / loaded heap |"
     )
     .expect("BUG: writing to String never fails");
     writeln!(
         &mut table,
-        "|---------|-----------:|-------------:|-----:|------------:|---------------:|--------------:|---------------:|--------------------:|--------------:|-----------------------:|"
+        "|---------|-----------:|-------------:|-----:|------------:|---------------:|--------------:|---------------:|------------:|--------------------:|--------------:|-----------------------:|"
     )
     .expect("BUG: writing to String never fails");
 
@@ -161,7 +178,7 @@ fn main() {
         let row = measure(rung.rate_cells);
         writeln!(
             &mut table,
-            "| logistics_{} | {} | {} | {:.3} ms | {} | {} | {:.3} ms | {:.3} ms | {} | {} | {:.3} |",
+            "| logistics_{} | {} | {} | {:.3} ms | {} | {} | {:.3} ms | {:.3} ms | {:.3} ms | {} | {} | {:.3} |",
             row.profile,
             row.rate_cells,
             row.source_bytes,
@@ -170,6 +187,7 @@ fn main() {
             row.snapshot_bytes,
             row.encode_ms,
             row.restore_ms,
+            row.eval_ms,
             row.restore_allocations,
             row.restored_heap_bytes,
             row.restored_heap_bytes as f64 / row.loaded_heap_bytes as f64,

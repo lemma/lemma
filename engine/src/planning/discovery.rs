@@ -1,10 +1,12 @@
 use crate::engine::Context;
+use crate::parsing::arena::ExprRef;
 use crate::parsing::ast::{
-    DataValue, DateTimeValue, EffectiveDate, Expression, ExpressionKind, LemmaRepository,
-    LemmaSpec, ParentType, Reference, RepositoryQualifier, SpecRef, WithRhs,
+    DataValue, DateTimeValue, EffectiveDate, ExpressionKind, LemmaData, LemmaRepository, LemmaSpec,
+    ParentType, Reference, RepositoryQualifier, SpecRef, UsesListRow, WithRhs,
 };
 use crate::parsing::source::Source;
 use crate::planning::semantics::{DataDefinition, LemmaType};
+use crate::planning::PlanStore;
 use crate::Error;
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::sync::Arc;
@@ -65,10 +67,7 @@ pub(crate) fn resolve_spec_ref_after_expanding_uses_aliases(
             if d.reference.name != spec_ref.name {
                 continue;
             }
-            let DataValue::Import {
-                spec_ref: inner, ..
-            } = &d.value
-            else {
+            let Some(inner) = d.value.uses_spec_ref() else {
                 continue;
             };
             if spec_ref.effective.is_some()
@@ -178,6 +177,40 @@ pub(crate) fn resolve_spec_ref<'a>(
     effective: &EffectiveDate,
     ref_source: Option<Source>,
 ) -> Result<(Arc<LemmaRepository>, &'a LemmaSpec), Error> {
+    let (repository, spec) = resolve_spec_ref_or_self(
+        context,
+        spec_ref,
+        consumer_repository,
+        consumer_spec,
+        effective,
+        ref_source.clone(),
+    )?;
+    if same_loaded_spec(consumer_spec, spec) {
+        return Err(Error::validation_with_context(
+            format!(
+                "spec '{}' cannot reference itself via '{}'",
+                consumer_identity(consumer_spec),
+                spec_ref
+            ),
+            ref_source,
+            None::<String>,
+            Some(consumer_spec),
+            None,
+        ));
+    }
+    Ok((repository, spec))
+}
+
+/// [`resolve_spec_ref`] that also resolves to `consumer_spec` itself: the row spec
+/// of a self-list (`uses components: part list` inside `spec part`).
+pub(crate) fn resolve_spec_ref_or_self<'a>(
+    context: &'a Context,
+    spec_ref: &SpecRef,
+    consumer_repository: &Arc<LemmaRepository>,
+    consumer_spec: &LemmaSpec,
+    effective: &EffectiveDate,
+    ref_source: Option<Source>,
+) -> Result<(Arc<LemmaRepository>, &'a LemmaSpec), Error> {
     let consumer_name = consumer_spec.name.as_str();
     let (resolved, effective_ref) = resolve_spec_ref_after_expanding_uses_aliases(
         context,
@@ -239,21 +272,22 @@ pub(crate) fn resolve_spec_ref<'a>(
         )
     })?;
 
-    if same_loaded_spec(consumer_spec, spec) {
-        return Err(Error::validation_with_context(
-            format!(
-                "spec '{}' cannot reference itself via '{}'",
-                consumer_identity(consumer_spec),
-                spec_ref
-            ),
-            ref_source,
-            None::<String>,
-            Some(consumer_spec),
-            None,
-        ));
-    }
-
     Ok((repository_arc, spec))
+}
+
+/// Whether `data` of `spec` is a self-list: `uses x: spec list` whose row spec is `spec` itself.
+pub(crate) fn is_self_list(
+    context: &Context,
+    data: &LemmaData,
+    spec: &LemmaSpec,
+    spec_repository: &Arc<LemmaRepository>,
+    effective: &EffectiveDate,
+) -> bool {
+    let DataValue::ImportList { spec_ref, .. } = &data.value else {
+        return false;
+    };
+    resolve_spec_ref_or_self(context, spec_ref, spec_repository, spec, effective, None)
+        .is_ok_and(|(_, row_spec)| same_loaded_spec(row_spec, spec))
 }
 
 fn format_dep_qualified_name(repository: &LemmaRepository, dep_name: &str) -> String {
@@ -353,6 +387,8 @@ pub(crate) struct DependencyEdge {
 pub(crate) enum DependencyEdgeOrigin {
     /// `uses alias: dep`
     Uses,
+    /// `uses alias: dep list`
+    UsesList,
     /// `data x: alias.type`
     QualifiedType,
 }
@@ -412,6 +448,14 @@ pub(crate) fn dependency_edges(
                     &data.source_location,
                     &data.reference.name,
                     DependencyEdgeOrigin::Uses,
+                );
+            }
+            DataValue::ImportList { spec_ref, .. } => {
+                push_edge(
+                    spec_ref,
+                    &data.source_location,
+                    &data.reference.name,
+                    DependencyEdgeOrigin::UsesList,
                 );
             }
             DataValue::Definition {
@@ -625,10 +669,10 @@ struct AliasReads {
 fn alias_reads(spec: &LemmaSpec, alias: &str) -> AliasReads {
     let mut reads = AliasReads::default();
     for rule in &spec.rules {
-        collect_alias_expression_reads(&rule.expression, alias, &mut reads);
+        collect_alias_expression_reads(rule.expression.root(), alias, &mut reads);
         for clause in &rule.unless_clauses {
-            collect_alias_expression_reads(&clause.condition, alias, &mut reads);
-            collect_alias_expression_reads(&clause.result, alias, &mut reads);
+            collect_alias_expression_reads(clause.condition.root(), alias, &mut reads);
+            collect_alias_expression_reads(clause.result.root(), alias, &mut reads);
         }
     }
     for data in &spec.data {
@@ -656,6 +700,27 @@ fn alias_reads(spec: &LemmaSpec, alias: &str) -> AliasReads {
                     }
                 }
             }
+            DataValue::ImportList { list, .. } => {
+                if data.reference.name == alias {
+                    reads.whole = true;
+                }
+                for row in &list.rows {
+                    let rhs_values: Vec<&WithRhs> = match row {
+                        UsesListRow::Fields { bindings, .. } => {
+                            bindings.iter().map(|binding| &binding.rhs).collect()
+                        }
+                        UsesListRow::Values { values, .. } => values.iter().collect(),
+                    };
+                    for rhs in rhs_values {
+                        if let WithRhs::Reference { target } = rhs {
+                            collect_alias_reference_read(target, alias, &mut reads.members);
+                            if target.segments.is_empty() && target.name == alias {
+                                reads.whole = true;
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
     reads
@@ -679,51 +744,46 @@ fn collect_alias_reference_read(reference: &Reference, alias: &str, out: &mut Ha
     }
 }
 
-fn collect_alias_expression_reads(expression: &Expression, alias: &str, reads: &mut AliasReads) {
-    match &expression.kind {
-        ExpressionKind::Reference(reference) => {
+fn collect_alias_expression_reads(
+    expression: ExprRef<'_, ExpressionKind>,
+    alias: &str,
+    reads: &mut AliasReads,
+) {
+    let mut pending = vec![expression];
+    while let Some(node) = pending.pop() {
+        if let ExpressionKind::Reference(reference) = node.kind() {
             if reference.segments.is_empty() && reference.name == alias {
                 reads.whole = true;
             } else {
                 collect_alias_reference_read(reference, alias, &mut reads.members);
             }
         }
-        ExpressionKind::DateRelative(_, inner)
-        | ExpressionKind::DateCalendar(_, _, inner)
-        | ExpressionKind::PastFutureRange(_, inner)
-        | ExpressionKind::UnitConversion(inner, _)
-        | ExpressionKind::LogicalNegation(inner, _)
-        | ExpressionKind::MathematicalComputation(_, inner)
-        | ExpressionKind::RangeBound(_, inner)
-        | ExpressionKind::ResultIsVeto(inner) => {
-            collect_alias_expression_reads(inner, alias, reads);
-        }
-        ExpressionKind::RangeLiteral(left, right)
-        | ExpressionKind::RangeContainment(left, right)
-        | ExpressionKind::LogicalAnd(left, right)
-        | ExpressionKind::Arithmetic(left, _, right)
-        | ExpressionKind::Comparison(left, _, right) => {
-            collect_alias_expression_reads(left, alias, reads);
-            collect_alias_expression_reads(right, alias, reads);
-        }
-        ExpressionKind::Literal(_) | ExpressionKind::Now | ExpressionKind::Veto(_) => {}
+        node.push_children(&mut pending);
     }
 }
 
 /// Type name read from `alias` by a data row's parent type, if any.
 fn qualified_type_read<'p>(base: &'p ParentType, alias: &str) -> Option<&'p str> {
-    match base {
-        ParentType::Qualified { spec_alias, inner } if spec_alias == alias => {
-            match inner.as_ref() {
-                ParentType::Custom { name } => Some(name.as_str()),
-                ParentType::Primitive { .. }
-                | ParentType::Qualified { .. }
-                | ParentType::Ranged { .. } => None,
+    let mut current = base;
+    loop {
+        match current {
+            ParentType::Qualified { spec_alias, inner } if spec_alias == alias => {
+                return match inner.as_ref() {
+                    ParentType::Custom { name } => Some(name.as_str()),
+                    ParentType::Primitive { .. }
+                    | ParentType::Qualified { .. }
+                    | ParentType::Ranged { .. }
+                    | ParentType::List { .. } => None,
+                };
             }
-        }
-        ParentType::Ranged { inner } => qualified_type_read(inner, alias),
-        ParentType::Qualified { .. } | ParentType::Primitive { .. } | ParentType::Custom { .. } => {
-            None
+            ParentType::Ranged { inner } | ParentType::List { inner } => {
+                current = inner.as_ref();
+            }
+            ParentType::Qualified { .. }
+            | ParentType::Primitive { .. }
+            | ParentType::Custom { .. } => {
+                return None;
+            }
         }
     }
 }
@@ -785,190 +845,198 @@ fn interface_member_drift_message(
 /// (schema) is type-compatible across all dep specs active within the
 /// consumer's effective range. Qualified deps are pinned and skip this check.
 ///
-/// Only consumers inside `scope` are checked: a consumer outside it has unchanged
-/// edges into unchanged dependencies, so the previous pass already proved it.
+/// Every spec set of `context` is checked against `plans`, the plan store of this pass.
 ///
 /// Returns `(consumer_repository, consumer_spec_name, consumer_spec, error)` tuples.
 pub fn validate_dependency_interfaces<'a>(
     context: &'a Context,
-    plan_view: &super::PlanView<'_>,
-    scope: &super::ReplanScope,
+    plans: &PlanStore,
     missing_repository_source_specs: &HashSet<(Arc<LemmaRepository>, String, EffectiveDate)>,
     failed_source_specs: &HashSet<(Arc<LemmaRepository>, String, EffectiveDate)>,
 ) -> Vec<(Arc<LemmaRepository>, String, &'a LemmaSpec, Error)> {
     let mut errors: Vec<(Arc<LemmaRepository>, String, &'a LemmaSpec, Error)> = Vec::new();
 
-    for member in scope.members() {
-        let consumer_repository = &member.repository;
-        let consumer_spec_name = &member.spec;
-        // A member with no spec set left the context in this batch: it has no consumer
-        // interfaces left to check.
-        if let Some(consumer_spec_set) = context.spec_set(consumer_repository, consumer_spec_name) {
-            for spec in consumer_spec_set.iter_specs() {
-                if missing_repository_source_specs.contains(&(
-                    Arc::clone(consumer_repository),
-                    consumer_spec_name.clone(),
-                    spec.effective_from.clone(),
-                )) {
-                    continue;
-                }
+    for (consumer_repository, consumer_spec_name, consumer_spec_set) in
+        super::spec_sets_in_order(context)
+    {
+        for spec in consumer_spec_set.iter_specs() {
+            if missing_repository_source_specs.contains(&(
+                Arc::clone(consumer_repository),
+                consumer_spec_name.clone(),
+                spec.effective_from.clone(),
+            )) {
+                continue;
+            }
 
-                let consumer_repository = Arc::clone(consumer_repository);
-                let (eff_from, eff_to) = consumer_spec_set.effective_range(spec);
+            let consumer_repository = Arc::clone(consumer_repository);
+            let (eff_from, eff_to) = consumer_spec_set.effective_range(spec);
 
-                let edges = match dependency_edges(spec, &consumer_repository, context) {
-                    Ok(edges) => edges,
-                    Err(errs) => {
-                        for e in errs {
-                            errors.push((
-                                Arc::clone(&consumer_repository),
-                                consumer_spec_name.clone(),
-                                spec,
-                                e,
-                            ));
-                        }
-                        continue;
-                    }
-                };
-
-                let uses_aliases: HashSet<&str> = edges
-                    .iter()
-                    .filter(|edge| edge.origin == DependencyEdgeOrigin::Uses)
-                    .map(|edge| edge.alias.as_str())
-                    .collect();
-
-                for edge in &edges {
-                    if edge.explicit_effective.is_some() {
-                        continue;
-                    }
-                    // The `uses` row for this alias already checks every member read through it.
-                    if edge.origin == DependencyEdgeOrigin::QualifiedType
-                        && uses_aliases.contains(edge.alias.as_str())
-                    {
-                        continue;
-                    }
-
-                    let dep_qualified =
-                        format_dep_qualified_name(&edge.dep_repository, &edge.dep_name);
-                    let Some(_dep_ss) = context.spec_set(&edge.dep_repository, &edge.dep_name)
-                    else {
+            let edges = match dependency_edges(spec, &consumer_repository, context) {
+                Ok(edges) => edges,
+                Err(errs) => {
+                    for e in errs {
                         errors.push((
                             Arc::clone(&consumer_repository),
                             consumer_spec_name.clone(),
                             spec,
-                            Error::validation_with_context(
-                                format!(
-                                    "'{}' depends on '{}', but '{}' does not exist",
-                                    spec.name, dep_qualified, dep_qualified
-                                ),
-                                Some(edge.source.clone()),
-                                None::<String>,
-                                Some(spec),
-                                None,
-                            ),
+                            e,
                         ));
+                    }
+                    continue;
+                }
+            };
+
+            let uses_aliases: HashSet<&str> = edges
+                .iter()
+                .filter(|edge| {
+                    matches!(
+                        edge.origin,
+                        DependencyEdgeOrigin::Uses | DependencyEdgeOrigin::UsesList
+                    )
+                })
+                .map(|edge| edge.alias.as_str())
+                .collect();
+
+            for edge in &edges {
+                if edge.explicit_effective.is_some() {
+                    continue;
+                }
+                // A self-list's rows are typed by the consumer's own slice.
+                if edge.origin == DependencyEdgeOrigin::UsesList
+                    && Arc::ptr_eq(&edge.dep_repository, &consumer_repository)
+                    && crate::parsing::ast::ascii_lowercase_logical_name(edge.dep_name.clone())
+                        == crate::parsing::ast::ascii_lowercase_logical_name(
+                            consumer_spec_name.clone(),
+                        )
+                {
+                    continue;
+                }
+                // The `uses` row for this alias already checks every member read through it.
+                if edge.origin == DependencyEdgeOrigin::QualifiedType
+                    && uses_aliases.contains(edge.alias.as_str())
+                {
+                    continue;
+                }
+
+                let dep_qualified = format_dep_qualified_name(&edge.dep_repository, &edge.dep_name);
+                let Some(_) = context.spec_set(&edge.dep_repository, &edge.dep_name) else {
+                    errors.push((
+                        Arc::clone(&consumer_repository),
+                        consumer_spec_name.clone(),
+                        spec,
+                        Error::validation_with_context(
+                            format!(
+                                "'{}' depends on '{}', but '{}' does not exist",
+                                spec.name, dep_qualified, dep_qualified
+                            ),
+                            Some(edge.source.clone()),
+                            None::<String>,
+                            Some(spec),
+                            None,
+                        ),
+                    ));
+                    continue;
+                };
+                let Some(dep_plans) =
+                    plans.get_plans(edge.dep_repository.name.as_deref(), &edge.dep_name)
+                else {
+                    let dep_repo = Arc::clone(&edge.dep_repository);
+                    let dep_name = edge.dep_name.clone();
+                    let all_dep_rows_failed = context
+                        .spec_set(&dep_repo, &dep_name)
+                        .expect("BUG: dependency spec set missing after existence check")
+                        .iter_specs()
+                        .all(|dep_spec| {
+                            failed_source_specs.contains(&(
+                                Arc::clone(&dep_repo),
+                                dep_name.clone(),
+                                dep_spec.effective_from.clone(),
+                            ))
+                        });
+                    if all_dep_rows_failed {
                         continue;
-                    };
-                    let Some(dep_plans) =
-                        plan_view.get_plans(edge.dep_repository.name.as_deref(), &edge.dep_name)
-                    else {
-                        let dep_repo = Arc::clone(&edge.dep_repository);
-                        let dep_name = edge.dep_name.clone();
-                        let all_dep_rows_failed = context
-                            .spec_set(&dep_repo, &dep_name)
-                            .expect("BUG: dependency spec set missing after existence check")
-                            .iter_specs()
-                            .all(|dep_spec| {
-                                failed_source_specs.contains(&(
-                                    Arc::clone(&dep_repo),
-                                    dep_name.clone(),
-                                    dep_spec.effective_from.clone(),
-                                ))
-                            });
-                        if all_dep_rows_failed {
+                    }
+                    panic!(
+                        "BUG: dependency '{}' in context but has no planning result",
+                        dep_qualified
+                    );
+                };
+
+                let reads = alias_reads(spec, &edge.alias);
+                let mut seen: HashMap<(MemberKind, String), MemberRow<'_>> = HashMap::new();
+                let mut member_drift: Option<String> = None;
+                let mut saw_overlapping_plan = false;
+
+                let mut dep_iter = dep_plans.iter().peekable();
+                'dep_plans: while let Some((effective, plan)) = dep_iter.next() {
+                    let window_from = plan.effective.as_ref().cloned();
+                    let window_to = dep_iter
+                        .peek()
+                        .and_then(|(_, next)| next.effective.as_ref().cloned());
+
+                    if !super::ranges_overlap(&eff_from, &eff_to, &window_from, &window_to) {
+                        continue;
+                    }
+                    saw_overlapping_plan = true;
+
+                    let mut observed: Vec<(MemberKind, String, &LemmaType)> = Vec::new();
+                    for (path, data) in &plan.data {
+                        let Some(lemma_type) = data.schema_type() else {
+                            continue;
+                        };
+                        if matches!(data, DataDefinition::Reference { .. }) {
                             continue;
                         }
-                        panic!(
-                            "BUG: dependency '{}' in context but has no planning result",
-                            dep_qualified
-                        );
-                    };
-
-                    let reads = alias_reads(spec, &edge.alias);
-                    let mut seen: HashMap<(MemberKind, String), MemberRow<'_>> = HashMap::new();
-                    let mut member_drift: Option<String> = None;
-                    let mut saw_overlapping_plan = false;
-
-                    let mut dep_iter = dep_plans.iter().peekable();
-                    'dep_plans: while let Some((effective, plan)) = dep_iter.next() {
-                        let window_from = plan.effective.as_ref().cloned();
-                        let window_to = dep_iter
-                            .peek()
-                            .and_then(|(_, next)| next.effective.as_ref().cloned());
-
-                        if !super::ranges_overlap(&eff_from, &eff_to, &window_from, &window_to) {
-                            continue;
+                        let input_key = path.input_key();
+                        if reads.whole || reads.members.contains(&input_key) {
+                            observed.push((MemberKind::Data, input_key, lemma_type));
                         }
-                        saw_overlapping_plan = true;
-
-                        let mut observed: Vec<(MemberKind, String, &LemmaType)> = Vec::new();
-                        for (path, data) in &plan.data {
-                            let Some(lemma_type) = data.schema_type() else {
-                                continue;
-                            };
-                            if matches!(data, DataDefinition::Reference { .. }) {
-                                continue;
-                            }
-                            let input_key = path.input_key();
-                            if reads.whole || reads.members.contains(&input_key) {
-                                observed.push((MemberKind::Data, input_key, lemma_type));
-                            }
+                    }
+                    for rule in plan.rules.values() {
+                        let key = rule.path.input_key();
+                        let named =
+                            rule.path.segments.is_empty() && reads.members.contains(rule.name());
+                        if reads.whole || named {
+                            observed.push((MemberKind::Rule, key, rule.rule_type.as_ref()));
                         }
-                        for rule in plan.rules.values() {
-                            let key = rule.path.input_key();
-                            let named = rule.path.segments.is_empty()
-                                && reads.members.contains(rule.name());
-                            if reads.whole || named {
-                                observed.push((MemberKind::Rule, key, rule.rule_type.as_ref()));
-                            }
-                        }
-                        for (type_name, lemma_type) in &plan.resolved_types.resolved {
-                            if reads.types.contains(type_name) {
-                                observed.push((
-                                    MemberKind::Type,
-                                    type_name.clone(),
-                                    lemma_type.as_ref(),
-                                ));
-                            }
-                        }
-
-                        for (kind, key, lemma_type) in observed {
-                            let row = MemberRow {
-                                lemma_type,
-                                at: effective.clone(),
-                            };
-                            match seen.get(&(kind, key.clone())) {
-                                Some(earlier) if earlier.lemma_type != lemma_type => {
-                                    member_drift = Some(interface_member_drift_message(
-                                        &spec.name,
-                                        &dep_qualified,
-                                        kind.label(),
-                                        &key,
-                                        earlier,
-                                        &row,
-                                    ));
-                                    break 'dep_plans;
-                                }
-                                Some(_) => {}
-                                None => {
-                                    seen.insert((kind, key), row);
-                                }
-                            }
+                    }
+                    for (type_name, lemma_type) in &plan.resolved_types.resolved {
+                        if reads.types.contains(type_name) {
+                            observed.push((
+                                MemberKind::Type,
+                                type_name.clone(),
+                                lemma_type.as_ref(),
+                            ));
                         }
                     }
 
-                    if let Some(message) = member_drift {
-                        errors.push((
+                    for (kind, key, lemma_type) in observed {
+                        let row = MemberRow {
+                            lemma_type,
+                            at: effective.clone(),
+                        };
+                        match seen.get(&(kind, key.clone())) {
+                            Some(earlier) if !earlier.lemma_type.same_interface(lemma_type) => {
+                                member_drift = Some(interface_member_drift_message(
+                                    &spec.name,
+                                    &dep_qualified,
+                                    kind.label(),
+                                    &key,
+                                    earlier,
+                                    &row,
+                                ));
+                                break 'dep_plans;
+                            }
+                            Some(_) => {}
+                            None => {
+                                seen.insert((kind, key), row);
+                            }
+                        }
+                    }
+                }
+
+                if let Some(message) = member_drift {
+                    errors.push((
                             Arc::clone(&consumer_repository),
                             consumer_spec_name.clone(),
                             spec,
@@ -982,8 +1050,8 @@ pub fn validate_dependency_interfaces<'a>(
                                 None,
                             ),
                         ));
-                    } else if !saw_overlapping_plan {
-                        errors.push((
+                } else if !saw_overlapping_plan {
+                    errors.push((
                             Arc::clone(&consumer_repository),
                             consumer_spec_name.clone(),
                             spec,
@@ -1002,7 +1070,6 @@ pub fn validate_dependency_interfaces<'a>(
                                 None,
                             ),
                         ));
-                    }
                 }
             }
         }
@@ -1037,26 +1104,22 @@ pub(crate) fn discover_dependency_order<'a>(
     effective: &EffectiveDate,
     limits: &crate::limits::ResourceLimits,
 ) -> Result<Vec<DependencySpec<'a>>, DependencyDiscoveryError> {
-    let mut nodes: Vec<DependencySpec<'a>> = Vec::new();
-    let mut edges: Vec<(usize, usize)> = Vec::new();
-    let mut errors: Vec<Error> = Vec::new();
-    // Visited: (repo name key, loaded name, loaded effective_from, resolution instant).
-    let mut visited: Vec<(Option<String>, String, EffectiveDate, EffectiveDate)> = Vec::new();
-
-    let root_repository =
-        lookup_owning_repository(context, root).unwrap_or_else(|| context.workspace());
-    dfs_discover(
+    let root_repository = owning_repository(context, root);
+    let mut discovery = DependencyDiscovery {
         context,
-        root,
-        &root_repository,
-        effective,
-        &mut nodes,
-        &mut edges,
-        &mut errors,
-        &mut visited,
-        0,
         limits,
-    );
+        nodes: Vec::new(),
+        edges: Vec::new(),
+        errors: Vec::new(),
+        visited: Vec::new(),
+    };
+    discovery.visit(root, &root_repository, effective, 0);
+    let DependencyDiscovery {
+        nodes,
+        edges,
+        errors,
+        ..
+    } = discovery;
 
     if errors.is_empty() {
         kahns_topo_sort(&nodes, &edges).map_err(|err| DependencyDiscoveryError::Cycle(vec![err]))
@@ -1065,24 +1128,30 @@ pub(crate) fn discover_dependency_order<'a>(
     }
 }
 
-/// Find the repository `Arc` that owns `spec` in `context`. Used by DFS to resolve
-/// same-repository references against the consumer's repository without callers having to
-/// pass it explicitly.
-pub(crate) fn lookup_owning_repository(
-    context: &Context,
-    spec: &LemmaSpec,
-) -> Option<Arc<LemmaRepository>> {
-    for (repository, inner) in context.repositories().iter() {
-        for (name, set) in inner.iter() {
-            if name != &spec.name {
-                continue;
-            }
-            if set.iter_specs().any(|p| same_loaded_spec(p, spec)) {
-                return Some(Arc::clone(repository));
-            }
-        }
-    }
-    None
+/// State of one single-root DFS dependency discovery.
+struct DependencyDiscovery<'a, 'l> {
+    context: &'a Context,
+    limits: &'l crate::limits::ResourceLimits,
+    nodes: Vec<DependencySpec<'a>>,
+    edges: Vec<(usize, usize)>,
+    errors: Vec<Error>,
+    /// Visited: (repo name key, loaded name, loaded effective_from, resolution instant).
+    visited: Vec<(Option<String>, String, EffectiveDate, EffectiveDate)>,
+}
+
+/// The repository `Arc` that owns `spec` in `context`. Same-repository references resolve
+/// against it. Planning only sees specs loaded into `context`.
+pub(crate) fn owning_repository(context: &Context, spec: &LemmaSpec) -> Arc<LemmaRepository> {
+    context
+        .repositories()
+        .iter()
+        .find(|(_, inner)| {
+            inner
+                .get(&spec.name)
+                .is_some_and(|set| set.iter_specs().any(|p| same_loaded_spec(p, spec)))
+        })
+        .map(|(repository, _)| Arc::clone(repository))
+        .expect("BUG: planned spec must be loaded in context")
 }
 
 fn visit_key(
@@ -1098,124 +1167,184 @@ fn visit_key(
     )
 }
 
-#[allow(clippy::too_many_arguments)]
-fn dfs_discover<'a>(
-    context: &'a Context,
+/// A spec whose dependency edges are being visited. Edges are consumed in order; an edge
+/// whose dependency was entered is completed (its edge recorded) when the frame resumes.
+struct VisitFrame<'a> {
     spec: &'a LemmaSpec,
-    consumer_repository: &Arc<LemmaRepository>,
-    effective: &EffectiveDate,
-    nodes: &mut Vec<DependencySpec<'a>>,
-    edges: &mut Vec<(usize, usize)>,
-    errors: &mut Vec<Error>,
-    visited: &mut Vec<(Option<String>, String, EffectiveDate, EffectiveDate)>,
+    spec_index: usize,
+    repository: Arc<LemmaRepository>,
+    effective: EffectiveDate,
     depth: usize,
-    limits: &crate::limits::ResourceLimits,
-) {
-    if depth > limits.max_spec_dependency_depth {
-        errors.push(Error::resource_limit_exceeded(
-            "max_spec_dependency_depth",
-            limits.max_spec_dependency_depth.to_string(),
-            depth.to_string(),
-            format!(
-                "Spec '{}' exceeds the maximum dependency nesting depth; flatten the import chain",
-                spec.name
-            ),
-            None,
-            Some(spec),
-            None,
-        ));
-        return;
-    }
+    edges: std::vec::IntoIter<DependencyEdge>,
+    awaiting: Option<&'a LemmaSpec>,
+}
 
-    let key = visit_key(consumer_repository, spec, effective);
-    if visited.iter().any(|v| v == &key) {
-        return;
-    }
-    visited.push(key);
-
-    let spec_index = match nodes
-        .iter()
-        .position(|node| same_loaded_spec(node.spec, spec))
-    {
-        Some(existing_index) => existing_index,
-        None => {
-            if nodes.len() >= limits.max_dag_specs {
-                errors.push(Error::resource_limit_exceeded(
-                    "max_dag_specs",
-                    limits.max_dag_specs.to_string(),
-                    (nodes.len() + 1).to_string(),
-                    format!(
-                        "Dependency graph of the root spec grew past {} specs at '{}'; \
-                         reduce the number of transitive imports",
-                        limits.max_dag_specs, spec.name
-                    ),
-                    None,
-                    Some(spec),
-                    None,
-                ));
-                return;
-            }
-            let new_index = nodes.len();
-            nodes.push(DependencySpec {
-                repository: Arc::clone(consumer_repository),
-                spec,
-            });
-            new_index
-        }
-    };
-
-    let edges_for_spec = match dependency_edges(spec, consumer_repository, context) {
-        Ok(edges) => edges,
-        Err(errs) => {
-            errors.extend(errs);
+impl<'a, 'l> DependencyDiscovery<'a, 'l> {
+    /// Depth-first over dependency edges with an explicit frame stack. Nodes are added on
+    /// entry, edges when a dependency's subtree is complete.
+    fn visit(
+        &mut self,
+        spec: &'a LemmaSpec,
+        consumer_repository: &Arc<LemmaRepository>,
+        effective: &EffectiveDate,
+        depth: usize,
+    ) {
+        let Some(root) = self.enter(spec, consumer_repository, effective, depth) else {
             return;
+        };
+        let mut stack = vec![root];
+        while let Some(mut frame) = stack.pop() {
+            if let Some(dependency) = frame.awaiting.take() {
+                match self
+                    .nodes
+                    .iter()
+                    .position(|node| same_loaded_spec(node.spec, dependency))
+                {
+                    Some(dep_index) => self.edges.push((dep_index, frame.spec_index)),
+                    None => assert!(
+                        !self.errors.is_empty(),
+                        "BUG: dependency absent from nodes without a recorded error"
+                    ),
+                }
+            }
+            let Some((child, child_repository, child_effective)) = self.next_child(&mut frame)
+            else {
+                continue;
+            };
+            let child_depth = frame.depth + 1;
+            stack.push(frame);
+            if let Some(child_frame) =
+                self.enter(child, &child_repository, &child_effective, child_depth)
+            {
+                stack.push(child_frame);
+            }
         }
-    };
+    }
 
-    for edge in edges_for_spec {
-        let dep_effective = edge
-            .explicit_effective
-            .clone()
-            .map_or_else(|| effective.clone(), EffectiveDate::DateTimeValue);
+    /// Node entry of [`Self::visit`]. `None` when the spec adds no edges to walk.
+    fn enter(
+        &mut self,
+        spec: &'a LemmaSpec,
+        consumer_repository: &Arc<LemmaRepository>,
+        effective: &EffectiveDate,
+        depth: usize,
+    ) -> Option<VisitFrame<'a>> {
+        let context = self.context;
+        let limits = self.limits;
+        if depth > limits.max_spec_dependency_depth {
+            self.errors.push(Error::resource_limit_exceeded(
+                "max_spec_dependency_depth",
+                limits.max_spec_dependency_depth.to_string(),
+                depth.to_string(),
+                format!(
+                    "Spec '{}' exceeds the maximum dependency nesting depth; flatten the import chain",
+                    spec.name
+                ),
+                None,
+                Some(spec),
+                None,
+            ));
+            return None;
+        }
 
-        let dependency = match resolve_spec_ref(
-            context,
-            &edge.as_spec_ref(),
-            consumer_repository,
+        let key = visit_key(consumer_repository, spec, effective);
+        if self.visited.iter().any(|v| v == &key) {
+            return None;
+        }
+        self.visited.push(key);
+
+        let spec_index = match self
+            .nodes
+            .iter()
+            .position(|node| same_loaded_spec(node.spec, spec))
+        {
+            Some(existing_index) => existing_index,
+            None => {
+                if self.nodes.len() >= limits.max_dag_specs {
+                    self.errors.push(Error::resource_limit_exceeded(
+                        "max_dag_specs",
+                        limits.max_dag_specs.to_string(),
+                        (self.nodes.len() + 1).to_string(),
+                        format!(
+                            "Dependency graph of the root spec grew past {} specs at '{}'; \
+                             reduce the number of transitive imports",
+                            limits.max_dag_specs, spec.name
+                        ),
+                        None,
+                        Some(spec),
+                        None,
+                    ));
+                    return None;
+                }
+                let new_index = self.nodes.len();
+                self.nodes.push(DependencySpec {
+                    repository: Arc::clone(consumer_repository),
+                    spec,
+                });
+                new_index
+            }
+        };
+
+        let edges_for_spec = match dependency_edges(spec, consumer_repository, context) {
+            Ok(edges) => edges,
+            Err(errs) => {
+                self.errors.extend(errs);
+                return None;
+            }
+        };
+
+        Some(VisitFrame {
             spec,
-            effective,
-            Some(edge.source.clone()),
-        ) {
-            Ok((_, dependency)) => dependency,
-            Err(error) => {
-                errors.push(error);
+            spec_index,
+            repository: Arc::clone(consumer_repository),
+            effective: effective.clone(),
+            depth,
+            edges: edges_for_spec.into_iter(),
+            awaiting: None,
+        })
+    }
+
+    /// Next edge of `frame` whose dependency must be visited. Edges that fail to resolve
+    /// record their error and are skipped.
+    fn next_child(
+        &mut self,
+        frame: &mut VisitFrame<'a>,
+    ) -> Option<(&'a LemmaSpec, Arc<LemmaRepository>, EffectiveDate)> {
+        let context = self.context;
+        for edge in frame.edges.by_ref() {
+            let dep_effective = edge
+                .explicit_effective
+                .clone()
+                .map_or_else(|| frame.effective.clone(), EffectiveDate::DateTimeValue);
+
+            let resolve = match edge.origin {
+                DependencyEdgeOrigin::UsesList => resolve_spec_ref_or_self,
+                DependencyEdgeOrigin::Uses | DependencyEdgeOrigin::QualifiedType => {
+                    resolve_spec_ref
+                }
+            };
+            let dependency = match resolve(
+                context,
+                &edge.as_spec_ref(),
+                &frame.repository,
+                frame.spec,
+                &frame.effective,
+                Some(edge.source.clone()),
+            ) {
+                Ok((_, dependency)) => dependency,
+                Err(error) => {
+                    self.errors.push(error);
+                    continue;
+                }
+            };
+            if same_loaded_spec(dependency, frame.spec) {
                 continue;
             }
-        };
 
-        dfs_discover(
-            context,
-            dependency,
-            &edge.dep_repository,
-            &dep_effective,
-            nodes,
-            edges,
-            errors,
-            visited,
-            depth + 1,
-            limits,
-        );
-        let Some(dep_index) = nodes
-            .iter()
-            .position(|node| same_loaded_spec(node.spec, dependency))
-        else {
-            assert!(
-                !errors.is_empty(),
-                "BUG: dependency absent from nodes without a recorded error"
-            );
-            continue;
-        };
-        edges.push((dep_index, spec_index));
+            frame.awaiting = Some(dependency);
+            return Some((dependency, Arc::clone(&edge.dep_repository), dep_effective));
+        }
+        None
     }
 }
 
@@ -1412,22 +1541,9 @@ mod tests {
             .expect("insert consumer");
 
         // Dep is in the context, healthy, but was never planned into plans.
-        let replanned = crate::planning::PlanStore::new();
-        let committed = crate::planning::PlanStore::new();
-        let scope = crate::planning::ReplanScope::from_changed_sets(
-            &ctx,
-            vec![(ctx.workspace(), "consumer".to_string())],
-        );
-        let plan_view = crate::planning::PlanView::new(&replanned, &committed, &scope, &ctx);
-        let missing_repository_source_specs = HashSet::new();
+        let plans = PlanStore::new();
 
-        let _ = validate_dependency_interfaces(
-            &ctx,
-            &plan_view,
-            &scope,
-            &missing_repository_source_specs,
-            &HashSet::new(),
-        );
+        validate_dependency_interfaces(&ctx, &plans, &HashSet::new(), &HashSet::new());
     }
 
     #[test]
@@ -1435,14 +1551,17 @@ mod tests {
         let mut ctx = Context::new();
         let repository = ctx.workspace();
         let consumer = spec_with_dep("consumer", Some(date(2025, 1, 1)), "dep", None, None);
-        ctx.insert_spec(Arc::clone(&repository), consumer.clone())
-            .unwrap();
+        ctx.insert_spec(Arc::clone(&repository), consumer).unwrap();
 
+        let consumer = ctx
+            .spec_set(&repository, "consumer")
+            .and_then(|ss| ss.get_exact(Some(&date(2025, 1, 1))))
+            .expect("consumer inserted");
         let effective = EffectiveDate::DateTimeValue(date(2025, 1, 1));
         let errs = discovery_errors(
             discover_dependency_order(
                 &ctx,
-                &consumer,
+                consumer,
                 &effective,
                 &crate::ResourceLimits::default(),
             )
@@ -1476,14 +1595,17 @@ mod tests {
             Some(date(2025, 8, 1)),
             None,
         );
-        ctx.insert_spec(Arc::clone(&repository), consumer.clone())
-            .unwrap();
+        ctx.insert_spec(Arc::clone(&repository), consumer).unwrap();
 
+        let consumer = ctx
+            .spec_set(&repository, "consumer")
+            .and_then(|ss| ss.get_exact(Some(&date(2025, 1, 1))))
+            .expect("consumer inserted");
         let effective = EffectiveDate::DateTimeValue(date(2025, 1, 1));
         let errs = discovery_errors(
             discover_dependency_order(
                 &ctx,
-                &consumer,
+                consumer,
                 &effective,
                 &crate::ResourceLimits::default(),
             )
@@ -1564,14 +1686,17 @@ mod tests {
         let mut ctx = Context::new();
         let repository = ctx.workspace();
         let consumer = spec_with_dep("consumer", Some(date(2025, 1, 1)), "dep", None, None);
-        ctx.insert_spec(Arc::clone(&repository), consumer.clone())
-            .unwrap();
+        ctx.insert_spec(Arc::clone(&repository), consumer).unwrap();
 
+        let consumer = ctx
+            .spec_set(&repository, "consumer")
+            .and_then(|ss| ss.get_exact(Some(&date(2025, 1, 1))))
+            .expect("consumer inserted");
         let effective = EffectiveDate::DateTimeValue(date(2025, 1, 1));
         let errs = discovery_errors(
             discover_dependency_order(
                 &ctx,
-                &consumer,
+                consumer,
                 &effective,
                 &crate::ResourceLimits::default(),
             )
@@ -2026,7 +2151,7 @@ data v: 99
 spec shop
 uses a: amounts
   -> with rate: b.base
-  -> with lines.count: 3
+  -> with lines.qty: 3
 uses b: other
 data price: a.money
 data window: a.span range
@@ -2053,7 +2178,7 @@ rule start: lower a.period
             AliasReads {
                 members: strings(&[
                     "rate",
-                    "lines.count",
+                    "lines.qty",
                     "amount",
                     "lines.flag",
                     "waiver",

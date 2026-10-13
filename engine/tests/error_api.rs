@@ -4,10 +4,11 @@
 //! tests assert against [`lemma::__test_support::current_binding_error_json`]
 //! (today's WASM/`JsError` shape). Missing structured fields are the intended red.
 
+use indexmap::IndexMap;
 use lemma::__test_support::current_binding_error_json;
 use lemma::{
-    DateTimeValue, Engine, Error, ErrorKind, RegistryErrorKind, RequestErrorKind, ResourceLimits,
-    Source, SourceType,
+    DateTimeValue, Engine, Error, RegistryErrorKind, RequestErrorKind, ResourceLimits, Source,
+    SourceType,
 };
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -267,15 +268,14 @@ fn all_seven_error_kind_snake_case_spellings_appear() {
         );
     }
     assert_eq!(kinds.len(), 7);
-    let _ = ErrorKind::Parsing; // keep import live for kind coverage docs
 }
 
 #[test]
-fn run_missing_spec_is_request_error_on_api() {
+fn evaluate_missing_spec_is_request_error_on_api() {
     let engine = Engine::new();
     let now = DateTimeValue::now();
     let err = engine
-        .run(None, "absent", Some(&now), Default::default(), None, false)
+        .evaluate(None, "absent", Some(&now), IndexMap::new(), None, false)
         .expect_err("missing spec");
     let json = current_binding_error_json(&err);
     assert_eq!(json["kind"], "request");

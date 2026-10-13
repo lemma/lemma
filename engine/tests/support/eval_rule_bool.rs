@@ -1,16 +1,16 @@
-use lemma::DateTimeValue;
+use indexmap::IndexMap;
 use lemma::Engine;
-use std::collections::HashMap;
+use lemma::{DateTimeValue, EvaluateDataValue};
 
 pub fn eval_rule_bool(
     engine: &Engine,
     spec_name: &str,
     rule: &str,
     effective: &DateTimeValue,
-    data: HashMap<String, String>,
+    data: IndexMap<String, EvaluateDataValue>,
 ) -> bool {
     let response = engine
-        .run(
+        .evaluate(
             None,
             spec_name,
             Some(effective),
@@ -18,7 +18,7 @@ pub fn eval_rule_bool(
             Some(&[rule.to_string()]),
             false,
         )
-        .expect("run");
+        .expect("evaluate");
     let rule_result = response.get(rule).unwrap_or_else(|_| panic!("rule {rule}"));
     if rule_result.vetoed {
         panic!(

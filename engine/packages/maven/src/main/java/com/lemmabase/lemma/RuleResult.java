@@ -251,6 +251,7 @@ public sealed interface RuleResult {
    * @param spec spec name
    * @param effective resolved row effective date
    * @param instance uses path
+   * @param path one hop per {@code uses} from the evaluated spec to the instance; never empty
    * @param data evaluated data slots relative to the spec
    * @param rules rule results relative to the spec
    */
@@ -259,6 +260,7 @@ public sealed interface RuleResult {
       String spec,
       String effective,
       String instance,
+      List<Show.PathSegment> path,
       Map<String, SpecRuleResult> data,
       Map<String, SpecRuleResult> rules) {
     /**
@@ -274,6 +276,7 @@ public sealed interface RuleResult {
       String spec = null;
       String effective = null;
       String instance = null;
+      List<Show.PathSegment> path = null;
       Map<String, SpecRuleResult> data = null;
       Map<String, SpecRuleResult> rules = null;
       while (p.nextToken() != JsonToken.END_OBJECT) {
@@ -284,6 +287,7 @@ public sealed interface RuleResult {
           case "spec" -> spec = JsonReading.readString(p);
           case "effective" -> effective = JsonReading.readString(p);
           case "instance" -> instance = JsonReading.readString(p);
+          case "path" -> path = JsonReading.readList(p, Show.PathSegment::read);
           case "data" -> data = JsonReading.readMap(p, SpecRuleResult::read);
           case "rules" -> rules = JsonReading.readMap(p, SpecRuleResult::read);
           default -> JsonReading.unknownField(field, "SpecResult");
@@ -298,15 +302,158 @@ public sealed interface RuleResult {
       if (instance == null) {
         JsonReading.missingRequired("instance", "SpecResult");
       }
+      if (path == null || path.isEmpty()) {
+        JsonReading.missingRequired("path", "SpecResult");
+      }
       if (data == null) {
         JsonReading.missingRequired("data", "SpecResult");
       }
       if (rules == null) {
         JsonReading.missingRequired("rules", "SpecResult");
       }
-      return new SpecResult(repository, spec, effective, instance, data, rules);
+      return new SpecResult(repository, spec, effective, instance, List.copyOf(path), data, rules);
     }
   }
+
+  /**
+   * List row carried by a row-valued result: an index into {@link Response#rows()}.
+   *
+   * @param repository repository or null
+   * @param spec row spec name
+   * @param effective resolved row effective date, empty for the origin row
+   * @param instance row path relative to its holder, e.g. {@code lines.2}
+   * @param index position in {@link Response#rows()}
+   */
+  record RowReference(
+      @Nullable String repository, String spec, String effective, String instance, int index) {
+    /**
+     * Parses JSON.
+     *
+     * @param p parser at value start
+     * @return parsed value
+     * @throws IOException if JSON IO fails
+     */
+    static RowReference read(JsonParser p) throws IOException {
+      JsonReading.expectStartObject(p, "RowReference");
+      String repository = null;
+      String spec = null;
+      String effective = null;
+      String instance = null;
+      Integer index = null;
+      while (p.nextToken() != JsonToken.END_OBJECT) {
+        String field = p.currentName();
+        p.nextToken();
+        switch (field) {
+          case "repository" -> repository = JsonReading.readString(p);
+          case "spec" -> spec = JsonReading.readString(p);
+          case "effective" -> effective = JsonReading.readString(p);
+          case "instance" -> instance = JsonReading.readString(p);
+          case "index" -> index = JsonReading.readInt(p);
+          default -> JsonReading.unknownField(field, "RowReference");
+        }
+      }
+      if (spec == null) {
+        JsonReading.missingRequired("spec", "RowReference");
+      }
+      if (effective == null) {
+        JsonReading.missingRequired("effective", "RowReference");
+      }
+      if (instance == null) {
+        JsonReading.missingRequired("instance", "RowReference");
+      }
+      if (index == null) {
+        JsonReading.missingRequired("index", "RowReference");
+      }
+      return new RowReference(repository, spec, effective, instance, index);
+    }
+  }
+
+  /**
+   * One list row reached by the results, filled once.
+   *
+   * @param repository repository or null
+   * @param spec row spec name
+   * @param effective resolved row effective date, empty for the origin row
+   * @param data evaluated row data
+   * @param rules evaluated row rules
+   */
+  record RowResult(
+      @Nullable String repository,
+      String spec,
+      String effective,
+      Map<String, SpecRuleResult> data,
+      Map<String, SpecRuleResult> rules) {
+    /**
+     * Parses JSON.
+     *
+     * @param p parser at value start
+     * @return parsed value
+     * @throws IOException if JSON IO fails
+     */
+    static RowResult read(JsonParser p) throws IOException {
+      JsonReading.expectStartObject(p, "RowResult");
+      String repository = null;
+      String spec = null;
+      String effective = null;
+      Map<String, SpecRuleResult> data = null;
+      Map<String, SpecRuleResult> rules = null;
+      while (p.nextToken() != JsonToken.END_OBJECT) {
+        String field = p.currentName();
+        p.nextToken();
+        switch (field) {
+          case "repository" -> repository = JsonReading.readString(p);
+          case "spec" -> spec = JsonReading.readString(p);
+          case "effective" -> effective = JsonReading.readString(p);
+          case "data" -> data = JsonReading.readMap(p, SpecRuleResult::read);
+          case "rules" -> rules = JsonReading.readMap(p, SpecRuleResult::read);
+          default -> JsonReading.unknownField(field, "RowResult");
+        }
+      }
+      if (spec == null) {
+        JsonReading.missingRequired("spec", "RowResult");
+      }
+      if (effective == null) {
+        JsonReading.missingRequired("effective", "RowResult");
+      }
+      if (data == null) {
+        JsonReading.missingRequired("data", "RowResult");
+      }
+      if (rules == null) {
+        JsonReading.missingRequired("rules", "RowResult");
+      }
+      return new RowResult(repository, spec, effective, data, rules);
+    }
+  }
+
+  /**
+   * Row-valued rule result.
+   *
+   * @param result display of the row path
+   * @param row the row reference
+   * @param ruleType rule type
+   * @param explanation explanation or null
+   */
+  record Row(
+      String result,
+      RowReference row,
+      String ruleType,
+      ExplanationNode.@Nullable Rule explanation)
+      implements RuleResult {}
+
+  /**
+   * List-valued rule result.
+   *
+   * @param result engine display string
+   * @param items items in list order; rows are {@link RuleResultValue.Row} values
+   * @param ruleType rule type
+   * @param explanation explanation or null
+   */
+  record ListResult(
+      String result,
+      List<RuleResultValue> items,
+      String ruleType,
+      ExplanationNode.@Nullable Rule explanation)
+      implements RuleResult {}
 
   /**
    * Spec-valued rule result.
@@ -343,6 +490,8 @@ public sealed interface RuleResult {
     RuleResultValue.CalendarResult calendar = null;
     RuleResultValue.RangeResult range = null;
     SpecResult spec = null;
+    RowReference row = null;
+    List<RuleResultValue> items = null;
     Boolean vetoed = null;
     String vetoReason = null;
     String ruleType = null;
@@ -363,6 +512,8 @@ public sealed interface RuleResult {
         case "calendar" -> calendar = RuleResultValue.CalendarResult.read(p);
         case "range" -> range = RuleResultValue.RangeResult.read(p);
         case "spec" -> spec = SpecResult.read(p);
+        case "row" -> row = RowReference.read(p);
+        case "list" -> items = JsonReading.readList(p, RuleResultValue::read);
         case "unit" -> JsonReading.readString(p);
         case "vetoed" -> vetoed = JsonReading.readBoolean(p);
         case "veto_reason" -> vetoReason = JsonReading.readString(p);
@@ -416,6 +567,12 @@ public sealed interface RuleResult {
     }
     if (spec != null) {
       return new Spec(result, spec, ruleType, explanation);
+    }
+    if (row != null) {
+      return new Row(result, row, ruleType, explanation);
+    }
+    if (items != null) {
+      return new ListResult(result, List.copyOf(items), ruleType, explanation);
     }
     throw new LemmaBugError("BUG: non-veto RuleResult has no typed value field");
   }

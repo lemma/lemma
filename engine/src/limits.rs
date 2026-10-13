@@ -8,6 +8,15 @@ pub const MAX_RULE_NAME_LENGTH: usize = 256;
 /// Maximum character length for a text value (data/runtime input).
 pub const MAX_TEXT_VALUE_LENGTH: usize = 1024;
 
+/// Maximum magnitude of a unit exponent, both as written (`meter^3`) and in every
+/// planned measure decomposition (`meter^2 * meter^3`, compound units of compound units).
+pub const MAX_UNIT_EXPONENT: i32 = 64;
+
+/// Maximum bit length of the numerator and of the denominator of an arithmetic result
+/// (about 9,860 decimal digits). Larger results veto, which bounds the cost of every
+/// exact rational operation.
+pub const MAX_RATIONAL_BITS: u64 = 1 << 15;
+
 /// Validate that a name does not exceed the given character limit.
 /// `kind` is a human-readable noun like "spec", "data", "rule", or "type".
 pub fn check_max_length(
@@ -48,7 +57,8 @@ pub struct ResourceLimits {
     /// Quick-reject for pathological single sources.
     pub max_expression_count: usize,
 
-    /// Maximum size of a single data value in bytes
+    /// Maximum size of a single data value in bytes. For a value list each item is checked;
+    /// the list itself is bounded by `max_list_rows`, `max_list_depth`, `max_list_nodes`.
     /// Real usage: ~100 bytes, Limit: 1KB (10x)
     /// Enables server pre-allocation for zero-allocation evaluation
     pub max_data_value_bytes: usize,
@@ -66,7 +76,7 @@ pub struct ResourceLimits {
     pub max_normalized_expression_nodes: usize,
 
     /// Maximum depth of the spec dependency chain (`uses` imports) from the
-    /// root spec. Bounds recursion in dependency discovery and graph building.
+    /// root spec. Bounds the depth of the walks in dependency discovery and graph building.
     /// Real usage: ~3 levels, Limit: 32 (10x).
     pub max_spec_dependency_depth: usize,
 
@@ -74,13 +84,12 @@ pub struct ResourceLimits {
     /// transitive dependencies). Bounds per-plan memory and planning work.
     pub max_dag_specs: usize,
 
-    /// Maximum nesting depth of a rule's normalized NormalForm DAG. Leaves and
-    /// rule references count as depth 1: rule references are evaluation boundaries, so this
-    /// bounds only intra-rule Kind nesting. The evaluator walks recursively
-    /// within one rule; planning must guarantee no rule root overflows the
-    /// stack. Lemma's runtime does not return errors — this limit is the
-    /// guarantee.
-    pub max_normal_form_depth: usize,
+    /// Maximum rows in one list (evaluation-data bind).
+    pub max_list_rows: usize,
+    /// Maximum nested self-list depth, the spec holding the list being level 1.
+    pub max_list_depth: usize,
+    /// Maximum total rows across one evaluation-data list tree.
+    pub max_list_nodes: usize,
 }
 
 impl Default for ResourceLimits {
@@ -95,8 +104,9 @@ impl Default for ResourceLimits {
             max_normalized_expression_nodes: 30_000,
             max_spec_dependency_depth: 32,
             max_dag_specs: 4096,
-            // Bounds recursive eval stack depth within one rule (rule references = leaves).
-            max_normal_form_depth: 4096,
+            max_list_rows: 1024,
+            max_list_depth: 32,
+            max_list_nodes: 4096,
         }
     }
 }
@@ -114,7 +124,9 @@ impl ResourceLimits {
             "max_normalized_expression_nodes" => self.max_normalized_expression_nodes = value,
             "max_spec_dependency_depth" => self.max_spec_dependency_depth = value,
             "max_dag_specs" => self.max_dag_specs = value,
-            "max_normal_form_depth" => self.max_normal_form_depth = value,
+            "max_list_rows" => self.max_list_rows = value,
+            "max_list_depth" => self.max_list_depth = value,
+            "max_list_nodes" => self.max_list_nodes = value,
             other => return Err(format!("unknown limits key: '{other}'")),
         }
         Ok(())
@@ -158,12 +170,9 @@ mod tests {
     }
 
     #[test]
-    fn apply_sets_max_normal_form_depth() {
+    fn apply_rejects_removed_max_normal_form_depth() {
         let mut limits = ResourceLimits::default();
-        limits
-            .apply("max_normal_form_depth", 99)
-            .expect("known key");
-        assert_eq!(limits.max_normal_form_depth, 99);
+        assert!(limits.apply("max_normal_form_depth", 99).is_err());
     }
 
     #[test]

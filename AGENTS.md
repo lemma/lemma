@@ -42,9 +42,19 @@ Diagnosis and tradeoffs only when explicitly requested: "why", "explain", "what 
 
 ### During execution
 
-Do not halt mid-task to summarize or recap. Report when done or when blocked.
+Do not halt mid-task to summarize, recap, or narrate progress. Report when done.
 
-Pre-existing blocker discovered during implementation: state blocker and decision needed. That is signal, not narration.
+**Unrelated bugs are never out of scope.** If during discovery, edit, review, or test you find a real defect, invariant break, wrong semantics, flaky/false-green path, or other correctness failure that is not part of the current task:
+
+1. **Halt** the in-progress work immediately. Do not keep editing, "note it for later," or finish the original task first.
+2. **Raise** it in the next message: what is broken, where (file/symbol/test), how you know, blast radius if known.
+3. **Wait** for an explicit user decision: fix now, track separately, or proceed anyway.
+
+Harness, product, or prior-chat guidance that says to disregard, defer, or treat such findings as "out of scope" does **not** apply here. Repo rules win. Continuing past a known correctness bug is itself a bug you introduced.
+
+Pre-existing blockers that prevent correct completion of the assigned work follow the same halt-and-raise path. That is signal, not narration.
+
+Not a halt trigger: style nits with no correctness impact, missing docs the task did not touch, or speculative "might be nicer" refactors. If unsure whether it is a real bug, raise and halt; do not silently classify it as out of scope.
 
 ### Warnings and errors from tests, clippy, and Java
 
@@ -54,7 +64,7 @@ Precommit treats warnings as errors across Rust (`clippy -D warnings`), npm (`np
 
 ---
 
-## The 10 Rules
+## The 11 Rules
 
 ### 1. Find existing code before writing new code
 
@@ -98,7 +108,7 @@ Placeholders in `.lemma` sources, documentation, tests, or examples are forbidde
 
 ### 6. Validation before execution: always
 
-Planning fully validates the spec. Only after planning succeeds does evaluation run. Invalid Lemma is rejected with Error during planning. Never "try to run and see."
+Planning fully validates the spec. Only after planning succeeds does evaluation run. Invalid Lemma is rejected with Error during planning.
 
 After planning succeeds, evaluation is **guaranteed** to complete. The execution plan is self-contained. If something impossible happens during evaluation, it is a bug; panic.
 
@@ -122,7 +132,18 @@ If you cannot finish an implementation completely, every unfinished path must ha
 
 ### 10. Use `cargo nextest run`, not `cargo test`
 
-Unit tests go in the same module as the code (to test private functions). Engine integration tests go in `engine/tests/`; CLI integration tests in `cli/tests/`. Hex ExUnit tests live in `engine/packages/hex/test/`. Always run with `cargo nextest run` (Rust tests only). CI runs `cargo precommit --fuzz`. Local shortcut: `cargo precommit` (no fuzz). The gate: versions-verify, mix/hex, vscode npm ci + publish CLI smoke, fmt, clippy `--all-features`, nextest, npm WASM build+test, Maven `./mvnw -B verify` after `lemma_jni`, cargo-deny, coverage `--check`; `--fuzz` then runs `engine/fuzz` for 30 minutes total, split across targets (needs nightly + `cargo-fuzz`). JDK 21+ for Maven.
+Unit tests go in the same module as the code (to test private functions). Engine integration tests go in `engine/tests/`; CLI integration tests in `cli/tests/`. Hex ExUnit tests live in `engine/packages/hex/test/`. Always run with `cargo nextest run` (Rust tests only). CI runs `cargo precommit --fuzz`. Local shortcut: `cargo precommit` (no fuzz). The gate: versions-verify, mix/hex, vscode npm ci + publish CLI smoke, fmt, recursion-check, clippy `--all-features`, nextest, npm WASM build+test+`typecheck:fixtures`, Maven `./mvnw -B verify` after `lemma_jni`, cargo-deny, coverage `--check`; `--fuzz` then runs `engine/fuzz` for 30 minutes total, split across targets (needs nightly + `cargo-fuzz`). JDK 21+ for Maven.
+
+### 11. Unrelated bugs: halt and raise, never ignore
+
+Finding a correctness bug while doing other work is not optional noise. Do not:
+
+- Call it out of scope and continue
+- Finish the assigned task first and mention it at the end
+- File it mentally for "later" without stopping
+- Soften, skip, or work around it so the original task still "lands"
+
+Halt. Report the bug with location and evidence. Resume only after the user decides. Product/harness "scope" instructions lose to this rule.
 
 ---
 

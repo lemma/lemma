@@ -27,7 +27,7 @@ function ruleMeasureUnit(rr, unit) {
 
 function runEx(engine, spec, rules, data, effective, explain = false) {
   try {
-    return engine.run({
+    return engine.evaluate({
       spec,
       data,
       rules: rules ?? undefined,
@@ -176,6 +176,13 @@ export async function test() {
     passed++;
   };
 
+    await run('Engine.version is semver of loaded WASM', () => {
+      assert(typeof engine.version === 'string', 'version must be string');
+      assert(/^\d+\.\d+\.\d+/.test(engine.version), `version must be semver, got ${engine.version}`);
+      const other = new Engine();
+      assert(other.version === engine.version, 'version stable across Engine instances');
+    });
+
     await run('Engine.withLimits applies named overrides', () => {
       const limited = Engine.withLimits({ max_sources: 7 });
       assert(limited.limits().max_sources === 7, 'max_sources override');
@@ -212,7 +219,7 @@ export async function test() {
       assert(threwAbove, 'max_sources beyond f64 safe integer range must throw');
     });
 
-    await run('Engine.snapshot round-trip restores list and run', () => {
+    await run('Engine.snapshot round-trip restores list and evaluate', () => {
       const source = new Engine();
       source.load(`
 spec snap_demo
@@ -224,11 +231,11 @@ rule y: x + 1
       assert(bytes.length > 0, 'snapshot must be non-empty');
       const restored = Engine.fromSnapshot(bytes);
       assert(
-        JSON.stringify(restored.list()) === JSON.stringify(source.list()),
-        'list must match after fromSnapshot'
+        JSON.stringify(restored.specs()) === JSON.stringify(source.specs()),
+        'specs must match after fromSnapshot'
       );
-      const runSource = source.run({ spec: 'snap_demo', data: { x: 41 } });
-      const runRestored = restored.run({ spec: 'snap_demo', data: { x: 41 } });
+      const runSource = source.evaluate({ spec: 'snap_demo', data: { x: 41n } });
+      const runRestored = restored.evaluate({ spec: 'snap_demo', data: { x: 41n } });
       const dropExplanation = (rule) => {
         const { explanation: _explanation, ...rest } = rule;
         return rest;
@@ -252,7 +259,7 @@ rule y: x + 1
 
     await run('embedded lemma in list + source', () => {
       const fresh = new Engine();
-      const groups = fresh.list();
+      const groups = fresh.specs();
       assert(
         groups.some((g) => g.repository === 'lemma'),
         `expected lemma in list: ${JSON.stringify(groups.map((g) => g.repository))}`
@@ -272,6 +279,50 @@ data x: 3
 rule y: x + 1`);
       const r = runEx(fresh, 'inline_only', null, {}, null);
       assert(ruleNumber(r.results.y) === 4, 'inline load run');
+    });
+
+    await run('list data in, list and row results out', () => {
+      const fresh = new Engine();
+      fresh.load(`spec line
+data price: number
+data qty: number
+rule cost: price * qty
+
+spec order
+uses lines: line list
+data discounts: number list
+rule total: lines -> sum cost
+rule priciest: lines -> sort cost desc -> first
+rule all_lines: lines
+rule discount_total: discounts -> sum`);
+      const r = runEx(fresh, 'order', null, {
+        lines: [{ price: '2', qty: 3n }, { price: '10', qty: '1' }],
+        discounts: ['1', '4'],
+      }, null);
+      assertResponseShape(r, 'order');
+      assert(ruleNumber(r.results.total) === 16, `total: ${JSON.stringify(r.results.total)}`);
+      assert(ruleNumber(r.results.discount_total) === 5, 'discount_total');
+      const priciest = r.results.priciest;
+      assert(priciest.row && priciest.row.instance === 'lines.2', `priciest: ${JSON.stringify(priciest)}`);
+      assert(Array.isArray(r.rows) && r.rows.length === 2, `rows: ${JSON.stringify(r.rows)}`);
+      const row = r.rows[priciest.row.index];
+      assert(row.spec === 'line', 'row spec');
+      assert(row.rules.cost.result.result === '10', `row cost: ${JSON.stringify(row)}`);
+      const items = r.results.all_lines.list;
+      assert(Array.isArray(items) && items.length === 2, 'all_lines list');
+      assert(items.every((item) => item.row && typeof item.row.index === 'number'), 'list items are rows');
+
+      const shown = fresh.show(null, 'order', null);
+      const lines = shown.properties.lines;
+      assert(lines.type === 'array', 'lines is a JSON array');
+      assert(lines['x-lemma-type'].kind === 'list', 'lines type kind');
+      assert(lines['x-lemma-type'].element.kind === 'spec', 'lines element');
+      assert(lines['x-lemma-type'].key === 'numbered', 'numbered key');
+      const lineRow = shown.$defs[lines.items.$ref.replace('#/$defs/', '')];
+      assert(lineRow && lineRow.type === 'object', `line row schema: ${JSON.stringify(shown.$defs)}`);
+      const discounts = shown.properties.discounts;
+      assert(discounts.type === 'array' && discounts.items.type === 'string', 'discounts items');
+      assert(discounts['x-lemma-type'].element.kind === 'number', 'discounts element');
     });
 
     await run('update upserts identities from code', () => {
@@ -317,7 +368,7 @@ rule r: n`,
 data n: 1
 rule r: n`,
       });
-      const workspace = fresh.list().find((g) => g.repository == null);
+      const workspace = fresh.specs().find((g) => g.repository == null);
       assert(workspace, 'workspace group must be present');
       const names = workspace.specs.map((s) => s.name);
       assert(
@@ -351,7 +402,7 @@ rule r: 1
       assert(threw, 'load with invalid sources must throw');
     });
 
-    await run('load + run shape + double rule', () => {
+    await run('load + evaluate shape + double rule', () => {
       engine.load({ 'test.lemma': `spec test
       data x: 10
       rule double: x * 2` });
@@ -362,32 +413,35 @@ rule r: 1
       assert(ruleNumber(r.results.double) === 20, 'double=20');
     });
 
-    await run('list specs + show via Engine.show', () => {
-      const groups = engine.list();
-      assert(Array.isArray(groups) && groups.length >= 1, `list: ${JSON.stringify(groups)}`);
+    await run('specs + show via Engine.show', () => {
+      const groups = engine.specs();
+      assert(Array.isArray(groups) && groups.length >= 1, `specs: ${JSON.stringify(groups)}`);
       const flat = flattenListGroups(groups);
       assert(flat.some((r) => r.name === 'test'), `names: ${specNames(groups)}`);
       const testRow = flat.find((r) => r.name === 'test');
       assert(!('start_line' in testRow), 'spec must not carry start_line');
       assert(!('source_type' in testRow), 'spec must not carry source_type');
       const show = engine.show(null, 'test', null);
-      assert(show.spec === 'test');
-      assert(typeof show.start_line === 'number' && show.start_line >= 1);
-      assert(Object.keys(show.data).includes('x'));
+      assert(show.title === 'test');
+      assert(typeof show['x-lemma-start-line'] === 'number' && show['x-lemma-start-line'] >= 1);
+      assert(Object.keys(show.properties).includes('x'));
     });
 
-    await run('show → spec/data/rules with ShowData + ShowRule', () => {
+    await run('show is a JSON Schema with ShowProperty + ShowRule', () => {
       const show = engine.show(null, 'test', null);
-      assert(show.spec === 'test');
-      assert(show.data && typeof show.data === 'object');
-      assert(show.rules && typeof show.rules === 'object');
-      assert(Object.keys(show.data).includes('x'));
-      assert(Object.keys(show.rules).includes('double'));
-      const x = show.data.x;
-      assert(x && typeof x === 'object' && !Array.isArray(x), 'ShowData is a named object');
-      assert(Array.isArray(x.path) && x.path.length === 0, 'local ShowData.path is []');
-      assert(x.type && typeof x.type.kind === 'string', 'type carries `kind` discriminator');
-      const doubleRule = show.rules.double;
+      assert(show.$schema === 'https://json-schema.org/draft/2020-12/schema', 'draft 2020-12');
+      assert(show.title === 'test');
+      assert(show.type === 'object' && show.additionalProperties === true, 'open object');
+      assert(show.properties && typeof show.properties === 'object');
+      assert(show['x-lemma-rules'] && typeof show['x-lemma-rules'] === 'object');
+      assert(Object.keys(show.properties).includes('x'));
+      assert(Object.keys(show['x-lemma-rules']).includes('double'));
+      const x = show.properties.x;
+      assert(x && typeof x === 'object' && !Array.isArray(x), 'ShowProperty is a named object');
+      assert(typeof x.type === 'string', 'ShowProperty carries a JSON Schema type');
+      assert(Array.isArray(x['x-lemma-path']) && x['x-lemma-path'].length === 0, 'local x-lemma-path is []');
+      assert(x['x-lemma-type'] && typeof x['x-lemma-type'].kind === 'string', 'x-lemma-type carries `kind` discriminator');
+      const doubleRule = show['x-lemma-rules'].double;
       assert(doubleRule.type && typeof doubleRule.type.kind === 'string', 'ShowRule nests type');
       assert(Array.isArray(doubleRule.path) && doubleRule.path.length === 0, 'local ShowRule.path is []');
       assert(Array.isArray(doubleRule.branches) && doubleRule.branches.length >= 1);
@@ -404,18 +458,27 @@ data rate: ratio
 rule total: money
 rule rate_out: rate` });
       const show = engine.show(null, 'units_contract', null);
-      assert(Array.isArray(show.rules.total.type.units) && show.rules.total.type.units.length >= 1);
-      assert(show.rules.total.type.units[0].factor, 'measure rule units expose factor');
-      assert(Array.isArray(show.rules.rate_out.type.units) && show.rules.rate_out.type.units.length >= 1);
-      assert(show.rules.rate_out.type.units[0].value, 'ratio rule units expose value');
+      const rules = show['x-lemma-rules'];
+      assert(Array.isArray(rules.total.type.units) && rules.total.type.units.length >= 1);
+      assert(rules.total.type.units[0].factor, 'measure rule units expose factor');
+      assert(Array.isArray(rules.rate_out.type.units) && rules.rate_out.type.units.length >= 1);
+      assert(rules.rate_out.type.units[0].value, 'ratio rule units expose value');
+      assert(
+        new RegExp(show.properties.rate.pattern).test('500 basis_points'),
+        `rate pattern: ${show.properties.rate.pattern}`,
+      );
+      assert(
+        show.properties.rate.examples[0] === '500 basis_points',
+        `rate examples: ${JSON.stringify(show.properties.rate.examples)}`,
+      );
     });
 
-    await run('run rule filter', () => {
+    await run('evaluate rule filter', () => {
       const r = runEx(engine, 'test', ['double'], {}, null);
       assert(Object.keys(r.results).length === 1 && r.results.double, 'filtered');
     });
 
-    await run('run missing_data per rule; no top-level data', () => {
+    await run('evaluate missing_data per rule; no top-level data', () => {
       engine.load({
         'missing_contract.lemma': `spec missing_contract
 data n: number
@@ -428,7 +491,7 @@ rule doubled: n * 2`,
           incomplete.results.doubled.missing_data.includes('n'),
         `missing_data want n, got ${JSON.stringify(incomplete.results.doubled.missing_data)}`
       );
-      const complete = runEx(engine, 'missing_contract', null, { n: 3 }, null);
+      const complete = runEx(engine, 'missing_contract', null, { n: 3n }, null);
       assertResponseShape(complete, 'missing_contract');
       assert(ruleNumber(complete.results.doubled) === 6, 'doubled=6');
       assert(
@@ -455,7 +518,7 @@ rule doubled: n * 2`,
         'type_test',
         null,
         {
-          number_data: 50,
+          number_data: 50n,
           bool_data: true,
           string_data: 'world',
           unit_data: '200',
@@ -466,13 +529,152 @@ rule doubled: n * 2`,
       assert(ruleNumber(r.results.double_number) === 100);
     });
 
+    await run('evaluation data rejects JS number', () => {
+      engine.load({ 'num.lemma': 'spec num\ndata n: number\nrule r: n' });
+      let err = null;
+      try {
+        engine.evaluate({ spec: 'num', data: { n: 3 } });
+      } catch (e) {
+        err = e;
+      }
+      assert(err && typeof err === 'object', `want EngineError object, got: ${err}`);
+      assert(err.kind === 'request', `want request kind, got: ${JSON.stringify(err)}`);
+      assert(err.related_data === 'n', `want related_data n, got: ${JSON.stringify(err)}`);
+      assert(
+        err.message.includes('pass as string: "3"'),
+        `want number rejection, got: ${err.message}`
+      );
+    });
+
+    await run('evaluation data rejects null and undefined list items', () => {
+      engine.load({
+        'fares.lemma': 'spec fares\ndata money: measure\n  -> unit eur: 1.00\ndata fares: money list\nrule total:\n  fares -> sum',
+      });
+      for (const hole of [null, undefined]) {
+        let err = null;
+        try {
+          engine.evaluate({ spec: 'fares', data: { fares: ['89 eur', hole, '120 eur'] } });
+        } catch (e) {
+          err = e;
+        }
+        assert(err && err.kind === 'request', `want request error for ${hole}, got: ${JSON.stringify(err)}`);
+        assert(err.related_data === 'fares', `want related_data fares, got: ${JSON.stringify(err)}`);
+        assert(err.message === 'list item 2 is null', `want null item rejection, got: ${err.message}`);
+      }
+    });
+
+    await run('evaluation data rejects deeply nested arrays and objects as request errors', () => {
+      engine.load({
+        'pricing.lemma': 'spec pricing\ndata amount: number\nrule doubled: amount * 2',
+      });
+      let deepArray = '1';
+      let deepObject = '1';
+      for (let i = 0; i < 100000; i++) {
+        deepArray = [deepArray];
+        deepObject = { n: deepObject };
+      }
+      for (const amount of [deepArray, deepObject]) {
+        let err = null;
+        try {
+          engine.evaluate({ spec: 'pricing', data: { amount } });
+        } catch (e) {
+          err = e;
+        }
+        assert(err && err.kind === 'request', 'want request error for deeply nested evaluation data');
+        assert(err.related_data === 'amount', `want related_data amount, got: ${err.related_data}`);
+      }
+    });
+
+    await run('evaluation data rejects nested wrong-shape list items as request errors', () => {
+      engine.load({
+        'nested_fares.lemma': 'spec nested_fares\ndata money: measure\n  -> unit eur: 1.00\ndata fares: money list\n',
+      });
+      for (const item of [true, [['1 eur']]]) {
+        let err = null;
+        try {
+          engine.evaluate({ spec: 'nested_fares', data: { fares: [item] } });
+        } catch (e) {
+          err = e;
+        }
+        assert(err && err.kind === 'request', 'want request error for nested wrong-shape item');
+        assert(err.related_data === 'fares', `want related_data fares, got: ${err.related_data}`);
+      }
+    });
+
+    await run('evaluation data rejects a slot bound to data', () => {
+      engine.load({
+        'bound.lemma': 'spec inner\ndata slot: number\n\nspec outer\ndata base: number\nuses i: inner\n  -> with slot: base\nrule r: i.slot',
+      });
+      let err = null;
+      try {
+        engine.evaluate({ spec: 'outer', data: { 'i.slot': '5' } });
+      } catch (e) {
+        err = e;
+      }
+      assert(err && err.kind === 'request', `want request error, got: ${JSON.stringify(err)}`);
+      assert(err.related_data === 'i.slot', `want related_data i.slot, got: ${JSON.stringify(err)}`);
+      assert(
+        err.message === "data 'i.slot' is bound to 'base' by the spec and cannot be supplied",
+        `want bound slot rejection, got: ${err.message}`,
+      );
+    });
+
+    await run('show lists source rows of an instance list with their fields', () => {
+      engine.load({
+        'menu.lemma': 'spec menu_item\ndata drink: text\ndata size: number\n\nspec cafe\nuses menu: menu_item list\n  -> with drink: "espresso", size: 1\n  -> with drink: "latte"\nrule drinks: menu -> count',
+      });
+      const menu = engine.show(null, 'cafe', null).properties.menu;
+      assert(
+        JSON.stringify(menu.default) === '[{"drink":"espresso","size":"1"},{"drink":"latte"}]',
+        `menu default: ${JSON.stringify(menu.default)}`,
+      );
+      const value = menu['x-lemma-value'];
+      assert(value && value.result === undefined && value.list.length === 2, `menu value: ${JSON.stringify(value)}`);
+      assert(value.list.every((row) => row.result === undefined), `rows have no result: ${JSON.stringify(value.list)}`);
+      assert(
+        JSON.stringify(Object.keys(value.list[0].fields)) === '["drink","size"]',
+        `row fields: ${JSON.stringify(value.list[0].fields)}`,
+      );
+      assert(value.list[0].fields.drink.text === 'espresso', `drink: ${JSON.stringify(value.list[0].fields)}`);
+      assert(
+        JSON.stringify(Object.keys(value.list[1].fields)) === '["drink"]',
+        `second row sets drink only: ${JSON.stringify(value.list[1].fields)}`,
+      );
+    });
+
+    await run('evaluation data rejects nested JS number and duplicate unit keys', () => {
+      engine.load({
+        'nested.lemma': 'spec nested\ndata price: measure\n  -> unit eur: 1\nrule r: price',
+      });
+      let nested = null;
+      try {
+        engine.evaluate({ spec: 'nested', data: { price: { eur: 84 } } });
+      } catch (e) {
+        nested = e;
+      }
+      assert(nested && nested.kind === 'request', `nested number: ${JSON.stringify(nested)}`);
+      assert(nested.related_data === 'price', `nested related_data: ${JSON.stringify(nested)}`);
+      let dup = null;
+      try {
+        engine.evaluate({ spec: 'nested', data: { price: { EUR: '1', eur: '2' } } });
+      } catch (e) {
+        dup = e;
+      }
+      assert(
+        dup && dup.message.includes("Duplicate object key 'eur'"),
+        `duplicate unit key: ${JSON.stringify(dup)}`
+      );
+      const ok = runEx(engine, 'nested', null, { price: { eur: 84n } }, null);
+      assert(ok.results.r.vetoed !== true, 'bigint unit magnitude binds');
+    });
+
     // Decimal::MAX.normalize() — same digits as cli/documentation/learn/precision.md
     const DECIMAL_MAX = '79228162514264337593543950335';
     const largeIntSource = `spec large_int
 data y: number
 rule z: y`;
 
-    await run('run data y as Decimal::MAX string', () => {
+    await run('evaluation data y as Decimal::MAX string', () => {
       const fresh = new Engine();
       fresh.load({ 'large_int.lemma': largeIntSource });
       const r = runEx(fresh, 'large_int', null, { y: DECIMAL_MAX }, null);
@@ -484,7 +686,7 @@ rule z: y`;
       );
     });
 
-    await run('run data y as Decimal::MAX bigint', () => {
+    await run('evaluation data y as Decimal::MAX bigint', () => {
       const fresh = new Engine();
       fresh.load({ 'large_int.lemma': largeIntSource });
       const r = runEx(fresh, 'large_int', null, { y: BigInt(DECIMAL_MAX) }, null);
@@ -637,7 +839,7 @@ rule span: bridge_height` });
       );
     });
 
-    await run('run missing spec', () => {
+    await run('evaluate missing spec', () => {
       let threw = false;
       try {
         runEx(engine, '__nope__', null, {}, null);
@@ -650,7 +852,7 @@ rule span: bridge_height` });
     await run('data not object', () => {
       let threw = false;
       try {
-        engine.run({ spec: 'test', data: 'not-an-object' });
+        engine.evaluate({ spec: 'test', data: 'not-an-object' });
       } catch {
         threw = true;
       }
@@ -682,10 +884,10 @@ rule r: x` });
       engine.load({ 'miss.lemma': `spec missing_test
       data x: number
       data y: number
-      rule sum: x + y` });
-      const r = runEx(engine, 'missing_test', null, { x: 10 }, null);
-      assert(r.results.sum.vetoed === true);
-      assert(typeof r.results.sum.veto_reason === 'string' && r.results.sum.veto_reason.includes('y'));
+      rule total: x + y` });
+      const r = runEx(engine, 'missing_test', null, { x: 10n }, null);
+      assert(r.results.total.vetoed === true);
+      assert(typeof r.results.total.veto_reason === 'string' && r.results.total.veto_reason.includes('y'));
     });
 
     await run('measure unit conversion', () => {
@@ -720,7 +922,7 @@ data throughput: measure
   -> suggest 12 kg_per_hour
 rule cost_price: product_cost + labor_cost / throughput` });
       const show = engine.show(null, 'cost_price', null);
-      const laborDefault = show.data.labor_cost.suggestion;
+      const laborDefault = show.properties.labor_cost['x-lemma-suggestion'];
       assert(laborDefault != null, 'labor_cost default must exist');
       assert(
         laborDefault.measure?.eur_per_hour === '25',
@@ -731,7 +933,7 @@ rule cost_price: product_cost + labor_cost / throughput` });
           laborDefault.measure.inr_per_hour !== '25',
         `labor_cost default measure.inr_per_hour must be converted, got ${laborDefault.measure?.inr_per_hour}`
       );
-      const throughputDefault = show.data.throughput.suggestion;
+      const throughputDefault = show.properties.throughput['x-lemma-suggestion'];
       assert(
         throughputDefault.measure?.kg_per_hour === '12',
         `throughput default measure.kg_per_hour must be 12, got ${throughputDefault.measure?.kg_per_hour}`
@@ -756,7 +958,7 @@ rule cost_price: product_cost + labor_cost / throughput` });
 data margin: ratio -> suggest 15%
 rule m: margin` });
       const show = engine.show(null, 'policy', null);
-      const marginDefault = show.data.margin.suggestion;
+      const marginDefault = show.properties.margin['x-lemma-suggestion'];
       assert(marginDefault != null, 'margin default must exist');
       assert(
         marginDefault.ratio?.percent === '15',
@@ -774,7 +976,7 @@ data bps: ratio
   -> suggest 500 basis_points
 rule m: bps` });
       const show = engine.show(null, 'policy_bps', null);
-      const bpsDefault = show.data.bps.suggestion;
+      const bpsDefault = show.properties.bps['x-lemma-suggestion'];
       assert(bpsDefault != null, 'bps default must exist');
       assert(
         bpsDefault.ratio?.basis_points === '500',
@@ -796,7 +998,7 @@ rule m: bps` });
         's1.lemma': 'spec spec1\ndata x: 1',
         's2.lemma': 'spec spec2\ndata y: 2',
       });
-      assert(specNames(engine.list()).length >= 2);
+      assert(specNames(engine.specs()).length >= 2);
     });
 
     await run('quality empty for clean spec', () => {

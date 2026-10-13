@@ -1,19 +1,18 @@
-use lemma::DateTimeValue;
-use lemma::{Engine, LiteralValue};
-use std::collections::HashMap;
+use indexmap::IndexMap;
+use lemma::{DateTimeValue, Engine, LiteralValue};
 
 pub fn get_rule_value(engine: &Engine, spec_name: &str, rule_name: &str) -> LiteralValue {
     let now = DateTimeValue::now();
     let response = engine
-        .run(
+        .evaluate(
             None,
             spec_name,
             Some(&now),
-            HashMap::new(),
+            IndexMap::new(),
             Some(&[rule_name.to_string()]),
             false,
         )
-        .expect("run");
+        .expect("evaluate");
     let rule_result = response
         .get(rule_name)
         .unwrap_or_else(|_| panic!("rule {rule_name}"));

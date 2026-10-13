@@ -2,7 +2,7 @@ pub mod http {
     use crate::formatter::Formatter;
     use axum::{
         body::Bytes,
-        extract::{Path, Query, State},
+        extract::{Path, Query, RawQuery, State},
         http::{header::CONTENT_TYPE, HeaderMap, HeaderValue, StatusCode},
         response::{Html, IntoResponse, Json},
         routing::get,
@@ -11,7 +11,6 @@ pub mod http {
     use lemma::DateTimeValue;
     use lemma::Engine;
     use serde::Deserialize;
-    use std::panic::{catch_unwind, AssertUnwindSafe};
 
     use std::net::SocketAddr;
     use std::path::PathBuf;
@@ -21,7 +20,7 @@ pub mod http {
     use tower_http::cors::CorsLayer;
     use tracing::{error, info, warn};
 
-    /// Requests take a read lock for the duration of list/show/run. The file
+    /// Requests take a read lock for the duration of specs/show/run. The file
     /// watcher takes a write lock to refresh the same long-lived `Engine` via
     /// per-file `update` (PartialEq skip on unchanged files). On incremental
     /// failure it cold-loads into a scratch engine and swaps only on success;
@@ -85,26 +84,6 @@ pub mod http {
         error: String,
     }
 
-    fn catch_engine_panic<F, T>(f: F) -> Result<T, (StatusCode, Json<ErrorResponse>)>
-    where
-        F: FnOnce() -> T + std::panic::UnwindSafe,
-    {
-        catch_unwind(f).map_err(|panic_payload| {
-            let msg = panic_payload
-                .downcast_ref::<&str>()
-                .copied()
-                .or_else(|| panic_payload.downcast_ref::<String>().map(|s| s.as_str()))
-                .unwrap_or("unknown internal error");
-            error!("engine panic caught: {}", msg);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse {
-                    error: "internal engine error".to_string(),
-                }),
-            )
-        })
-    }
-
     /// Build Memento-Datetime, Vary for the resolved spec.
     fn spec_response_headers(
         effective_from: Option<&DateTimeValue>,
@@ -128,11 +107,11 @@ pub mod http {
     /// Start the Lemma HTTP server.
     ///
     /// The server auto-generates typed REST endpoints for each loaded spec:
-    /// - `GET /{spec}` — show interface (data, rules, versions); no evaluate, no data query params
+    /// - `GET /{spec}` — show interface (data, rules, this version's window); no evaluate, no data query params
     /// - `POST /{spec}` — evaluate (`?rules=` scopes which rules to run); data as JSON or form body
     ///
     /// Meta routes:
-    /// - `GET /` — list all specs
+    /// - `GET /` — all loaded specs
     /// - `GET /health` — health check
     /// - `GET /openapi.json` — OpenAPI 3.1 specification
     /// - `GET /docs` — Scalar interactive documentation
@@ -141,17 +120,20 @@ pub mod http {
     /// It binds to localhost by default; for any non-localhost deployment, put
     /// it behind a reverse proxy that terminates TLS and enforces access
     /// control. Cross-origin browser access is denied unless `cors` is set.
-    #[allow(clippy::too_many_arguments)]
     pub async fn start_server(
         engine: Engine,
-        host: &str,
-        port: u16,
-        watch: bool,
-        explain: bool,
+        args: &crate::ServerArgs,
         workdir: PathBuf,
-        eval_timeout_secs: u64,
-        cors: bool,
     ) -> anyhow::Result<()> {
+        let &crate::ServerArgs {
+            ref host,
+            port,
+            watch,
+            explain,
+            eval_timeout: eval_timeout_secs,
+            cors,
+            ..
+        } = args;
         tracing_subscriber::fmt()
             .with_env_filter(
                 tracing_subscriber::EnvFilter::try_from_default_env()
@@ -161,10 +143,26 @@ pub mod http {
 
         let shared_engine: SharedEngine = Arc::new(RwLock::new(engine));
 
+        let (fatal_tx, mut fatal_rx) = tokio::sync::mpsc::unbounded_channel::<anyhow::Error>();
         let watch_guard = if watch {
-            Some(start_file_watcher(shared_engine.clone(), workdir)?)
+            Some(start_file_watcher(
+                shared_engine.clone(),
+                workdir,
+                fatal_tx,
+            )?)
         } else {
+            drop(fatal_tx);
             None
+        };
+        let fatal_watch = async move {
+            if watch {
+                match fatal_rx.recv().await {
+                    Some(error) => error,
+                    None => anyhow::anyhow!("workspace watcher stopped unexpectedly"),
+                }
+            } else {
+                std::future::pending::<anyhow::Error>().await
+            }
         };
 
         let state = AppState {
@@ -174,7 +172,7 @@ pub mod http {
         };
 
         let router = Router::new()
-            .route("/", get(list))
+            .route("/", get(specs))
             .route("/health", get(health_check))
             .route("/openapi.json", get(openapi_spec))
             .route("/docs", get(scalar_docs))
@@ -189,7 +187,7 @@ pub mod http {
         };
         let app = router.with_state(state);
 
-        if !matches!(host, "127.0.0.1" | "localhost" | "::1" | "[::1]") {
+        if !matches!(host.as_str(), "127.0.0.1" | "localhost" | "::1" | "[::1]") {
             warn!(
                 "Binding to non-localhost address {host}: the Lemma HTTP server has no \
                  built-in authentication or TLS. Deploy behind a reverse proxy that \
@@ -210,12 +208,12 @@ pub mod http {
                 // serve already finished; drain timer not needed
             }
         };
-        let serve_result = tokio::select! {
+        let serve_result: anyhow::Result<()> = tokio::select! {
             result = axum::serve(listener, app).with_graceful_shutdown(shutdown) => {
                 if result.is_ok() {
                     info!("all connections drained");
                 }
-                result
+                result.map_err(anyhow::Error::from)
             }
             _ = async {
                 match drain_timeout_wait.await {
@@ -228,7 +226,8 @@ pub mod http {
                     }
                     Err(_) => std::future::pending::<()>().await,
                 }
-            } => Ok(())
+            } => Ok(()),
+            error = fatal_watch => Err(error),
         };
 
         drop(watch_guard);
@@ -274,11 +273,11 @@ pub mod http {
     // Meta routes
     // -----------------------------------------------------------------------
 
-    async fn list(
+    async fn specs(
         State(state): State<AppState>,
     ) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
         let engine = engine_read(&state).await;
-        Ok(Json(engine.list()))
+        Ok(Json(engine.specs()))
     }
 
     async fn health_check() -> impl IntoResponse {
@@ -294,7 +293,7 @@ pub mod http {
         (
             StatusCode::NOT_FOUND,
             Json(ErrorResponse {
-                error: "Not found. Use GET / for spec list, GET /docs for API docs.".to_string(),
+                error: "Not found. Use GET / for loaded specs, GET /docs for API docs.".to_string(),
             }),
         )
     }
@@ -433,41 +432,22 @@ pub mod http {
     // Doc path (wildcard): GET = show, POST = evaluate
     // -----------------------------------------------------------------------
 
-    fn data_values_for_run(
-        data: std::collections::HashMap<String, lemma::RunDataValue>,
-    ) -> Result<std::collections::HashMap<String, String>, (StatusCode, Json<ErrorResponse>)> {
-        data.into_iter()
-            .map(|(key, value)| {
-                let string_value = match value {
-                    lemma::RunDataValue::String(s) => s,
-                    lemma::RunDataValue::Boolean(b) => b.to_string(),
-                    lemma::RunDataValue::MeasureMap(map) | lemma::RunDataValue::RatioMap(map) => {
-                        if map.len() == 1 {
-                            let (unit, magnitude) =
-                                map.into_iter().next().expect("BUG: map len checked");
-                            format!("{magnitude} {unit}")
-                        } else {
-                            return Err((
-                                StatusCode::BAD_REQUEST,
-                                Json(ErrorResponse {
-                                    error: format!(
-                                        "data field '{key}' uses a multi-key unit map; pass a convenience string instead"
-                                    ),
-                                }),
-                            ));
-                        }
-                    }
-                };
-                Ok((key, string_value))
-            })
-            .collect()
-    }
-
     async fn spec_get_show(
         State(state): State<AppState>,
         Path(path): Path<String>,
+        RawQuery(query): RawQuery,
         headers: HeaderMap,
     ) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
+        if let Some(query) = query.filter(|query| !query.is_empty()) {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    error: format!(
+                        "GET /{path} shows the interface and takes no query parameters (got '{query}'); POST data as a JSON or form body to evaluate"
+                    ),
+                }),
+            ));
+        }
         let raw_path = parse_spec_path(&path);
         let effective = accept_datetime_from_headers(&headers)?;
         let engine = engine_read(&state).await;
@@ -481,75 +461,83 @@ pub mod http {
             )
         })?;
 
-        catch_engine_panic(AssertUnwindSafe(
-            || -> Result<_, (StatusCode, Json<ErrorResponse>)> {
-                let show = engine
-                    .show(None, &spec_name, Some(&effective))
-                    .map_err(|e| {
-                        (
-                            lemma_error_to_status(&e),
-                            Json(ErrorResponse {
-                                error: e.to_string(),
-                            }),
-                        )
-                    })?;
+        let show = engine
+            .show(None, &spec_name, Some(&effective))
+            .map_err(|e| {
+                (
+                    lemma_error_to_status(&e),
+                    Json(ErrorResponse {
+                        error: e.to_string(),
+                    }),
+                )
+            })?;
 
-                let effective_from = show.effective_from.clone();
+        let effective_from = show.effective_from.clone();
 
-                let mut response = Json(lemma::api::Show::from(&show)).into_response();
-                let headers_mut = response.headers_mut();
-                for (k, v) in spec_response_headers(effective_from.as_ref()) {
-                    headers_mut.insert(k, v);
-                }
-                Ok(response)
-            },
-        ))?
+        let mut response = Json(lemma::api::show_document(&engine, &show)).into_response();
+        let headers_mut = response.headers_mut();
+        for (k, v) in spec_response_headers(effective_from.as_ref()) {
+            headers_mut.insert(k, v);
+        }
+        Ok(response)
     }
 
     fn parse_post_evaluate_body(
         headers: &HeaderMap,
         body: &[u8],
     ) -> Result<
-        std::collections::HashMap<String, lemma::RunDataValue>,
+        indexmap::IndexMap<String, lemma::EvaluateDataValue>,
         (StatusCode, Json<ErrorResponse>),
     > {
         if body.is_empty() {
-            return Ok(std::collections::HashMap::new());
+            return Ok(indexmap::IndexMap::new());
         }
 
-        let content_type = headers
-            .get(CONTENT_TYPE)
-            .and_then(|v| v.to_str().ok())
-            .map(|s| s.split(';').next().unwrap_or(s).trim().to_ascii_lowercase())
-            .unwrap_or_default();
-
-        let data_values = match content_type.as_str() {
-            "application/json" => {
-                let map: std::collections::HashMap<String, serde_json::Value> =
-                    serde_json::from_slice(body).map_err(|e| {
-                        (
-                            StatusCode::BAD_REQUEST,
-                            Json(ErrorResponse {
-                                error: format!("invalid JSON body: {e}"),
-                            }),
-                        )
-                    })?;
-                map.into_iter()
-                    .filter_map(
-                        |(k, v)| match crate::data_json::json_value_to_run_data_value(v) {
-                            Ok(None) => None,
-                            Ok(Some(input)) => Some(Ok((k, input))),
-                            Err(e) => Some(Err(e)),
-                        },
+        let content_type = match headers.get(CONTENT_TYPE) {
+            None => None,
+            Some(value) => {
+                let text = value.to_str().map_err(|_| {
+                    (
+                        StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                        Json(ErrorResponse {
+                            error: "Content-Type must be ASCII".to_string(),
+                        }),
                     )
-                    .collect::<Result<_, _>>()
-                    .map_err(|e| (StatusCode::BAD_REQUEST, Json(ErrorResponse { error: e })))?
+                })?;
+                Some(
+                    text.split(';')
+                        .next()
+                        .expect("BUG: str::split yields at least one item")
+                        .trim()
+                        .to_ascii_lowercase(),
+                )
             }
-            "application/x-www-form-urlencoded" => {
+        };
+
+        let data_values = match content_type.as_deref() {
+            Some("application/json") => {
+                let value: serde_json::Value = serde_json::from_slice(body).map_err(|e| {
+                    (
+                        StatusCode::BAD_REQUEST,
+                        Json(ErrorResponse {
+                            error: format!("invalid JSON body: {e}"),
+                        }),
+                    )
+                })?;
+                lemma::parse_evaluate_data_object(&Some(value)).map_err(|e| {
+                    (
+                        StatusCode::BAD_REQUEST,
+                        Json(ErrorResponse {
+                            error: e.to_string(),
+                        }),
+                    )
+                })?
+            }
+            Some("application/x-www-form-urlencoded") => {
                 crate::data_json::form_urlencoded_to_data_values(body)
                     .map_err(|e| (StatusCode::BAD_REQUEST, Json(ErrorResponse { error: e })))?
             }
-            "" => {
+            None => {
                 return Err((
                     StatusCode::UNSUPPORTED_MEDIA_TYPE,
                     Json(ErrorResponse {
@@ -557,7 +545,7 @@ pub mod http {
                     }),
                 ));
             }
-            other => {
+            Some(other) => {
                 return Err((
                     StatusCode::UNSUPPORTED_MEDIA_TYPE,
                     Json(ErrorResponse {
@@ -594,8 +582,6 @@ pub mod http {
 
         let data_values = parse_post_evaluate_body(&headers, &body)?;
 
-        let data_strings = data_values_for_run(data_values)?;
-
         let parsed_rules: Option<Vec<String>> = match q.rules.as_deref() {
             None => None,
             Some(rules_query) => {
@@ -612,7 +598,7 @@ pub mod http {
             }
         };
 
-        let include_explanations = want_explain(&state, &headers);
+        let include_explanations = want_explain(&state, &headers)?;
         let engine = Arc::clone(&state.engine);
 
         // Evaluate on a blocking thread under a read lock so refresh waits.
@@ -621,11 +607,11 @@ pub mod http {
         let eval_task = tokio::task::spawn_blocking(move || {
             let engine = engine.blocking_read();
             let response = engine
-                .run(
+                .evaluate(
                     None,
                     &spec_name,
                     Some(&effective),
-                    data_strings,
+                    data_values,
                     parsed_rules.as_deref(),
                     include_explanations,
                 )
@@ -645,7 +631,7 @@ pub mod http {
 
         let (payload, effective_from) =
             match tokio::time::timeout(state.eval_timeout, eval_task).await {
-                Err(_elapsed) => {
+                Err(_) => {
                     error!(
                         "evaluation timed out after {}s",
                         state.eval_timeout.as_secs()
@@ -660,16 +646,10 @@ pub mod http {
                         }),
                     ));
                 }
-                // The blocking task panicked (JoinError); same mapping as catch_engine_panic.
-                Ok(Err(join_error)) => {
-                    error!("engine panic caught: {}", join_error);
-                    return Err((
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        Json(ErrorResponse {
-                            error: "internal engine error".to_string(),
-                        }),
-                    ));
-                }
+                Ok(Err(join_error)) => match join_error.try_into_panic() {
+                    Ok(payload) => std::panic::resume_unwind(payload),
+                    Err(cancelled) => panic!("BUG: evaluation task cancelled: {cancelled}"),
+                },
                 Ok(Ok(result)) => result?,
             };
 
@@ -681,13 +661,27 @@ pub mod http {
         Ok(axum_response)
     }
 
-    fn want_explain(state: &AppState, headers: &HeaderMap) -> bool {
-        state.explain
-            && headers
-                .get("x-explain")
-                .and_then(|v: &axum::http::HeaderValue| v.to_str().ok())
-                .map(|s: &str| !s.trim().is_empty())
-                .unwrap_or(false)
+    fn want_explain(
+        state: &AppState,
+        headers: &HeaderMap,
+    ) -> Result<bool, (StatusCode, Json<ErrorResponse>)> {
+        if !state.explain {
+            return Ok(false);
+        }
+        match headers.get("x-explain") {
+            None => Ok(false),
+            Some(value) => {
+                let text = value.to_str().map_err(|_| {
+                    (
+                        StatusCode::BAD_REQUEST,
+                        Json(ErrorResponse {
+                            error: "x-explain header must be visible ASCII".to_string(),
+                        }),
+                    )
+                })?;
+                Ok(!text.trim().is_empty())
+            }
+        }
     }
 
     /// Map a `Error` to an HTTP status code.
@@ -726,75 +720,90 @@ pub mod http {
     fn start_file_watcher(
         shared_engine: SharedEngine,
         workdir: PathBuf,
+        fatal: tokio::sync::mpsc::UnboundedSender<anyhow::Error>,
     ) -> anyhow::Result<lemma_cli::workspace::WatchGuard> {
         let watch_dir = workdir.clone();
-        let on_change = Arc::new(
-            move |watch_result: Result<(), lemma_cli::workspace::WorkspaceDiskError>| {
-                match watch_result {
-                    Ok(()) => {}
-                    Err(error) => {
-                        error!("Workspace watch failed: {}", error);
+        let on_watch_event = move |watch_result: Result<
+            (),
+            lemma_cli::workspace::WorkspaceDiskError,
+        >| {
+            match watch_result {
+                Ok(()) => {}
+                Err(error) => {
+                    if let Err(send_error) =
+                        fatal.send(anyhow::anyhow!("workspace watch failed: {error}"))
+                    {
+                        info!("server already stopped; {}", send_error.0);
+                    }
+                    return;
+                }
+            }
+            info!("Detected .lemma file changes, refreshing...");
+            let engine_clone = shared_engine.clone();
+            let workdir_clone = workdir.clone();
+            let fatal_clone = fatal.clone();
+
+            // Spawn a dedicated OS thread for reloading. The notify
+            // callback is synchronous, so we create a fresh tokio
+            // runtime on a new thread to run the async reload.
+            std::thread::spawn(move || {
+                let runtime = match tokio::runtime::Runtime::new() {
+                    Ok(rt) => rt,
+                    Err(err) => {
+                        if let Err(send_error) = fatal_clone.send(anyhow::anyhow!(
+                            "failed to create tokio runtime for reload: {err}"
+                        )) {
+                            info!("server already stopped; {}", send_error.0);
+                        }
                         return;
                     }
-                }
-                info!("Detected .lemma file changes, refreshing...");
-                let engine_clone = shared_engine.clone();
-                let workdir_clone = workdir.clone();
+                };
 
-                // Spawn a dedicated OS thread for reloading. The notify
-                // callback is synchronous, so we create a fresh tokio
-                // runtime on a new thread to run the async reload.
-                std::thread::spawn(move || {
-                    let runtime = match tokio::runtime::Runtime::new() {
-                        Ok(rt) => rt,
-                        Err(err) => {
-                            error!("Failed to create tokio runtime for reload: {}", err);
-                            return;
+                runtime.block_on(async {
+                    // Build scratch outside the write lock so HTTP readers
+                    // are not blocked for the full workspace load.
+                    let mut scratch = Engine::new();
+                    match lemma_cli::workspace::load_workspace(&mut scratch, &workdir_clone) {
+                        Ok(()) => {
+                            let mut engine = engine_clone.write().await;
+                            *engine = scratch;
+                            let workspace_specs = engine
+                                .specs()
+                                .into_iter()
+                                .find(|repository_group| repository_group.repository.is_none())
+                                .expect("BUG: default repository must exist after Engine::new")
+                                .specs;
+                            let unique_specs: std::collections::BTreeSet<&str> =
+                                workspace_specs.iter().map(|ls| ls.name.as_str()).collect();
+                            let spec_count = unique_specs.len();
+                            info!("Refreshed engine with {} spec(s)", spec_count);
                         }
-                    };
-
-                    runtime.block_on(async {
-                        // Build scratch outside the write lock so HTTP readers
-                        // are not blocked for the full workspace load.
-                        let mut scratch = Engine::new();
-                        match lemma_cli::workspace::load_workspace(&mut scratch, &workdir_clone) {
-                            Ok(()) => {
-                                let mut engine = engine_clone.write().await;
-                                *engine = scratch;
-                                let workspace_specs = engine
-                                    .list()
-                                    .into_iter()
-                                    .find(|repository_group| repository_group.repository.is_none())
-                                    .expect("BUG: default repository must exist after Engine::new")
-                                    .specs;
-                                let unique_specs: std::collections::BTreeSet<&str> =
-                                    workspace_specs.iter().map(|ls| ls.name.as_str()).collect();
-                                let spec_count = unique_specs.len();
-                                info!("Refreshed engine with {} spec(s)", spec_count);
-                            }
-                            Err(lemma_cli::workspace::WorkspaceDiskError::EngineLoad(load_err)) => {
-                                for err in load_err.iter() {
-                                    tracing::error!(
-                                        "{}",
-                                        crate::error_formatter::format_error(
-                                            err,
-                                            &load_err.sources
-                                        )
-                                    );
-                                }
-                                warn!(
-                                    "Refresh failed ({} error(s)); keeping previous engine",
-                                    load_err.errors.len()
+                        Err(lemma_cli::workspace::WorkspaceDiskError::EngineLoad(load_err)) => {
+                            for err in load_err.iter() {
+                                tracing::error!(
+                                    "{}",
+                                    crate::error_formatter::format_error(err, &load_err.sources)
                                 );
                             }
-                            Err(err) => {
-                                warn!("Refresh failed (keeping previous engine): {}", err);
-                            }
+                            warn!(
+                                "Refresh failed ({} error(s)); keeping previous engine",
+                                load_err.errors.len()
+                            );
                         }
-                    });
+                        Err(err) => {
+                            warn!("Refresh failed (keeping previous engine): {}", err);
+                        }
+                    }
                 });
-            },
-        );
+            });
+        };
+
+        let (on_change, changes) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            for watch_result in changes {
+                on_watch_event(watch_result);
+            }
+        });
 
         let guard = lemma_cli::workspace::watch_lemma_workspace(watch_dir.clone(), on_change)
             .map_err(|error| anyhow::Error::msg(error.to_string()))?;

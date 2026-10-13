@@ -1,9 +1,9 @@
-//! Per-rule `RuleResult.missing_data` from `Engine::run`.
+//! Per-rule `RuleResult.missing_data` from `Engine::evaluate`.
 //!
 //! Asserts on Rust `Response` / `RuleResult` structures (not JSON).
 
-use lemma::{DateTimeValue, Engine, ExplanationNode, RuleResult};
-use std::collections::HashMap;
+use indexmap::IndexMap;
+use lemma::{DateTimeValue, Engine, EvaluateDataValue, ExplanationNode, RuleResult};
 use std::sync::Arc;
 
 fn load(engine: &mut Engine, code: &str) {
@@ -15,13 +15,13 @@ fn load(engine: &mut Engine, code: &str) {
 fn run(
     engine: &Engine,
     spec: &str,
-    data: HashMap<String, String>,
+    data: IndexMap<String, EvaluateDataValue>,
     rules: Option<&[String]>,
     explain: bool,
 ) -> lemma::Response {
     let now = DateTimeValue::now();
     engine
-        .run(None, spec, Some(&now), data, rules, explain)
+        .evaluate(None, spec, Some(&now), data, rules, explain)
         .expect("evaluation must succeed")
 }
 
@@ -71,7 +71,7 @@ rule main: expensive
   unless flag and (expensive > 100) then 0
 "#,
     );
-    let mut data = HashMap::new();
+    let mut data = IndexMap::new();
     data.insert("flag".to_string(), "false".into());
     let response = run(&engine, "demo", data, None, false);
     let md = missing(&response, "main");
@@ -96,7 +96,7 @@ data c: boolean
 rule main: a and b and c
 "#,
     );
-    let mut data = HashMap::new();
+    let mut data = IndexMap::new();
     data.insert("a".to_string(), "false".into());
     let response = run(&engine, "demo", data, None, false);
     let md = missing(&response, "main");
@@ -124,7 +124,7 @@ data c: boolean
 rule main: a and b and c
 "#,
     );
-    let mut data = HashMap::new();
+    let mut data = IndexMap::new();
     data.insert("a".to_string(), "true".into());
     data.insert("b".to_string(), "false".into());
     let response = run(&engine, "demo", data, None, false);
@@ -162,7 +162,7 @@ rule main: shared
 "#,
     );
     // flag_b arm is taken: default body (shared) and flag_a body (shared) are both dead.
-    let mut data = HashMap::new();
+    let mut data = IndexMap::new();
     data.insert("flag_b".to_string(), "true".into());
     let response = run(&engine, "demo", data, None, false);
     let md = missing(&response, "main");
@@ -193,7 +193,7 @@ rule main: 1
   unless flag then expensive
 "#,
     );
-    let mut data = HashMap::new();
+    let mut data = IndexMap::new();
     data.insert("flag".to_string(), "false".into());
     let response = run(&engine, "demo", data, None, false);
     let md = missing(&response, "main");
@@ -262,7 +262,7 @@ rule main: expensive
   unless flag_outer then guarded
 "#,
     );
-    let mut data = HashMap::new();
+    let mut data = IndexMap::new();
     data.insert("flag_outer".to_string(), "true".into());
     data.insert("flag_inner".to_string(), "true".into());
     let response = run(&engine, "demo", data, None, false);
@@ -288,7 +288,7 @@ data b: number
 rule main: a + b
 "#,
     );
-    let mut data = HashMap::new();
+    let mut data = IndexMap::new();
     data.insert("a".to_string(), "1".into());
     data.insert("b".to_string(), "2".into());
     let response = run(&engine, "demo", data, None, false);
@@ -318,7 +318,7 @@ data c: number
 rule main: a + b + c
 "#,
     );
-    let response = run(&engine, "demo", HashMap::new(), None, false);
+    let response = run(&engine, "demo", IndexMap::new(), None, false);
     assert_eq!(missing(&response, "main"), &["a", "b", "c"]);
 }
 
@@ -335,7 +335,7 @@ data c: number
 rule main: a + b + c
 "#,
     );
-    let mut data = HashMap::new();
+    let mut data = IndexMap::new();
     data.insert("a".to_string(), "1".into());
     let response = run(&engine, "demo", data, None, false);
     assert_eq!(missing(&response, "main"), &["b", "c"]);
@@ -354,7 +354,7 @@ data required: number
 rule main: prefilled + suggested + required
 "#,
     );
-    let response = run(&engine, "demo", HashMap::new(), None, false);
+    let response = run(&engine, "demo", IndexMap::new(), None, false);
     let md = missing(&response, "main");
     assert!(
         !md.contains(&"prefilled".to_string()),
@@ -388,7 +388,7 @@ rule r2: y
     let response = run(
         &engine,
         "demo",
-        HashMap::new(),
+        IndexMap::new(),
         Some(&["r1".to_string(), "r2".to_string()]),
         false,
     );
@@ -412,7 +412,7 @@ rule r2: y
     let response = run(
         &engine,
         "demo",
-        HashMap::new(),
+        IndexMap::new(),
         Some(&["r1".to_string()]),
         false,
     );
@@ -440,7 +440,7 @@ rule r2: s + t
     let response = run(
         &engine,
         "demo",
-        HashMap::new(),
+        IndexMap::new(),
         Some(&["r1".to_string(), "r2".to_string()]),
         false,
     );
@@ -460,7 +460,7 @@ rule r2: s + t
         missing(&response, "r2")
     );
 
-    let mut data = HashMap::new();
+    let mut data = IndexMap::new();
     data.insert("s".to_string(), "3".into());
     let response = run(
         &engine,
@@ -495,7 +495,7 @@ rule ok: ready
 rule incomplete: need
 "#,
     );
-    let response = run(&engine, "demo", HashMap::new(), None, false);
+    let response = run(&engine, "demo", IndexMap::new(), None, false);
     assert!(
         missing(&response, "ok").is_empty(),
         "ok must have empty missing_data: {:?}",
@@ -508,7 +508,7 @@ rule incomplete: need
 
 const CHOOSER: &str = r#"
 spec chooser
-data mode: text -> options "simple" "complex"
+data mode: text -> options "simple", "complex"
 data simple_input: number
 data complex_input_a: number
 data complex_input_b: number
@@ -524,7 +524,7 @@ fn c1_mode_unbound_lists_mode_and_live_arm_inputs() {
     let response = run(
         &engine,
         "chooser",
-        HashMap::new(),
+        IndexMap::new(),
         Some(&["result".to_string()]),
         false,
     );
@@ -548,7 +548,7 @@ fn c1_mode_unbound_lists_mode_and_live_arm_inputs() {
 fn c2_mode_simple_prunes_complex_inputs() {
     let mut engine = Engine::new();
     load(&mut engine, CHOOSER);
-    let mut data = HashMap::new();
+    let mut data = IndexMap::new();
     data.insert("mode".to_string(), "simple".into());
     let response = run(
         &engine,
@@ -577,7 +577,7 @@ fn c2_mode_simple_prunes_complex_inputs() {
 fn c3_mode_complex_prunes_simple_input() {
     let mut engine = Engine::new();
     load(&mut engine, CHOOSER);
-    let mut data = HashMap::new();
+    let mut data = IndexMap::new();
     data.insert("mode".to_string(), "complex".into());
     let response = run(
         &engine,
@@ -610,7 +610,7 @@ rule main: expensive * 2
   unless now > 1970-01-01 then threshold + 1
 "#,
     );
-    let mut data = HashMap::new();
+    let mut data = IndexMap::new();
     data.insert("threshold".to_string(), "4".into());
     let response = run(&engine, "demo", data, Some(&["main".to_string()]), false);
     let md = missing(&response, "main");
@@ -640,7 +640,7 @@ rule main: 1
   unless flag and (1 > 2) then 2
 "#,
     );
-    let response = run(&engine, "demo", HashMap::new(), None, false);
+    let response = run(&engine, "demo", IndexMap::new(), None, false);
     let md = missing(&response, "main");
     assert!(
         !md.contains(&"flag".to_string()),
@@ -667,7 +667,7 @@ data expensive: number
 rule main: flag and expensive > 0
 "#,
     );
-    let mut data = HashMap::new();
+    let mut data = IndexMap::new();
     data.insert("flag".to_string(), "false".into());
     let response = run(&engine, "demo", data, None, false);
     let md = missing(&response, "main");
@@ -690,7 +690,7 @@ data c: number
 rule main: a + b + c
 "#,
     );
-    let response = run(&engine, "demo", HashMap::new(), None, false);
+    let response = run(&engine, "demo", IndexMap::new(), None, false);
     let md = missing(&response, "main");
     assert!(md.contains(&"a".to_string()), "{md:?}");
     assert!(md.contains(&"b".to_string()), "{md:?}");
@@ -716,7 +716,7 @@ rule loading: 1
 rule main: missing_factor * loading
 "#,
     );
-    let mut data = HashMap::new();
+    let mut data = IndexMap::new();
     data.insert("is_smoker".to_string(), "true".into());
     let response = run(&engine, "demo", data, Some(&["main".to_string()]), false);
     let md = missing(&response, "main");
@@ -734,11 +734,10 @@ rule main: missing_factor * loading
     );
 }
 
-/// And Propagate (left MissingData): value walk and missing_data both leave the
-/// right conjunct unreachable (matches `evaluate_and`). The `loading` arms are
-/// absent because the right conjunct is never reached, whatever `is_smoker` is.
+/// And Propagate (left MissingData) with a decided right conjunct: `is_smoker`
+/// settles `loading` to 2, so the former-smoker arms add nothing to missing_data.
 #[test]
-fn d4_and_propagate_leaves_right_conjunct_unreachable() {
+fn d4_and_propagate_with_decided_right_lists_left_only() {
     let mut engine = Engine::new();
     load(
         &mut engine,
@@ -754,7 +753,7 @@ rule loading: 1
 rule main: missing_flag and (loading > 0)
 "#,
     );
-    let mut data = HashMap::new();
+    let mut data = IndexMap::new();
     data.insert("is_smoker".to_string(), "true".into());
     let response = run(&engine, "demo", data, Some(&["main".to_string()]), false);
     let md = missing(&response, "main");
@@ -764,11 +763,11 @@ rule main: missing_flag and (loading > 0)
     );
     assert!(
         !md.contains(&"is_former_smoker".to_string()),
-        "right conjunct is unreachable after left MissingData: {md:?}"
+        "decided right conjunct adds no missing data: {md:?}"
     );
     assert!(
         !md.contains(&"years_since_quit".to_string()),
-        "right conjunct is unreachable after left MissingData: {md:?}"
+        "decided right conjunct adds no missing data: {md:?}"
     );
 }
 
@@ -791,7 +790,7 @@ rule loading: 1
 rule main: (1 / denom) * loading
 "#,
     );
-    let mut data = HashMap::new();
+    let mut data = IndexMap::new();
     data.insert("denom".to_string(), "0".into());
     let plain = run(
         &engine,
@@ -835,7 +834,7 @@ rule loading: 1
 rule main: base * loading
 "#,
     );
-    let mut data = HashMap::new();
+    let mut data = IndexMap::new();
     data.insert("age".to_string(), "80".into());
     let response = run(&engine, "demo", data, Some(&["main".to_string()]), false);
     let main = rule(&response, "main");
@@ -870,7 +869,7 @@ rule base: veto "no rate"
 rule main: missing_factor * base
 "#,
     );
-    let mut data = HashMap::new();
+    let mut data = IndexMap::new();
     data.insert("age".to_string(), "80".into());
     let plain = run(
         &engine,
@@ -906,7 +905,8 @@ rule main: missing_factor * base
 }
 
 /// And left MissingData + right definitive: MissingData wins intake (`false` can still answer).
-/// The right conjunct is never visited (parity with d4), so `age` is not listed.
+/// The right conjunct's veto does not replace the left MissingData, and `age` is
+/// decided by `unless age < 70`, so it is not listed.
 #[test]
 fn d8_and_missing_left_is_missing_data_despite_later_definitive_veto() {
     let mut engine = Engine::new();
@@ -921,7 +921,7 @@ rule base: veto "no rate"
 rule main: missing_flag and (base > 0)
 "#,
     );
-    let mut data = HashMap::new();
+    let mut data = IndexMap::new();
     data.insert("age".to_string(), "80".into());
     let plain = run(
         &engine,
@@ -972,7 +972,7 @@ rule base: veto "no rate"
 rule main: missing_flag and (base > 0)
 "#,
     );
-    let mut data = HashMap::new();
+    let mut data = IndexMap::new();
     data.insert("missing_flag".to_string(), "false".into());
     data.insert("age".to_string(), "80".into());
     let response = run(&engine, "demo", data, Some(&["main".to_string()]), false);
@@ -996,9 +996,10 @@ rule main: missing_flag and (base > 0)
     );
 }
 
-/// Left definitive veto settles And; right conjunct is not visited (value or explain).
+/// The first propagating operand, the left veto, is the value of And; the right
+/// veto does not replace it.
 #[test]
-fn d8b_and_left_definitive_veto_does_not_explore_right() {
+fn d8b_and_left_definitive_veto_is_value_right_is_visited() {
     let mut engine = Engine::new();
     load(
         &mut engine,
@@ -1012,14 +1013,14 @@ rule z: x and y
     let plain = run(
         &engine,
         "demo",
-        HashMap::new(),
+        IndexMap::new(),
         Some(&["z".to_string()]),
         false,
     );
     let explained = run(
         &engine,
         "demo",
-        HashMap::new(),
+        IndexMap::new(),
         Some(&["z".to_string()]),
         true,
     );
@@ -1053,8 +1054,8 @@ rule z: x and y
         "left conjunct x must be an explanation child: {names:?}"
     );
     assert!(
-        !names.iter().any(|n| n == "y"),
-        "right conjunct y must not run after left Propagate: {names:?}"
+        names.iter().any(|n| n == "y"),
+        "no false operand decides the and, so the right veto y is visited and narrated: {names:?}"
     );
 }
 
@@ -1062,15 +1063,22 @@ fn explanation_rule_names(nodes: &[ExplanationNode]) -> Vec<String> {
     let mut names = Vec::new();
     fn walk(node: &ExplanationNode, names: &mut Vec<String>) {
         match node {
-            ExplanationNode::Rule { name, children, .. } => {
+            ExplanationNode::RuleRef { name, .. } => {
                 names.push(name.rule.clone());
-                for child in children {
-                    walk(child, names);
-                }
             }
             ExplanationNode::Compose { operands, .. }
             | ExplanationNode::Conversion { operands, .. } => {
                 for child in operands {
+                    walk(child, names);
+                }
+            }
+            ExplanationNode::Row { key, fields, .. } => {
+                for child in key.iter().chain(fields.iter()) {
+                    walk(child, names);
+                }
+            }
+            ExplanationNode::Filter { children, .. } => {
+                for child in children {
                     walk(child, names);
                 }
             }
@@ -1104,7 +1112,7 @@ rule loading: 1
 rule main: missing_threshold > loading
 "#,
     );
-    let mut data = HashMap::new();
+    let mut data = IndexMap::new();
     data.insert("is_smoker".to_string(), "true".into());
     let response = run(&engine, "demo", data, Some(&["main".to_string()]), false);
     let md = missing(&response, "main");
@@ -1137,7 +1145,7 @@ rule base: veto "no rate"
 rule main: missing_threshold > base
 "#,
     );
-    let mut data = HashMap::new();
+    let mut data = IndexMap::new();
     data.insert("age".to_string(), "80".into());
     let plain = run(
         &engine,
@@ -1187,7 +1195,7 @@ rule base: veto "no rate"
 rule main: missing_threshold...base
 "#,
     );
-    let mut data = HashMap::new();
+    let mut data = IndexMap::new();
     data.insert("age".to_string(), "80".into());
     let plain = run(
         &engine,
@@ -1237,7 +1245,7 @@ rule base: veto "no rate"
 rule main: missing_threshold in 0...base
 "#,
     );
-    let mut data = HashMap::new();
+    let mut data = IndexMap::new();
     data.insert("age".to_string(), "80".into());
     let plain = run(
         &engine,
@@ -1286,7 +1294,7 @@ rule base: veto "no rate"
 rule main: 100 > base
 "#,
     );
-    let mut data = HashMap::new();
+    let mut data = IndexMap::new();
     data.insert("age".to_string(), "80".into());
     let plain = run(
         &engine,
@@ -1335,7 +1343,7 @@ rule base: veto "no rate"
 rule main: 0...base
 "#,
     );
-    let mut data = HashMap::new();
+    let mut data = IndexMap::new();
     data.insert("age".to_string(), "80".into());
     let plain = run(
         &engine,
@@ -1384,7 +1392,7 @@ rule base: veto "no rate"
 rule main: 50 in 0...base
 "#,
     );
-    let mut data = HashMap::new();
+    let mut data = IndexMap::new();
     data.insert("age".to_string(), "80".into());
     let plain = run(
         &engine,
@@ -1436,12 +1444,11 @@ uses i: inner
 rule r: i.half + 1
 "#,
     );
-    let response = run(&engine, "outer", HashMap::new(), None, false);
-    let md = missing(&response, "r");
-    assert!(
-        md.iter()
-            .any(|k| k == "i.slot" || k.ends_with(".slot") || k == "slot"),
-        "outer must list inner unbound slot via embed: {md:?}"
+    let response = run(&engine, "outer", IndexMap::new(), None, false);
+    assert_eq!(
+        missing(&response, "r"),
+        &["i.slot"],
+        "outer must list unbound slot under import alias"
     );
 }
 
@@ -1456,7 +1463,7 @@ rule total: weight * item_cost
 spec calc
 uses bag
   -> with item_cost: item_cost
-data type_of_nut: text -> options "peanut" "cashew"
+data type_of_nut: text -> options "peanut", "cashew"
 rule item_cost: 1
   unless type_of_nut is "cashew" then 2
 rule total: bag.total
@@ -1471,14 +1478,14 @@ rule total: bag.total
     let response = run(
         &engine,
         "calc",
-        HashMap::new(),
+        IndexMap::new(),
         Some(&["total".to_string()]),
         false,
     );
-    let md = missing(&response, "total");
-    assert!(
-        !md.contains(&"bag.item_cost".to_string()),
-        "with-bound rule ref must not appear: {md:?}"
+    assert_eq!(
+        missing(&response, "total"),
+        &["bag.weight", "type_of_nut"],
+        "live unbound inputs; with-bound bag.item_cost omitted"
     );
 }
 
@@ -1497,9 +1504,9 @@ uses i: inner
 rule r: i.half
 "#,
     );
-    let response = run(&engine, "outer", HashMap::new(), None, false);
+    let response = run(&engine, "outer", IndexMap::new(), None, false);
     let md = missing(&response, "r");
-    assert!(!md.is_empty(), "expected nested missing key: {md:?}");
+    assert_eq!(md, &["i.slot"], "nested unbound under uses alias");
     for key in md {
         show_has(&engine, "outer", key);
     }
@@ -1519,7 +1526,7 @@ data b: number
 rule main: a + b
 "#,
     );
-    let mut data = HashMap::new();
+    let mut data = IndexMap::new();
     data.insert("a".to_string(), "1".into());
     let plain = run(&engine, "demo", data.clone(), None, false);
     let explained = run(&engine, "demo", data, None, true);
@@ -1546,7 +1553,7 @@ data a: number
 rule main: a
 "#,
     );
-    let mut data = HashMap::new();
+    let mut data = IndexMap::new();
     data.insert("a".to_string(), "9".into());
     let response = run(&engine, "demo", data, None, true);
     assert!(
@@ -1570,7 +1577,7 @@ data b: number
 rule main: a + b
 "#,
     );
-    let response = run(&engine, "demo", HashMap::new(), None, false);
+    let response = run(&engine, "demo", IndexMap::new(), None, false);
     let md = missing(&response, "main");
     assert_eq!(md, &["a", "b"]);
     for key in md {
@@ -1591,7 +1598,7 @@ fn g2b_reference_bound_chain_missing_data_key_exists_in_show() {
         &mut engine,
         r#"
 spec prev
-data code: text -> options "AA" "BB"
+data code: text -> options "AA", "BB"
 rule name: veto "no code"
   unless code is "AA" then "Alpha"
   unless code is "BB" then "Beta"
@@ -1606,7 +1613,7 @@ rule name: prev.name
     let response = run(
         &engine,
         "current",
-        HashMap::new(),
+        IndexMap::new(),
         Some(&["name".to_string()]),
         false,
     );
@@ -1691,7 +1698,7 @@ rule loading: 1
 rule main: missing_threshold > loading
 "#,
     );
-    let mut data = HashMap::new();
+    let mut data = IndexMap::new();
     data.insert("is_smoker".to_string(), "true".into());
     let comparison = run(&engine, "demo", data, Some(&["main".to_string()]), false);
     assert_attach_invariant(&comparison);
@@ -1716,7 +1723,7 @@ rule loading: 1
 rule main: missing_flag and (loading > 0)
 "#,
     );
-    let mut data = HashMap::new();
+    let mut data = IndexMap::new();
     data.insert("is_smoker".to_string(), "true".into());
     let and_case = run(&engine, "demo", data, Some(&["main".to_string()]), false);
     assert_attach_invariant(&and_case);
@@ -1737,7 +1744,7 @@ data c: number
 rule main: a + b + c
 "#,
     );
-    let product = run(&engine, "demo", HashMap::new(), None, false);
+    let product = run(&engine, "demo", IndexMap::new(), None, false);
     assert_attach_invariant(&product);
     assert!(
         missing(&product, "main").contains(&"a".to_string()),
@@ -1746,7 +1753,7 @@ rule main: a + b + c
     );
 }
 
-/// Engine::run must never attach MissingData veto with empty or mismatched missing_data.
+/// Engine::evaluate must never attach MissingData veto with empty or mismatched missing_data.
 #[test]
 fn g5_engine_run_never_attaches_empty_missing_data() {
     let mut engine = Engine::new();
@@ -1759,7 +1766,7 @@ data b: number
 rule main: a + b
 "#,
     );
-    assert_attach_invariant(&run(&engine, "demo", HashMap::new(), None, false));
+    assert_attach_invariant(&run(&engine, "demo", IndexMap::new(), None, false));
 
     let mut engine = Engine::new();
     load(
@@ -1776,7 +1783,7 @@ rule loading: 1
 rule main: missing_threshold > loading
 "#,
     );
-    let mut data = HashMap::new();
+    let mut data = IndexMap::new();
     data.insert("is_smoker".to_string(), "true".into());
     assert_attach_invariant(&run(
         &engine,
@@ -1799,7 +1806,13 @@ uses i: inner
 rule r: i.half + 1
 "#,
     );
-    assert_attach_invariant(&run(&engine, "outer", HashMap::new(), None, false));
+    let nested = run(&engine, "outer", IndexMap::new(), None, false);
+    assert_attach_invariant(&nested);
+    assert_eq!(
+        missing(&nested, "r"),
+        &["i.slot"],
+        "nested uses arm must pin qualified missing key"
+    );
 }
 
 #[test]
@@ -1809,7 +1822,7 @@ fn g3_missing_data_order_follows_evaluation_order() {
     let response = run(
         &engine,
         "chooser",
-        HashMap::new(),
+        IndexMap::new(),
         Some(&["result".to_string()]),
         false,
     );
@@ -1833,14 +1846,14 @@ data flag: boolean
 rule main: expensive unless flag then 0
 "#,
     );
-    let unbound = run(&engine, "demo", HashMap::new(), None, false);
+    let unbound = run(&engine, "demo", IndexMap::new(), None, false);
     assert_eq!(
         missing(&unbound, "main"),
         &["flag", "expensive"],
         "last-match unless: ask flag before gated expensive"
     );
 
-    let mut data = HashMap::new();
+    let mut data = IndexMap::new();
     data.insert("flag".to_string(), "true".into());
     let gated = run(&engine, "demo", data, None, false);
     assert!(
@@ -1868,7 +1881,7 @@ data b: boolean
 rule r: 0 unless a then x unless b then y
 "#,
     );
-    let response = run(&engine, "demo", HashMap::new(), None, false);
+    let response = run(&engine, "demo", IndexMap::new(), None, false);
     assert_eq!(
         missing(&response, "r"),
         &["b", "y", "a", "x"],
@@ -1888,7 +1901,7 @@ data alpha: number
 rule total: alpha + zebra
 "#,
     );
-    let response = run(&engine, "demo", HashMap::new(), None, false);
+    let response = run(&engine, "demo", IndexMap::new(), None, false);
     assert_eq!(
         missing(&response, "total"),
         &["alpha", "zebra"],
@@ -1905,7 +1918,7 @@ fn missing_data_folded_matches_unfolded_piecewise_order() {
     let folded_response = run(
         &folded,
         "chooser",
-        HashMap::new(),
+        IndexMap::new(),
         Some(&["result".to_string()]),
         false,
     );
@@ -1916,7 +1929,7 @@ fn missing_data_folded_matches_unfolded_piecewise_order() {
         &mut unfolded,
         r#"
 spec chooser
-data mode: text -> options "simple" "complex"
+data mode: text -> options "simple", "complex"
 data simple_input: number
 data complex_input_a: number
 data complex_input_b: number
@@ -1928,7 +1941,7 @@ rule result: veto "pick mode"
     let unfolded_response = run(
         &unfolded,
         "chooser",
-        HashMap::new(),
+        IndexMap::new(),
         Some(&["result".to_string()]),
         false,
     );
@@ -1943,8 +1956,8 @@ rule result: veto "pick mode"
 fn missing_data_interleaved_mixed_scrutinees() {
     let code = r#"
 spec chooser
-data mode: text -> options "simple" "complex"
-data priority: text -> options "low" "high"
+data mode: text -> options "simple", "complex"
+data priority: text -> options "low", "high"
 data simple_input: number
 data complex_input_a: number
 data complex_input_b: number
@@ -1959,7 +1972,7 @@ rule result: veto "pick mode"
     let unbound = run(
         &engine,
         "chooser",
-        HashMap::new(),
+        IndexMap::new(),
         Some(&["result".to_string()]),
         false,
     );
@@ -1974,7 +1987,7 @@ rule result: veto "pick mode"
         ]
     );
 
-    let mut complex = HashMap::new();
+    let mut complex = IndexMap::new();
     complex.insert("mode".to_string(), "complex".into());
     let complex_response = run(
         &engine,
@@ -1988,7 +2001,7 @@ rule result: veto "pick mode"
         &["complex_input_a", "complex_input_b"]
     );
 
-    let mut high = HashMap::new();
+    let mut high = IndexMap::new();
     high.insert("priority".to_string(), "high".into());
     let high_alone = run(
         &engine,
@@ -2003,7 +2016,7 @@ rule result: veto "pick mode"
         "priority high alone cannot settle: later complex arm still MissingData on unbound mode"
     );
 
-    let mut middle_wins = HashMap::new();
+    let mut middle_wins = IndexMap::new();
     middle_wins.insert("mode".to_string(), "simple".into());
     middle_wins.insert("priority".to_string(), "high".into());
     let middle = run(

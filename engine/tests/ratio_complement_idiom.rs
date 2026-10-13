@@ -2,14 +2,19 @@
 //! `(100% + rate) ^ year`, and operand-order correctness for ratio/number
 //! mixed arithmetic.
 
-use lemma::{DateTimeValue, Engine};
-use std::collections::HashMap;
+use indexmap::IndexMap;
+use lemma::{DateTimeValue, Engine, EvaluateDataValue};
 
 fn eval(code: &str, spec: &str, rule: &str) -> String {
-    eval_with_data(code, spec, rule, HashMap::new())
+    eval_with_data(code, spec, rule, IndexMap::new())
 }
 
-fn eval_with_data(code: &str, spec: &str, rule: &str, data: HashMap<String, String>) -> String {
+fn eval_with_data(
+    code: &str,
+    spec: &str,
+    rule: &str,
+    data: IndexMap<String, EvaluateDataValue>,
+) -> String {
     let mut engine = Engine::new();
     engine
         .load([(lemma::SourceType::Volatile, code.to_string())])
@@ -24,7 +29,7 @@ fn eval_with_data(code: &str, spec: &str, rule: &str, data: HashMap<String, Stri
         });
     let now = DateTimeValue::now();
     let resp = engine
-        .run(None, spec, Some(&now), data, None, false)
+        .evaluate(None, spec, Some(&now), data, None, false)
         .expect("eval failed");
     let result = resp
         .results
@@ -107,7 +112,7 @@ data annual_rate: ratio
 data year: number
 rule growth: (100% + annual_rate) ^ year
 rule future_value: principal * growth"#;
-    let data = HashMap::from([
+    let data = IndexMap::from([
         ("principal".into(), "1000".into()),
         ("annual_rate".into(), "10%".into()),
         ("year".into(), "3".into()),
@@ -196,7 +201,7 @@ fn number_modulo_ratio() {
     let code = r#"spec t
 data n: 10
 data r: 30%
-rule result: n % r"#;
+rule result: n mod r"#;
     assert_eq!(eval(code, "t", "result"), "0.1");
 }
 
@@ -205,7 +210,7 @@ fn ratio_modulo_number() {
     let code = r#"spec t
 data r: 30%
 data n: 10
-rule result: r % n"#;
+rule result: r mod n"#;
     assert_eq!(eval(code, "t", "result"), "30%");
 }
 
@@ -231,6 +236,6 @@ uses lemma units
 data money: measure -> unit eur: 1.00
 data price: 100 eur
 data r: 50%
-rule bad: r % price"#;
+rule bad: r mod price"#;
     expect_plan_error(code, "Cannot apply");
 }

@@ -2,7 +2,7 @@
 //!
 //! **Rules for man and machine**
 //!
-//! Consumer API: **`load`** → **`list`** → **`show`** / **`source`** → **`run`**.
+//! Consumer API: **`load`** → **`specs`** → **`show`** / **`source`** → **`evaluate`**.
 
 #[cfg(test)]
 mod tests;
@@ -35,37 +35,63 @@ pub mod mcp;
 #[cfg(target_arch = "wasm32")]
 pub mod wasm;
 
+pub use api::{
+    evaluate_data_value_from_json_value, parse_evaluate_data_object, resolve_evaluate_rules,
+    show_document,
+};
 pub use computation::{OperationResult, VetoType};
 pub use engine::{
-    resolve_effective, Engine, Errors, ListedSpec, ResolvedRepository, EMBEDDED_STDLIB_REPOSITORY,
+    format_repositories, resolve_effective, Engine, Errors, Repository, SpecDependency,
+    SpecVersion, EMBEDDED_STDLIB_REPOSITORY,
 };
 pub use error::{
     EngineError, EngineErrorSource, Error, ErrorDetails, ErrorKind, RegistryErrorKind,
     RequestErrorKind,
 };
+pub use evaluation::evaluate_data::{
+    attribute_evaluate_data_error, evaluate_data_from_entries, evaluate_data_map_from_entries,
+    evaluate_data_null_list_item, EvaluateDataValue,
+};
 pub use evaluation::explanations::{format_explanation, Cause, Explanation, ExplanationNode};
 pub use evaluation::response::{Response, RuleResult};
-pub use evaluation::run_data::{
-    parse_run_data_object, resolve_run_rules, run_data_value_from_json_value, RunDataValue,
-};
+
+#[deprecated(note = "use EvaluateDataValue")]
+pub type RunDataValue = EvaluateDataValue;
+#[deprecated(note = "use evaluate_data_value_from_json_value")]
+pub use api::evaluate_data_value_from_json_value as run_data_value_from_json_value;
+#[deprecated(note = "use parse_evaluate_data_object")]
+pub use api::parse_evaluate_data_object as parse_run_data_object;
+#[deprecated(note = "use resolve_evaluate_rules")]
+pub use api::resolve_evaluate_rules as resolve_run_rules;
+#[deprecated(note = "use attribute_evaluate_data_error")]
+pub use evaluation::evaluate_data::attribute_evaluate_data_error as attribute_run_data_error;
+#[deprecated(note = "use evaluate_data_from_entries")]
+pub use evaluation::evaluate_data::evaluate_data_from_entries as run_data_from_entries;
+#[deprecated(note = "use evaluate_data_map_from_entries")]
+pub use evaluation::evaluate_data::evaluate_data_map_from_entries as run_data_map_from_entries;
+#[deprecated(note = "use evaluate_data_null_list_item")]
+pub use evaluation::evaluate_data::evaluate_data_null_list_item as run_data_null_list_item;
 pub use formatting::{format_parse_result, format_source, format_specs};
+pub use indexmap::IndexMap;
 pub use limits::{
     ResourceLimits, MAX_DATA_NAME_LENGTH, MAX_RULE_NAME_LENGTH, MAX_SPEC_NAME_LENGTH,
 };
 pub use literals::{DateGranularity, MeasureUnit, MeasureUnits, RatioUnit, RatioUnits};
-pub use parsing::ast::DateTimeValue;
+pub use parsing::ast::{DateTimeValue, EffectiveDate};
 pub use parsing::source::SourceType;
 pub use planning::execution_plan::type_detail_lines;
 pub use planning::execution_plan::{
-    Show, ShowBranch, ShowConversionTarget, ShowData, ShowExpression, ShowRule, ShowVersion,
+    Show, ShowBranch, ShowConversionTarget, ShowData, ShowExpression, ShowRule,
 };
 pub use planning::explanation::{ConversionTraceRole, SerializedConversionTraceStep};
+pub use planning::explanation::{ExplainedRule, ExplainedRuleId};
 pub use planning::semantics::{
-    DataPath, LemmaType, LiteralValue, PathSegment, TypeSpecification, ValueKind,
+    numbered_row_origin, row_field_input_key, DataPath, LemmaType, ListKey, LiteralValue,
+    PathSegment, SpecIdentity, TypeSpecification, ValueKind,
 };
 pub use result_value::{
-    CalendarResult, RangeResult, RuleResultValue, RuleResultValueFailure, SpecResult,
-    SpecRuleResult,
+    CalendarResult, RangeResult, RowReference, RowResult, RuleResultValue, RuleResultValueFailure,
+    SpecResult, SpecRuleResult,
 };
 pub use spec_set_id::parse_spec_set_id;
 pub use stdlib::UNITS_LEMMA;
@@ -133,15 +159,25 @@ pub mod __test_support {
             }
         }
 
+        fn read_fixture_dir(dir: &Path) -> std::fs::ReadDir {
+            std::fs::read_dir(dir)
+                .unwrap_or_else(|e| panic!("BUG: read fixture dir {}: {e}", dir.display()))
+        }
+
         fn collect_fixture_files(dir: &Path, base: &Path, fixtures: &mut HashMap<String, String>) {
-            let entries = std::fs::read_dir(dir)
-                .unwrap_or_else(|e| panic!("BUG: read fixture dir {}: {e}", dir.display()));
-            for entry in entries {
-                let entry = entry
-                    .unwrap_or_else(|e| panic!("BUG: fixture dir entry in {}: {e}", dir.display()));
+            let mut stack = vec![(dir.to_path_buf(), read_fixture_dir(dir))];
+            while let Some((current_dir, entries)) = stack.last_mut() {
+                let Some(entry) = entries.next() else {
+                    stack.pop();
+                    continue;
+                };
+                let entry = entry.unwrap_or_else(|e| {
+                    panic!("BUG: fixture dir entry in {}: {e}", current_dir.display())
+                });
                 let path = entry.path();
                 if path.is_dir() {
-                    collect_fixture_files(&path, base, fixtures);
+                    let subdir = read_fixture_dir(&path);
+                    stack.push((path, subdir));
                     continue;
                 }
                 if path.extension().is_none_or(|e| e != "lemma") {
@@ -164,9 +200,10 @@ pub mod __test_support {
 
 // Tier 1 — language surface (always)
 pub use parsing::ast::{
-    try_parse_type_constraint_command, DataValue, Span, SpecRef, TimezoneValue,
+    try_parse_type_constraint_command, CommandArg, DataValue, LemmaData, ParentType, Span, SpecRef,
+    TimezoneValue, TypeConstraintCommand,
 };
-pub use parsing::lexer::{Lexer, TokenKind};
+pub use parsing::lexer::{can_be_label, Lexer, TokenKind, COMPLETION_KEYWORD_LABELS};
 pub use parsing::source::Source;
 pub use parsing::{parse, ParseResult};
 pub use quality::Recommendation;

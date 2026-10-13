@@ -1,6 +1,6 @@
+use indexmap::IndexMap;
 use lemma::DateTimeValue;
 use lemma::Engine;
-use std::collections::HashMap;
 
 #[test]
 fn parentheses_syntax_evaluates_correctly() {
@@ -25,7 +25,7 @@ rule with_spaces: not  (  x  )
 
     let now = DateTimeValue::now();
     let response = engine
-        .run(None, "test", Some(&now), HashMap::new(), None, false)
+        .evaluate(None, "test", Some(&now), IndexMap::new(), None, false)
         .unwrap();
 
     let not_x_rule = response.results.get("not_x").unwrap();
@@ -70,7 +70,7 @@ rule reject: false
 
     let now = DateTimeValue::now();
     let response = engine
-        .run(None, "test", Some(&now), HashMap::new(), None, false)
+        .evaluate(None, "test", Some(&now), IndexMap::new(), None, false)
         .unwrap();
 
     assert_eq!(
@@ -102,15 +102,15 @@ rule r: flag
     let now = DateTimeValue::now();
     for invalid in ["accept", "reject"] {
         let response = engine
-            .run(
+            .evaluate(
                 None,
                 "test",
                 Some(&now),
-                HashMap::from([("flag".to_string(), invalid.to_string())]),
+                IndexMap::from([("flag".to_string(), invalid.into())]),
                 None,
                 false,
             )
-            .expect("run must complete");
+            .expect("evaluate must complete");
         assert!(
             response.results.get("r").expect("rule r").vetoed,
             "'{invalid}' must not parse as boolean"
@@ -216,11 +216,11 @@ uses lemma units
         .expect("reordered");
     let now = DateTimeValue::now();
     let a = engine_a
-        .run(None, "s", Some(&now), HashMap::new(), None, false)
-        .expect("run a");
+        .evaluate(None, "s", Some(&now), IndexMap::new(), None, false)
+        .expect("evaluate a");
     let b = engine_b
-        .run(None, "s", Some(&now), HashMap::new(), None, false)
-        .expect("run b");
+        .evaluate(None, "s", Some(&now), IndexMap::new(), None, false)
+        .expect("evaluate b");
     assert_eq!(a.results.get("doubled").and_then(|r| r.result()), Some("4"));
     assert_eq!(
         a.results
@@ -253,11 +253,11 @@ rule r: n * 2
         .expect("oneline");
     let now = DateTimeValue::now();
     let a = engine_a
-        .run(None, "s", Some(&now), HashMap::new(), None, false)
-        .expect("run a");
+        .evaluate(None, "s", Some(&now), IndexMap::new(), None, false)
+        .expect("evaluate a");
     let b = engine_b
-        .run(None, "s", Some(&now), HashMap::new(), None, false)
-        .expect("run b");
+        .evaluate(None, "s", Some(&now), IndexMap::new(), None, false)
+        .expect("evaluate b");
     assert_eq!(
         a.results
             .get("r")

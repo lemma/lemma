@@ -1,7 +1,7 @@
 //! Show.rules is the reachable rule graph (local + depends_on_rules closure).
 
+use indexmap::IndexMap;
 use lemma::{DateTimeValue, Engine, ShowExpression, SourceType};
-use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -268,9 +268,18 @@ fn every_depends_on_rules_and_rule_leaf_is_a_show_key() {
                     "Rule leaf '{name}' missing from Show.rules"
                 );
             }
-            ShowExpression::And { left, right }
-            | ShowExpression::Arithmetic { left, right, .. }
-            | ShowExpression::Comparison { left, right, .. }
+            ShowExpression::And { operands } => {
+                for operand in operands {
+                    walk(operand, keys);
+                }
+            }
+            ShowExpression::Arithmetic { first, steps } => {
+                walk(first, keys);
+                for step in steps {
+                    walk(&step.operand, keys);
+                }
+            }
+            ShowExpression::Comparison { left, right, .. }
             | ShowExpression::RangeLiteral {
                 from: left,
                 to: right,
@@ -289,12 +298,22 @@ fn every_depends_on_rules_and_rule_leaf_is_a_show_key() {
             | ShowExpression::DateCalendar { operand, .. }
             | ShowExpression::PastFutureRange { operand, .. }
             | ShowExpression::RangeBound { operand, .. }
-            | ShowExpression::IsVeto { operand } => walk(operand, keys),
+            | ShowExpression::IsVeto { operand }
+            | ShowExpression::Member { base: operand, .. }
+            | ShowExpression::RowFieldValue { value: operand, .. } => walk(operand, keys),
+            ShowExpression::ListCommand { list, args, .. } => {
+                walk(list, keys);
+                for arg in args {
+                    walk(arg, keys);
+                }
+            }
             ShowExpression::Literal(_)
             | ShowExpression::Data { .. }
             | ShowExpression::Veto { .. }
             | ShowExpression::Now
-            | ShowExpression::SpecMember { .. } => {}
+            | ShowExpression::SpecMember { .. }
+            | ShowExpression::RowField { .. }
+            | ShowExpression::RowValue => {}
         }
     }
     let keys: std::collections::HashSet<&str> = show.rules.keys().map(String::as_str).collect();
@@ -315,7 +334,7 @@ fn every_depends_on_rules_and_rule_leaf_is_a_show_key() {
 }
 
 #[test]
-fn run_rules_accepts_reachable_imported_key() {
+fn evaluate_rules_accepts_reachable_imported_key() {
     let engine = engine(
         r#"
         spec inner
@@ -329,24 +348,24 @@ fn run_rules_accepts_reachable_imported_key() {
     );
     let now = DateTimeValue::now();
     let response = engine
-        .run(
+        .evaluate(
             None,
             "outer",
             Some(&now),
-            HashMap::new(),
+            IndexMap::new(),
             Some(&["i.helper".to_string()]),
             false,
         )
-        .expect("run i.helper");
+        .expect("evaluate i.helper");
     assert!(response.results.contains_key("i.helper"));
     assert!(!response.results.contains_key("r"));
 
     let err = engine
-        .run(
+        .evaluate(
             None,
             "outer",
             Some(&now),
-            HashMap::new(),
+            IndexMap::new(),
             Some(&["i.unused".to_string()]),
             false,
         )
@@ -369,8 +388,8 @@ fn default_run_returns_only_local_outputs() {
     let now = DateTimeValue::now();
     let show = engine.show(None, "outer", Some(&now)).expect("show");
     let response = engine
-        .run(None, "outer", Some(&now), HashMap::new(), None, false)
-        .expect("run");
+        .evaluate(None, "outer", Some(&now), IndexMap::new(), None, false)
+        .expect("evaluate");
     let local_keys: Vec<_> = show
         .rules
         .iter()
@@ -396,8 +415,8 @@ fn explain_imported_rule_name_is_input_key() {
     );
     let now = DateTimeValue::now();
     let response = engine
-        .run(None, "outer", Some(&now), HashMap::new(), None, true)
-        .expect("run explain");
+        .evaluate(None, "outer", Some(&now), IndexMap::new(), None, true)
+        .expect("evaluate explain");
     let explanation = response
         .results
         .get("r")
@@ -412,7 +431,7 @@ fn explain_imported_rule_name_is_input_key() {
         .expect("children")
         .iter()
         .filter_map(|child| {
-            if child["type"] == "rule" {
+            if child["type"] == "rule_ref" {
                 child["name"].as_str().map(str::to_string)
             } else {
                 None

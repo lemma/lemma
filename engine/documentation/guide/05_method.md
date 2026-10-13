@@ -22,7 +22,7 @@ A handbook, statute, or SOP with more than one policy: list the policies you fou
 
 Narrative (SOP prose, code with retries and logging): distill to principle + exceptions. Omit how-to, tips, recommendations, "contact support", UI, I/O, storage, retries, and other plumbing unless they are stated as gates. Do not copy every sentence, or every code branch, into a rule.
 
-Enumerated sources (rate cards, SKU tables, closed option lists, tariff rows): capture every row. Dropping a row is a silent policy change. Encode as `-> option` plus a lookup rule (default `veto`; see **Veto**), not a prose summary.
+Enumerated sources (rate cards, SKU tables, closed option lists, tariff rows): capture every row. Dropping a row is a silent policy change. Encode rows of several columns as an instance list with `-> key` and one `-> with` per row, read with `find` (see **Data**: Lists). A single closed choice mapped to one value can stay `-> option` plus a lookup rule (default `veto`; see **Veto**). Never a prose summary.
 
 Distill is not invent. If you cannot tell what the rule is, stop and ask. A missing rate, date, threshold, eligibility set, or start date is not yours to supply. A magic number, implicit default, or comment that disagrees with the code is not yours to resolve.
 
@@ -34,7 +34,7 @@ Someone can read the spec as: in principle X; unless Y, then Z. Facts of the sit
 
 Do not emit `spec` / `data` / `rule`. Do not call `check` / `add_spec` / `update_spec`. A spec in the same turn as open policy questions is a bug.
 
-`list` / `show` first. If that policy is already loaded, `update_spec` it. Do not invent spec names.
+`specs` / `show` first. If that policy is already loaded, `update_spec` it. Do not invent spec names.
 
 Stop when any of these is true:
 
@@ -130,5 +130,5 @@ See **Data**, **Rules**, **Veto**, **Anti-patterns**. In short:
 
 **After capture**
 
-User gives facts and wants a result → evaluate guide (`evaluate`, verify, stop). Do not edit the spec.
+User gives facts and wants a result, or says **ask Lemma** → evaluate guide (`evaluate`, verify, stop). Do not edit the spec.
 User changes the rule → `update_spec`, verify again.

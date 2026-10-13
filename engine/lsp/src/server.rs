@@ -7,32 +7,22 @@ use std::time::Duration;
 #[cfg(not(target_arch = "wasm32"))]
 use tokio::sync::Notify;
 use tokio::sync::RwLock;
-use tower_lsp::jsonrpc::Result;
-use tower_lsp::lsp_types::*;
-use tower_lsp::{Client, LanguageServer};
+use tower_lsp_server::jsonrpc::{Error, Result};
+use tower_lsp_server::ls_types::*;
+use tower_lsp_server::{Client, LanguageServer};
 
+use crate::completion;
 use crate::diagnostics;
 use crate::semantic_tokens;
+#[cfg(not(target_arch = "wasm32"))]
+use crate::workspace::file_path_of;
 use crate::workspace::WorkspaceModel;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::workspace_files::{DiskLemmaFile, WatchGuard, WorkspaceFiles, WorkspaceFilesError};
 use lemma::{DataValue, SpecRef};
 
 async fn publish_workspace_diagnostics(client: &Client, workspace: &mut WorkspaceModel) {
-    let file_diagnostics = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        workspace.validate_workspace()
-    })) {
-        Ok(diags) => diags,
-        Err(panic_payload) => {
-            let msg = panic_payload
-                .downcast_ref::<&str>()
-                .copied()
-                .or_else(|| panic_payload.downcast_ref::<String>().map(|s| s.as_str()))
-                .unwrap_or("unknown internal error");
-            eprintln!("engine panic during workspace validation: {}", msg);
-            return;
-        }
-    };
+    let file_diagnostics = workspace.validate_workspace();
     for file_diag in file_diagnostics {
         let lsp_diagnostics = diagnostics::errors_to_diagnostics(
             &file_diag.errors,
@@ -51,7 +41,7 @@ struct SharedState {
     #[cfg(not(target_arch = "wasm32"))]
     debounce_notify: Notify,
     /// The workspace root URI, set during `initialize`.
-    root_uri: RwLock<Option<Url>>,
+    root_uri: RwLock<Option<Uri>>,
     /// Attributes of documents currently open in the editor.
     open_attributes: RwLock<std::collections::HashSet<String>>,
     /// Keeps the CLI filesystem watch alive for the process lifetime.
@@ -106,14 +96,11 @@ impl LemmaLanguageServer {
     async fn apply_disk_files_from_host(&self, files: Vec<DiskLemmaFile>) {
         let mut disk_entries = Vec::with_capacity(files.len());
         for file in files {
-            let url = match Url::from_file_path(&file.path) {
-                Ok(url) => url,
-                Err(()) => {
-                    panic!(
-                        "BUG: disk lemma path must be absolute for URL conversion: {}",
-                        file.path.display()
-                    );
-                }
+            let Some(url) = Uri::from_file_path(&file.path) else {
+                panic!(
+                    "BUG: disk lemma path must be absolute for URL conversion: {}",
+                    file.path.display()
+                );
             };
             disk_entries.push((url, file.text));
         }
@@ -127,6 +114,8 @@ impl LemmaLanguageServer {
     }
 
     /// Load disk files for `root_path` via the injected host, then start watching.
+    ///
+    /// Without an injected host (buffer-only mode) there is no disk workspace to load.
     #[cfg(not(target_arch = "wasm32"))]
     async fn load_and_watch_workspace_disk(&self, root_path: &Path) {
         let Some(workspace_files) = self.workspace_files.as_ref() else {
@@ -156,45 +145,44 @@ impl LemmaLanguageServer {
         let workspace_files = Arc::clone(workspace_files);
         let root_for_watch = root_path.to_path_buf();
         let runtime = tokio::runtime::Handle::current();
-        let on_change: Arc<
-            dyn Fn(std::result::Result<Vec<DiskLemmaFile>, WorkspaceFilesError>) + Send + Sync,
-        > = Arc::new(move |result| match result {
-            Ok(files) => {
-                let state = Arc::clone(&state);
-                runtime.spawn(async move {
-                    let open_attributes = state.open_attributes.read().await.clone();
-                    let mut disk_entries = Vec::with_capacity(files.len());
-                    for file in files {
-                        let url = match Url::from_file_path(&file.path) {
-                            Ok(url) => url,
-                            Err(()) => {
-                                panic!(
-                                    "BUG: disk lemma path must be absolute for URL conversion: {}",
-                                    file.path.display()
-                                );
+        let (on_change, changes) = std::sync::mpsc::channel::<
+            std::result::Result<Vec<DiskLemmaFile>, WorkspaceFilesError>,
+        >();
+        let worker_runtime = runtime.clone();
+        drop(runtime.spawn_blocking(move || {
+            for result in changes {
+                worker_runtime.block_on(async {
+                    match result {
+                        Ok(files) => {
+                            let open_attributes = state.open_attributes.read().await.clone();
+                            let mut disk_entries = Vec::with_capacity(files.len());
+                            for file in files {
+                                let Some(url) = Uri::from_file_path(&file.path) else {
+                                    panic!(
+                                        "BUG: disk lemma path must be absolute for URL conversion: {}",
+                                        file.path.display()
+                                    );
+                                };
+                                disk_entries.push((url, file.text));
                             }
-                        };
-                        disk_entries.push((url, file.text));
+                            {
+                                let mut workspace = state.workspace.write().await;
+                                workspace.apply_disk_files(&disk_entries, &open_attributes);
+                            }
+                            state.debounce_notify.notify_one();
+                        }
+                        Err(error) => {
+                            client
+                                .log_message(
+                                    MessageType::ERROR,
+                                    format!("Lemma workspace disk watch reload failed: {error}"),
+                                )
+                                .await;
+                        }
                     }
-                    {
-                        let mut workspace = state.workspace.write().await;
-                        workspace.apply_disk_files(&disk_entries, &open_attributes);
-                    }
-                    state.debounce_notify.notify_one();
                 });
             }
-            Err(error) => {
-                let client = client.clone();
-                runtime.spawn(async move {
-                    client
-                        .log_message(
-                            MessageType::ERROR,
-                            format!("Lemma workspace disk watch reload failed: {error}"),
-                        )
-                        .await;
-                });
-            }
-        });
+        }));
 
         match workspace_files.watch(root_for_watch, on_change) {
             Ok(guard) => {
@@ -236,7 +224,7 @@ impl LemmaLanguageServer {
         let state = Arc::clone(&self.state);
         let client = self.client.clone();
 
-        tokio::spawn(async move {
+        let debounce = tokio::spawn(async move {
             loop {
                 state.debounce_notify.notified().await;
 
@@ -256,19 +244,46 @@ impl LemmaLanguageServer {
                 publish_workspace_diagnostics(&client, &mut workspace).await;
             }
         });
+
+        tokio::spawn(async move {
+            match debounce.await {
+                Ok(()) => unreachable!("BUG: debounce loop never returns"),
+                Err(join_error) => match join_error.try_into_panic() {
+                    Ok(_) => std::process::abort(),
+                    Err(cancelled) => {
+                        panic!("BUG: debounce task cancelled without shutdown: {cancelled}")
+                    }
+                },
+            }
+        });
     }
 }
 
-#[tower_lsp::async_trait]
 impl LanguageServer for LemmaLanguageServer {
     async fn initialize(&self, params: InitializeParams) -> Result<InitializeResult> {
-        // Store the workspace root for file discovery during initialized().
-        if let Some(root_uri) = params.root_uri {
-            let mut root = self.state.root_uri.write().await;
-            *root = Some(root_uri);
-        }
+        let workspace_root = match params.workspace_folders.as_deref() {
+            None | Some([]) => None,
+            Some([folder]) => {
+                #[cfg(not(target_arch = "wasm32"))]
+                if file_path_of(&folder.uri).is_none() {
+                    return Err(Error::invalid_params(format!(
+                        "workspace folder must be a file URI: {}",
+                        folder.uri.as_str()
+                    )));
+                }
+                Some(folder.uri.clone())
+            }
+            Some(folders) => {
+                return Err(Error::invalid_params(format!(
+                    "multi-root workspaces are not supported, got {} folders",
+                    folders.len()
+                )));
+            }
+        };
+        *self.state.root_uri.write().await = workspace_root;
 
         Ok(InitializeResult {
+            offset_encoding: None,
             capabilities: ServerCapabilities {
                 text_document_sync: Some(TextDocumentSyncCapability::Options(
                     TextDocumentSyncOptions {
@@ -288,6 +303,11 @@ impl LanguageServer for LemmaLanguageServer {
                     },
                 }),
                 hover_provider: Some(HoverProviderCapability::Simple(true)),
+                completion_provider: Some(CompletionOptions {
+                    resolve_provider: Some(false),
+                    trigger_characters: Some(vec![".".into(), ">".into(), ":".into(), " ".into()]),
+                    ..Default::default()
+                }),
                 document_formatting_provider: Some(OneOf::Left(true)),
                 semantic_tokens_provider: Some(
                     SemanticTokensServerCapabilities::SemanticTokensOptions(
@@ -311,7 +331,7 @@ impl LanguageServer for LemmaLanguageServer {
         })
     }
 
-    async fn initialized(&self, _params: InitializedParams) {
+    async fn initialized(&self, InitializedParams {}: InitializedParams) {
         // Spawn the debounce background task (native only; requires Send futures).
         #[cfg(not(target_arch = "wasm32"))]
         self.spawn_debounce_task();
@@ -324,11 +344,11 @@ impl LanguageServer for LemmaLanguageServer {
                 root.clone()
             };
             if let Some(root_uri) = root_uri {
-                if let Ok(root_path) = root_uri.to_file_path() {
-                    self.load_and_watch_workspace_disk(&root_path).await;
-                    let mut workspace = self.state.workspace.write().await;
-                    publish_workspace_diagnostics(&self.client, &mut workspace).await;
-                }
+                let root_path = file_path_of(&root_uri)
+                    .expect("BUG: workspace root validated as file URI in initialize");
+                self.load_and_watch_workspace_disk(&root_path).await;
+                let mut workspace = self.state.workspace.write().await;
+                publish_workspace_diagnostics(&self.client, &mut workspace).await;
             }
         }
 
@@ -408,7 +428,7 @@ impl LanguageServer for LemmaLanguageServer {
                 if !restored {
                     panic!(
                         "BUG: disk-backed URI missing disk text after close: {}",
-                        uri
+                        uri.as_str()
                     );
                 }
                 false
@@ -466,23 +486,22 @@ impl LanguageServer for LemmaLanguageServer {
     /// Links reflect the last `validate_workspace` pass: between a `didChange` and
     /// the debounced validation, targets may still resolve against pre-edit state.
     async fn document_link(&self, params: DocumentLinkParams) -> Result<Option<Vec<DocumentLink>>> {
-        let uri = params.text_document.uri;
-        let workspace = self.state.workspace.read().await;
-        let Some(text) = workspace.get_file_text(&uri).map(|t| t.to_string()) else {
-            return Ok(None);
-        };
-        let Some(parse_result) = workspace.parse_success_for_url(&uri) else {
-            return Ok(None);
-        };
-
         #[cfg(target_arch = "wasm32")]
         {
-            let _ = (text, parse_result);
+            drop(params);
             Ok(None)
         }
 
         #[cfg(not(target_arch = "wasm32"))]
         {
+            let uri = params.text_document.uri;
+            let workspace = self.state.workspace.read().await;
+            let Some(text) = workspace.get_file_text(&uri).map(|t| t.to_string()) else {
+                return Ok(None);
+            };
+            let Some(parse_result) = workspace.parse_success_for_url(&uri) else {
+                return Ok(None);
+            };
             let Some(root) = workspace.workspace_root().cloned() else {
                 return Ok(None);
             };
@@ -562,6 +581,22 @@ impl LanguageServer for LemmaLanguageServer {
         Ok(None)
     }
 
+    async fn completion(&self, params: CompletionParams) -> Result<Option<CompletionResponse>> {
+        let uri = params.text_document_position.text_document.uri;
+        let position = params.text_document_position.position;
+        let workspace = self.state.workspace.read().await;
+        let Some(text) = workspace.get_file_text(&uri) else {
+            return Ok(None);
+        };
+        let parse = workspace.parse_success_for_url(&uri);
+        let engine = workspace.engine();
+        let items = completion::complete(text, position, parse, Some(engine));
+        Ok(Some(CompletionResponse::List(CompletionList {
+            is_incomplete: false,
+            items,
+        })))
+    }
+
     async fn semantic_tokens_full(
         &self,
         params: SemanticTokensParams,
@@ -586,18 +621,6 @@ impl LanguageServer for LemmaLanguageServer {
     }
 }
 
-/// True when `position` falls inside `range` using LSP's half-open interval
-/// (`range.start <= position < range.end`). Position comparison is lexicographic
-/// over (line, character in UTF-16 code units), matching how `span_to_range`
-/// produces ranges.
-fn position_within_range(position: Position, range: &Range) -> bool {
-    let start_before_or_at = position.line > range.start.line
-        || (position.line == range.start.line && position.character >= range.start.character);
-    let end_after = position.line < range.end.line
-        || (position.line == range.end.line && position.character < range.end.character);
-    start_before_or_at && end_after
-}
-
 /// Return the LSP `Range` of the [`SpecRef`] span that `position` is currently
 /// inside (qualifier span or target span), or `None` if `position` is not on
 /// either span. Used by the hover handler to scope the popup to the hovered
@@ -612,8 +635,10 @@ fn spec_ref_hit_range(spec_ref: &SpecRef, text: &str, position: Position) -> Opt
         .as_ref()
         .map(|s| diagnostics::span_to_range(text, s.start, s.end));
     qualifier_range
-        .filter(|range| position_within_range(position, range))
-        .or_else(|| target_range.filter(|range| position_within_range(position, range)))
+        .filter(|range| diagnostics::position_within_range(position, range))
+        .or_else(|| {
+            target_range.filter(|range| diagnostics::position_within_range(position, range))
+        })
 }
 
 /// Return one LSP `Range` covering the full `uses` reference from the qualifier
@@ -681,8 +706,13 @@ fn build_uses_document_link(
             _ => lemma::deps::dependency_cache_file(workspace_root, qualifier_name),
         }
     };
-    let mut file_url = Url::from_file_path(&dep_path).ok()?;
-    file_url.set_fragment(Some(&format!("L{}", shown.start_line)));
+    let file_url = format!(
+        "{}#L{}",
+        Uri::from_file_path(&dep_path)?.as_str(),
+        shown.start_line
+    )
+    .parse::<Uri>()
+    .expect("BUG: file URI with line fragment must parse");
     Some(DocumentLink {
         range: full_range,
         target: Some(file_url),
@@ -744,42 +774,42 @@ mod tests {
                 character: 10,
             },
         };
-        assert!(position_within_range(
+        assert!(diagnostics::position_within_range(
             Position {
                 line: 1,
                 character: 5
             },
             &range
         ));
-        assert!(position_within_range(
+        assert!(diagnostics::position_within_range(
             Position {
                 line: 1,
                 character: 9
             },
             &range
         ));
-        assert!(!position_within_range(
+        assert!(!diagnostics::position_within_range(
             Position {
                 line: 1,
                 character: 10
             },
             &range
         ));
-        assert!(!position_within_range(
+        assert!(!diagnostics::position_within_range(
             Position {
                 line: 1,
                 character: 4
             },
             &range
         ));
-        assert!(!position_within_range(
+        assert!(!diagnostics::position_within_range(
             Position {
                 line: 0,
                 character: 7
             },
             &range
         ));
-        assert!(!position_within_range(
+        assert!(!diagnostics::position_within_range(
             Position {
                 line: 2,
                 character: 0
@@ -800,35 +830,35 @@ mod tests {
                 character: 2,
             },
         };
-        assert!(position_within_range(
+        assert!(diagnostics::position_within_range(
             Position {
                 line: 1,
                 character: 5
             },
             &range
         ));
-        assert!(position_within_range(
+        assert!(diagnostics::position_within_range(
             Position {
                 line: 2,
                 character: 100
             },
             &range
         ));
-        assert!(position_within_range(
+        assert!(diagnostics::position_within_range(
             Position {
                 line: 3,
                 character: 0
             },
             &range
         ));
-        assert!(!position_within_range(
+        assert!(!diagnostics::position_within_range(
             Position {
                 line: 3,
                 character: 2
             },
             &range
         ));
-        assert!(!position_within_range(
+        assert!(!diagnostics::position_within_range(
             Position {
                 line: 1,
                 character: 4
@@ -841,7 +871,9 @@ mod tests {
     /// each test in its own process, so pid alone is unique).
     fn test_workspace() -> std::path::PathBuf {
         let path = std::env::temp_dir().join(format!("lemma_lsp_test_{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&path);
+        if path.exists() {
+            std::fs::remove_dir_all(&path).expect("BUG: clear stale test workspace");
+        }
         std::fs::create_dir_all(&path).expect("create test workspace");
         path
     }
@@ -905,7 +937,7 @@ mod tests {
     }
 
     /// Mirrors the link-resolution body of `document_link` for the embedded stdlib path,
-    /// so we can exercise it without constructing a `tower_lsp::Client`. Asserts both the
+    /// so we can exercise it without constructing a `tower_lsp_server::Client`. Asserts both the
     /// lazy write and that we can derive a valid `file://` URL at the resolved `spec units`
     /// line number.
     #[test]
@@ -960,9 +992,9 @@ mod tests {
         );
 
         let repository_link_target =
-            Url::from_file_path(&view_path).expect("file URL for repository span");
+            Uri::from_file_path(&view_path).expect("file URL for repository span");
         assert_eq!(
-            repository_link_target.scheme(),
+            repository_link_target.scheme().as_str(),
             "file",
             "repository link must be a file:// URL",
         );
@@ -980,10 +1012,17 @@ mod tests {
             shown.start_line,
         );
 
-        let mut target_link = Url::from_file_path(&view_path).expect("file URL for target span");
-        target_link.set_fragment(Some(&format!("L{}", shown.start_line)));
+        let target_link = format!(
+            "{}#L{}",
+            Uri::from_file_path(&view_path)
+                .expect("file URL for target span")
+                .as_str(),
+            shown.start_line
+        )
+        .parse::<Uri>()
+        .expect("file URL with line fragment");
         assert_eq!(
-            target_link.fragment(),
+            target_link.fragment().map(|fragment| fragment.as_str()),
             Some(format!("L{}", shown.start_line).as_str()),
         );
 
@@ -1005,7 +1044,7 @@ mod tests {
     }
 
     /// Mirrors the markdown-building body of `hover` for a registry `uses` reference
-    /// so we can assert the popup shape without spinning up a `tower_lsp::Client`.
+    /// so we can assert the popup shape without spinning up a `tower_lsp_server::Client`.
     /// Verifies exactly one repository-level LemmaBase link and the absence of any
     /// spec-level LemmaBase link or local `lemma_deps/` link.
     #[test]
@@ -1092,7 +1131,7 @@ mod tests {
             1,
             "hover popup must contain exactly one markdown link, got: {markdown}",
         );
-        let spec_identifier = format!("{}/{}", qualifier_name, spec_ref.name);
+        let spec_identifier = format!("{} {}", qualifier_name, spec_ref.name);
         assert!(
             !markdown.contains(&spec_identifier),
             "spec-level LemmaBase link must be gone, but markdown contains `{spec_identifier}`: {markdown}",
@@ -1146,19 +1185,19 @@ mod tests {
 
         let mut workspace_model = WorkspaceModel::new();
         workspace_model.set_workspace_root(root.clone());
-        let consumer_url = Url::from_file_path(&consumer_path).expect("consumer url");
-        let dep_url = Url::from_file_path(&dep_path).expect("dep url");
+        let consumer_url = Uri::from_file_path(&consumer_path).expect("consumer url");
+        let dep_url = Uri::from_file_path(&dep_path).expect("dep url");
         workspace_model.update_file(consumer_url.clone(), consumer_source.clone());
         workspace_model.update_file(
             dep_url,
             std::fs::read_to_string(&dep_path).expect("read dep"),
         );
 
-        let _ = workspace_model.validate_workspace();
+        workspace_model.validate_workspace();
         let engine = workspace_model.engine();
         assert!(
             engine
-                .list()
+                .specs()
                 .iter()
                 .any(|r| r.repository.as_deref() == Some("@iso/countries")),
             "engine must contain @iso/countries after loading lemma_deps/@iso/countries.lemma",
@@ -1209,17 +1248,21 @@ mod tests {
         );
 
         let target = link.target.as_ref().expect("link must have a target");
-        assert_eq!(target.scheme(), "file", "target must be a file:// URL");
+        assert_eq!(
+            target.scheme().as_str(),
+            "file",
+            "target must be a file:// URL"
+        );
         let target_path = target.to_file_path().expect("target must be a file path");
         assert_eq!(
             target_path, dep_path,
             "DocumentLink must point at the on-disk lemma_deps/@iso/countries.lemma",
         );
         assert_eq!(
-            target.fragment(),
+            target.fragment().map(|fragment| fragment.as_str()),
             Some("L1"),
             "target must carry a #L<line> fragment for the resolved spec, got: {:?}",
-            target.fragment(),
+            target.fragment().map(|fragment| fragment.as_str()),
         );
     }
 }

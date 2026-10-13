@@ -1,6 +1,6 @@
 defmodule Lemma.ShowRule do
   @moduledoc """
-  One rule in `Lemma.Show.rules` (this spec's graph: local plus reachable imports).
+  One rule in `Lemma.Show.rules` (`x-lemma-rules`: this spec's graph, local plus reachable imports).
 
   `type` is the raw `LemmaType` JSON map. `path` is the import hops to this rule;
   empty means this spec. `branches` is the authored default/unless table as a list

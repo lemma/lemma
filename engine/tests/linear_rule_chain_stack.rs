@@ -1,12 +1,11 @@
 //! Linear rule-chain stack safety: tip-only eval and deep load must not abort.
 //!
-//! Rule references are evaluation boundaries; `normal_form_depth` is iterative with rule references
-//! as leaves. These tests pin success (correct values / successful load) on
-//! small stacks that previously SIGSEGV'd.
+//! Rule references are evaluation boundaries and count as leaves. These tests pin success
+//! (correct values / successful load) on small stacks that previously SIGSEGV'd.
 
-use lemma::{DateTimeValue, Engine, SourceType};
+use indexmap::IndexMap;
+use lemma::{DateTimeValue, Engine, EvaluateDataValue, SourceType};
 use rust_decimal::Decimal;
-use std::collections::HashMap;
 use std::fmt::Write;
 
 const ONE_MIB: usize = 1024 * 1024;
@@ -31,8 +30,8 @@ fn load_deep(n: usize) -> Engine {
     engine
 }
 
-fn x0_zero() -> HashMap<String, String> {
-    let mut data = HashMap::new();
+fn x0_zero() -> IndexMap<String, EvaluateDataValue> {
+    let mut data = IndexMap::new();
     data.insert("x0".to_string(), "0".into());
     data
 }
@@ -49,10 +48,10 @@ fn rule_number(response: &lemma::Response, rule: &str) -> Decimal {
         .expect("number payload")
 }
 
-fn run_tip(engine: &Engine, tip: &str, explain: bool) -> lemma::Response {
+fn evaluate_tip(engine: &Engine, tip: &str, explain: bool) -> lemma::Response {
     let now = DateTimeValue::now();
     engine
-        .run(
+        .evaluate(
             None,
             "bench_deep",
             Some(&now),
@@ -63,7 +62,7 @@ fn run_tip(engine: &Engine, tip: &str, explain: bool) -> lemma::Response {
         .unwrap_or_else(|e| panic!("run {tip} must succeed or return Error, not abort: {e:?}"))
 }
 
-fn run_tip_on_stack(
+fn evaluate_tip_on_stack(
     engine: Engine,
     tip: String,
     stack_size: usize,
@@ -71,7 +70,7 @@ fn run_tip_on_stack(
 ) -> lemma::Response {
     let handle = std::thread::Builder::new()
         .stack_size(stack_size)
-        .spawn(move || run_tip(&engine, &tip, explain))
+        .spawn(move || evaluate_tip(&engine, &tip, explain))
         .unwrap_or_else(|e| {
             panic!("spawn with stack_size={stack_size} failed (do not silently raise stack): {e}")
         });
@@ -85,7 +84,7 @@ fn run_tip_on_stack(
 #[test]
 fn deep_chain_tip_r1_on_1mib_stack_succeeds() {
     let engine = load_deep(200);
-    let response = run_tip_on_stack(engine, "r1".to_string(), ONE_MIB, false);
+    let response = evaluate_tip_on_stack(engine, "r1".to_string(), ONE_MIB, false);
     assert_eq!(rule_number(&response, "r1"), Decimal::from(1));
 }
 
@@ -93,11 +92,11 @@ fn deep_chain_tip_r1_on_1mib_stack_succeeds() {
 #[test]
 fn deep_chain_tip_r56_and_r100_on_1mib_stack_succeeds() {
     let engine = load_deep(200);
-    let response_56 = run_tip_on_stack(engine, "r56".to_string(), ONE_MIB, false);
+    let response_56 = evaluate_tip_on_stack(engine, "r56".to_string(), ONE_MIB, false);
     assert_eq!(rule_number(&response_56, "r56"), Decimal::from(56));
 
     let engine = load_deep(200);
-    let response_100 = run_tip_on_stack(engine, "r100".to_string(), ONE_MIB, false);
+    let response_100 = evaluate_tip_on_stack(engine, "r100".to_string(), ONE_MIB, false);
     assert_eq!(rule_number(&response_100, "r100"), Decimal::from(100));
 }
 
@@ -105,7 +104,7 @@ fn deep_chain_tip_r56_and_r100_on_1mib_stack_succeeds() {
 #[test]
 fn deep_chain_tip_r56_explain_on_1mib_stack_succeeds() {
     let engine = load_deep(200);
-    let response = run_tip_on_stack(engine, "r56".to_string(), ONE_MIB, true);
+    let response = evaluate_tip_on_stack(engine, "r56".to_string(), ONE_MIB, true);
     assert_eq!(rule_number(&response, "r56"), Decimal::from(56));
     let explanation = response
         .get("r56")
@@ -120,7 +119,7 @@ fn deep_chain_tip_r56_explain_on_1mib_stack_succeeds() {
 #[test]
 fn deep_chain_tip_r1000_on_default_stack_succeeds() {
     let engine = load_deep(1000);
-    let response = run_tip(&engine, "r1000", false);
+    let response = evaluate_tip(&engine, "r1000", false);
     assert_eq!(rule_number(&response, "r1000"), Decimal::from(1000));
 }
 
@@ -128,7 +127,7 @@ fn deep_chain_tip_r1000_on_default_stack_succeeds() {
 #[test]
 fn deep_chain_tip_r100_explain_on_default_stack_succeeds() {
     let engine = load_deep(200);
-    let response = run_tip(&engine, "r100", true);
+    let response = evaluate_tip(&engine, "r100", true);
     assert_eq!(rule_number(&response, "r100"), Decimal::from(100));
     let explanation = response
         .get("r100")
@@ -142,13 +141,13 @@ fn deep_chain_tip_r100_explain_on_default_stack_succeeds() {
 /// Load of a 1600-rule linear chain must not abort during planning.
 #[test]
 fn load_linear_chain_1600_succeeds() {
-    let _engine = load_deep(1600);
+    load_deep(1600);
 }
 
 /// Load of a 5000-rule linear chain must not abort during planning.
 #[test]
 fn load_linear_chain_5000_succeeds() {
-    let _engine = load_deep(5000);
+    load_deep(5000);
 }
 
 /// Load of N=5000 on a JNI-scale stack (planning walks must not recurse).
@@ -157,7 +156,7 @@ fn load_linear_chain_5000_on_1mib_stack_succeeds() {
     let handle = std::thread::Builder::new()
         .stack_size(ONE_MIB)
         .spawn(|| {
-            let _engine = load_deep(5000);
+            load_deep(5000);
         })
         .unwrap_or_else(|e| {
             panic!("spawn with stack_size={ONE_MIB} failed (do not silently raise stack): {e}")

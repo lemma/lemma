@@ -3,13 +3,13 @@ defmodule Lemma do
   Lemma rules engine for Elixir.
 
   Wraps the Lemma engine (Rust) via NIFs. Create an engine, load sources,
-  run evaluations, and show specs.
+  evaluate specs, and show them.
 
   ## Example
 
       {:ok, engine} = Lemma.new()
       :ok = Lemma.load(engine, "spec foo\\ndata x: 1\\nrule y: x + 1")
-      {:ok, response} = Lemma.run(engine, %{spec: "foo"}, %{data: %{}})
+      {:ok, response} = Lemma.evaluate(engine, %{spec: "foo"}, %{data: %{}})
       # response is a map from decoded JSON
 
   ## Engine lifecycle
@@ -22,6 +22,14 @@ defmodule Lemma do
   @type spec_name :: String.t()
   @type limits_map :: %{String.t() => pos_integer()} | nil
   @type repository :: String.t() | nil
+
+  @doc """
+  Returns the native engine version (e.g. `"0.9.12"`).
+  """
+  @spec version() :: String.t()
+  def version do
+    Lemma.Native.lemma_version()
+  end
 
   @doc """
   Creates a new engine. Optionally pass a map of resource limits; omitted keys use defaults.
@@ -122,11 +130,11 @@ defmodule Lemma do
   end
 
   @doc """
-  Lists loaded specs grouped by repository (metadata only).
+  Loaded specs grouped by repository (metadata only).
   """
-  @spec list(engine()) :: {:ok, [map()]} | {:error, term()}
-  def list(engine) do
-    case Lemma.Native.lemma_list(engine) do
+  @spec specs(engine()) :: {:ok, [map()]} | {:error, term()}
+  def specs(engine) do
+    case Lemma.Native.lemma_specs(engine) do
       {:ok, binary} -> {:ok, Jason.decode!(binary)}
       err -> err
     end
@@ -158,20 +166,29 @@ defmodule Lemma do
   end
 
   @doc """
-  Runs a spec.
+  Evaluates a spec.
 
   `target` is `%{repo: repository | nil, spec: name, effective: datetime | nil}`.
   `options` is `%{data: map, rules: [String.t()] | nil, explain: boolean}` (defaults apply when omitted).
+  `data` values are binaries, booleans, integers (any size), single-unit maps, or lists; a `nil`
+  map value is omitted. Floats, other atoms and `nil` list items return
+  `{:error, %{kind: "request"}}`.
 
   Each rule result may include `missing_data` (unbound input keys as strings). Types,
   filled literals, and suggestions are on `show/4` only — not on the evaluate response.
   """
-  @spec run(engine(), map(), map()) :: {:ok, map()} | {:error, term()}
-  def run(engine, target, options \\ %{}) do
+  @spec evaluate(engine(), map(), map()) :: {:ok, map()} | {:error, term()}
+  def evaluate(engine, target, options \\ %{}) do
     case Lemma.Native.lemma_run(engine, target, options) do
       {:ok, binary} -> {:ok, Jason.decode!(binary)}
       err -> err
     end
+  end
+
+  @deprecated "Use evaluate/3"
+  @spec run(engine(), map(), map()) :: {:ok, map()} | {:error, term()}
+  def run(engine, target, options \\ %{}) do
+    evaluate(engine, target, options)
   end
 
   @doc """

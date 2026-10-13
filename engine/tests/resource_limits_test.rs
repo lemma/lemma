@@ -1,6 +1,6 @@
+use indexmap::IndexMap;
 use lemma::DateTimeValue;
 use lemma::{Engine, Error, ResourceLimits};
-use std::time::Instant;
 
 #[test]
 fn test_source_size_limit() {
@@ -141,12 +141,12 @@ fn test_data_value_size_limit() {
         .unwrap();
 
     let large_string = "a".repeat(100);
-    let mut data = std::collections::HashMap::new();
-    data.insert("name".to_string(), large_string.to_string());
+    let mut data = IndexMap::new();
+    data.insert("name".to_string(), large_string.into());
 
     let now = DateTimeValue::now();
     let response = engine
-        .run(None, "test", Some(&now), data, None, false)
+        .evaluate(None, "test", Some(&now), data, None, false)
         .expect("oversized data value must not abort evaluation");
     let result = response.results.get("result").expect("result rule");
     assert!(
@@ -357,10 +357,9 @@ fn data_import_name_exceeding_max_length_is_rejected() {
     assert_eq!(rle, "max_data_name_length");
 }
 
-/// Scaling test: incremental rule counts to find performance cliffs.
+/// 10k rules in one spec load and evaluate under the scaled expression budget.
 #[test]
-fn performance_test_10k_rules() {
-    use std::collections::HashMap;
+fn wide_spec_10k_rules_loads_and_evaluates() {
     use std::fmt::Write;
 
     const NODES_PER_RULE: usize = 19;
@@ -377,7 +376,6 @@ fn performance_test_10k_rules() {
     let num_rules = 10000;
     let nodes = num_rules * NODES_PER_RULE;
     let code = build_wide_spec("test", num_rules);
-    let bytes = code.len();
     let limits = ResourceLimits {
         max_source_size_bytes: 100 * 1024 * 1024,
         max_expression_count: nodes + 1000,
@@ -385,33 +383,28 @@ fn performance_test_10k_rules() {
     };
     let mut engine = Engine::with_limits(limits);
 
-    let start = Instant::now();
     engine
         .load([(lemma::SourceType::Volatile, &code.to_string())])
         .unwrap_or_else(|errs| panic!("{num_rules} rules failed: {:?}", errs));
-    let elapsed = start.elapsed();
 
     let now = DateTimeValue::now();
-    let eval_start = Instant::now();
     let resp = engine
-        .run(None, "test", Some(&now), HashMap::new(), None, false)
+        .evaluate(None, "test", Some(&now), IndexMap::new(), None, false)
         .unwrap();
-    let eval_time = eval_start.elapsed();
-
-    eprintln!(
-        "{num_rules:>6} rules ({nodes:>7} nodes, {bytes:>8} bytes): parse+plan {elapsed:>8.2?}  eval {eval_time:>8.2?}  result={:?}",
-        resp.results[0].result()
-    );
+    assert_eq!(resp.results.len(), num_rules);
+    let last = resp
+        .results
+        .get(&format!("r_{}", num_rules - 1))
+        .expect("last rule result")
+        .result()
+        .expect("value")
+        .to_string();
+    assert_eq!(last, "10");
 }
 
-/// Scaling test: deep rule dependency chains (linear + binary tree).
+/// Deep rule dependency chains (linear + binary tree) evaluate to their closed-form values.
 #[test]
-fn bench_deep_chains() {
-    bench_deep_chains_body();
-}
-
-fn bench_deep_chains_body() {
-    use std::collections::HashMap;
+fn deep_chains_evaluate_to_closed_form_values() {
     use std::fmt::Write;
 
     fn build_linear_chain(num_rules: usize) -> String {
@@ -452,7 +445,6 @@ fn bench_deep_chains_body() {
     const TREE_LEAF_NODES: usize = 2;
     const TREE_INTERNAL_NODES: usize = 5;
 
-    eprintln!("--- Linear chain ---");
     for num_rules in [50, 100, 200] {
         let code = build_linear_chain(num_rules);
         let est_nodes = num_rules * LINEAR_NODES_PER_RULE;
@@ -463,7 +455,6 @@ fn bench_deep_chains_body() {
         };
         let mut engine = Engine::with_limits(limits);
 
-        let start = Instant::now();
         engine
             .load([(
                 lemma::SourceType::Path(std::sync::Arc::new(std::path::PathBuf::from(
@@ -472,22 +463,21 @@ fn bench_deep_chains_body() {
                 &code.to_string(),
             )])
             .unwrap_or_else(|errs| panic!("linear {num_rules} rules failed: {:?}", errs));
-        let elapsed = start.elapsed();
 
         let now = DateTimeValue::now();
-        let eval_start = Instant::now();
         let resp = engine
-            .run(None, "chain", Some(&now), HashMap::new(), None, false)
+            .evaluate(None, "chain", Some(&now), IndexMap::new(), None, false)
             .unwrap();
-        let eval_time = eval_start.elapsed();
-
-        eprintln!(
-            "chain {num_rules:>6} rules (~{est_nodes:>6} nodes): parse+plan {elapsed:>8.2?}  eval {eval_time:>8.2?}  result={:?}",
-            resp.results[0].result()
-        );
+        let last = resp
+            .results
+            .get(&format!("r_{}", num_rules - 1))
+            .expect("last chain rule result")
+            .result()
+            .expect("value")
+            .to_string();
+        assert_eq!(last, num_rules.to_string());
     }
 
-    eprintln!("--- Binary tree ---");
     for depth in [4, 6, 8] {
         let leaves = 1_usize << depth;
         let total_rules = (1 << (depth + 1)) - 1;
@@ -500,7 +490,6 @@ fn bench_deep_chains_body() {
         };
         let mut engine = Engine::with_limits(limits);
 
-        let start = Instant::now();
         engine
             .load([(
                 lemma::SourceType::Path(std::sync::Arc::new(std::path::PathBuf::from(
@@ -509,37 +498,34 @@ fn bench_deep_chains_body() {
                 &code.to_string(),
             )])
             .unwrap_or_else(|errs| panic!("tree depth {depth} failed: {:?}", errs));
-        let elapsed = start.elapsed();
 
         let now = DateTimeValue::now();
-        let eval_start = Instant::now();
         let resp = engine
-            .run(None, "tree", Some(&now), HashMap::new(), None, false)
+            .evaluate(None, "tree", Some(&now), IndexMap::new(), None, false)
             .unwrap();
-        let eval_time = eval_start.elapsed();
-
-        eprintln!(
-            "tree  {total_rules:>6} rules (depth {depth:>2}, ~{est_nodes:>6} nodes): parse+plan {elapsed:>8.2?}  eval {eval_time:>8.2?}  result={:?}",
-            resp.results[0].result()
-        );
+        assert_eq!(resp.results.len(), total_rules);
+        let root = resp
+            .results
+            .get(&format!("r_{depth}_0"))
+            .expect("tree root result")
+            .result()
+            .expect("value")
+            .to_string();
+        assert_eq!(root, (1_usize << depth).to_string());
     }
 }
 
-/// Long linear rule chain stays under `max_normal_form_depth` because embeds are leaves.
+/// Long linear rule chain loads under default limits: embeds are leaves, so no depth limit applies.
 #[test]
-fn linear_chain_loads_under_tight_normal_form_depth() {
+fn linear_chain_loads_without_normal_form_depth_limit() {
     let mut code = String::from("spec chain\ndata x0: number\nrule r1: x0 + 1\n");
     for i in 2..=100 {
         code.push_str(&format!("rule r{i}: r{} + 1\n", i - 1));
     }
-    let limits = ResourceLimits {
-        max_normal_form_depth: 3,
-        ..ResourceLimits::default()
-    };
-    let mut engine = Engine::with_limits(limits);
+    let mut engine = Engine::new();
     engine
         .load([(lemma::SourceType::Volatile, code)])
-        .expect("100-rule chain must load when embeds count as depth 1");
+        .expect("100-rule chain must load");
 }
 
 /// Long linear rule chain stays under `max_normalized_expression_nodes` because embeds are one cell.
@@ -559,19 +545,16 @@ fn linear_chain_loads_under_tight_normalized_node_budget() {
         .expect("100-rule chain must load when embeds count as one cell");
 }
 
-/// Nested math ops in one rule body still hit `max_normal_form_depth`.
+/// Nested math in one rule body loads without a normal-form depth limit; nesting is bounded only by `max_expression_depth`.
 #[test]
-fn nested_math_exceeding_normal_form_depth_is_rejected() {
+fn nested_math_loads_without_normal_form_depth_limit() {
     let limits = ResourceLimits {
-        max_normal_form_depth: 3,
         max_expression_depth: 20,
         ..ResourceLimits::default()
     };
     let code = "spec deep\ndata x: number\nrule r: sqrt (sqrt (sqrt (sqrt x)))";
     let mut engine = Engine::with_limits(limits);
-    let result = engine.load([(lemma::SourceType::Volatile, code.to_string())]);
-    let load_err = result.expect_err("four nested sqrt must exceed depth 3");
-    let limit_err = find_resource_limit_name(&load_err.errors)
-        .expect("expected ResourceLimitExceeded for normal form depth");
-    assert_eq!(limit_err, "max_normal_form_depth");
+    engine
+        .load([(lemma::SourceType::Volatile, code.to_string())])
+        .expect("four nested sqrt must load");
 }

@@ -1,11 +1,17 @@
+use crate::computation::rational::{NumericFailure, RationalInteger};
 use crate::engine::Context;
 use crate::literals::{MeasureUnit, MeasureUnits};
+use crate::parsing::arena::{ExprId, ExprKind, ExprRef, ExprTable, ExprTree};
 use crate::parsing::ast::{
     self as ast, CommandArg, Constraint, EffectiveDate, LemmaData, LemmaRepository, LemmaRule,
-    LemmaSpec, ParentType, PrimitiveKind, TypeConstraintCommand, Value, WithRhs,
+    LemmaSpec, ParentType, PrimitiveKind, RowCondition, TypeConstraintCommand, Value, WithRhs,
 };
 use crate::parsing::source::Source;
 use crate::planning::discovery;
+use crate::planning::execution_plan::{self, import_rule_needs, ExecutionPlan, ImportNeed};
+use crate::planning::instance_list::{
+    self, DataSource, InstanceListSource, InstanceLists, KeyedRow, SourceRow,
+};
 use crate::planning::semantics::{
     self, bound_value_kind_from_raw_suggestion, calendar_decomposition, canonicalize_signature,
     conversion_target_to_semantic, duration_decomposition, lift_range_endpoint,
@@ -13,19 +19,23 @@ use crate::planning::semantics::{
     primitive_date_arc, primitive_number_arc, primitive_ratio_arc, primitive_text_arc,
     primitive_time_arc, range_type_specification_from_endpoints, value_kind_matches_spec,
     value_to_semantic, ArithmeticComputation, BaseMeasureVector, BoundValueKind,
-    ComparisonComputation, DataDefinition, DataPath, Expression, ExpressionKind, LemmaType,
-    LiteralValue, PathSegment, RawSuggestion, ReferenceEnd, ReferenceTarget, RulePath,
-    SemanticConversionTarget, SpecIdentity, SpecInstance, SpecMemberEnd, SpecMemberTarget,
-    TypeDefiningSpec, TypeExtends, TypeSpecification, TypedLiteral, UnitTokenResolver, ValueKind,
+    ComparisonComputation, DataDefinition, DataPath, Expression, ExpressionKind, ImportOverlay,
+    LemmaType, ListKey, ListOp, ListPredKind, ListReduce, LiteralValue, PathSegment, RawSuggestion,
+    ReferenceEnd, ReferenceTarget, RowEnd, RulePath, SemanticConversionTarget, SpecIdentity,
+    SpecInstance, SpecMemberEnd, SpecMemberTarget, SpecValue, TypeDefiningSpec, TypeExtends,
+    TypeFamily, TypeSpecification, TypedLiteral, UnitTokenResolver, ValueKind,
 };
 use crate::planning::spec_value::RulePresence;
 use crate::planning::typing::{
-    comparison_type, date_predicate_type, logical_and_type, logical_not_type, math_op_type,
-    measure_range_matches_measure, past_future_range_type, piecewise_type, range_bound_result_type,
-    range_matches_measure_type, range_matches_range_measure, range_span_type, result_is_veto_type,
-    unit_conversion_type, MeasureScope,
+    comparison_type, date_predicate_type, list_command_result_type, list_has_instance_rows,
+    logical_and_type, logical_not_type, math_op_type, measure_range_matches_measure,
+    past_future_range_type, piecewise_type, range_bound_result_type, range_matches_measure_type,
+    range_matches_range_measure, range_span_type, resolve_anonymous_measure, result_is_veto_type,
+    unit_conversion_type, ListCommandResultKind, MeasureScope,
 };
-use crate::planning::unit_index::{UnitIndex, UnitMergeConflict, UnitOwner};
+use crate::planning::unit_index::{
+    PlanningOwner, PlanningUnitIndex, UnitIndex, UnitMergeConflict, UnitOwner,
+};
 use crate::Error;
 
 pub use crate::planning::typing::DecompositionMatch;
@@ -35,42 +45,34 @@ pub(crate) use crate::planning::typing::{
 };
 use ast::DataValue as ParsedDataValue;
 use indexmap::IndexMap;
+use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
-use std::cell::RefCell;
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::fmt;
 use std::sync::Arc;
 
-// Filled for the duration of one graph type-inference + type-check pass so
-// `infer_expression_type` does not re-walk a subtree that was already typed.
-// Cleared when the pass ends. Keyed by expression pointer identity (stable for
-// the life of the [`Graph`] being built).
-thread_local! {
-    static INFER_EXPRESSION_TYPE_CACHE: RefCell<Option<HashMap<usize, Arc<LemmaType>>>> =
-        const { RefCell::new(None) };
+/// Memo of inferred expression types per expression table (one table per rule).
+/// The memo does not include `computed_rule_types` or `resolved_types`, so an entry is valid
+/// only while those are unchanged. Every change to either must be followed by `clear()`:
+/// after phase 4 merges rule-target constraints into `resolved_types`, and when
+/// `recursive_rule_seed` replaces a recursive rule's undetermined placeholder with its seed.
+#[derive(Default)]
+struct InferExpressionTypeCache {
+    /// Types of a table's nodes in table order, keyed by the table's address. A table lists
+    /// children before parents, so a typed prefix always covers the operands of its next node.
+    tables: HashMap<usize, Vec<Arc<LemmaType>>>,
 }
 
-fn with_infer_expression_type_cache<T>(f: impl FnOnce() -> T) -> T {
-    INFER_EXPRESSION_TYPE_CACHE.with(|slot| {
-        if slot.borrow().is_some() {
-            panic!("BUG: infer_expression_type cache already installed (reentrant planning pass)");
-        }
-        *slot.borrow_mut() = Some(HashMap::new());
-        let result = f();
-        *slot.borrow_mut() = None;
-        result
-    })
-}
+impl InferExpressionTypeCache {
+    fn new() -> Self {
+        Self::default()
+    }
 
-fn clear_infer_expression_type_cache() {
-    INFER_EXPRESSION_TYPE_CACHE.with(|slot| {
-        let mut borrow = slot.borrow_mut();
-        let cache = borrow
-            .as_mut()
-            .expect("BUG: clear_infer_expression_type_cache without an active cache");
-        cache.clear();
-    });
+    /// Forgets every type and keeps each table's storage for the next wave.
+    fn clear(&mut self) {
+        self.tables.values_mut().for_each(Vec::clear);
+    }
 }
 
 /// Data bindings map: maps a target data name path to the binding's value and source.
@@ -102,6 +104,16 @@ pub(crate) enum BindingValue {
     },
 }
 
+impl execution_plan::ReferenceOwner for Graph<'_> {
+    fn owner_data(&self) -> &IndexMap<DataPath, DataDefinition> {
+        &self.data
+    }
+
+    fn owner_templates(&self) -> &BTreeMap<SpecIdentity, Arc<ExecutionPlan>> {
+        &self.instance_lists.templates
+    }
+}
+
 #[derive(Debug)]
 pub(crate) struct Graph<'a> {
     /// Root spec being planned (for error spec_context).
@@ -110,8 +122,11 @@ pub(crate) struct Graph<'a> {
     rules: BTreeMap<RulePath, RuleNode<'a>>,
     /// Rules whose expression conversion failed. Each has an error in `graph_errors`.
     dropped_rules: BTreeSet<RulePath>,
-    /// Rules in dependency order (topo).
+    /// Local rules in dependency order (topo).
     rule_order: Vec<RulePath>,
+    /// [`Self::rule_order`] with the named-`uses` rules locals reach, each placed
+    /// after the owner rules its site overlays bind.
+    execution_order: Vec<RulePath>,
     /// Data→data references in dependency order (topo). Targets before dependents
     /// so chained references resolve. Refs to non-reference data are unordered
     /// among themselves.
@@ -119,6 +134,120 @@ pub(crate) struct Graph<'a> {
     /// Every [`DataDefinition::Reference`] path → where its chain ends.
     /// Filled in [`Self::validate`] after data-reference cycles are rejected.
     reference_ends: IndexMap<DataPath, ReferenceEnd>,
+    /// Instances each local rule can yield (empty when not spec-valued), relative to
+    /// this spec. Filled by [`Self::link_spec_values`].
+    rule_candidates: HashMap<RulePath, Vec<SpecInstance>>,
+    instance_lists: InstanceLists,
+}
+
+/// Result of [`Graph::lookup_data`]: local graph slot or a peeled import-template field.
+pub(crate) enum DataLookup<'p> {
+    Local(&'p DataDefinition),
+    Import(&'p DataDefinition),
+}
+
+impl<'p> DataLookup<'p> {
+    pub(crate) fn definition(&self) -> &'p DataDefinition {
+        match self {
+            DataLookup::Local(definition) | DataLookup::Import(definition) => definition,
+        }
+    }
+}
+
+/// First Import hop on consumer `data` → shared template plan.
+pub(crate) fn first_import_template<'p>(
+    data: &'p IndexMap<DataPath, DataDefinition>,
+    templates: &'p BTreeMap<SpecIdentity, Arc<ExecutionPlan>>,
+    first: &PathSegment,
+) -> Option<&'p ExecutionPlan> {
+    let import_marker = DataPath::local(first.uses.clone());
+    let DataDefinition::Import { identity, .. } = data.get(&import_marker)? else {
+        return None;
+    };
+    templates.get(identity).map(Arc::as_ref)
+}
+
+/// Local `uses` marker `hop` on `data`, its identity and template plan.
+fn root_import_hop<'p>(
+    data: &'p IndexMap<DataPath, DataDefinition>,
+    templates: &'p BTreeMap<SpecIdentity, Arc<ExecutionPlan>>,
+    hop: &str,
+) -> Option<(DataPath, &'p SpecIdentity, &'p ExecutionPlan)> {
+    let import = DataPath::local(hop.to_string());
+    let DataDefinition::Import { identity, .. } = data.get(&import)? else {
+        return None;
+    };
+    let template = templates.get(identity)?;
+    Some((import, identity, template))
+}
+
+/// Self-list row field `name` (dotted through named `uses`) on the spec being planned,
+/// `rules` being its rules so far.
+fn root_row_end(
+    data: &IndexMap<DataPath, DataDefinition>,
+    templates: &BTreeMap<SpecIdentity, Arc<ExecutionPlan>>,
+    rules: &[&RulePath],
+    name: &str,
+) -> Option<RowEnd> {
+    let Some((hop, rest)) = name.split_once('.') else {
+        return instance_list::row_end_of(instance_list::RowEndView::Root(data, rules), name);
+    };
+    let (import, identity, template) = root_import_hop(data, templates, hop)?;
+    Some(
+        match instance_list::row_end_of(instance_list::RowEndView::Plan(template), rest)? {
+            RowEnd::Data(path) => {
+                RowEnd::Data(absolute_import_member_path(&import, identity, &path))
+            }
+            RowEnd::Rule(rule) => {
+                let absolute = absolute_import_member_path(
+                    &import,
+                    identity,
+                    &DataPath {
+                        segments: rule.segments,
+                        data: rule.rule,
+                    },
+                );
+                RowEnd::Rule(RulePath {
+                    segments: absolute.segments,
+                    rule: absolute.data,
+                })
+            }
+        },
+    )
+}
+
+/// Peel Import hops on a rule path using a data map + template store (no Graph borrow).
+pub(crate) fn peel_rule_from<'p>(
+    data: &'p IndexMap<DataPath, DataDefinition>,
+    templates: &'p BTreeMap<SpecIdentity, Arc<ExecutionPlan>>,
+    path: &RulePath,
+) -> Option<(&'p ExecutionPlan, &'p RulePath)> {
+    let first = path.segments.first()?;
+    let template = first_import_template(data, templates, first)?;
+    let rest = RulePath {
+        segments: path.segments[1..].to_vec(),
+        rule: path.rule.clone(),
+    };
+    template.peel_rule(&rest)
+}
+
+/// Consumer-qualified path for a template-relative overlay field under `import_path`.
+pub(crate) fn absolute_import_member_path(
+    import_path: &DataPath,
+    identity: &SpecIdentity,
+    relative: &DataPath,
+) -> DataPath {
+    let mut segments = import_path.segments.clone();
+    segments.push(PathSegment {
+        uses: import_path.data.clone(),
+        repository: identity.repository.clone(),
+        spec: identity.spec.clone(),
+    });
+    segments.extend(relative.segments.iter().cloned());
+    DataPath {
+        segments,
+        data: relative.data.clone(),
+    }
 }
 
 impl<'a> Graph<'a> {
@@ -135,9 +264,50 @@ impl<'a> Graph<'a> {
             RulePresence::Present
         } else if self.dropped_rules.contains(path) {
             RulePresence::Dropped
+        } else if peel_rule_from(&self.data, &self.instance_lists.templates, path).is_some() {
+            // Rule lives on a named `uses` template, not in this graph's rule map.
+            RulePresence::Present
+        } else if path.segments.first().is_some_and(|hop| {
+            matches!(
+                self.data.get(&DataPath::local(hop.uses.clone())),
+                Some(DataDefinition::Import { .. })
+            )
+        }) {
+            // Import hop exists but template peel failed (nested planning error
+            // already recorded). Treat as dropped so topo does not panic.
+            RulePresence::Dropped
         } else {
             RulePresence::Absent
         }
+    }
+
+    /// Whether `path` is a local rule of this graph (not merely an import-template member).
+    pub(crate) fn has_local_rule(&self, path: &RulePath) -> bool {
+        self.rules.contains_key(path)
+    }
+
+    /// Data at `path` on this graph, or after peeling leading Import hops into templates.
+    pub(crate) fn lookup_data(&self, path: &DataPath) -> Option<DataLookup<'_>> {
+        if let Some(definition) = self.data.get(path) {
+            return Some(DataLookup::Local(definition));
+        }
+        let (_, _, definition) = self.peel_data(path)?;
+        Some(DataLookup::Import(definition))
+    }
+
+    /// Peel `alias…` hops through Import markers into nested templates; `path.data` is
+    /// the final field on the last template.
+    pub(crate) fn peel_data(
+        &self,
+        path: &DataPath,
+    ) -> Option<(&ExecutionPlan, &DataPath, &DataDefinition)> {
+        let first = path.segments.first()?;
+        let template = first_import_template(&self.data, &self.instance_lists.templates, first)?;
+        let rest = DataPath {
+            segments: path.segments[1..].to_vec(),
+            data: path.data.clone(),
+        };
+        template.peel_data(&rest)
     }
 
     pub(crate) fn rules_mut(&mut self) -> &mut BTreeMap<RulePath, RuleNode<'a>> {
@@ -148,6 +318,10 @@ impl<'a> Graph<'a> {
         &self.rule_order
     }
 
+    pub(crate) fn execution_order(&self) -> &[RulePath] {
+        &self.execution_order
+    }
+
     pub(crate) fn data_reference_order(&self) -> &[DataPath] {
         &self.data_reference_order
     }
@@ -156,8 +330,16 @@ impl<'a> Graph<'a> {
         &self.reference_ends
     }
 
+    pub(crate) fn rule_candidates(&self) -> &HashMap<RulePath, Vec<SpecInstance>> {
+        &self.rule_candidates
+    }
+
     pub(crate) fn main_spec(&self) -> &LemmaSpec {
         self.main_spec
+    }
+
+    pub(crate) fn instance_lists(&self) -> &InstanceLists {
+        &self.instance_lists
     }
 
     /// Build the data map: one entry per data (Value or Import), with defaults and coercion applied.
@@ -171,15 +353,14 @@ impl<'a> Graph<'a> {
             resolved_type: Arc<LemmaType>,
             local_constraints: Option<Vec<Constraint>>,
             local_suggestion: Option<BoundValueKind>,
-            local_fill: Option<BoundValueKind>,
+            local_value: Option<BoundValueKind>,
         }
 
         let mut schema: HashMap<DataPath, Arc<LemmaType>> = HashMap::new();
         let mut declared_suggestions: HashMap<DataPath, BoundValueKind> = HashMap::new();
-        let mut declared_fills: HashMap<DataPath, BoundValueKind> = HashMap::new();
+        let mut declared_values: HashMap<DataPath, BoundValueKind> = HashMap::new();
         let mut values: HashMap<DataPath, LiteralValue> = HashMap::new();
         let mut value_sources: HashMap<DataPath, Source> = HashMap::new();
-        let mut import_targets: HashMap<DataPath, SpecIdentity> = HashMap::new();
         let mut references: HashMap<DataPath, PendingReference> = HashMap::new();
 
         for (path, rfv) in self.data.iter() {
@@ -196,38 +377,25 @@ impl<'a> Graph<'a> {
                 DataDefinition::TypeDeclaration {
                     resolved_type,
                     declared_suggestion,
-                    declared_fill,
+                    declared_value,
                     ..
                 } => {
                     schema.insert(path.clone(), Arc::clone(resolved_type));
                     if let Some(dv) = declared_suggestion {
                         declared_suggestions.insert(path.clone(), dv.clone());
                     }
-                    if let Some(dv) = declared_fill {
-                        declared_fills.insert(path.clone(), dv.clone());
+                    if let Some(dv) = declared_value {
+                        declared_values.insert(path.clone(), dv.clone());
                     }
                 }
-                DataDefinition::Import {
-                    target_name,
-                    repository,
-                    effective,
-                    ..
-                } => {
-                    import_targets.insert(
-                        path.clone(),
-                        SpecIdentity {
-                            repository: repository.clone(),
-                            spec: target_name.clone(),
-                            effective: effective.clone(),
-                        },
-                    );
-                }
+                DataDefinition::Import { .. } => {}
+                DataDefinition::InstanceList { .. } => {}
                 DataDefinition::Reference {
                     target,
                     resolved_type,
                     local_constraints,
                     local_suggestion,
-                    local_fill,
+                    local_value,
                     ..
                 } => {
                     schema.insert(path.clone(), Arc::clone(resolved_type));
@@ -238,7 +406,7 @@ impl<'a> Graph<'a> {
                             resolved_type: Arc::clone(resolved_type),
                             local_constraints: local_constraints.clone(),
                             local_suggestion: local_suggestion.clone(),
-                            local_fill: local_fill.clone(),
+                            local_value: local_value.clone(),
                         },
                     );
                 }
@@ -291,16 +459,8 @@ impl<'a> Graph<'a> {
         let mut data = IndexMap::new();
         for (path, rfv) in &self.data {
             let source = rfv.source().clone();
-            if let Some(identity) = import_targets.remove(path) {
-                data.insert(
-                    path.clone(),
-                    DataDefinition::Import {
-                        target_name: identity.spec,
-                        repository: identity.repository,
-                        effective: identity.effective,
-                        source,
-                    },
-                );
+            if let DataDefinition::InstanceList { .. } | DataDefinition::Import { .. } = rfv {
+                data.insert(path.clone(), rfv.clone());
             } else if let Some(pending) = references.remove(path) {
                 data.insert(
                     path.clone(),
@@ -309,7 +469,7 @@ impl<'a> Graph<'a> {
                         resolved_type: pending.resolved_type,
                         local_constraints: pending.local_constraints,
                         local_suggestion: pending.local_suggestion,
-                        local_fill: pending.local_fill,
+                        local_value: pending.local_value,
                         source,
                     },
                 );
@@ -331,13 +491,13 @@ impl<'a> Graph<'a> {
                     .cloned()
                     .expect("non-spec-ref data has schema (value, reference, or type-only)");
                 let declared_suggestion = declared_suggestions.remove(path);
-                let declared_fill = declared_fills.remove(path);
+                let declared_value = declared_values.remove(path);
                 data.insert(
                     path.clone(),
                     DataDefinition::TypeDeclaration {
                         resolved_type,
                         declared_suggestion,
-                        declared_fill,
+                        declared_value,
                         source,
                     },
                 );
@@ -376,6 +536,47 @@ impl<'a> Graph<'a> {
                 .map(|element_spec| Arc::new(LemmaType::primitive(element_spec)))
         }
 
+        let schema_ref = schema_type.as_ref();
+        match (&schema_ref.specifications, &lit.value) {
+            (
+                TypeSpecification::NumberRange { .. }
+                | TypeSpecification::DateRange { .. }
+                | TypeSpecification::TimeRange { .. }
+                | TypeSpecification::RatioRange { .. }
+                | TypeSpecification::MeasureRange { .. },
+                ValueKind::Range(left, right),
+            ) if !lit
+                .lemma_type
+                .specifications
+                .equal_ignoring_unit(&schema_ref.specifications) =>
+            {
+                let endpoint_schema_type =
+                    range_endpoint_schema_type(schema_ref).unwrap_or_else(|| {
+                        unreachable!("BUG: range_endpoint_schema_type missing range schema arm")
+                    });
+                let left_schema =
+                    Self::preserve_measure_binding(&endpoint_schema_type, left.lemma_type.as_ref());
+                let right_schema = Self::preserve_measure_binding(
+                    &endpoint_schema_type,
+                    right.lemma_type.as_ref(),
+                );
+                let coerced_left = Self::coerce_scalar_literal(left, &left_schema)?;
+                let coerced_right = Self::coerce_scalar_literal(right, &right_schema)?;
+                Ok(TypedLiteral {
+                    value: ValueKind::Range(Box::new(coerced_left), Box::new(coerced_right)),
+                    lemma_type: Arc::clone(schema_type),
+                })
+            }
+            _ => Self::coerce_scalar_literal(lit, schema_type),
+        }
+    }
+
+    /// [`Self::coerce_literal_to_schema_type`] for a literal that is not a range against a
+    /// range schema: a range endpoint is coerced here, never as a range.
+    fn coerce_scalar_literal(
+        lit: &TypedLiteral,
+        schema_type: &Arc<LemmaType>,
+    ) -> Result<TypedLiteral, String> {
         let schema_ref = schema_type.as_ref();
         if lit
             .lemma_type
@@ -425,31 +626,6 @@ impl<'a> Graph<'a> {
                 out.lemma_type = Self::preserve_measure_binding(schema_type, &lit.lemma_type);
                 Ok(out)
             }
-            (
-                TypeSpecification::NumberRange { .. }
-                | TypeSpecification::DateRange { .. }
-                | TypeSpecification::TimeRange { .. }
-                | TypeSpecification::RatioRange { .. }
-                | TypeSpecification::MeasureRange { .. },
-                ValueKind::Range(left, right),
-            ) => {
-                let endpoint_schema_type =
-                    range_endpoint_schema_type(schema_ref).unwrap_or_else(|| {
-                        unreachable!("BUG: range_endpoint_schema_type missing range schema arm")
-                    });
-                let left_schema =
-                    Self::preserve_measure_binding(&endpoint_schema_type, left.lemma_type.as_ref());
-                let right_schema = Self::preserve_measure_binding(
-                    &endpoint_schema_type,
-                    right.lemma_type.as_ref(),
-                );
-                let coerced_left = Self::coerce_literal_to_schema_type(left, &left_schema)?;
-                let coerced_right = Self::coerce_literal_to_schema_type(right, &right_schema)?;
-                Ok(TypedLiteral {
-                    value: ValueKind::Range(Box::new(coerced_left), Box::new(coerced_right)),
-                    lemma_type: Arc::clone(schema_type),
-                })
-            }
             (TypeSpecification::Ratio { .. }, ValueKind::Number(n)) => Ok(
                 TypedLiteral::ratio_with_type(n.clone(), Arc::clone(schema_type)),
             ),
@@ -485,17 +661,7 @@ impl<'a> Graph<'a> {
     ) -> Result<(), Vec<Error>> {
         let mut errors: Vec<Error> = Vec::new();
         let main_spec = self.main_spec;
-        let resolve_unit = |unit: &str| -> Result<String, String> {
-            let resolved = find_types_by_spec(resolved_types, main_spec).ok_or_else(|| {
-                format!(
-                    "Unknown unit '{unit}'. Declare it on a measure or ratio type, or import it with uses."
-                )
-            })?;
-            resolved
-                .unit_index
-                .resolve_with_named_types(unit, &resolved.resolved)
-                .map(|(bare, _)| bare)
-        };
+        let resolve_unit = unit_tokens_for_spec(resolved_types, main_spec);
 
         for reference_path in ordered_reference_paths {
             let (target_data_path, provisional, local_constraints, source) =
@@ -532,6 +698,7 @@ impl<'a> Graph<'a> {
             let target_type_arc = match target_entry {
                 DataDefinition::TypeDeclaration { resolved_type, .. }
                 | DataDefinition::Reference { resolved_type, .. }
+                | DataDefinition::InstanceList { resolved_type, .. }
                 | DataDefinition::Value { resolved_type, .. } => Arc::clone(resolved_type),
                 DataDefinition::Import { .. } => {
                     errors.push(reference_error(
@@ -574,7 +741,7 @@ impl<'a> Graph<'a> {
                 None => target_type_arc.as_ref().clone(),
             };
             let mut raw_suggestion: Option<RawSuggestion> = None;
-            let mut raw_fill: Option<RawSuggestion> = None;
+            let mut raw_value: Option<RawSuggestion> = None;
             if let Some(constraints) = &local_constraints {
                 let constraint_type_name = merged.name();
                 match apply_constraints_to_spec(
@@ -585,7 +752,7 @@ impl<'a> Graph<'a> {
                     &source,
                     ConstraintSuggestionSink {
                         suggestion: &mut raw_suggestion,
-                        fill: &mut raw_fill,
+                        value: &mut raw_value,
                         resolve_unit: Some(&resolve_unit),
                     },
                 ) {
@@ -612,7 +779,7 @@ impl<'a> Graph<'a> {
                     }
                 }
             };
-            let captured_fill = match raw_fill {
+            let captured_value = match raw_value {
                 None => None,
                 Some(raw) => {
                     match bound_value_kind_from_raw_suggestion(
@@ -634,7 +801,7 @@ impl<'a> Graph<'a> {
             if let Some(DataDefinition::Reference {
                 resolved_type,
                 local_suggestion,
-                local_fill,
+                local_value,
                 ..
             }) = self.data.get_mut(reference_path)
             {
@@ -642,14 +809,95 @@ impl<'a> Graph<'a> {
                 if captured_suggestion.is_some() {
                     *local_suggestion = captured_suggestion;
                 }
-                if captured_fill.is_some() {
-                    *local_fill = captured_fill;
+                if captured_value.is_some() {
+                    *local_value = captured_value;
                 }
             } else {
                 unreachable!("BUG: reference path disappeared during type resolution");
             }
         }
 
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(errors)
+        }
+    }
+
+    /// Type-check named-`uses` overlay references against the template field type.
+    /// Same kind / measure-family rules as [`Self::resolve_data_reference_types`].
+    fn validate_import_overlay_reference_types(&self) -> Result<(), Vec<Error>> {
+        let mut errors = Vec::new();
+        for (import_path, definition) in &self.data {
+            let DataDefinition::Import {
+                identity,
+                overlay,
+                source,
+                ..
+            } = definition
+            else {
+                continue;
+            };
+            if overlay.is_empty() {
+                continue;
+            }
+            let Some(template) = self.instance_lists.templates.get(identity).map(Arc::as_ref)
+            else {
+                panic!(
+                    "BUG: import '{}' has overlay but no template during overlay type check",
+                    import_path.input_key()
+                );
+            };
+            for (relative, entry) in overlay {
+                // Rule-target overlays: type-checked after rule inference (Phase 4).
+                let ImportOverlay::Reference {
+                    target: ReferenceTarget::Data(target_path),
+                    ..
+                } = entry
+                else {
+                    continue;
+                };
+                let Some((_, _, field_def)) = template.peel_data(relative) else {
+                    panic!(
+                        "BUG: overlay path '{}' missing from template during type check",
+                        relative.input_key()
+                    );
+                };
+                let Some(lhs) = field_def.resolved_type_arc() else {
+                    panic!(
+                        "BUG: overlay field '{}' must be typed",
+                        relative.input_key()
+                    );
+                };
+                if lhs.is_undetermined() {
+                    continue;
+                }
+                let absolute = absolute_import_member_path(import_path, identity, relative);
+                let target_type = self
+                    .lookup_data(target_path)
+                    .and_then(|lookup| lookup.definition().resolved_type_arc().cloned());
+                let Some(target_type) = target_type else {
+                    errors.push(reference_error(
+                        self.main_spec,
+                        source,
+                        format!(
+                            "Data reference '{}' target '{}' does not exist",
+                            absolute, target_path
+                        ),
+                    ));
+                    continue;
+                };
+                if let Some(msg) = reference_kind_mismatch_message(
+                    lhs.as_ref(),
+                    target_type.as_ref(),
+                    &absolute,
+                    target_path,
+                    "target",
+                ) {
+                    errors.push(reference_error(self.main_spec, source, msg));
+                }
+            }
+        }
         if errors.is_empty() {
             Ok(())
         } else {
@@ -673,17 +921,7 @@ impl<'a> Graph<'a> {
         let mut errors: Vec<Error> = Vec::new();
         let mut updates: Vec<RuleReferenceUpdate> = Vec::new();
         let main_spec = self.main_spec;
-        let resolve_unit = |unit: &str| -> Result<String, String> {
-            let resolved = find_types_by_spec(resolved_types, main_spec).ok_or_else(|| {
-                format!(
-                    "Unknown unit '{unit}'. Declare it on a measure or ratio type, or import it with uses."
-                )
-            })?;
-            resolved
-                .unit_index
-                .resolve_with_named_types(unit, &resolved.resolved)
-                .map(|(bare, _)| bare)
-        };
+        let resolve_unit = unit_tokens_for_spec(resolved_types, main_spec);
 
         for (reference_path, entry) in &self.data {
             let DataDefinition::Reference {
@@ -741,7 +979,7 @@ impl<'a> Graph<'a> {
             if target_type.vetoed() || target_type.is_undetermined() {
                 let mut merged = target_type.as_ref().clone();
                 let mut raw_suggestion: Option<RawSuggestion> = None;
-                let mut raw_fill: Option<RawSuggestion> = None;
+                let mut raw_value: Option<RawSuggestion> = None;
                 if let Some(constraints) = local_constraints {
                     let constraint_type_name = merged.name();
                     match apply_constraints_to_spec(
@@ -752,7 +990,7 @@ impl<'a> Graph<'a> {
                         source,
                         ConstraintSuggestionSink {
                             suggestion: &mut raw_suggestion,
-                            fill: &mut raw_fill,
+                            value: &mut raw_value,
                             resolve_unit: Some(&resolve_unit),
                         },
                     ) {
@@ -779,7 +1017,7 @@ impl<'a> Graph<'a> {
                         }
                     }
                 };
-                let captured_fill = match raw_fill {
+                let captured_value = match raw_value {
                     None => None,
                     Some(raw) => {
                         match bound_value_kind_from_raw_suggestion(
@@ -799,7 +1037,7 @@ impl<'a> Graph<'a> {
                     reference_path.clone(),
                     Arc::new(merged),
                     captured_suggestion,
-                    captured_fill,
+                    captured_value,
                 ));
                 continue;
             }
@@ -830,7 +1068,7 @@ impl<'a> Graph<'a> {
                 None => target_type.as_ref().clone(),
             };
             let mut raw_suggestion: Option<RawSuggestion> = None;
-            let mut raw_fill: Option<RawSuggestion> = None;
+            let mut raw_value: Option<RawSuggestion> = None;
             if let Some(constraints) = local_constraints {
                 let constraint_type_name = merged.name();
                 match apply_constraints_to_spec(
@@ -841,7 +1079,7 @@ impl<'a> Graph<'a> {
                     source,
                     ConstraintSuggestionSink {
                         suggestion: &mut raw_suggestion,
-                        fill: &mut raw_fill,
+                        value: &mut raw_value,
                         resolve_unit: Some(&resolve_unit),
                     },
                 ) {
@@ -868,7 +1106,7 @@ impl<'a> Graph<'a> {
                     }
                 }
             };
-            let captured_fill = match raw_fill {
+            let captured_value = match raw_value {
                 None => None,
                 Some(raw) => {
                     match bound_value_kind_from_raw_suggestion(
@@ -889,15 +1127,15 @@ impl<'a> Graph<'a> {
                 reference_path.clone(),
                 Arc::new(merged),
                 captured_suggestion,
-                captured_fill,
+                captured_value,
             ));
         }
 
-        for (path, new_type, new_suggestion, new_fill) in updates {
+        for (path, new_type, new_suggestion, new_value) in updates {
             if let Some(DataDefinition::Reference {
                 resolved_type,
                 local_suggestion,
-                local_fill,
+                local_value,
                 ..
             }) = self.data.get_mut(&path)
             {
@@ -905,13 +1143,88 @@ impl<'a> Graph<'a> {
                 if new_suggestion.is_some() {
                     *local_suggestion = new_suggestion;
                 }
-                if new_fill.is_some() {
-                    *local_fill = new_fill;
+                if new_value.is_some() {
+                    *local_value = new_value;
                 }
             } else {
                 unreachable!(
                     "BUG: rule-target reference path disappeared between collect and update phases"
                 );
+            }
+        }
+
+        // Named-`uses` overlay rule targets: same kind check once rule types exist.
+        for (import_path, definition) in &self.data {
+            let DataDefinition::Import {
+                identity,
+                overlay,
+                source,
+                ..
+            } = definition
+            else {
+                continue;
+            };
+            if overlay.is_empty() {
+                continue;
+            }
+            let Some(template) = self.instance_lists.templates.get(identity).map(Arc::as_ref)
+            else {
+                continue;
+            };
+            for (relative, entry) in overlay {
+                let ImportOverlay::Reference {
+                    target: ReferenceTarget::Rule(target_rule),
+                    ..
+                } = entry
+                else {
+                    continue;
+                };
+                let Some((_, _, field_def)) = template.peel_data(relative) else {
+                    continue;
+                };
+                let Some(lhs) = field_def.resolved_type_arc() else {
+                    continue;
+                };
+                if lhs.is_undetermined() {
+                    continue;
+                }
+                let absolute = absolute_import_member_path(import_path, identity, relative);
+                let target_type = computed_rule_types
+                    .get(target_rule)
+                    .cloned()
+                    .or_else(|| {
+                        self.rules
+                            .get(target_rule)
+                            .map(|node| Arc::clone(&node.rule_type))
+                    })
+                    .or_else(|| {
+                        peel_rule_from(&self.data, &self.instance_lists.templates, target_rule)
+                            .and_then(|(body, local)| {
+                                body.rules
+                                    .get(local)
+                                    .map(|rule| Arc::clone(&rule.rule_type))
+                            })
+                    });
+                let Some(target_type) = target_type else {
+                    errors.push(reference_error(
+                        self.main_spec,
+                        source,
+                        format!(
+                            "Data reference '{}' target rule '{}' does not exist",
+                            absolute, target_rule
+                        ),
+                    ));
+                    continue;
+                };
+                if let Some(msg) = reference_kind_mismatch_message(
+                    lhs.as_ref(),
+                    target_type.as_ref(),
+                    &absolute,
+                    target_rule,
+                    "target rule",
+                ) {
+                    errors.push(reference_error(self.main_spec, source, msg));
+                }
             }
         }
 
@@ -938,12 +1251,11 @@ impl<'a> Graph<'a> {
         let mut updates: Vec<(RulePath, RulePath)> = Vec::new();
         for (rule_path, rule_node) in &self.rules {
             let mut found: BTreeSet<RulePath> = BTreeSet::new();
-            for (cond, result) in &rule_node.branches {
-                if let Some(c) = cond {
-                    collect_rule_reference_dependencies(c, &self.reference_ends, &mut found);
-                }
-                collect_rule_reference_dependencies(result, &self.reference_ends, &mut found);
-            }
+            collect_rule_reference_dependencies(
+                &rule_node.expression,
+                &self.reference_ends,
+                &mut found,
+            );
             for target in found {
                 updates.push((rule_path.clone(), target));
             }
@@ -973,44 +1285,47 @@ impl<'a> Graph<'a> {
                     out.insert(path.clone(), ReferenceEnd::Rule(rule_path.clone()));
                 }
                 ReferenceTarget::Data(start) => {
-                    let mut cursor = start.clone();
-                    loop {
-                        match self.data.get(&cursor) {
-                            Some(
-                                DataDefinition::Value { .. }
-                                | DataDefinition::TypeDeclaration { .. },
-                            ) => {
-                                out.insert(path.clone(), ReferenceEnd::Promptable(cursor));
-                                break;
-                            }
-                            Some(DataDefinition::Import { .. }) => {
-                                out.insert(path.clone(), ReferenceEnd::Import);
-                                break;
-                            }
-                            Some(DataDefinition::Reference {
-                                target: ReferenceTarget::Rule(rule_path),
-                                ..
-                            }) => {
-                                out.insert(path.clone(), ReferenceEnd::Rule(rule_path.clone()));
-                                break;
-                            }
-                            Some(DataDefinition::Reference {
-                                target: ReferenceTarget::Data(next),
-                                ..
-                            }) => {
-                                cursor = next.clone();
-                            }
-                            None => {
-                                panic!(
-                                    "BUG: data-target reference chain from '{path}' ends at missing data '{cursor}'"
-                                );
-                            }
-                        }
+                    out.insert(path.clone(), self.expect_reference_end(start));
+                }
+            }
+        }
+        for (import_path, definition) in &self.data {
+            let DataDefinition::Import {
+                identity, overlay, ..
+            } = definition
+            else {
+                continue;
+            };
+            for (relative, entry) in overlay {
+                let absolute = absolute_import_member_path(import_path, identity, relative);
+                if out.contains_key(&absolute) {
+                    continue;
+                }
+                match entry {
+                    ImportOverlay::Reference {
+                        target: ReferenceTarget::Rule(rule_path),
+                        ..
+                    } => {
+                        out.insert(absolute, ReferenceEnd::Rule(rule_path.clone()));
                     }
+                    ImportOverlay::Reference {
+                        target: ReferenceTarget::Data(start),
+                        ..
+                    } => {
+                        out.insert(absolute, self.expect_reference_end(start));
+                    }
+                    ImportOverlay::Literal(_) => {}
                 }
             }
         }
         out
+    }
+
+    /// [`execution_plan::reference_end_on`] for a target planning already validated.
+    fn expect_reference_end(&self, start: &DataPath) -> ReferenceEnd {
+        execution_plan::reference_end_on(self, start).unwrap_or_else(|| {
+            panic!("BUG: data-target reference chain from '{start}' ends at missing data")
+        })
     }
 
     /// Compute an order in which data-target references can be evaluated at
@@ -1020,7 +1335,9 @@ impl<'a> Graph<'a> {
     /// already-evaluated target rule's result. Cycles among data-target
     /// references are reported as planning errors.
     fn compute_data_reference_order(&self) -> Result<Vec<DataPath>, Vec<Error>> {
-        let reference_paths: Vec<DataPath> = self
+        // Local DataDefinition::Reference plus named-`uses` overlay data→data edges
+        // (consumer-qualified paths). Overlay refs are not stored in `self.data`.
+        let mut reference_paths: Vec<DataPath> = self
             .data
             .iter()
             .filter_map(|(p, d)| match d {
@@ -1031,6 +1348,34 @@ impl<'a> Graph<'a> {
                 _ => None,
             })
             .collect();
+        let mut overlay_targets: BTreeMap<DataPath, DataPath> = BTreeMap::new();
+        let mut overlay_sources: BTreeMap<DataPath, Source> = BTreeMap::new();
+        for (import_path, definition) in &self.data {
+            let DataDefinition::Import {
+                identity,
+                overlay,
+                source,
+                ..
+            } = definition
+            else {
+                continue;
+            };
+            for (relative, entry) in overlay {
+                let ImportOverlay::Reference {
+                    target: ReferenceTarget::Data(target),
+                    ..
+                } = entry
+                else {
+                    continue;
+                };
+                let absolute = absolute_import_member_path(import_path, identity, relative);
+                if !reference_paths.contains(&absolute) {
+                    reference_paths.push(absolute.clone());
+                }
+                overlay_targets.insert(absolute.clone(), target.clone());
+                overlay_sources.insert(absolute, source.clone());
+            }
+        }
 
         if reference_paths.is_empty() {
             return Ok(Vec::new());
@@ -1045,19 +1390,26 @@ impl<'a> Graph<'a> {
         }
 
         for p in &reference_paths {
-            let Some(DataDefinition::Reference { target, .. }) = self.data.get(p) else {
-                unreachable!("BUG: reference entry lost between collect and walk");
+            let target_path =
+                if let Some(DataDefinition::Reference { target, .. }) = self.data.get(p) {
+                    match target {
+                        ReferenceTarget::Data(path) => Some(path.clone()),
+                        ReferenceTarget::Rule(_) => None,
+                    }
+                } else {
+                    overlay_targets.get(p).cloned()
+                };
+            let Some(target_path) = target_path else {
+                continue;
             };
-            if let ReferenceTarget::Data(target_path) = target {
-                if reference_set.contains(target_path) {
-                    *in_degree
-                        .get_mut(p)
-                        .expect("BUG: reference missing in_degree") += 1;
-                    dependents
-                        .get_mut(target_path)
-                        .expect("BUG: reference missing dependents list")
-                        .push(p.clone());
-                }
+            if reference_set.contains(&target_path) {
+                *in_degree
+                    .get_mut(p)
+                    .expect("BUG: reference missing in_degree") += 1;
+                dependents
+                    .get_mut(&target_path)
+                    .expect("BUG: reference missing dependents list")
+                    .push(p.clone());
             }
         }
 
@@ -1097,10 +1449,15 @@ impl<'a> Graph<'a> {
             let errors: Vec<Error> = cycle_members
                 .iter()
                 .filter_map(|p| {
-                    self.data.get(p).map(|entry| {
+                    let source = self
+                        .data
+                        .get(p)
+                        .map(|entry| entry.source())
+                        .or_else(|| overlay_sources.get(p));
+                    source.map(|source| {
                         reference_error(
                             self.main_spec,
-                            entry.source(),
+                            source,
                             format!("Circular data reference ({})", cycle_display),
                         )
                     })
@@ -1109,7 +1466,19 @@ impl<'a> Graph<'a> {
             return Err(errors);
         }
 
-        Ok(result)
+        // Runtime copy order only includes local DataDefinition::Reference paths.
+        Ok(result
+            .into_iter()
+            .filter(|path| {
+                matches!(
+                    self.data.get(path),
+                    Some(DataDefinition::Reference {
+                        target: ReferenceTarget::Data(_),
+                        ..
+                    })
+                )
+            })
+            .collect())
     }
 
     /// Candidate instances of spec-valued rules, field targets of `rule.field`,
@@ -1123,17 +1492,39 @@ impl<'a> Graph<'a> {
 
         let rule_paths: HashSet<RulePath> = self.rules.keys().cloned().collect();
         let dropped_rules = self.dropped_rules.clone();
-        let presence = |rule: &RulePath| {
-            if rule_paths.contains(rule) {
+        // Presence closure cannot borrow `self` while rules are mutably taken below.
+        // Clone data/templates only when named-`uses` peels can matter.
+        let import_presence = self
+            .data
+            .values()
+            .any(|definition| matches!(definition, DataDefinition::Import { .. }))
+            .then(|| (self.data.clone(), self.instance_lists.templates.clone()));
+        let presence_locals = rule_paths.clone();
+        let presence = move |rule: &RulePath| {
+            if presence_locals.contains(rule) {
                 RulePresence::Present
             } else if dropped_rules.contains(rule) {
                 RulePresence::Dropped
+            } else if let Some((data, templates)) = &import_presence {
+                if peel_rule_from(data, templates, rule).is_some() {
+                    // Named `uses` template rule — same as [`Graph::rule_presence`].
+                    RulePresence::Present
+                } else if rule.segments.first().is_some_and(|hop| {
+                    matches!(
+                        data.get(&DataPath::local(hop.uses.clone())),
+                        Some(DataDefinition::Import { .. })
+                    )
+                }) {
+                    RulePresence::Dropped
+                } else {
+                    RulePresence::Absent
+                }
             } else {
                 RulePresence::Absent
             }
         };
         loop {
-            let order = self.topological_sort()?;
+            let order = self.local_rules_in(&self.topological_sort()?);
             let mut rule_candidates: HashMap<RulePath, Vec<SpecInstance>> = HashMap::new();
             let mut member_errors = Vec::new();
             let mut grew = false;
@@ -1145,9 +1536,13 @@ impl<'a> Graph<'a> {
                     .get(&path)
                     .expect("BUG: rule from topological sort not in graph");
                 for (_, result) in &node.branches {
-                    for candidate in
-                        expression_candidates(result, &rule_candidates, &self.data, &presence)
-                    {
+                    for candidate in expression_candidates(
+                        node.expression.at(*result),
+                        &rule_candidates,
+                        &self.data,
+                        &self.instance_lists.templates,
+                        &presence,
+                    ) {
                         if !candidates.contains(&candidate) {
                             candidates.push(candidate);
                         }
@@ -1155,32 +1550,17 @@ impl<'a> Graph<'a> {
                 }
                 rule_candidates.insert(path.clone(), candidates.clone());
 
-                let mut branches = std::mem::take(
-                    &mut self
-                        .rules
-                        .get_mut(&path)
-                        .expect("BUG: rule from topological sort not in graph")
-                        .branches,
-                );
-                let mut extra_deps = BTreeSet::new();
-                let mut branch_errors = Vec::new();
-                for (condition, result) in &mut branches {
-                    if let Some(condition) = condition {
-                        let (deps, errors) =
-                            fill_spec_members(condition, &rule_candidates, &self.data, &presence);
-                        extra_deps.extend(deps);
-                        branch_errors.extend(errors);
-                    }
-                    let (deps, errors) =
-                        fill_spec_members(result, &rule_candidates, &self.data, &presence);
-                    extra_deps.extend(deps);
-                    branch_errors.extend(errors);
-                }
                 let node = self
                     .rules
                     .get_mut(&path)
                     .expect("BUG: rule from topological sort not in graph");
-                node.branches = branches;
+                let (extra_deps, branch_errors) = fill_spec_members(
+                    &mut node.expression,
+                    &rule_candidates,
+                    &self.data,
+                    &self.instance_lists.templates,
+                    &presence,
+                );
                 let before = node.depends_on_rules.len();
                 node.depends_on_rules.extend(extra_deps);
                 if !candidates.is_empty() {
@@ -1214,56 +1594,86 @@ impl<'a> Graph<'a> {
             }
             if !grew {
                 for node in self.rules.values() {
-                    for (condition, result) in &node.branches {
-                        if let Some(condition) = condition {
-                            assert_expression_candidates_linked(
-                                condition,
-                                &rule_candidates,
-                                &self.data,
-                                &presence,
-                            );
-                        }
-                        assert_expression_candidates_linked(
-                            result,
-                            &rule_candidates,
-                            &self.data,
-                            &presence,
-                        );
-                    }
+                    assert_expression_candidates_linked(
+                        node.expression.root(),
+                        &rule_candidates,
+                        &self.data,
+                        &self.instance_lists.templates,
+                        &presence,
+                    );
                 }
+                self.rule_candidates = rule_candidates;
                 return Ok(member_errors);
             }
         }
     }
 
+    fn local_rules_in(&self, execution_order: &[RulePath]) -> Vec<RulePath> {
+        execution_order
+            .iter()
+            .filter(|path| self.has_local_rule(path))
+            .cloned()
+            .collect()
+    }
+
+    /// Dependency order of local rules and the named-`uses` rules they reach. A
+    /// named-`uses` rule depends on the owner rules its site overlays bind
+    /// ([`import_rule_needs`]), so overlay cycles are circular dependencies.
     fn topological_sort(&self) -> Result<Vec<RulePath>, Vec<Error>> {
-        let mut in_degree: BTreeMap<RulePath, usize> = BTreeMap::new();
-        let mut dependents: BTreeMap<RulePath, Vec<RulePath>> = BTreeMap::new();
-        let mut queue = VecDeque::new();
-        let mut result = Vec::new();
-
-        for rule_path in self.rules.keys() {
-            in_degree.insert(rule_path.clone(), 0);
-            dependents.insert(rule_path.clone(), Vec::new());
-        }
-
-        for (rule_path, rule_node) in &self.rules {
-            for dependency in &rule_node.depends_on_rules {
-                match self.rule_presence(dependency) {
+        let mut depends_on: BTreeMap<RulePath, BTreeSet<RulePath>> = BTreeMap::new();
+        let mut pending_imports: Vec<RulePath> = Vec::new();
+        let present_dependencies = |dependencies: &mut dyn Iterator<Item = RulePath>,
+                                    pending_imports: &mut Vec<RulePath>|
+         -> BTreeSet<RulePath> {
+            let mut present = BTreeSet::new();
+            for dependency in dependencies {
+                match self.rule_presence(&dependency) {
                     RulePresence::Present => {
-                        *in_degree
-                            .get_mut(rule_path)
-                            .expect("BUG: rule missing from in_degree") += 1;
-                        dependents
-                            .get_mut(dependency)
-                            .expect("BUG: rule missing from dependents")
-                            .push(rule_path.clone());
+                        if !self.has_local_rule(&dependency) {
+                            pending_imports.push(dependency.clone());
+                        }
+                        present.insert(dependency);
                     }
                     RulePresence::Dropped => {}
                     RulePresence::Absent => {
                         panic!("BUG: rule '{dependency}' neither in graph nor dropped")
                     }
                 }
+            }
+            present
+        };
+        for (rule_path, rule_node) in &self.rules {
+            let present = present_dependencies(
+                &mut rule_node.depends_on_rules.iter().cloned(),
+                &mut pending_imports,
+            );
+            depends_on.insert(rule_path.clone(), present);
+        }
+        while let Some(import_path) = pending_imports.pop() {
+            if depends_on.contains_key(&import_path) {
+                continue;
+            }
+            let needs = import_rule_needs(self, &import_path);
+            let present = present_dependencies(
+                &mut needs.into_iter().filter_map(|need| match need {
+                    ImportNeed::Rule(rule) => Some(rule),
+                    ImportNeed::Data(_) => None,
+                }),
+                &mut pending_imports,
+            );
+            depends_on.insert(import_path, present);
+        }
+        let mut in_degree: BTreeMap<RulePath, usize> = BTreeMap::new();
+        let mut dependents: BTreeMap<RulePath, Vec<RulePath>> = BTreeMap::new();
+        let mut queue = VecDeque::new();
+        let mut result = Vec::new();
+        for (rule_path, dependencies) in &depends_on {
+            in_degree.insert(rule_path.clone(), dependencies.len());
+            for dependency in dependencies {
+                dependents
+                    .entry(dependency.clone())
+                    .or_default()
+                    .push(rule_path.clone());
             }
         }
 
@@ -1274,12 +1684,7 @@ impl<'a> Graph<'a> {
         }
 
         while let Some(rule_path) = queue.pop_front() {
-            result.push(rule_path.clone());
-
-            for dependent in dependents
-                .get(&rule_path)
-                .expect("BUG: rule missing from dependents")
-            {
+            for dependent in dependents.get(&rule_path).into_iter().flatten() {
                 let degree = in_degree
                     .get_mut(dependent)
                     .expect("BUG: rule missing from in_degree");
@@ -1288,11 +1693,11 @@ impl<'a> Graph<'a> {
                     queue.push_back(dependent.clone());
                 }
             }
+            result.push(rule_path);
         }
 
-        if result.len() != self.rules.len() {
-            let missing: Vec<RulePath> = self
-                .rules
+        if result.len() != depends_on.len() {
+            let missing: Vec<RulePath> = depends_on
                 .keys()
                 .filter(|rule| !result.contains(rule))
                 .cloned()
@@ -1310,7 +1715,7 @@ impl<'a> Graph<'a> {
             }
             let rules_involved: String = missing
                 .iter()
-                .map(|rp| rp.rule.as_str())
+                .map(RulePath::input_key)
                 .collect::<Vec<_>>()
                 .join(", ");
             let message = format!("Circular dependency (rules: {})", rules_involved);
@@ -1335,12 +1740,20 @@ impl<'a> Graph<'a> {
 
 #[derive(Debug)]
 pub(crate) struct RuleNode<'a> {
-    /// First branch has condition=None (default expression), subsequent branches are unless clauses.
-    /// Resolved expressions (Reference -> DataPath or RulePath).
-    pub branches: Vec<(Option<Expression>, Expression)>,
+    /// The whole rule in one table: the default expression when the rule has no unless
+    /// clauses, else a `Piecewise` over every branch in source order whose default arm
+    /// has condition literal `true`.
+    pub expression: Expression,
+    /// Condition and result ids in [`Self::expression`]: the default first (no condition),
+    /// then each unless clause in source order.
+    pub branches: Vec<(Option<ExprId>, ExprId)>,
     pub source: Source,
 
     pub depends_on_rules: BTreeSet<RulePath>,
+
+    /// Reads itself on rows of a self-list (`components -> sum components.unit_cost`).
+    /// Not an edge in [`Self::depends_on_rules`]: child rows are evaluated first.
+    pub recursive: bool,
 
     /// Computed type of this rule's result (populated during validation)
     /// Every rule MUST have a type (Lemma is strictly typed)
@@ -1363,13 +1776,22 @@ type ParentLookupOk = (
 /// Local resolved type entry during topo-sort: type, suggest, fill.
 type ResolvedTypeEntry = (Arc<LemmaType>, Option<RawSuggestion>, Option<RawSuggestion>);
 
-/// Unqualified import type match: alias, type, suggest, fill.
-type ImportedTypeMatch<'a> = (
-    &'a str,
-    Arc<LemmaType>,
-    Option<RawSuggestion>,
-    Option<RawSuggestion>,
-);
+fn local_type_entries(resolved_types: &ResolvedSpecTypes) -> HashMap<String, ResolvedTypeEntry> {
+    resolved_types
+        .resolved
+        .iter()
+        .map(|(name, lemma_type)| {
+            (
+                name.clone(),
+                (
+                    Arc::clone(lemma_type),
+                    resolved_types.source_defaults.get(name).cloned(),
+                    resolved_types.source_value_defaults.get(name).cloned(),
+                ),
+            )
+        })
+        .collect()
+}
 
 /// Pending rule-reference type merge: path, type, local suggest, local fill.
 type RuleReferenceUpdate = (
@@ -1386,27 +1808,280 @@ type GraphBuildOk<'a> = (
     BTreeSet<RulePath>,
     Vec<Error>,
     ResolvedTypesMap<'a>,
+    InstanceLists,
 );
 
-struct GraphBuilder<'a> {
+struct GraphBuilder<'a, 'i> {
     data: IndexMap<DataPath, DataDefinition>,
     rules: BTreeMap<RulePath, RuleNode<'a>>,
     dropped_rules: BTreeSet<RulePath>,
     context: &'a Context,
     local_types: ResolvedTypesMap<'a>,
     errors: Vec<Error>,
+    nested_template_failed: bool,
     main_spec: &'a LemmaSpec,
-    main_repository: Arc<ast::LemmaRepository>,
     limits: &'a crate::limits::ResourceLimits,
+    instance_lists: InstanceLists,
+    interners: &'i mut instance_list::PassInterners,
 }
 
 struct RuleExpressionConversion<'a, 'b> {
+    /// Nodes of every expression converted for the rule being added.
+    table: ExprTable<ExpressionKind>,
     spec: &'a LemmaSpec,
     data_map: &'b HashMap<String, &'b LemmaData>,
     segments: &'b [PathSegment],
     rule_names: &'b HashSet<&'b str>,
+    /// Rule being converted. Never a clash for a row field: it cannot read itself.
+    rule: &'b str,
     effective: &'b EffectiveDate,
     depends_on_rules: &'b mut BTreeSet<RulePath>,
+    /// Instance-list commands enclosing the expression being converted, outermost first.
+    row_scopes: Vec<RowScope>,
+    /// The rule reads itself on rows of a self-list.
+    reads_itself_on_rows: bool,
+}
+
+impl RuleExpressionConversion<'_, '_> {
+    fn push(&mut self, kind: ExpressionKind, source: Option<Source>) -> ExprId {
+        self.table.push(kind, source)
+    }
+}
+
+type AstRef<'a> = ExprRef<'a, ast::ExpressionKind>;
+
+/// Work item of a DFS over resolved and source expressions and rule references.
+enum Pending<'a> {
+    Sem(ExprRef<'a, ExpressionKind>),
+    Ast(AstRef<'a>),
+    Rule(RulePath),
+}
+
+/// Children converted in the enclosing row scope. List command arguments are not among them:
+/// they are converted in their own row scope by the list command.
+fn for_each_conversion_child(kind: &ast::ExpressionKind, mut f: impl FnMut(ExprId)) {
+    match kind {
+        ast::ExpressionKind::ListCommand { list, .. } => f(*list),
+        other => other.for_each_child(f),
+    }
+}
+
+fn one(children: &[ExprId]) -> ExprId {
+    let &[child] = children else {
+        panic!("BUG: AST expression with one operand has one converted child");
+    };
+    child
+}
+
+/// A chain's first operand and the operands of its steps, in source order.
+/// Converted `first` and steps of an AST chain whose operands converted to `children`.
+fn convert_chain_steps<Op: Clone>(
+    steps: &[ast::ChainStep<Op>],
+    children: &[ExprId],
+) -> (ExprId, Vec<ast::ChainStep<Op>>) {
+    let mut children = children.iter().copied();
+    let first = children
+        .next()
+        .expect("BUG: chain expression always has a first operand");
+    let steps: Vec<ast::ChainStep<Op>> = steps
+        .iter()
+        .zip(children.by_ref())
+        .map(|(step, operand)| ast::ChainStep {
+            op: step.op.clone(),
+            operand,
+            source_location: step.source_location.clone(),
+        })
+        .collect();
+    assert!(
+        children.next().is_none(),
+        "BUG: chain converted to more operands than steps"
+    );
+    (first, steps)
+}
+
+fn two(children: &[ExprId]) -> (ExprId, ExprId) {
+    let &[left, right] = children else {
+        panic!("BUG: AST expression with two operands has two converted children");
+    };
+    (left, right)
+}
+
+/// Work of [`GraphBuilder::convert_ast_expression`]. A node's operands are converted before
+/// the node; a list command's arguments are converted between its list operand and its
+/// build, each in the row scope the argument names.
+enum ConvertFrame<'t> {
+    /// Convert the subtree at this node.
+    Enter(AstRef<'t>),
+    /// Operands of this node are converted; their results are on the value stack.
+    Node(AstRef<'t>),
+    /// List command whose next argument is converted, or which is built when none is left.
+    List(Box<ListCommandBuild<'t>>),
+    /// Argument of a list command was converted; its result is on the value stack.
+    ListArgument(Box<ListCommandBuild<'t>>, ListArgumentSink),
+    /// Ends the row scope pushed for a list command argument.
+    PopRowScope,
+}
+
+/// Stacks of [`GraphBuilder::convert_ast_expression`], reused across one rule's expressions.
+/// Empty between calls.
+struct ConvertScratch<'t> {
+    frames: Vec<ConvertFrame<'t>>,
+    values: Vec<Option<ExprId>>,
+    children: Vec<ExprId>,
+}
+
+/// Where the converted value of a list command argument goes.
+enum ListArgumentSink {
+    /// Positional argument: an unconvertible argument makes the command unconvertible.
+    Positional,
+    /// Value of the `-> with` row field at this data path.
+    Field(DataPath),
+}
+
+/// Argument of a list command, converted in queue order.
+enum ListArgument {
+    /// Converted in the row scopes enclosing the command.
+    Enclosing(ExprId),
+    /// Converted with the rows of the list in view.
+    InRows(ExprId),
+    /// Value of the `-> with` row field `name`.
+    Field { name: String, value: ExprId },
+}
+
+/// A list command whose arguments are being converted.
+struct ListCommandBuild<'t> {
+    node: AstRef<'t>,
+    source: Source,
+    list: ExprId,
+    row_level: Option<u32>,
+    row_scope: Option<RowScope>,
+    pending: VecDeque<ListArgument>,
+    converted: Vec<ExprId>,
+    fields: Vec<(DataPath, ExprId)>,
+    failed: bool,
+}
+
+/// Arguments of `command` in the order they are converted.
+fn list_command_arguments(
+    command: &ast::ListCommand,
+    row_scope: &Option<RowScope>,
+) -> VecDeque<ListArgument> {
+    match command {
+        ast::ListCommand::Find { keys } => keys
+            .iter()
+            .map(|key| ListArgument::Enclosing(*key))
+            .collect(),
+        ast::ListCommand::First | ast::ListCommand::Last | ast::ListCommand::Count => {
+            VecDeque::new()
+        }
+        ast::ListCommand::Sum { argument }
+        | ast::ListCommand::Avg { argument }
+        | ast::ListCommand::Product { argument }
+        | ast::ListCommand::Min { argument }
+        | ast::ListCommand::Max { argument }
+        | ast::ListCommand::Sort { argument, .. } => argument
+            .iter()
+            .map(|argument| ListArgument::InRows(*argument))
+            .collect(),
+        ast::ListCommand::Any { form }
+        | ast::ListCommand::All { form }
+        | ast::ListCommand::Where { form } => match form {
+            ast::ListPredicate::Value { right, .. } => {
+                VecDeque::from([ListArgument::Enclosing(*right)])
+            }
+            ast::ListPredicate::Instance { expr } => VecDeque::from([ListArgument::InRows(*expr)]),
+        },
+        ast::ListCommand::Top { n } => VecDeque::from([ListArgument::Enclosing(*n)]),
+        ast::ListCommand::With { rows } => match (rows, row_scope) {
+            (ast::ListWithRows::Values(values), None) => values
+                .iter()
+                .map(|value| ListArgument::Enclosing(*value))
+                .collect(),
+            (ast::ListWithRows::Values(_), Some(_)) | (ast::ListWithRows::FieldPairs(_), None) => {
+                VecDeque::new()
+            }
+            (ast::ListWithRows::FieldPairs(pairs), Some(_)) => pairs
+                .iter()
+                .map(|(field, value)| ListArgument::Field {
+                    name: field.to_string(),
+                    value: *value,
+                })
+                .collect(),
+        },
+    }
+}
+
+fn optional_argument(
+    argument: &Option<ExprId>,
+    converted: &mut impl Iterator<Item = ExprId>,
+) -> Option<ExprId> {
+    argument.as_ref().map(|_| next_argument(converted))
+}
+
+fn next_argument(converted: &mut impl Iterator<Item = ExprId>) -> ExprId {
+    converted
+        .next()
+        .expect("BUG: one converted argument per list command argument")
+}
+
+fn list_predicate_op(
+    form: &ast::ListPredicate,
+    kind: ListPredKind,
+    converted: &mut impl Iterator<Item = ExprId>,
+) -> ListOp {
+    match form {
+        ast::ListPredicate::Value { op, .. } => ListOp::Predicate {
+            kind,
+            op: op.clone(),
+            right: next_argument(converted),
+        },
+        ast::ListPredicate::Instance { .. } => ListOp::InstancePredicate {
+            kind,
+            expr: next_argument(converted),
+        },
+    }
+}
+
+/// Spec being converted and its `uses` path in the graph.
+struct SourceScope<'s> {
+    spec: &'s LemmaSpec,
+    segments: &'s [PathSegment],
+}
+
+/// Outcome of reading a name as a row field inside an instance-list command.
+enum RowFieldLookup {
+    Field(ExpressionKind),
+    NotARowField,
+    /// An error was pushed.
+    Failed,
+}
+
+/// Rows of one instance-list command: argument names may read their fields.
+#[derive(Clone)]
+struct RowScope {
+    /// Path of the list operand (`menu`, `card`+`menu`) when it is a plain reference.
+    list_path: Option<Vec<String>>,
+    identity: SpecIdentity,
+    template: RowTemplate,
+    level: u32,
+}
+
+/// Where rows of an instance list read their fields while the consumer is planned.
+#[derive(Clone)]
+enum RowTemplate {
+    /// Row spec planned on its own.
+    Plan(Arc<ExecutionPlan>),
+    /// Self-list: rows are the spec being planned.
+    Root,
+}
+
+/// A spec whose imports are being resolved into `local_types`. It is finished after its
+/// last import.
+struct SpecTypesFrame<'a> {
+    spec: &'a LemmaSpec,
+    repository: Arc<LemmaRepository>,
+    effective: EffectiveDate,
+    next_data: usize,
 }
 
 fn reference_error(main_spec: &LemmaSpec, source: &Source, message: String) -> Error {
@@ -1498,11 +2173,15 @@ fn reference_kind_mismatch_message<P: fmt::Display>(
 
 /// Type name shown in `-> suggest` constraint errors (the declared type, not the data slot).
 fn constraint_application_type_name(parent: &ParentType, data_name: &str) -> String {
-    match parent {
-        ParentType::Custom { name } => name.clone(),
-        ParentType::Qualified { inner, .. } => constraint_application_type_name(inner, data_name),
-        ParentType::Ranged { inner, .. } => constraint_application_type_name(inner, data_name),
-        ParentType::Primitive { .. } => data_name.to_string(),
+    let mut current = parent;
+    loop {
+        match current {
+            ParentType::Custom { name } => return name.clone(),
+            ParentType::Qualified { inner, .. }
+            | ParentType::Ranged { inner, .. }
+            | ParentType::List { inner, .. } => current = inner.as_ref(),
+            ParentType::Primitive { .. } => return data_name.to_string(),
+        }
     }
 }
 
@@ -1523,7 +2202,7 @@ fn should_defer_ranged_constraints(parent: &ParentType) -> bool {
 /// application logic stays in one place.
 struct ConstraintSuggestionSink<'a> {
     suggestion: &'a mut Option<RawSuggestion>,
-    fill: &'a mut Option<RawSuggestion>,
+    value: &'a mut Option<RawSuggestion>,
     resolve_unit: Option<&'a UnitTokenResolver<'a>>,
 }
 
@@ -1541,15 +2220,15 @@ fn apply_constraints_to_spec(
     let mut seen_singleton_commands: std::collections::HashSet<TypeConstraintCommand> =
         Default::default();
     let mut has_suggest = false;
-    let mut has_fill = false;
+    let mut has_value = false;
     for row in constraints.iter() {
         let command = row.command;
         let args = &row.args;
         if command == TypeConstraintCommand::Suggest {
             has_suggest = true;
         }
-        if command == TypeConstraintCommand::Fill {
-            has_fill = true;
+        if command == TypeConstraintCommand::With {
+            has_value = true;
         }
         if command == TypeConstraintCommand::Unit {
             if let Some(CommandArg::Label(name)) = args.first() {
@@ -1573,8 +2252,10 @@ fn apply_constraints_to_spec(
                 | TypeConstraintCommand::Maximum
                 | TypeConstraintCommand::Decimals
                 | TypeConstraintCommand::Suggest
-                | TypeConstraintCommand::Fill
-        ) && !seen_singleton_commands.insert(command)
+                | TypeConstraintCommand::With
+        ) && !(command == TypeConstraintCommand::With
+            && matches!(specs, TypeSpecification::List { .. }))
+            && !seen_singleton_commands.insert(command)
         {
             errors.push(Error::validation_with_context(
                 format!(
@@ -1587,9 +2268,9 @@ fn apply_constraints_to_spec(
             ));
         }
     }
-    if has_suggest && has_fill {
+    if has_suggest && has_value {
         errors.push(Error::validation_with_context(
-            "Cannot use both 'fill' and 'suggest' on the same data declaration".to_string(),
+            "Cannot use both 'with' and 'suggest' on the same data declaration".to_string(),
             Some(source.clone()),
             None::<String>,
             Some(spec),
@@ -1602,7 +2283,7 @@ fn apply_constraints_to_spec(
 
     let ConstraintSuggestionSink {
         suggestion: declared_suggestion,
-        fill: declared_fill,
+        value: declared_value,
         resolve_unit,
     } = sink;
 
@@ -1610,20 +2291,20 @@ fn apply_constraints_to_spec(
                          command: TypeConstraintCommand,
                          args: &[CommandArg],
                          declared_suggestion: &mut Option<RawSuggestion>,
-                         declared_fill: &mut Option<RawSuggestion>| {
+                         declared_value: &mut Option<RawSuggestion>| {
         let mut suggestion_before = declared_suggestion.clone();
-        let mut fill_before = declared_fill.clone();
+        let mut value_before = declared_value.clone();
         match specs.apply_constraint(
             type_name,
             command,
             args,
             &mut suggestion_before,
-            &mut fill_before,
+            &mut value_before,
             resolve_unit,
         ) {
             Ok(()) => {
                 *declared_suggestion = suggestion_before;
-                *declared_fill = fill_before;
+                *declared_value = value_before;
             }
             Err(e) => {
                 // Commands fail before writing; specs is unchanged. No success-path clone.
@@ -1650,7 +2331,7 @@ fn apply_constraints_to_spec(
                 command,
                 args,
                 declared_suggestion,
-                declared_fill,
+                declared_value,
             );
         }
     }
@@ -1666,7 +2347,7 @@ fn apply_constraints_to_spec(
                 command,
                 args,
                 declared_suggestion,
-                declared_fill,
+                declared_value,
             );
         }
     }
@@ -1676,35 +2357,11 @@ fn apply_constraints_to_spec(
     Ok(specs)
 }
 
-/// Whether `expr` and every nested sub-expression carry a `source_location`.
-///
-/// ASTs produced by the parser always carry locations; this guards the
-/// programmatic-AST boundary (external consumers constructing ASTs directly).
+/// Every node reachable from the root carries a `source_location`.
 fn expression_has_source_locations(expr: &ast::Expression) -> bool {
-    if expr.source_location.is_none() {
-        return false;
-    }
-    match &expr.kind {
-        ast::ExpressionKind::Literal(_)
-        | ast::ExpressionKind::Reference(_)
-        | ast::ExpressionKind::Now
-        | ast::ExpressionKind::Veto(_) => true,
-        ast::ExpressionKind::DateRelative(_, e)
-        | ast::ExpressionKind::DateCalendar(_, _, e)
-        | ast::ExpressionKind::PastFutureRange(_, e)
-        | ast::ExpressionKind::UnitConversion(e, _)
-        | ast::ExpressionKind::LogicalNegation(e, _)
-        | ast::ExpressionKind::MathematicalComputation(_, e)
-        | ast::ExpressionKind::RangeBound(_, e)
-        | ast::ExpressionKind::ResultIsVeto(e) => expression_has_source_locations(e),
-        ast::ExpressionKind::RangeLiteral(l, r)
-        | ast::ExpressionKind::RangeContainment(l, r)
-        | ast::ExpressionKind::LogicalAnd(l, r)
-        | ast::ExpressionKind::Arithmetic(l, _, r)
-        | ast::ExpressionKind::Comparison(l, _, r) => {
-            expression_has_source_locations(l) && expression_has_source_locations(r)
-        }
-    }
+    expr.table
+        .nodes()
+        .all(|node| node.source_location.is_some())
 }
 
 /// Boundary validation for programmatically constructed ASTs: every expression
@@ -1759,6 +2416,7 @@ impl<'a> Graph<'a> {
         ordered_dependencies: &[discovery::DependencySpec<'a>],
         effective: &EffectiveDate,
         limits: &'a crate::limits::ResourceLimits,
+        interners: &mut instance_list::PassInterners,
     ) -> Result<(Graph<'a>, ResolvedSpecTypes), Vec<Error>> {
         let boundary_errors = validate_ast_source_locations(ordered_dependencies);
         if !boundary_errors.is_empty() {
@@ -1772,23 +2430,34 @@ impl<'a> Graph<'a> {
             errors.extend(type_resolver.register_all(&node.repository, node.spec));
         }
 
-        let (data, rules, dropped_rules, graph_errors, local_types) = GraphBuilder::build(
-            context,
-            repository,
-            main_spec,
-            effective,
-            &type_resolver,
-            limits,
-        )?;
+        let (data, rules, dropped_rules, graph_errors, local_types, instance_lists) =
+            match GraphBuilder::build(
+                context,
+                repository,
+                main_spec,
+                effective,
+                &type_resolver,
+                limits,
+                interners,
+            ) {
+                Ok(built) => built,
+                Err(build_errors) => {
+                    errors.extend(build_errors);
+                    return Err(errors);
+                }
+            };
 
         let mut graph = Graph {
             data,
             rules,
             dropped_rules,
             rule_order: Vec::new(),
+            execution_order: Vec::new(),
             data_reference_order: Vec::new(),
             reference_ends: IndexMap::new(),
+            rule_candidates: HashMap::new(),
             main_spec,
+            instance_lists,
         };
 
         let validation_errors = match graph.validate(&local_types) {
@@ -1844,6 +2513,9 @@ impl<'a> Graph<'a> {
         {
             errors.extend(reference_errors);
         }
+        if let Err(overlay_errors) = self.validate_import_overlay_reference_types() {
+            errors.extend(overlay_errors);
+        }
 
         // Resolve every Reference chain end once. Cycles were just rejected.
         // Used for rule-dep edges, normalize embeds, show promptability, eval guard.
@@ -1864,13 +2536,14 @@ impl<'a> Graph<'a> {
             }
         }
 
-        let rule_order = match self.topological_sort() {
+        let execution_order = match self.topological_sort() {
             Ok(order) => order,
             Err(circular_errors) => {
                 errors.extend(circular_errors);
                 return Err(errors);
             }
         };
+        let rule_order = self.local_rules_in(&execution_order);
 
         // Continue to type inference and type checking even when structural
         // checks found errors.  This lets us report structural errors (e.g.
@@ -1880,17 +2553,21 @@ impl<'a> Graph<'a> {
         // Phase 3–5 share one infer cache for walk reuse within a phase. Phase 4
         // mutates rule-target `resolved_type` (constraint merge), so the cache is
         // cleared before phase 5 re-infers against the merged types.
-        let (inferred_types, rule_reference_errors, type_errors) =
-            with_infer_expression_type_cache(|| {
-                let inferred_types = infer_rule_types(self, &rule_order, resolved_types);
-                let rule_reference_errors =
-                    self.resolve_rule_reference_types(&inferred_types, resolved_types);
-                clear_infer_expression_type_cache();
-                let type_errors =
-                    check_rule_types(self, &rule_order, &inferred_types, resolved_types);
-                (inferred_types, rule_reference_errors, type_errors)
-            });
+        let mut infer_cache = InferExpressionTypeCache::new();
+        let (inferred_types, seed_errors) =
+            infer_rule_types(self, &rule_order, resolved_types, &mut infer_cache);
+        let rule_reference_errors =
+            self.resolve_rule_reference_types(&inferred_types, resolved_types);
+        infer_cache.clear();
+        let type_errors = check_rule_types(
+            self,
+            &rule_order,
+            &inferred_types,
+            resolved_types,
+            &mut infer_cache,
+        );
 
+        errors.extend(seed_errors);
         if let Err(errs) = rule_reference_errors {
             errors.extend(errs);
         }
@@ -1905,6 +2582,7 @@ impl<'a> Graph<'a> {
         // Phase 6: Apply (only on full success)
         apply_inferred_types(self, inferred_types);
         self.rule_order = rule_order;
+        self.execution_order = execution_order;
         self.data_reference_order = reference_order;
         Ok(())
     }
@@ -1966,10 +2644,10 @@ fn import_spec_ref_for_clash<'a>(
         };
         return std::borrow::Cow::Borrowed(spec_ref);
     }
-    let DataDefinition::Import { target_name, .. } = existing else {
+    let DataDefinition::Import { identity, .. } = existing else {
         unreachable!("BUG: uses vs data clash but no Import side with recoverable spec_ref");
     };
-    std::borrow::Cow::Owned(ast::SpecRef::same_repository(target_name.clone()))
+    std::borrow::Cow::Owned(ast::SpecRef::same_repository(identity.spec.clone()))
 }
 
 fn uses_vs_data_duplicate_message(
@@ -2001,7 +2679,7 @@ fn uses_vs_data_duplicate_message(
     (message, Some(suggestion))
 }
 
-impl<'a> GraphBuilder<'a> {
+impl<'a, 'i> GraphBuilder<'a, 'i> {
     fn build(
         context: &'a Context,
         repository: &Arc<LemmaRepository>,
@@ -2009,6 +2687,7 @@ impl<'a> GraphBuilder<'a> {
         effective: &EffectiveDate,
         type_resolver: &TypeResolver<'a>,
         limits: &'a crate::limits::ResourceLimits,
+        interners: &'i mut instance_list::PassInterners,
     ) -> Result<GraphBuildOk<'a>, Vec<Error>> {
         let mut builder = GraphBuilder {
             data: IndexMap::new(),
@@ -2017,9 +2696,11 @@ impl<'a> GraphBuilder<'a> {
             context,
             local_types: Vec::new(),
             errors: Vec::new(),
+            nested_template_failed: false,
             main_spec,
-            main_repository: Arc::clone(repository),
             limits,
+            instance_lists: InstanceLists::new(SpecIdentity::of(repository, main_spec)),
+            interners,
         };
 
         builder.build_spec(
@@ -2031,12 +2712,17 @@ impl<'a> GraphBuilder<'a> {
             type_resolver,
         )?;
 
+        if builder.nested_template_failed {
+            return Err(builder.errors);
+        }
+
         Ok((
             builder.data,
             builder.rules,
             builder.dropped_rules,
             builder.errors,
             builder.local_types,
+            builder.instance_lists,
         ))
     }
 
@@ -2349,6 +3035,20 @@ impl<'a> GraphBuilder<'a> {
 
                     let spec_ref = match &seg_data.value {
                         ParsedDataValue::Import { spec_ref, .. } => spec_ref,
+                        ParsedDataValue::ImportList { .. } => {
+                            self.errors.push(Error::validation_with_context(
+                                format!(
+                                    "binding `{path}` replaces instance list `{segment}`; supply the whole list through evaluation data",
+                                    path = binding_reference,
+                                ),
+                                Some(binding.source_location.clone()),
+                                None::<String>,
+                                Some(self.main_spec),
+                                None,
+                            ));
+                            binding_resolved = false;
+                            break;
+                        }
                         _ => {
                             self.errors.push(Error::validation_with_context(
                                 format!(
@@ -2368,9 +3068,7 @@ impl<'a> GraphBuilder<'a> {
                         }
                     };
 
-                    let walk_repository =
-                        discovery::lookup_owning_repository(self.context, walk_spec)
-                            .unwrap_or_else(|| Arc::clone(&self.main_repository));
+                    let walk_repository = discovery::owning_repository(self.context, walk_spec);
                     walk_spec = match self.resolve_spec_ref(
                         spec_ref,
                         effective,
@@ -2400,6 +3098,25 @@ impl<'a> GraphBuilder<'a> {
                         walk_spec,
                         &binding_reference.name,
                     );
+                    continue;
+                }
+
+                if walk_spec.data.iter().any(|field| {
+                    field.reference.segments.is_empty()
+                        && field.reference.name == binding_reference.name
+                        && matches!(&field.value, ParsedDataValue::ImportList { .. })
+                }) {
+                    self.errors.push(Error::validation_with_context(
+                        format!(
+                            "binding `{path}` replaces instance list `{name}`; supply the whole list through evaluation data",
+                            path = binding_reference,
+                            name = binding_reference.name,
+                        ),
+                        Some(binding.source_location.clone()),
+                        None::<String>,
+                        Some(self.main_spec),
+                        None,
+                    ));
                     continue;
                 }
 
@@ -2492,6 +3209,10 @@ impl<'a> GraphBuilder<'a> {
                     Some(Arc::clone(resolved_type))
                 }
                 DataDefinition::Import { .. } => None,
+                DataDefinition::InstanceList { .. } => unreachable!(
+                    "BUG: binding `{}` onto instance list `{path}` passed build_data_bindings",
+                    key.join(".")
+                ),
             };
             self.add_data_from_binding(path, value.clone(), source.clone(), schema, current_spec);
         }
@@ -2506,7 +3227,7 @@ impl<'a> GraphBuilder<'a> {
         &mut self,
         data: &LemmaData,
         current_segments: &[PathSegment],
-        current_spec: &LemmaSpec,
+        current_spec: &'a LemmaSpec,
         effective: &EffectiveDate,
     ) {
         let data_path = DataPath {
@@ -2537,7 +3258,7 @@ impl<'a> GraphBuilder<'a> {
             return;
         }
 
-        let (original_schema_type, original_declared_suggestion, original_declared_fill) = if matches!(
+        let (original_schema_type, original_declared_suggestion, original_declared_value) = if matches!(
             &data.value,
             ParsedDataValue::Definition { .. }
         )
@@ -2561,8 +3282,8 @@ impl<'a> GraphBuilder<'a> {
                 .declared_suggestions
                 .get(&data.reference.name)
                 .cloned();
-            let declared_fill = resolved.declared_fills.get(&data.reference.name).cloned();
-            (Some(lemma_type), declared, declared_fill)
+            let declared_value = resolved.declared_values.get(&data.reference.name).cloned();
+            (Some(lemma_type), declared, declared_value)
         } else {
             (None, None, None)
         };
@@ -2592,7 +3313,7 @@ impl<'a> GraphBuilder<'a> {
                     )
                 });
                 let declared_suggestion = original_declared_suggestion;
-                let declared_fill = original_declared_fill;
+                let declared_value = original_declared_value;
 
                 let is_generic_measure_range = matches!(
                     &resolved_type.specifications,
@@ -2615,7 +3336,7 @@ impl<'a> GraphBuilder<'a> {
                         )
                     );
                     let measure_endpoint_fill = matches!(
-                        &declared_fill,
+                        &declared_value,
                         Some(BoundValueKind {
                             value: ValueKind::Range(left, right),
                             ..
@@ -2626,7 +3347,7 @@ impl<'a> GraphBuilder<'a> {
                     );
                     if measure_endpoint_suggest || measure_endpoint_fill {
                         self.errors.push(self.engine_error(
-                            "measure range requires unit declarations before a measure-endpoint suggest or fill".to_string(),
+                            "measure range requires unit declarations before a measure-endpoint suggest or with".to_string(),
                             &effective_source,
                         ));
                         return;
@@ -2638,15 +3359,13 @@ impl<'a> GraphBuilder<'a> {
                     DataDefinition::TypeDeclaration {
                         resolved_type,
                         declared_suggestion,
-                        declared_fill,
+                        declared_value,
                         source: effective_source,
                     },
                 );
             }
             ParsedDataValue::Import { spec_ref, .. } => {
-                let consumer_repository =
-                    discovery::lookup_owning_repository(self.context, current_spec)
-                        .unwrap_or_else(|| Arc::clone(&self.main_repository));
+                let consumer_repository = discovery::owning_repository(self.context, current_spec);
                 let (resolved_repository, effective_spec) = match self.resolve_spec_ref(
                     spec_ref,
                     effective,
@@ -2663,13 +3382,696 @@ impl<'a> GraphBuilder<'a> {
                 self.data.insert(
                     data_path,
                     DataDefinition::Import {
-                        target_name: effective_spec.name.clone(),
-                        repository: resolved_repository.name.clone(),
-                        effective: effective_spec.effective_from.clone(),
+                        identity: SpecIdentity::of(&resolved_repository, effective_spec),
+                        overlay: IndexMap::new(),
                         source: effective_source,
                     },
                 );
             }
+            ParsedDataValue::ImportList { .. } => {
+                self.add_instance_list(data, data_path, current_segments, current_spec, effective);
+            }
+        }
+    }
+
+    fn add_instance_list(
+        &mut self,
+        data: &LemmaData,
+        data_path: DataPath,
+        current_segments: &[PathSegment],
+        current_spec: &'a LemmaSpec,
+        effective: &EffectiveDate,
+    ) {
+        let ParsedDataValue::ImportList { spec_ref, list } = &data.value else {
+            panic!("BUG: add_instance_list on non-list data '{data_path}'");
+        };
+        let source = data.source_location.clone();
+        let consumer_repository = discovery::owning_repository(self.context, current_spec);
+        let declaring_owner = SpecIdentity::of(&consumer_repository, current_spec);
+        let (row_repository, row_spec) = match discovery::resolve_spec_ref_or_self(
+            self.context,
+            spec_ref,
+            &consumer_repository,
+            current_spec,
+            effective,
+            None,
+        ) {
+            Ok(pair) => pair,
+            Err(e) => {
+                self.errors.push(e);
+                return;
+            }
+        };
+        let identity = SpecIdentity::of(&row_repository, row_spec);
+        let intern_key = instance_list::ListSourceKey {
+            owner: declaring_owner,
+            local: DataPath::local(data_path.data.clone()),
+            element: identity.clone(),
+            at: effective.clone(),
+        };
+
+        let (key, rows) = if discovery::same_loaded_spec(row_spec, self.main_spec) {
+            assert_eq!(
+                identity, self.instance_lists.self_identity,
+                "BUG: self-list row identity differs from the planned spec's identity"
+            );
+            if !list.rows.is_empty() {
+                self.errors.push(self.engine_error(
+                    format!(
+                        "`{}` is a list of `{}` inside `{}` itself: it cannot have source rows, \
+                         since every row would hold the same rows forever; rows come from run data",
+                        data_path.data, identity.spec, identity.spec
+                    ),
+                    &source,
+                ));
+                return;
+            }
+            match self.instance_list_key(list, &self.data, &identity) {
+                Ok((key, _)) => (key, Arc::new(Vec::new())),
+                Err(errors) => {
+                    self.errors.extend(errors);
+                    return;
+                }
+            }
+        } else if let Some((interned_key, interned_rows)) = self
+            .interners
+            .list_sources
+            .get(&intern_key)
+            .map(|interned| {
+                assert_eq!(
+                    interned.identity, identity,
+                    "BUG: interned list element identity mismatch for owner {} list {}",
+                    intern_key.owner, intern_key.local
+                );
+                (interned.key.clone(), Arc::clone(&interned.rows))
+            })
+        {
+            let Some(template) = self.row_template(
+                &identity,
+                &row_repository,
+                row_spec,
+                &spec_ref.at(effective),
+            ) else {
+                return;
+            };
+            let (expected_key, _) = match self.instance_list_key(list, &template.data, &identity) {
+                Ok(key) => key,
+                Err(errors) => {
+                    self.errors.extend(errors);
+                    return;
+                }
+            };
+            assert_eq!(
+                interned_key, expected_key,
+                "BUG: interned list key mismatch for owner {} list {}",
+                intern_key.owner, intern_key.local
+            );
+            (interned_key, interned_rows)
+        } else {
+            let Some(template) = self.row_template(
+                &identity,
+                &row_repository,
+                row_spec,
+                &spec_ref.at(effective),
+            ) else {
+                return;
+            };
+            let (key, key_paths) = match self.instance_list_key(list, &template.data, &identity) {
+                Ok(key) => key,
+                Err(errors) => {
+                    self.errors.extend(errors);
+                    return;
+                }
+            };
+            let row_spec = RowSpec {
+                identity: &identity,
+                template: &template,
+            };
+            let rows = self.instance_list_rows(
+                &data_path,
+                list,
+                &row_spec,
+                current_segments,
+                current_spec,
+                effective,
+            );
+            self.check_source_row_keys(&key, &key_paths, &rows, &row_spec, &source);
+            let rows = Arc::new(rows);
+            self.interners.list_sources.insert(
+                intern_key,
+                instance_list::InternedList {
+                    identity: identity.clone(),
+                    key: key.clone(),
+                    rows: Arc::clone(&rows),
+                },
+            );
+            (key, rows)
+        };
+
+        let element = Arc::new(LemmaType::primitive(TypeSpecification::Spec {
+            spec: identity.clone(),
+        }));
+        let resolved_type = Arc::new(LemmaType {
+            name: Some(format!("{} list", identity.spec)),
+            specifications: TypeSpecification::List {
+                element,
+                key: key.clone(),
+            },
+            extends: TypeExtends::Primitive,
+        });
+        self.data.insert(
+            data_path.clone(),
+            DataDefinition::InstanceList {
+                resolved_type,
+                source,
+            },
+        );
+        self.instance_lists.sources.insert(
+            data_path,
+            InstanceListSource {
+                identity,
+                key,
+                rows,
+            },
+        );
+    }
+
+    /// Rows of `identity` as instance-list commands read them.
+    fn row_template_of(&self, identity: &SpecIdentity) -> RowTemplate {
+        if *identity == self.instance_lists.self_identity {
+            return RowTemplate::Root;
+        }
+        RowTemplate::Plan(Arc::clone(
+            self.instance_lists
+                .templates
+                .get(identity)
+                .expect("BUG: instance list identity without a template plan"),
+        ))
+    }
+
+    /// Top-level main-spec rules (forward refs while converting) then present
+    /// graph rules, each [`RulePath`] once.
+    fn conversion_root_rules(&self) -> Vec<RulePath> {
+        let mut rules = Vec::new();
+        let mut seen = HashSet::new();
+        for rule in &self.main_spec.rules {
+            let path = RulePath {
+                segments: Vec::new(),
+                rule: rule.name.clone(),
+            };
+            if seen.insert(path.clone()) {
+                rules.push(path);
+            }
+        }
+        for path in self.rules.keys() {
+            if seen.insert(path.clone()) {
+                rules.push(path.clone());
+            }
+        }
+        rules
+    }
+
+    /// Field `name` on rows read through `template`.
+    fn template_row_end(&self, template: &RowTemplate, name: &str) -> Option<RowEnd> {
+        match template {
+            RowTemplate::Plan(plan) => {
+                instance_list::row_end_of(instance_list::RowEndView::Plan(plan), name)
+            }
+            RowTemplate::Root => {
+                let owned = self.conversion_root_rules();
+                let rules: Vec<&RulePath> = owned.iter().collect();
+                root_row_end(&self.data, &self.instance_lists.templates, &rules, name)
+            }
+        }
+    }
+
+    /// Data path of row data `name` read through `template`.
+    fn template_data_path(&self, template: &RowTemplate, name: &str) -> Option<DataPath> {
+        match template {
+            RowTemplate::Plan(plan) => {
+                let parts: Vec<&str> = name.split('.').collect();
+                plan.qualify_data_names(&parts)
+            }
+            RowTemplate::Root => match name.split_once('.') {
+                None => self
+                    .data
+                    .keys()
+                    .find(|path| path.input_key() == name)
+                    .cloned(),
+                Some((hop, rest)) => {
+                    let (import, identity, template) =
+                        root_import_hop(&self.data, &self.instance_lists.templates, hop)?;
+                    let parts: Vec<&str> = rest.split('.').collect();
+                    let path = template.qualify_data_names(&parts)?;
+                    Some(absolute_import_member_path(&import, identity, &path))
+                }
+            },
+        }
+    }
+
+    /// Template plan of `identity`, shared pass-wide and recorded on this consumer.
+    ///
+    /// `at` is the planning instant for this edge (`spec_ref.at(consumer_effective)`),
+    /// so unpinned transitive imports inside the body resolve at that instant.
+    /// `identity.effective` is the resolved target version's `effective_from`.
+    fn row_template(
+        &mut self,
+        identity: &SpecIdentity,
+        row_repository: &Arc<LemmaRepository>,
+        row_spec: &'a LemmaSpec,
+        at: &EffectiveDate,
+    ) -> Option<Arc<ExecutionPlan>> {
+        if let Some(template) = self.instance_lists.templates.get(identity) {
+            return Some(Arc::clone(template));
+        }
+        if let Some(template) = self.interners.spec_templates.get(identity, at) {
+            self.record_template(identity.clone(), Arc::clone(&template));
+            return Some(template);
+        }
+        let planning_input = match super::planning_input(self.context, row_repository, row_spec) {
+            Ok(planning_input) => planning_input,
+            Err(errors) => {
+                self.errors.extend(errors);
+                self.nested_template_failed = true;
+                return None;
+            }
+        };
+        match super::get_or_build_template(
+            self.context,
+            row_repository,
+            row_spec,
+            at,
+            self.limits,
+            self.interners,
+            &planning_input,
+        ) {
+            Ok(template) => {
+                self.record_template(identity.clone(), Arc::clone(&template));
+                Some(template)
+            }
+            Err(errors) => {
+                self.errors.extend(errors);
+                self.nested_template_failed = true;
+                None
+            }
+        }
+    }
+
+    /// Record `template` under `identity` and absorb every nested row-element plan it carries.
+    fn record_template(&mut self, identity: SpecIdentity, template: Arc<ExecutionPlan>) {
+        for (row_identity, row_plan) in &template.row_templates {
+            self.instance_lists
+                .templates
+                .entry(row_identity.clone())
+                .or_insert_with(|| Arc::clone(row_plan));
+        }
+        self.instance_lists
+            .templates
+            .entry(identity)
+            .or_insert(template);
+    }
+
+    /// `-> key a, b`: names and template data paths of the key fields.
+    fn instance_list_key(
+        &self,
+        list: &ast::UsesList,
+        row_data: &IndexMap<DataPath, DataDefinition>,
+        identity: &SpecIdentity,
+    ) -> Result<(ListKey, Vec<DataPath>), Vec<Error>> {
+        let Some(declared) = &list.key else {
+            return Ok((ListKey::Numbered, Vec::new()));
+        };
+        let mut names: Vec<String> = Vec::with_capacity(declared.fields.len());
+        let mut paths: Vec<DataPath> = Vec::with_capacity(declared.fields.len());
+        let mut errors = Vec::new();
+        for field in &declared.fields {
+            if !field.segments.is_empty() {
+                errors.push(self.engine_error(
+                    format!(
+                        "key field `{field}` is a dotted path; a key names data declared on `{}` itself",
+                        identity.spec
+                    ),
+                    &declared.source_location,
+                ));
+                continue;
+            }
+            if names.contains(&field.name) {
+                errors.push(self.engine_error(
+                    format!("`{}` appears twice in `-> key`", field.name),
+                    &declared.source_location,
+                ));
+                continue;
+            }
+            let local = DataPath::local(field.name.clone());
+            let Some(definition) = row_data.get(&local) else {
+                errors.push(self.engine_error(
+                    format!(
+                        "key field `{}` is not data on `{}`",
+                        field.name, identity.spec
+                    ),
+                    &declared.source_location,
+                ));
+                continue;
+            };
+            match definition {
+                DataDefinition::Value { .. }
+                | DataDefinition::TypeDeclaration { .. }
+                | DataDefinition::Reference { .. } => {}
+                DataDefinition::Import { .. } | DataDefinition::InstanceList { .. } => {
+                    errors.push(self.engine_error(
+                        format!(
+                            "key field `{}` on `{}` is not a value",
+                            field.name, identity.spec
+                        ),
+                        &declared.source_location,
+                    ));
+                    continue;
+                }
+            }
+            names.push(field.name.clone());
+            paths.push(local);
+        }
+        if errors.is_empty() {
+            Ok((ListKey::Fields(names), paths))
+        } else {
+            Err(errors)
+        }
+    }
+
+    fn instance_list_rows(
+        &mut self,
+        list_path: &DataPath,
+        list: &ast::UsesList,
+        row_spec: &RowSpec<'_>,
+        current_segments: &[PathSegment],
+        current_spec: &'a LemmaSpec,
+        effective: &EffectiveDate,
+    ) -> Vec<SourceRow> {
+        let RowSpec { identity, template } = *row_spec;
+        let mut rows = Vec::new();
+        for row in &list.rows {
+            match row {
+                ast::UsesListRow::Fields { bindings, .. } => {
+                    let mut fields: Vec<(DataPath, DataSource)> =
+                        Vec::with_capacity(bindings.len());
+                    for binding in bindings {
+                        let name = binding.path.to_string();
+                        let parts: Vec<&str> = binding
+                            .path
+                            .segments
+                            .iter()
+                            .map(String::as_str)
+                            .chain(std::iter::once(binding.path.name.as_str()))
+                            .collect();
+                        let Some(path) = template.qualify_data_names(&parts) else {
+                            self.errors.push(self.engine_error(
+                                format!("row field `{name}` is not data on `{}`", identity.spec),
+                                &binding.source_location,
+                            ));
+                            continue;
+                        };
+                        let (body, _, definition) = template
+                            .peel_data(&path)
+                            .expect("BUG: qualified row field path must peel on template");
+                        if fields.iter().any(|(existing, _)| existing == &path) {
+                            self.errors.push(self.engine_error(
+                                format!("row field `{name}` appears twice in one row"),
+                                &binding.source_location,
+                            ));
+                            continue;
+                        }
+                        let Some(field_type) = definition.resolved_type_arc() else {
+                            self.errors.push(self.engine_error(
+                                format!(
+                                    "row field `{name}` is a `uses` instance of `{}`; bind its fields with `{name}.<field>`",
+                                    identity.spec
+                                ),
+                                &binding.source_location,
+                            ));
+                            continue;
+                        };
+                        let source = match &binding.rhs {
+                            WithRhs::Literal(value) => {
+                                match source_row_literal(value, field_type, body) {
+                                    Ok(bound) => DataSource::Literal(bound),
+                                    Err(message) => {
+                                        self.errors.push(self.engine_error(
+                                            format!("row field `{name}`: {message}"),
+                                            &binding.source_location,
+                                        ));
+                                        continue;
+                                    }
+                                }
+                            }
+                            WithRhs::Reference { target } => {
+                                match self.resolve_reference_target_in_spec(
+                                    target,
+                                    &binding.source_location,
+                                    current_spec,
+                                    current_segments,
+                                    effective,
+                                ) {
+                                    Some(ReferenceTarget::Data(consumer)) => DataSource::Reference(
+                                        instance_list::owner_relative_reference(
+                                            &consumer,
+                                            current_segments,
+                                        ),
+                                    ),
+                                    Some(ReferenceTarget::Rule(rule)) => {
+                                        self.errors.push(self.engine_error(
+                                            format!(
+                                                "row field `{name}` takes a value or data, not rule `{rule}`"
+                                            ),
+                                            &binding.source_location,
+                                        ));
+                                        continue;
+                                    }
+                                    None => continue,
+                                }
+                            }
+                        };
+                        fields.push((path, source));
+                    }
+                    if fields.len() != bindings.len() {
+                        continue;
+                    }
+                    rows.push(SourceRow { fields });
+                }
+                ast::UsesListRow::Values {
+                    values,
+                    source_location,
+                } => {
+                    for value in values {
+                        match self.named_instance_row(
+                            list_path,
+                            value,
+                            row_spec,
+                            current_segments,
+                            current_spec,
+                            source_location,
+                        ) {
+                            Some(row) => rows.push(row),
+                            None => continue,
+                        }
+                    }
+                }
+            }
+        }
+        rows
+    }
+
+    /// `-> with ada`: a row whose every field follows the `uses ada` instance.
+    fn named_instance_row(
+        &mut self,
+        list_path: &DataPath,
+        value: &WithRhs,
+        row_spec: &RowSpec<'_>,
+        current_segments: &[PathSegment],
+        current_spec: &LemmaSpec,
+        source: &Source,
+    ) -> Option<SourceRow> {
+        let RowSpec { identity, template } = *row_spec;
+        let target = match value {
+            WithRhs::Reference { target } if target.segments.is_empty() => target,
+            WithRhs::Reference { target } => {
+                self.errors.push(self.engine_error(
+                    format!(
+                        "row `{target}` of `{}` must name a `uses` instance of `{}` declared in this spec",
+                        list_path.data, identity.spec
+                    ),
+                    source,
+                ));
+                return None;
+            }
+            WithRhs::Literal(literal) => {
+                self.errors.push(self.engine_error(
+                    format!(
+                        "row `{literal}` of `{}` is not a `{}` instance; write `-> with <field>: <value>` for an inline row",
+                        list_path.data, identity.spec
+                    ),
+                    source,
+                ));
+                return None;
+            }
+        };
+        let declared_import = current_spec.data.iter().any(|data| {
+            data.reference.is_local()
+                && data.reference.name == target.name
+                && matches!(data.value, ParsedDataValue::Import { .. })
+        });
+        if !declared_import {
+            self.errors.push(self.engine_error(
+                format!(
+                    "row `{target}` of `{}` is not a `uses` instance of `{}`",
+                    list_path.data, identity.spec
+                ),
+                source,
+            ));
+            return None;
+        }
+        let alias_path = DataPath {
+            segments: current_segments.to_vec(),
+            data: target.name.clone(),
+        };
+        let Some(DataDefinition::Import {
+            identity: instance_identity,
+            ..
+        }) = self.data.get(&alias_path)
+        else {
+            // The import itself failed to resolve and already reported an error.
+            return None;
+        };
+        let instance_identity = instance_identity.clone();
+        if instance_identity != *identity {
+            self.errors.push(self.engine_error(
+                format!(
+                    "`{}` is a `{}` instance; rows of `{}` are `{}`",
+                    target.name, instance_identity, list_path.data, identity
+                ),
+                source,
+            ));
+            return None;
+        }
+        let mut prefix = current_segments.to_vec();
+        prefix.push(PathSegment {
+            uses: target.name.clone(),
+            repository: instance_identity.repository.clone(),
+            spec: instance_identity.spec.clone(),
+        });
+        let fields = ExecutionPlan::nested_input_keys(template)
+            .into_iter()
+            .map(|(path, _)| {
+                let mut segments = prefix.clone();
+                segments.extend(path.segments.iter().cloned());
+                let consumer = DataPath {
+                    segments,
+                    data: path.data.clone(),
+                };
+                {
+                    let first = consumer.segments.first().unwrap_or_else(|| {
+                        panic!("BUG: named-instance consumer path '{consumer}' has no uses hop")
+                    });
+                    let body =
+                        first_import_template(&self.data, &self.instance_lists.templates, first)
+                            .unwrap_or_else(|| {
+                                panic!(
+                                    "BUG: instance '{}' of '{identity}' lacks import template",
+                                    target.name
+                                )
+                            });
+                    let rest = DataPath {
+                        segments: consumer.segments[1..].to_vec(),
+                        data: consumer.data.clone(),
+                    };
+                    body.peel_data(&rest).unwrap_or_else(|| {
+                        panic!(
+                            "BUG: instance '{}' of '{identity}' lacks template data '{path}'",
+                            target.name
+                        )
+                    });
+                }
+                // Owner-relative: keep the named-instance hop (`ada.name`), strip only
+                // outer nested `uses` segments so materialize can re-prefix them.
+                (
+                    path,
+                    DataSource::Reference(instance_list::owner_relative_reference(
+                        &consumer,
+                        current_segments,
+                    )),
+                )
+            })
+            .collect();
+        Some(SourceRow { fields })
+    }
+
+    /// Source rows of a keyed list: key values are literal and unique.
+    fn check_source_row_keys(
+        &mut self,
+        key: &ListKey,
+        key_paths: &[DataPath],
+        rows: &[SourceRow],
+        row_spec: &RowSpec<'_>,
+        source: &Source,
+    ) {
+        let ListKey::Fields(fields) = key else {
+            return;
+        };
+        let template = row_spec.template;
+        let field_types: Vec<Arc<LemmaType>> = key_paths
+            .iter()
+            .map(|path| {
+                let (_, _, definition) = template
+                    .peel_data(path)
+                    .expect("BUG: key path must peel on template");
+                Arc::clone(
+                    definition
+                        .resolved_type_arc()
+                        .expect("BUG: key path must be typed template data"),
+                )
+            })
+            .collect();
+        let mut keyed: Vec<KeyedRow> = Vec::with_capacity(rows.len());
+        for (index, row) in rows.iter().enumerate() {
+            let mut values = Vec::with_capacity(key_paths.len());
+            for ((path, field), field_type) in key_paths.iter().zip(fields).zip(&field_types) {
+                let bound = row
+                    .fields
+                    .iter()
+                    .find(|(row_path, _)| row_path == path)
+                    .map(|(_, row_source)| row_source);
+                match bound {
+                    Some(DataSource::Literal(bound)) => {
+                        values.push(instance_list::typed_from_bound(bound, field_type))
+                    }
+                    Some(DataSource::Reference(consumer)) => {
+                        self.errors.push(self.engine_error(
+                            format!(
+                                "key field `{field}` of row {} is `{consumer}`; key values must be written as values",
+                                index + 1
+                            ),
+                            source,
+                        ));
+                        return;
+                    }
+                    None => match instance_list::template_default(template, path) {
+                        Some(default) => values.push(default),
+                        None => {
+                            self.errors.push(self.engine_error(
+                                format!("row {} has no value for key field `{field}`", index + 1),
+                                source,
+                            ));
+                            return;
+                        }
+                    },
+                }
+            }
+            keyed.push(KeyedRow {
+                label: format!("row {}", index + 1),
+                values,
+            });
+        }
+        if let Some(message) = instance_list::key_conflict(fields, &keyed) {
+            self.errors.push(self.engine_error(message, source));
         }
     }
 
@@ -2697,10 +4099,7 @@ impl<'a> GraphBuilder<'a> {
                         .specifications
                         .element_from_range()
                         .expect("BUG: measure/ratio range must define element_from_range");
-                    let resolve = |unit: &str| {
-                        self.resolve_unit_ref(current_spec, unit)
-                            .map(|(bare, _)| bare)
-                    };
+                    let resolve = unit_tokens_for_spec(&self.local_types, current_spec);
                     let left_lit = match lift_range_endpoint(left, &element, Some(&resolve)) {
                         Ok(lit) => lit,
                         Err(e) => {
@@ -2718,10 +4117,7 @@ impl<'a> GraphBuilder<'a> {
                     ValueKind::Range(Box::new(left_lit), Box::new(right_lit))
                 }
                 _ => {
-                    let resolve = |unit: &str| {
-                        self.resolve_unit_ref(current_spec, unit)
-                            .map(|(bare, _)| bare)
-                    };
+                    let resolve = unit_tokens_for_spec(&self.local_types, current_spec);
                     match parser_value_to_value_kind(value, &schema.specifications, Some(&resolve))
                     {
                         Ok(s) => s,
@@ -2879,6 +4275,254 @@ impl<'a> GraphBuilder<'a> {
         );
     }
 
+    /// Ensure the import at `import_path` has a shared template and site overlay.
+    ///
+    /// `at` is the planning instant for this import edge (unpinned transitive resolution).
+    /// Binding keys under the import alias become overlay entries (local to the template);
+    /// missing template slots are planning Errors.
+    fn ensure_import_template_and_overlay(
+        &mut self,
+        import_path: &DataPath,
+        current_segment_names: &[String],
+        bindings: &DataBindings,
+        used_binding_keys: &mut HashSet<Vec<String>>,
+        at: &EffectiveDate,
+    ) {
+        if current_segment_names.len() + 1 > self.limits.max_spec_dependency_depth {
+            self.errors.push(Error::resource_limit_exceeded(
+                "max_spec_dependency_depth",
+                self.limits.max_spec_dependency_depth.to_string(),
+                (current_segment_names.len() + 1).to_string(),
+                format!(
+                    "Import '{}' exceeds the maximum import nesting depth; flatten the import chain",
+                    import_path.input_key()
+                ),
+                None,
+                Some(self.main_spec),
+                None,
+            ));
+            return;
+        }
+
+        let Some(DataDefinition::Import {
+            identity, source, ..
+        }) = self.data.get(import_path)
+        else {
+            return;
+        };
+        let identity = identity.clone();
+        let import_source = source.clone();
+
+        let repo = match &identity.repository {
+            None => self.context.workspace(),
+            Some(name) => match self.context.find_repository(name) {
+                Some(repo) => repo,
+                None => {
+                    self.errors.push(self.engine_error(
+                        format!(
+                            "repository '{name}' not loaded for import '{}'",
+                            identity.spec
+                        ),
+                        &import_source,
+                    ));
+                    return;
+                }
+            },
+        };
+        let version_from = match &identity.effective {
+            EffectiveDate::Origin => None,
+            EffectiveDate::DateTimeValue(datetime) => Some(datetime),
+        };
+        let Some(nested_spec) = self
+            .context
+            .spec_set(&repo, &identity.spec)
+            .and_then(|set| set.get_exact(version_from))
+        else {
+            self.errors.push(self.engine_error(
+                format!(
+                    "spec '{}' at {} not loaded for import",
+                    identity.spec, identity.effective
+                ),
+                &import_source,
+            ));
+            return;
+        };
+
+        let Some(template) = self.row_template(&identity, &repo, nested_spec, at) else {
+            return;
+        };
+
+        self.project_instance_lists_from_template(import_path, &identity, Arc::clone(&template));
+
+        let mut alias_key = current_segment_names.to_vec();
+        alias_key.push(import_path.data.clone());
+
+        let mut overlay = IndexMap::new();
+        for (key, (value, binding_source)) in bindings {
+            if key.len() <= alias_key.len() || key[..alias_key.len()] != alias_key[..] {
+                continue;
+            }
+            let relative: Vec<&str> = key[alias_key.len()..].iter().map(String::as_str).collect();
+            let Some(overlay_path) = template.qualify_data_names(&relative) else {
+                self.errors.push(self.engine_error(
+                    format!(
+                        "No declared data matches with or binding for '{}'",
+                        key.join(".")
+                    ),
+                    binding_source,
+                ));
+                used_binding_keys.insert(key.clone());
+                continue;
+            };
+            let (body, _, definition) = template
+                .peel_data(&overlay_path)
+                .expect("BUG: qualified overlay path must peel on template");
+            if matches!(definition, DataDefinition::Import { .. }) {
+                self.errors.push(self.engine_error(
+                    format!(
+                        "cannot bind import alias '{}' as a value",
+                        overlay_path.input_key()
+                    ),
+                    binding_source,
+                ));
+                used_binding_keys.insert(key.clone());
+                continue;
+            }
+            if matches!(definition, DataDefinition::InstanceList { .. }) {
+                self.errors.push(self.engine_error(
+                    format!(
+                        "binding `{}` replaces instance list `{}`; supply the whole list through evaluation data",
+                        key.join("."),
+                        overlay_path.input_key()
+                    ),
+                    binding_source,
+                ));
+                used_binding_keys.insert(key.clone());
+                continue;
+            }
+            let overlay_entry = match value {
+                BindingValue::Literal(raw) => {
+                    let Some(field_type) = definition.resolved_type_arc() else {
+                        panic!(
+                            "BUG: template data '{}' must be typed for literal overlay",
+                            overlay_path.input_key()
+                        );
+                    };
+                    match source_row_literal(raw, field_type, body) {
+                        Ok(bound) => ImportOverlay::Literal(bound),
+                        Err(message) => {
+                            self.errors.push(self.engine_error(message, binding_source));
+                            used_binding_keys.insert(key.clone());
+                            continue;
+                        }
+                    }
+                }
+                BindingValue::Reference {
+                    target,
+                    constraints,
+                } => ImportOverlay::Reference {
+                    target: target.clone(),
+                    constraints: constraints.clone(),
+                },
+            };
+            overlay.insert(overlay_path, overlay_entry);
+            used_binding_keys.insert(key.clone());
+        }
+
+        let Some(DataDefinition::Import { overlay: slot, .. }) = self.data.get_mut(import_path)
+        else {
+            panic!(
+                "BUG: import '{}' missing after add_data",
+                import_path.input_key()
+            );
+        };
+        *slot = overlay;
+    }
+
+    /// Copy template instance lists onto this consumer under the import alias prefix.
+    /// Rows stay `Arc`-shared; run data never mutates them. Element row plans are
+    /// absorbed through [`Self::record_template`] so `resolve_instance_list` can
+    /// address dotted keys on this consumer.
+    fn project_instance_lists_from_template(
+        &mut self,
+        import_path: &DataPath,
+        identity: &SpecIdentity,
+        template: Arc<ExecutionPlan>,
+    ) {
+        self.record_template(identity.clone(), Arc::clone(&template));
+        let mut prefix = import_path.segments.clone();
+        prefix.push(PathSegment {
+            uses: import_path.data.clone(),
+            repository: identity.repository.clone(),
+            spec: identity.spec.clone(),
+        });
+        for (relative, source) in &template.instance_lists {
+            let absolute = DataPath {
+                segments: {
+                    let mut segments = prefix.clone();
+                    segments.extend(relative.segments.iter().cloned());
+                    segments
+                },
+                data: relative.data.clone(),
+            };
+            if let Some(existing) = self.instance_lists.sources.get(&absolute) {
+                assert!(
+                    Arc::ptr_eq(&existing.rows, &source.rows),
+                    "BUG: projected list '{}' must share the template row Arc",
+                    absolute.input_key()
+                );
+                continue;
+            }
+            let definition = template.data.get(relative).unwrap_or_else(|| {
+                panic!(
+                    "BUG: template instance list '{}' missing from template data",
+                    relative.input_key()
+                )
+            });
+            let DataDefinition::InstanceList {
+                resolved_type,
+                source: def_source,
+            } = definition
+            else {
+                panic!(
+                    "BUG: template instance list '{}' is not DataDefinition::InstanceList",
+                    relative.input_key()
+                );
+            };
+            if !self.instance_lists.templates.contains_key(&source.identity) {
+                if source.identity == template.identity {
+                    self.instance_lists
+                        .templates
+                        .insert(source.identity.clone(), Arc::clone(&template));
+                } else {
+                    let row_plan = template.row_templates.get(&source.identity).unwrap_or_else(|| {
+                        panic!(
+                            "BUG: projected list '{}' element '{}' missing from template row_templates",
+                            relative.input_key(),
+                            source.identity
+                        )
+                    });
+                    self.record_template(source.identity.clone(), Arc::clone(row_plan));
+                }
+            }
+            self.data.insert(
+                absolute.clone(),
+                DataDefinition::InstanceList {
+                    resolved_type: Arc::clone(resolved_type),
+                    source: def_source.clone(),
+                },
+            );
+            self.instance_lists.sources.insert(
+                absolute,
+                InstanceListSource {
+                    identity: source.identity.clone(),
+                    key: source.key.clone(),
+                    rows: Arc::clone(&source.rows),
+                },
+            );
+        }
+    }
+
     /// Apply a binding override to insert the bound data's definition.
     /// Bindings are pre-resolved — literal values or reference targets.
     fn add_data_from_binding(
@@ -2912,7 +4556,7 @@ impl<'a> GraphBuilder<'a> {
                         resolved_type: provisional_type,
                         local_constraints: constraints,
                         local_suggestion: None,
-                        local_fill: None,
+                        local_value: None,
                         source: binding_source,
                     },
                 );
@@ -2946,9 +4590,7 @@ impl<'a> GraphBuilder<'a> {
                 };
 
             if let ParsedDataValue::Import { spec_ref, .. } = &data_ref.value {
-                let context_repository =
-                    discovery::lookup_owning_repository(self.context, spec_context)
-                        .unwrap_or_else(|| Arc::clone(&self.main_repository));
+                let context_repository = discovery::owning_repository(self.context, spec_context);
                 let (repo, arc) = match self.resolve_spec_ref(
                     spec_ref,
                     effective,
@@ -2973,6 +4615,15 @@ impl<'a> GraphBuilder<'a> {
                     .collect();
                 last_arc = Some(arc);
                 spec_context = arc;
+            } else if let ParsedDataValue::ImportList { .. } = &data_ref.value {
+                self.errors.push(self.engine_error(
+                    format!(
+                        "`{segment}` is a list: there is no `{segment}.<field>` outside a command argument; \
+                         pick a row first, for example `({segment} -> first).<field>`"
+                    ),
+                    reference_source,
+                ));
+                return None;
             } else {
                 self.errors.push(self.engine_error(
                     format!("Data '{}' is not a spec reference", segment),
@@ -2999,12 +4650,48 @@ impl<'a> GraphBuilder<'a> {
         effective: &EffectiveDate,
         type_resolver: &TypeResolver<'a>,
     ) -> bool {
+        let root = match self.enter_spec_types(spec, spec_repository, effective, type_resolver) {
+            Ok(frame) => frame,
+            Err(resolved) => return resolved,
+        };
+        let mut stack = vec![root];
+        loop {
+            let mut frame = stack
+                .pop()
+                .expect("BUG: spec types walk ends when its root frame finishes");
+            if let Some((child, child_repository, child_effective)) =
+                self.next_spec_import(&mut frame)
+            {
+                stack.push(frame);
+                if let Ok(child_frame) =
+                    self.enter_spec_types(child, &child_repository, &child_effective, type_resolver)
+                {
+                    stack.push(child_frame);
+                }
+                continue;
+            }
+            let resolved = self.finish_spec_types(&frame, type_resolver);
+            if stack.is_empty() {
+                return resolved;
+            }
+        }
+    }
+
+    /// Entry of [`Self::ensure_spec_types_resolved`]: `Err` carries the result when there
+    /// is nothing to walk.
+    fn enter_spec_types(
+        &self,
+        spec: &'a LemmaSpec,
+        spec_repository: &Arc<LemmaRepository>,
+        effective: &EffectiveDate,
+        type_resolver: &TypeResolver<'a>,
+    ) -> Result<SpecTypesFrame<'a>, bool> {
         if self
             .local_types
             .iter()
             .any(|(_, s, _)| discovery::same_loaded_spec(s, spec))
         {
-            return true;
+            return Err(true);
         }
         if !type_resolver.is_registered(spec) {
             panic!(
@@ -3015,21 +4702,46 @@ impl<'a> GraphBuilder<'a> {
         if type_resolver.registration_failed(spec) {
             // The registration errors were already collected by
             // `register_all`; the spec cannot be built without its types.
-            return false;
+            return Err(false);
         }
-        for data in &spec.data {
+        Ok(SpecTypesFrame {
+            spec,
+            repository: Arc::clone(spec_repository),
+            effective: effective.clone(),
+            next_data: 0,
+        })
+    }
+
+    /// Next import of `frame`'s spec that must be entered. Import errors are recorded and
+    /// skipped.
+    fn next_spec_import(
+        &mut self,
+        frame: &mut SpecTypesFrame<'a>,
+    ) -> Option<(&'a LemmaSpec, Arc<LemmaRepository>, EffectiveDate)> {
+        let spec = frame.spec;
+        while let Some(data) = spec.data.get(frame.next_data) {
+            frame.next_data += 1;
+            if discovery::is_self_list(
+                self.context,
+                data,
+                spec,
+                &frame.repository,
+                &frame.effective,
+            ) {
+                continue;
+            }
             match &data.value {
-                ParsedDataValue::Import { spec_ref, .. } => {
-                    let import_effective = spec_ref.at(effective);
-                    match self.resolve_spec_ref(spec_ref, &import_effective, spec, spec_repository)
-                    {
+                ParsedDataValue::Import { spec_ref, .. }
+                | ParsedDataValue::ImportList { spec_ref, .. } => {
+                    let import_effective = spec_ref.at(&frame.effective);
+                    match self.resolve_spec_ref(
+                        spec_ref,
+                        &import_effective,
+                        spec,
+                        &frame.repository,
+                    ) {
                         Ok((source_repo, source_arc)) => {
-                            self.ensure_spec_types_resolved(
-                                source_arc,
-                                &source_repo,
-                                &import_effective,
-                                type_resolver,
-                            );
+                            return Some((source_arc, source_repo, import_effective));
                         }
                         Err(error) => self.errors.push(error),
                     }
@@ -3040,17 +4752,12 @@ impl<'a> GraphBuilder<'a> {
                 } => {
                     match self.resolve_spec_ref(
                         &ast::SpecRef::same_repository(spec_alias.clone()),
-                        effective,
+                        &frame.effective,
                         spec,
-                        spec_repository,
+                        &frame.repository,
                     ) {
                         Ok((source_repo, source_arc)) => {
-                            self.ensure_spec_types_resolved(
-                                source_arc,
-                                &source_repo,
-                                effective,
-                                type_resolver,
-                            );
+                            return Some((source_arc, source_repo, frame.effective.clone()));
                         }
                         Err(error) => self.errors.push(error),
                     }
@@ -3058,10 +4765,19 @@ impl<'a> GraphBuilder<'a> {
                 _ => {}
             }
         }
-        match type_resolver.resolve_and_validate(spec, effective, &self.local_types) {
+        None
+    }
+
+    /// Resolves and records the types of `frame`'s spec once all its imports are recorded.
+    fn finish_spec_types(
+        &mut self,
+        frame: &SpecTypesFrame<'a>,
+        type_resolver: &TypeResolver<'a>,
+    ) -> bool {
+        match type_resolver.resolve_and_validate(frame.spec, &frame.effective, &self.local_types) {
             Ok(resolved_types) => {
                 self.local_types
-                    .push((Arc::clone(spec_repository), spec, resolved_types));
+                    .push((Arc::clone(&frame.repository), frame.spec, resolved_types));
                 true
             }
             Err(errors) => {
@@ -3137,7 +4853,7 @@ impl<'a> GraphBuilder<'a> {
             if !data.reference.is_local() {
                 continue;
             }
-            if matches!(&data.value, ParsedDataValue::Import { .. }) {
+            if data.value.uses_spec_ref().is_some() {
                 continue;
             }
             self.add_data(data, &current_segments, spec, effective);
@@ -3155,44 +4871,38 @@ impl<'a> GraphBuilder<'a> {
             }
             if let ParsedDataValue::Import { spec_ref, .. } = &data.value {
                 let nested_effective = spec_ref.at(effective);
-                let (nested_repo, nested_arc) =
-                    match self.resolve_spec_ref(spec_ref, effective, spec, spec_repository) {
-                        Ok(pair) => pair,
-                        Err(e) => {
-                            self.errors.push(e);
-                            continue;
-                        }
-                    };
                 self.add_data(data, &current_segments, spec, effective);
-                let mut nested_segments = current_segments.clone();
-                nested_segments.push(PathSegment {
-                    uses: data.reference.name.clone(),
-                    repository: nested_repo.name.clone(),
-                    spec: nested_arc.name.clone(),
-                });
-
-                let nested_segment_names: Vec<String> =
-                    nested_segments.iter().map(|s| s.uses.clone()).collect();
+                let import_path = DataPath {
+                    segments: current_segments.to_vec(),
+                    data: data.reference.name.clone(),
+                };
+                // Merge parent bindings that target this nest, then apply as overlay on the Import.
+                let mut nest_key = current_segment_names.clone();
+                nest_key.push(data.reference.name.clone());
                 let mut combined_bindings = effective_bindings.clone();
                 for (key, value_and_source) in &data_bindings {
-                    if key.len() > nested_segment_names.len()
-                        && key[..nested_segment_names.len()] == nested_segment_names[..]
+                    if key.len() > nest_key.len()
+                        && key[..nest_key.len()] == nest_key[..]
                         && !combined_bindings.contains_key(key)
                     {
                         combined_bindings.insert(key.clone(), value_and_source.clone());
                     }
                 }
-
-                if let Err(errs) = self.build_spec(
-                    nested_arc,
-                    &nested_repo,
-                    nested_segments,
-                    combined_bindings,
+                self.ensure_import_template_and_overlay(
+                    &import_path,
+                    &current_segment_names,
+                    &combined_bindings,
+                    &mut used_binding_keys,
                     &nested_effective,
-                    type_resolver,
-                ) {
-                    self.errors.extend(errs);
-                }
+                );
+            }
+        }
+
+        for data in &spec.data {
+            if data.reference.is_local()
+                && matches!(&data.value, ParsedDataValue::ImportList { .. })
+            {
+                self.add_data(data, &current_segments, spec, effective);
             }
         }
 
@@ -3260,57 +4970,83 @@ impl<'a> GraphBuilder<'a> {
             return;
         }
 
-        let mut branches = Vec::new();
+        let piecewise_nodes = if rule.unless_clauses.is_empty() { 0 } else { 2 };
+        let ast_nodes = rule.expression.table.len()
+            + rule
+                .unless_clauses
+                .iter()
+                .map(|clause| clause.condition.table.len() + clause.result.table.len())
+                .sum::<usize>();
         let mut depends_on_rules = BTreeSet::new();
         let mut convert_ctx = RuleExpressionConversion {
+            table: ExprTable::with_capacity(ast_nodes + piecewise_nodes),
             spec: current_spec,
             data_map,
             segments: current_segments,
             rule_names,
+            rule: &rule.name,
             effective,
             depends_on_rules: &mut depends_on_rules,
+            row_scopes: Vec::new(),
+            reads_itself_on_rows: false,
         };
 
+        let mut scratch = ConvertScratch {
+            frames: Vec::with_capacity(ast_nodes),
+            values: Vec::with_capacity(ast_nodes),
+            children: Vec::new(),
+        };
         let errors_before = self.errors.len();
-        let converted_expression = match self
-            .convert_expression_and_extract_dependencies(&rule.expression, &mut convert_ctx)
-        {
-            Some(expr) => expr,
-            None => {
+        let Some(default_result) =
+            self.convert_ast_expression(rule.expression.root(), &mut convert_ctx, &mut scratch)
+        else {
+            self.drop_unconverted_rule(rule_path, errors_before);
+            return;
+        };
+        let mut branches = vec![(None, default_result)];
+        let default_source = convert_ctx.table.source(default_result).cloned();
+        let mut arms = Vec::with_capacity(rule.unless_clauses.len() + 1);
+        if !rule.unless_clauses.is_empty() {
+            let default_condition = convert_ctx.push(
+                ExpressionKind::Literal(Box::new(TypedLiteral::from_bool(true))),
+                default_source.clone(),
+            );
+            arms.push((default_condition, default_result));
+        }
+        for unless_clause in &rule.unless_clauses {
+            let Some(condition) = self.convert_ast_expression(
+                unless_clause.condition.root(),
+                &mut convert_ctx,
+                &mut scratch,
+            ) else {
                 self.drop_unconverted_rule(rule_path, errors_before);
                 return;
-            }
-        };
-        branches.push((None, converted_expression));
-
-        for unless_clause in &rule.unless_clauses {
-            let converted_condition = match self.convert_expression_and_extract_dependencies(
-                &unless_clause.condition,
-                &mut convert_ctx,
-            ) {
-                Some(expr) => expr,
-                None => {
-                    self.drop_unconverted_rule(rule_path, errors_before);
-                    return;
-                }
             };
-            let converted_result = match self.convert_expression_and_extract_dependencies(
-                &unless_clause.result,
+            let Some(result) = self.convert_ast_expression(
+                unless_clause.result.root(),
                 &mut convert_ctx,
-            ) {
-                Some(expr) => expr,
-                None => {
-                    self.drop_unconverted_rule(rule_path, errors_before);
-                    return;
-                }
+                &mut scratch,
+            ) else {
+                self.drop_unconverted_rule(rule_path, errors_before);
+                return;
             };
-            branches.push((Some(converted_condition), converted_result));
+            branches.push((Some(condition), result));
+            arms.push((condition, result));
         }
+        let root = if arms.is_empty() {
+            default_result
+        } else {
+            convert_ctx.push(ExpressionKind::Piecewise(arms), default_source)
+        };
 
+        let recursive = convert_ctx.reads_itself_on_rows;
+        let expression = ExprTree::new(std::mem::take(&mut convert_ctx.table), root);
         let rule_node = RuleNode {
+            expression,
             branches,
             source: rule.source_location.clone(),
             depends_on_rules,
+            recursive,
             rule_type: Arc::new(LemmaType::veto_type()),
             spec: current_spec,
         };
@@ -3325,34 +5061,237 @@ impl<'a> GraphBuilder<'a> {
         self.dropped_rules.insert(rule_path);
     }
 
-    /// Converts left and right expressions and accumulates rule dependencies.
-    fn convert_binary_operands(
+    /// Converts the subtree at `expr` into `ctx.table`, children before parents, with an
+    /// explicit stack. List command arguments are converted in their row scope before the
+    /// command is built, see [`ConvertFrame`].
+    fn convert_ast_expression<'t>(
         &mut self,
-        left: &ast::Expression,
-        right: &ast::Expression,
+        expr: AstRef<'t>,
         ctx: &mut RuleExpressionConversion<'a, '_>,
-    ) -> Option<(Expression, Expression)> {
-        let converted_left = self.convert_expression_and_extract_dependencies(left, ctx);
-        let converted_right = self.convert_expression_and_extract_dependencies(right, ctx);
-        match (converted_left, converted_right) {
-            (Some(l), Some(r)) => Some((l, r)),
-            _ => None,
+        scratch: &mut ConvertScratch<'t>,
+    ) -> Option<ExprId> {
+        let ConvertScratch {
+            frames,
+            values,
+            children,
+        } = scratch;
+        frames.push(ConvertFrame::Enter(expr));
+        while let Some(frame) = frames.pop() {
+            match frame {
+                ConvertFrame::Enter(node) => {
+                    frames.push(ConvertFrame::Node(node));
+                    let start = frames.len();
+                    for_each_conversion_child(node.kind(), |child| {
+                        frames.push(ConvertFrame::Enter(node.child(child)));
+                    });
+                    frames[start..].reverse();
+                }
+                ConvertFrame::Node(node) => {
+                    let mut arity = 0;
+                    for_each_conversion_child(node.kind(), |_| arity += 1);
+                    children.clear();
+                    let mut converted = true;
+                    for value in values.drain(values.len() - arity..) {
+                        match value {
+                            Some(id) => children.push(id),
+                            None => converted = false,
+                        }
+                    }
+                    if !converted {
+                        values.push(None);
+                    } else if let ast::ExpressionKind::ListCommand { .. } = node.kind() {
+                        self.start_list_command(node, one(children), ctx, frames);
+                    } else {
+                        values.push(self.convert_ast_node(node, children, ctx));
+                    }
+                }
+                ConvertFrame::List(build) => {
+                    self.advance_list_command(build, frames, values, ctx);
+                }
+                ConvertFrame::ListArgument(mut build, sink) => {
+                    let converted = values
+                        .pop()
+                        .expect("BUG: list argument is converted before its frame resumes");
+                    match (sink, converted) {
+                        (ListArgumentSink::Positional, Some(id)) => build.converted.push(id),
+                        (ListArgumentSink::Positional, None) => {
+                            values.push(None);
+                            continue;
+                        }
+                        (ListArgumentSink::Field(path), Some(id)) => build.fields.push((path, id)),
+                        (ListArgumentSink::Field(_), None) => build.failed = true,
+                    }
+                    frames.push(ConvertFrame::List(build));
+                }
+                ConvertFrame::PopRowScope => {
+                    ctx.row_scopes.pop();
+                }
+            }
+        }
+        let converted = values
+            .pop()
+            .expect("BUG: conversion leaves one result for its root");
+        assert!(
+            values.is_empty(),
+            "BUG: conversion left operands without a parent"
+        );
+        converted
+    }
+
+    /// Pushes the frame that converts the arguments of the list command at `node`, whose list
+    /// operand converted to `list`.
+    fn start_list_command<'t>(
+        &self,
+        node: AstRef<'t>,
+        list: ExprId,
+        ctx: &RuleExpressionConversion<'a, '_>,
+        frames: &mut Vec<ConvertFrame<'t>>,
+    ) {
+        let ast::ExpressionKind::ListCommand {
+            list: list_source,
+            command,
+        } = node.kind()
+        else {
+            unreachable!("BUG: list command frame started for a non-list-command node")
+        };
+        let source = node
+            .source()
+            .expect("BUG: AST expression missing source location")
+            .clone();
+        let row_scope = self
+            .instance_list_identity(
+                ExprRef {
+                    table: &ctx.table,
+                    id: list,
+                },
+                ctx.spec,
+                ctx.segments,
+            )
+            .map(|identity| {
+                let template = self.row_template_of(&identity);
+                let list_path = match node.child(*list_source).kind() {
+                    ast::ExpressionKind::Reference(reference) => Some(reference.full_path()),
+                    _ => None,
+                };
+                RowScope {
+                    list_path,
+                    identity,
+                    template,
+                    level: u32::try_from(ctx.row_scopes.len())
+                        .expect("BUG: row scope depth exceeds u32"),
+                }
+            });
+        let row_level = row_scope.as_ref().map(|scope| scope.level);
+        let pending = list_command_arguments(command, &row_scope);
+        frames.push(ConvertFrame::List(Box::new(ListCommandBuild {
+            node,
+            source,
+            list,
+            row_level,
+            row_scope,
+            pending,
+            converted: Vec::new(),
+            fields: Vec::new(),
+            failed: false,
+        })));
+    }
+
+    /// Converts the next argument of a list command, or builds the command once all are done.
+    fn advance_list_command<'t>(
+        &mut self,
+        mut build: Box<ListCommandBuild<'t>>,
+        frames: &mut Vec<ConvertFrame<'t>>,
+        values: &mut Vec<Option<ExprId>>,
+        ctx: &mut RuleExpressionConversion<'a, '_>,
+    ) {
+        let node = build.node;
+        let Some(argument) = build.pending.pop_front() else {
+            let ast::ExpressionKind::ListCommand { command, .. } = node.kind() else {
+                unreachable!("BUG: list command frame holds a list command node")
+            };
+            let op = self.finish_list_command(
+                command,
+                &build.row_scope,
+                std::mem::take(&mut build.converted),
+                std::mem::take(&mut build.fields),
+                build.failed,
+                &build.source,
+            );
+            let source = Some(build.source.clone());
+            let converted = op.map(|op| {
+                ctx.push(
+                    ExpressionKind::ListCommand {
+                        list: build.list,
+                        op,
+                        row_level: build.row_level,
+                    },
+                    source,
+                )
+            });
+            values.push(converted);
+            return;
+        };
+        match argument {
+            ListArgument::Enclosing(child) => {
+                frames.push(ConvertFrame::ListArgument(
+                    build,
+                    ListArgumentSink::Positional,
+                ));
+                frames.push(ConvertFrame::Enter(node.child(child)));
+            }
+            ListArgument::InRows(child) => {
+                let scoped = build.row_scope.clone();
+                frames.push(ConvertFrame::ListArgument(
+                    build,
+                    ListArgumentSink::Positional,
+                ));
+                if let Some(scope) = scoped {
+                    ctx.row_scopes.push(scope);
+                    frames.push(ConvertFrame::PopRowScope);
+                }
+                frames.push(ConvertFrame::Enter(node.child(child)));
+            }
+            ListArgument::Field { name, value } => match self.row_field_path(&build, &name) {
+                Some(path) => {
+                    frames.push(ConvertFrame::ListArgument(
+                        build,
+                        ListArgumentSink::Field(path),
+                    ));
+                    frames.push(ConvertFrame::Enter(node.child(value)));
+                }
+                None => {
+                    build.failed = true;
+                    frames.push(ConvertFrame::List(build));
+                }
+            },
         }
     }
 
-    /// Converts an AST expression into a resolved expression and records any rule references.
-    fn convert_expression_and_extract_dependencies(
+    fn convert_ast_node(
         &mut self,
-        expr: &ast::Expression,
+        expr: AstRef<'_>,
+        children: &[ExprId],
         ctx: &mut RuleExpressionConversion<'a, '_>,
-    ) -> Option<Expression> {
+    ) -> Option<ExprId> {
         let expr_src = expr
-            .source_location
-            .as_ref()
+            .source()
             .expect("BUG: AST expression missing source location");
-        match &expr.kind {
+        let source = expr.source().cloned();
+        match expr.kind() {
             ast::ExpressionKind::Reference(r) => {
                 let expr_source = expr_src;
+                if !ctx.row_scopes.is_empty() {
+                    match self.resolve_row_field(r, expr_source, ctx) {
+                        RowFieldLookup::Field(kind) => {
+                            if let ExpressionKind::RowField { identity, end, .. } = &kind {
+                                self.note_row_end_read(identity, end, ctx);
+                            }
+                            return Some(ctx.push(kind, source.clone()));
+                        }
+                        RowFieldLookup::Failed => return None,
+                        RowFieldLookup::NotARowField => {}
+                    }
+                }
                 if let Some((head, rest)) = r.segments.split_first() {
                     if ctx.rule_names.contains(head.as_str()) && !ctx.data_map.contains_key(head) {
                         let base = RulePath {
@@ -3360,14 +5299,16 @@ impl<'a> GraphBuilder<'a> {
                             rule: head.clone(),
                         };
                         ctx.depends_on_rules.insert(base.clone());
-                        return Some(Expression::with_source(
+                        let base = ctx.push(ExpressionKind::RulePath(base), source.clone());
+                        self.note_row_member_read(base, rest, &r.name, ctx);
+                        return Some(ctx.push(
                             ExpressionKind::SpecMember {
                                 base,
                                 path: rest.to_vec(),
                                 name: r.name.clone(),
                                 targets: Vec::new(),
                             },
-                            expr.source_location.clone(),
+                            source.clone(),
                         ));
                     }
                 }
@@ -3424,39 +5365,25 @@ impl<'a> GraphBuilder<'a> {
                         segments,
                         data: r.name.clone(),
                     };
-                    if let Some(DataDefinition::Import {
-                        target_name,
-                        repository,
-                        effective,
-                        ..
-                    }) = self.data.get(&data_path)
+                    if let Some(DataDefinition::Import { identity, .. }) = self.data.get(&data_path)
                     {
                         let mut prefix = data_path.segments.clone();
                         prefix.push(PathSegment {
                             uses: data_path.data.clone(),
-                            repository: repository.clone(),
-                            spec: target_name.clone(),
+                            repository: identity.repository.clone(),
+                            spec: identity.spec.clone(),
                         });
-                        let identity = SpecIdentity {
-                            repository: repository.clone(),
-                            spec: target_name.clone(),
-                            effective: effective.clone(),
-                        };
                         let typed = TypedLiteral {
-                            value: ValueKind::Spec(SpecInstance { prefix }),
+                            value: ValueKind::Spec(SpecValue::Fixed(SpecInstance { prefix })),
                             lemma_type: Arc::new(LemmaType::primitive(TypeSpecification::Spec {
-                                spec: identity,
+                                spec: identity.clone(),
                             })),
                         };
-                        return Some(Expression::with_source(
-                            ExpressionKind::Literal(Box::new(typed)),
-                            expr.source_location.clone(),
-                        ));
+                        return Some(
+                            ctx.push(ExpressionKind::Literal(Box::new(typed)), source.clone()),
+                        );
                     }
-                    return Some(Expression::with_source(
-                        ExpressionKind::DataPath(data_path),
-                        expr.source_location.clone(),
-                    ));
+                    return Some(ctx.push(ExpressionKind::DataPath(data_path), source.clone()));
                 }
                 if is_rule {
                     let rule_path = RulePath {
@@ -3464,10 +5391,7 @@ impl<'a> GraphBuilder<'a> {
                         rule: r.name.clone(),
                     };
                     ctx.depends_on_rules.insert(rule_path.clone());
-                    return Some(Expression::with_source(
-                        ExpressionKind::RulePath(rule_path),
-                        expr.source_location.clone(),
-                    ));
+                    return Some(ctx.push(ExpressionKind::RulePath(rule_path), source.clone()));
                 }
                 let msg = match target_spec_name_opt {
                     Some(s) => format!("Reference '{}' not found in spec '{}'", r.name, s),
@@ -3477,33 +5401,23 @@ impl<'a> GraphBuilder<'a> {
                 None
             }
 
-            ast::ExpressionKind::LogicalAnd(left, right) => {
-                let (l, r) = self.convert_binary_operands(left, right, ctx)?;
-                Some(Expression::with_source(
-                    ExpressionKind::LogicalAnd(Arc::new(l), Arc::new(r)),
-                    expr.source_location.clone(),
-                ))
+            ast::ExpressionKind::LogicalAnd { steps, .. } => {
+                let (first, steps) = convert_chain_steps(steps, children);
+                Some(ctx.push(ExpressionKind::LogicalAnd { first, steps }, source))
             }
 
-            ast::ExpressionKind::Arithmetic(left, op, right) => {
-                let (l, r) = self.convert_binary_operands(left, right, ctx)?;
-                Some(Expression::with_source(
-                    ExpressionKind::Arithmetic(Arc::new(l), op.clone(), Arc::new(r)),
-                    expr.source_location.clone(),
-                ))
+            ast::ExpressionKind::Arithmetic { steps, .. } => {
+                let (first, steps) = convert_chain_steps(steps, children);
+                Some(ctx.push(ExpressionKind::Arithmetic { first, steps }, source))
             }
 
-            ast::ExpressionKind::Comparison(left, op, right) => {
-                let (l, r) = self.convert_binary_operands(left, right, ctx)?;
-                Some(Expression::with_source(
-                    ExpressionKind::Comparison(Arc::new(l), op.clone(), Arc::new(r)),
-                    expr.source_location.clone(),
-                ))
+            ast::ExpressionKind::Comparison(_, op, _) => {
+                let (left, right) = two(children);
+                Some(ctx.push(ExpressionKind::Comparison(left, op.clone(), right), source))
             }
 
-            ast::ExpressionKind::UnitConversion(value, target) => {
-                let converted_value =
-                    self.convert_expression_and_extract_dependencies(value, ctx)?;
+            ast::ExpressionKind::UnitConversion(_, target) => {
+                let converted_value = one(children);
 
                 let resolved_spec_types = self
                     .local_types
@@ -3526,7 +5440,7 @@ impl<'a> GraphBuilder<'a> {
                                 .unwrap_or(msg);
                             self.errors.push(Error::validation_with_context(
                                 full_msg,
-                                expr.source_location.clone(),
+                                expr.source().cloned(),
                                 None::<String>,
                                 Some(self.main_spec),
                                 None,
@@ -3535,39 +5449,33 @@ impl<'a> GraphBuilder<'a> {
                         }
                     };
 
-                Some(Expression::with_source(
-                    ExpressionKind::UnitConversion(Arc::new(converted_value), semantic_target),
-                    expr.source_location.clone(),
+                Some(ctx.push(
+                    ExpressionKind::UnitConversion(converted_value, semantic_target),
+                    source,
                 ))
             }
 
-            ast::ExpressionKind::LogicalNegation(operand, neg_type) => {
-                let converted_operand =
-                    self.convert_expression_and_extract_dependencies(operand, ctx)?;
-                Some(Expression::with_source(
-                    ExpressionKind::LogicalNegation(Arc::new(converted_operand), neg_type.clone()),
-                    expr.source_location.clone(),
+            ast::ExpressionKind::LogicalNegation(_, neg_type) => {
+                let converted_operand = one(children);
+                Some(ctx.push(
+                    ExpressionKind::LogicalNegation(converted_operand, neg_type.clone()),
+                    source,
                 ))
             }
 
-            ast::ExpressionKind::MathematicalComputation(op, operand) => {
-                let converted_operand =
-                    self.convert_expression_and_extract_dependencies(operand, ctx)?;
-                Some(Expression::with_source(
-                    ExpressionKind::MathematicalComputation(
-                        op.clone(),
-                        Arc::new(converted_operand),
-                    ),
-                    expr.source_location.clone(),
+            ast::ExpressionKind::MathematicalComputation(op, _) => {
+                let converted_operand = one(children);
+                Some(ctx.push(
+                    ExpressionKind::MathematicalComputation(op.clone(), converted_operand),
+                    source,
                 ))
             }
 
-            ast::ExpressionKind::RangeBound(bound, operand) => {
-                let converted_operand =
-                    self.convert_expression_and_extract_dependencies(operand, ctx)?;
-                Some(Expression::with_source(
-                    ExpressionKind::RangeBound(*bound, Arc::new(converted_operand)),
-                    expr.source_location.clone(),
+            ast::ExpressionKind::RangeBound(bound, _) => {
+                let converted_operand = one(children);
+                Some(ctx.push(
+                    ExpressionKind::RangeBound(*bound, converted_operand),
+                    source,
                 ))
             }
 
@@ -3639,12 +5547,10 @@ impl<'a> GraphBuilder<'a> {
                     Value::Date(_) => primitive_date_arc().clone(),
                     Value::Time(_) => primitive_time_arc().clone(),
                     Value::Range(left_v, right_v) => match (left_v.as_ref(), right_v.as_ref()) {
-                        (
-                            Value::NumberWithUnit(_, _),
-                            Value::NumberWithUnit(_, _),
-                        ) => match &semantic_value {
-                            ValueKind::Range(left, right) => {
-                                let specs = range_type_specification_from_endpoints(
+                        (Value::NumberWithUnit(_, _), Value::NumberWithUnit(_, _)) => {
+                            match &semantic_value {
+                                ValueKind::Range(left, right) => {
+                                    let specs = range_type_specification_from_endpoints(
                                     left.lemma_type.as_ref(),
                                     right.lemma_type.as_ref(),
                                 )
@@ -3653,12 +5559,13 @@ impl<'a> GraphBuilder<'a> {
                                         "BUG: measure/ratio range endpoints must form a range type after resolve"
                                     )
                                 });
-                                Arc::new(LemmaType::primitive(specs))
+                                    Arc::new(LemmaType::primitive(specs))
+                                }
+                                _ => unreachable!(
+                                    "BUG: semantic range literal conversion returned non-range value kind"
+                                ),
                             }
-                            _ => unreachable!(
-                                "BUG: semantic range literal conversion returned non-range value kind"
-                            ),
-                        },
+                        }
                         _ => match &semantic_value {
                             ValueKind::Range(left, right) => {
                                 let endpoint_type = |endpoint: &TypedLiteral| -> Arc<LemmaType> {
@@ -3696,77 +5603,666 @@ impl<'a> GraphBuilder<'a> {
                     value: semantic_value,
                     lemma_type,
                 };
-                Some(Expression::with_source(
+                Some(ctx.push(
                     ExpressionKind::Literal(Box::new(literal_value)),
-                    expr.source_location.clone(),
+                    source.clone(),
                 ))
             }
 
-            ast::ExpressionKind::Veto(veto_expression) => Some(Expression::with_source(
-                ExpressionKind::Veto(veto_expression.clone()),
-                expr.source_location.clone(),
-            )),
+            ast::ExpressionKind::Veto(veto_expression) => {
+                Some(ctx.push(ExpressionKind::Veto(veto_expression.clone()), source))
+            }
 
-            ast::ExpressionKind::ResultIsVeto(operand) => {
-                let converted = self.convert_expression_and_extract_dependencies(operand, ctx)?;
-                Some(Expression::with_source(
-                    ExpressionKind::ResultIsVeto(Arc::new(converted)),
-                    expr.source_location.clone(),
+            ast::ExpressionKind::ResultIsVeto(_) => {
+                let converted = one(children);
+                Some(ctx.push(ExpressionKind::ResultIsVeto(converted), source))
+            }
+
+            ast::ExpressionKind::Now => Some(ctx.push(ExpressionKind::Now, source)),
+
+            ast::ExpressionKind::DateRelative(kind, _) => {
+                let converted_date = one(children);
+                Some(ctx.push(ExpressionKind::DateRelative(*kind, converted_date), source))
+            }
+
+            ast::ExpressionKind::DateCalendar(kind, unit, _) => {
+                let converted_date = one(children);
+                Some(ctx.push(
+                    ExpressionKind::DateCalendar(*kind, *unit, converted_date),
+                    source,
                 ))
             }
 
-            ast::ExpressionKind::Now => Some(Expression::with_source(
-                ExpressionKind::Now,
-                expr.source_location.clone(),
-            )),
+            ast::ExpressionKind::RangeLiteral(..) => {
+                let (left, right) = two(children);
+                Some(ctx.push(ExpressionKind::RangeLiteral(left, right), source))
+            }
 
-            ast::ExpressionKind::DateRelative(kind, date_expr) => {
-                let converted_date =
-                    self.convert_expression_and_extract_dependencies(date_expr, ctx)?;
-                Some(Expression::with_source(
-                    ExpressionKind::DateRelative(*kind, Arc::new(converted_date)),
-                    expr.source_location.clone(),
+            ast::ExpressionKind::PastFutureRange(kind, _) => {
+                let converted_offset = one(children);
+                Some(ctx.push(
+                    ExpressionKind::PastFutureRange(*kind, converted_offset),
+                    source,
                 ))
             }
 
-            ast::ExpressionKind::DateCalendar(kind, unit, date_expr) => {
-                let converted_date =
-                    self.convert_expression_and_extract_dependencies(date_expr, ctx)?;
-                Some(Expression::with_source(
-                    ExpressionKind::DateCalendar(*kind, *unit, Arc::new(converted_date)),
-                    expr.source_location.clone(),
+            ast::ExpressionKind::RangeContainment(..) => {
+                let (converted_value, converted_range) = two(children);
+                Some(ctx.push(
+                    ExpressionKind::RangeContainment(converted_value, converted_range),
+                    source,
                 ))
             }
 
-            ast::ExpressionKind::RangeLiteral(left, right) => {
-                let (l, r) = self.convert_binary_operands(left, right, ctx)?;
-                Some(Expression::with_source(
-                    ExpressionKind::RangeLiteral(Arc::new(l), Arc::new(r)),
-                    expr.source_location.clone(),
-                ))
+            ast::ExpressionKind::ListType { element } => {
+                self.convert_list_type_expression(element, expr, ctx)
             }
 
-            ast::ExpressionKind::PastFutureRange(kind, offset_expr) => {
-                let converted_offset =
-                    self.convert_expression_and_extract_dependencies(offset_expr, ctx)?;
-                Some(Expression::with_source(
-                    ExpressionKind::PastFutureRange(*kind, Arc::new(converted_offset)),
-                    expr.source_location.clone(),
-                ))
+            ast::ExpressionKind::ListCommand { .. } => {
+                unreachable!("BUG: list commands are converted by convert_ast_expression")
             }
 
-            ast::ExpressionKind::RangeContainment(value, range) => {
-                let (converted_value, converted_range) =
-                    self.convert_binary_operands(value, range, ctx)?;
-                Some(Expression::with_source(
-                    ExpressionKind::RangeContainment(
-                        Arc::new(converted_value),
-                        Arc::new(converted_range),
-                    ),
-                    expr.source_location.clone(),
+            ast::ExpressionKind::Member { path, .. } => {
+                let converted_base = one(children);
+                self.note_row_member_read(converted_base, &path.segments, &path.name, ctx);
+                Some(ctx.push(
+                    ExpressionKind::SpecMember {
+                        base: converted_base,
+                        path: path.segments.clone(),
+                        name: path.name.clone(),
+                        targets: Vec::new(),
+                    },
+                    source,
                 ))
             }
         }
+    }
+
+    /// Row spec of the rows a converted list expression yields, when it is an instance list.
+    ///
+    /// `spec` at `segments` is the spec being converted: its rules that are not converted
+    /// yet are read from source.
+    fn instance_list_identity(
+        &self,
+        list: ExprRef<'_, ExpressionKind>,
+        spec: &LemmaSpec,
+        segments: &[PathSegment],
+    ) -> Option<SpecIdentity> {
+        let scope = SourceScope { spec, segments };
+        self.instance_list_identity_guarded(list, &scope, &mut BTreeSet::new())
+    }
+
+    /// Depth-first search over pipeline commands, rule bodies and conditional arms, with an
+    /// explicit work stack. The first arm that yields an identity wins, in source order.
+    fn instance_list_identity_guarded(
+        &self,
+        list: ExprRef<'_, ExpressionKind>,
+        scope: &SourceScope<'_>,
+        visiting: &mut BTreeSet<RulePath>,
+    ) -> Option<SpecIdentity> {
+        self.instance_list_identity_walk(vec![Pending::Sem(list)], scope, visiting)
+    }
+
+    fn instance_list_identity_walk<'e>(
+        &'e self,
+        mut pending: Vec<Pending<'e>>,
+        scope: &SourceScope<'e>,
+        visiting: &mut BTreeSet<RulePath>,
+    ) -> Option<SpecIdentity> {
+        while let Some(item) = pending.pop() {
+            let identity = match item {
+                Pending::Sem(list) => match list.kind() {
+                    ExpressionKind::DataPath(path) => self.instance_list_data_identity(path),
+                    ExpressionKind::ListCommand {
+                        list: inner, op, ..
+                    } => match op {
+                        ListOp::Predicate {
+                            kind: ListPredKind::Where,
+                            ..
+                        }
+                        | ListOp::InstancePredicate {
+                            kind: ListPredKind::Where,
+                            ..
+                        }
+                        | ListOp::Sort { .. }
+                        | ListOp::Top { .. }
+                        | ListOp::With { .. }
+                        | ListOp::WithRow { .. } => {
+                            pending.push(Pending::Sem(list.child(*inner)));
+                            None
+                        }
+                        ListOp::Predicate { .. }
+                        | ListOp::InstancePredicate { .. }
+                        | ListOp::First
+                        | ListOp::Last
+                        | ListOp::Count
+                        | ListOp::Find { .. }
+                        | ListOp::Reduce { .. } => None,
+                    },
+                    ExpressionKind::RulePath(rule) => {
+                        pending.push(Pending::Rule(rule.clone()));
+                        None
+                    }
+                    ExpressionKind::Piecewise(arms) => {
+                        for (_, result) in arms.iter().rev() {
+                            pending.push(Pending::Sem(list.child(*result)));
+                        }
+                        None
+                    }
+                    _ => None,
+                },
+                Pending::Ast(expr) => match expr.kind() {
+                    ast::ExpressionKind::Reference(reference) if reference.segments.is_empty() => {
+                        let is_data = scope.spec.data.iter().any(|data| {
+                            data.reference.is_local() && data.reference.name == reference.name
+                        });
+                        if is_data {
+                            self.instance_list_data_identity(&DataPath {
+                                segments: scope.segments.to_vec(),
+                                data: reference.name.clone(),
+                            })
+                        } else {
+                            pending.push(Pending::Rule(RulePath {
+                                segments: scope.segments.to_vec(),
+                                rule: reference.name.clone(),
+                            }));
+                            None
+                        }
+                    }
+                    ast::ExpressionKind::ListCommand {
+                        list,
+                        command:
+                            ast::ListCommand::Where { .. }
+                            | ast::ListCommand::Sort { .. }
+                            | ast::ListCommand::Top { .. }
+                            | ast::ListCommand::With { .. },
+                    } => {
+                        pending.push(Pending::Ast(expr.child(*list)));
+                        None
+                    }
+                    _ => None,
+                },
+                Pending::Rule(rule) => {
+                    if !visiting.insert(rule.clone()) {
+                        None
+                    } else if let Some(node) = self.rules.get(&rule) {
+                        if let Some((_, body)) = node.branches.first() {
+                            pending.push(Pending::Sem(node.expression.at(*body)));
+                        }
+                        None
+                    } else if rule.segments.as_slice() != scope.segments {
+                        None
+                    } else {
+                        if let Some(source_rule) =
+                            scope.spec.rules.iter().find(|r| r.name == rule.rule)
+                        {
+                            pending.push(Pending::Ast(source_rule.expression.root()));
+                        }
+                        None
+                    }
+                }
+            };
+            if identity.is_some() {
+                return identity;
+            }
+        }
+        None
+    }
+
+    fn instance_list_data_identity(&self, path: &DataPath) -> Option<SpecIdentity> {
+        let definition = self.data.get(path)?;
+        match &definition.resolved_type_arc()?.specifications {
+            TypeSpecification::List { element, .. } => match &element.specifications {
+                TypeSpecification::Spec { spec } => Some(spec.clone()),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    /// `base.path.name` where `base` may be a row of a self-list: a rule read there is
+    /// recursion or an ordering edge, as for [`ExpressionKind::RowField`].
+    fn note_row_member_read(
+        &self,
+        base: ExprId,
+        path: &[String],
+        name: &str,
+        ctx: &mut RuleExpressionConversion<'a, '_>,
+    ) {
+        let scope = SourceScope {
+            spec: ctx.spec,
+            segments: ctx.segments,
+        };
+        let base = ExprRef {
+            table: &ctx.table,
+            id: base,
+        };
+        let Some(identity) = self.row_value_identity(base, &scope, &mut BTreeSet::new()) else {
+            return;
+        };
+        if identity != self.instance_lists.self_identity {
+            return;
+        }
+        let mut key = path.join(".");
+        if !key.is_empty() {
+            key.push('.');
+        }
+        key.push_str(name);
+        if let Some(end) = self.template_row_end(&RowTemplate::Root, &key) {
+            self.note_row_end_read(&identity, &end, ctx);
+        }
+    }
+
+    /// A row field read of a self-list: Rule ends and data that reference a rule
+    /// both order typing and mark recursion.
+    fn note_row_end_read(
+        &self,
+        identity: &SpecIdentity,
+        end: &RowEnd,
+        ctx: &mut RuleExpressionConversion<'a, '_>,
+    ) {
+        match end {
+            RowEnd::Rule(rule) => self.note_row_rule_read(identity, rule, ctx),
+            RowEnd::Data(path) => {
+                if let Some(DataDefinition::Reference {
+                    target: ReferenceTarget::Rule(rule),
+                    ..
+                }) = self.data.get(path)
+                {
+                    self.note_row_rule_read(identity, rule, ctx);
+                }
+            }
+        }
+    }
+
+    /// Row spec of the single row a converted expression yields (`list -> first`), when
+    /// it picks a row of an instance list. Depth-first over rule bodies and conditional arms
+    /// with an explicit work stack.
+    fn row_value_identity<'e>(
+        &'e self,
+        expression: ExprRef<'e, ExpressionKind>,
+        scope: &SourceScope<'e>,
+        visiting: &mut BTreeSet<RulePath>,
+    ) -> Option<SpecIdentity> {
+        let mut pending = vec![Pending::Sem(expression)];
+        while let Some(item) = pending.pop() {
+            let identity = match item {
+                Pending::Sem(expression) => match expression.kind() {
+                    ExpressionKind::ListCommand {
+                        list,
+                        op: ListOp::First | ListOp::Last | ListOp::Find { .. },
+                        ..
+                    } => self.instance_list_identity_guarded(
+                        expression.child(*list),
+                        scope,
+                        &mut BTreeSet::new(),
+                    ),
+                    ExpressionKind::RulePath(rule) => {
+                        pending.push(Pending::Rule(rule.clone()));
+                        None
+                    }
+                    ExpressionKind::Piecewise(arms) => {
+                        for (_, result) in arms.iter().rev() {
+                            pending.push(Pending::Sem(expression.child(*result)));
+                        }
+                        None
+                    }
+                    _ => None,
+                },
+                Pending::Ast(expr) => match expr.kind() {
+                    ast::ExpressionKind::Reference(reference) if reference.segments.is_empty() => {
+                        pending.push(Pending::Rule(RulePath {
+                            segments: scope.segments.to_vec(),
+                            rule: reference.name.clone(),
+                        }));
+                        None
+                    }
+                    ast::ExpressionKind::ListCommand {
+                        list,
+                        command:
+                            ast::ListCommand::First
+                            | ast::ListCommand::Last
+                            | ast::ListCommand::Find { .. },
+                    } => self.instance_list_identity_from_source(
+                        expr.child(*list),
+                        scope,
+                        &mut BTreeSet::new(),
+                    ),
+                    _ => None,
+                },
+                Pending::Rule(rule) => {
+                    if !visiting.insert(rule.clone()) {
+                        None
+                    } else if let Some(node) = self.rules.get(&rule) {
+                        for (_, body) in node.branches.iter().rev() {
+                            pending.push(Pending::Sem(node.expression.at(*body)));
+                        }
+                        None
+                    } else if rule.segments.as_slice() != scope.segments {
+                        None
+                    } else {
+                        if let Some(source_rule) =
+                            scope.spec.rules.iter().find(|r| r.name == rule.rule)
+                        {
+                            for unless in source_rule.unless_clauses.iter().rev() {
+                                pending.push(Pending::Ast(unless.result.root()));
+                            }
+                            pending.push(Pending::Ast(source_rule.expression.root()));
+                        }
+                        None
+                    }
+                }
+            };
+            if identity.is_some() {
+                return identity;
+            }
+        }
+        None
+    }
+
+    /// [`Self::instance_list_identity_guarded`] on a rule body that is not converted yet.
+    fn instance_list_identity_from_source(
+        &self,
+        expression: AstRef<'_>,
+        scope: &SourceScope<'_>,
+        visiting: &mut BTreeSet<RulePath>,
+    ) -> Option<SpecIdentity> {
+        self.instance_list_identity_walk(vec![Pending::Ast(expression)], scope, visiting)
+    }
+
+    /// Rule `rule` read on a row of `identity`. On a self-list row it is the rule being
+    /// converted (recursion through the list) or an ordering edge: its type must be
+    /// known before this rule is typed.
+    fn note_row_rule_read(
+        &self,
+        identity: &SpecIdentity,
+        rule: &RulePath,
+        ctx: &mut RuleExpressionConversion<'a, '_>,
+    ) {
+        if *identity != self.instance_lists.self_identity {
+            return;
+        }
+        if rule.segments.is_empty() && ctx.segments.is_empty() && rule.rule == ctx.rule {
+            ctx.reads_itself_on_rows = true;
+        } else {
+            ctx.depends_on_rules.insert(rule.clone());
+        }
+    }
+
+    /// Resolve `r` as a field of a row of an enclosing instance-list command.
+    fn resolve_row_field(
+        &mut self,
+        r: &ast::Reference,
+        source: &Source,
+        ctx: &RuleExpressionConversion<'a, '_>,
+    ) -> RowFieldLookup {
+        let written = r.full_path();
+        for scope in ctx.row_scopes.iter().rev() {
+            let Some(list_path) = &scope.list_path else {
+                continue;
+            };
+            let Some(rest_parts) = written.strip_prefix(list_path.as_slice()) else {
+                continue;
+            };
+            if rest_parts.is_empty() {
+                continue;
+            }
+            let rest = rest_parts.join(".");
+            let list_name = list_path.join(".");
+            return match self.template_row_end(&scope.template, &rest) {
+                Some(end) => RowFieldLookup::Field(ExpressionKind::RowField {
+                    level: scope.level,
+                    identity: scope.identity.clone(),
+                    end,
+                }),
+                None => {
+                    let message = if match &scope.template {
+                        RowTemplate::Root => instance_list::is_row_import(&self.data, &rest),
+                        RowTemplate::Plan(plan) => instance_list::is_row_import(&plan.data, &rest),
+                    } {
+                        format!(
+                            "`{rest}` is a `uses` instance on rows of `{list_name}`; read a field of it (`{list_name}.{rest}.<field>`), not the instance"
+                        )
+                    } else {
+                        format!(
+                            "no data or rule `{rest}` on rows of `{list_name}` (`{}`)",
+                            scope.identity.spec
+                        )
+                    };
+                    self.errors.push(self.engine_error(message, source));
+                    RowFieldLookup::Failed
+                }
+            };
+        }
+        let field = r.to_string();
+        let row_matches: Vec<(&RowScope, RowEnd)> = ctx
+            .row_scopes
+            .iter()
+            .rev()
+            .filter_map(|scope| {
+                self.template_row_end(&scope.template, &field)
+                    .map(|end| (scope, end))
+            })
+            .collect();
+        let Some((scope, end)) = row_matches.first() else {
+            return RowFieldLookup::NotARowField;
+        };
+        let head = r.segments.first().unwrap_or(&r.name);
+        let enclosing = ctx.data_map.contains_key(head)
+            || (ctx.rule_names.contains(head.as_str()) && head.as_str() != ctx.rule);
+        if enclosing || row_matches.len() > 1 {
+            let mut owners: Vec<String> = Vec::new();
+            if enclosing {
+                owners.push(format!("on `{}`", ctx.spec.name));
+            }
+            for (other, _) in &row_matches {
+                owners.push(match &other.list_path {
+                    Some(path) => format!("on rows of `{}`", path.join(".")),
+                    None => format!("on `{}` rows", other.identity.spec),
+                });
+            }
+            let qualifier = scope
+                .list_path
+                .as_ref()
+                .map(|path| path.join("."))
+                .unwrap_or_else(|| scope.identity.spec.clone());
+            self.errors.push(self.engine_error(
+                format!(
+                    "`{field}` exists {}; write `{qualifier}.{field}`",
+                    owners.join(" and ")
+                ),
+                source,
+            ));
+            return RowFieldLookup::Failed;
+        }
+        RowFieldLookup::Field(ExpressionKind::RowField {
+            level: scope.level,
+            identity: scope.identity.clone(),
+            end: end.clone(),
+        })
+    }
+
+    fn convert_list_type_expression(
+        &mut self,
+        element: &ParentType,
+        expr: AstRef<'_>,
+        ctx: &mut RuleExpressionConversion<'a, '_>,
+    ) -> Option<ExprId> {
+        let (_, _, types) = self
+            .local_types
+            .iter()
+            .find(|(_, spec, _)| discovery::same_loaded_spec(spec, ctx.spec))
+            .expect("BUG: rule spec types resolved before rule conversion");
+        let (_, list_type) = types
+            .rule_list_types
+            .iter()
+            .find(|(written, _)| written == element)
+            .expect("BUG: rule list types resolved with the spec's types");
+        Some(ctx.push(
+            ExpressionKind::Literal(Box::new(TypedLiteral {
+                value: ValueKind::List(Vec::new()),
+                lemma_type: Arc::clone(list_type),
+            })),
+            expr.source().cloned(),
+        ))
+    }
+
+    /// Path of the data field that `-> with` row field `name` names. Records the error and
+    /// returns `None` when it is not data of the row spec or repeats a field of the row.
+    fn row_field_path(&mut self, build: &ListCommandBuild<'_>, name: &str) -> Option<DataPath> {
+        let scope = build
+            .row_scope
+            .as_ref()
+            .expect("BUG: field arguments are queued only with a row scope");
+        let Some(path) = self.template_data_path(&scope.template, name) else {
+            self.errors.push(self.engine_error(
+                format!(
+                    "row field `{name}` is not data on `{}`",
+                    scope.identity.spec
+                ),
+                &build.source,
+            ));
+            return None;
+        };
+        if build.fields.iter().any(|(existing, _)| *existing == path) {
+            self.errors.push(self.engine_error(
+                format!("row field `{name}` appears twice in one row"),
+                &build.source,
+            ));
+            return None;
+        }
+        Some(path)
+    }
+
+    /// Planned list command from its converted arguments, which are in the order of
+    /// [`list_command_arguments`]. `None` when a rule-level error was recorded.
+    fn finish_list_command(
+        &mut self,
+        command: &ast::ListCommand,
+        row_scope: &Option<RowScope>,
+        converted: Vec<ExprId>,
+        fields: Vec<(DataPath, ExprId)>,
+        failed: bool,
+        source: &Source,
+    ) -> Option<ListOp> {
+        let mut converted = converted.into_iter();
+        match command {
+            ast::ListCommand::Find { .. } => Some(ListOp::Find {
+                keys: converted.collect(),
+            }),
+            ast::ListCommand::First => Some(ListOp::First),
+            ast::ListCommand::Last => Some(ListOp::Last),
+            ast::ListCommand::Count => Some(ListOp::Count),
+            ast::ListCommand::Sum { argument } => Some(ListOp::Reduce {
+                kind: ListReduce::Sum,
+                argument: optional_argument(argument, &mut converted),
+            }),
+            ast::ListCommand::Avg { argument } => Some(ListOp::Reduce {
+                kind: ListReduce::Avg,
+                argument: optional_argument(argument, &mut converted),
+            }),
+            ast::ListCommand::Product { argument } => Some(ListOp::Reduce {
+                kind: ListReduce::Product,
+                argument: optional_argument(argument, &mut converted),
+            }),
+            ast::ListCommand::Min { argument } => Some(ListOp::Reduce {
+                kind: ListReduce::Min,
+                argument: optional_argument(argument, &mut converted),
+            }),
+            ast::ListCommand::Max { argument } => Some(ListOp::Reduce {
+                kind: ListReduce::Max,
+                argument: optional_argument(argument, &mut converted),
+            }),
+            ast::ListCommand::Any { form } => {
+                Some(list_predicate_op(form, ListPredKind::Any, &mut converted))
+            }
+            ast::ListCommand::All { form } => {
+                Some(list_predicate_op(form, ListPredKind::All, &mut converted))
+            }
+            ast::ListCommand::Where { form } => {
+                Some(list_predicate_op(form, ListPredKind::Where, &mut converted))
+            }
+            ast::ListCommand::Sort {
+                descending,
+                argument,
+            } => Some(ListOp::Sort {
+                descending: *descending,
+                argument: optional_argument(argument, &mut converted),
+            }),
+            ast::ListCommand::Top { .. } => Some(ListOp::Top {
+                n: next_argument(&mut converted),
+            }),
+            ast::ListCommand::With { rows } => match (rows, row_scope) {
+                (ast::ListWithRows::Values(_), None) => Some(ListOp::With {
+                    rows: converted.collect(),
+                }),
+                (ast::ListWithRows::Values(_), Some(scope)) => {
+                    self.errors.push(self.engine_error(
+                        format!(
+                            "`-> with <instance>` appends named instances on a `uses` list declaration; on a `{}` list in a rule, write `-> with <field>: <value>` for an inline row",
+                            scope.identity.spec
+                        ),
+                        source,
+                    ));
+                    None
+                }
+                (ast::ListWithRows::FieldPairs(_), None) => {
+                    self.errors.push(self.engine_error(
+                        "`-> with field: value` appends a row to an instance list; this is a value list, write `-> with <value>`",
+                        source,
+                    ));
+                    None
+                }
+                (ast::ListWithRows::FieldPairs(_), Some(_)) => {
+                    (!failed).then_some(ListOp::WithRow { fields })
+                }
+            },
+        }
+    }
+}
+
+/// Row spec of an instance list: its identity and template plan.
+#[derive(Clone, Copy)]
+struct RowSpec<'t> {
+    identity: &'t SpecIdentity,
+    template: &'t ExecutionPlan,
+}
+
+/// Literal source-row value read against the template field type.
+fn source_row_literal(
+    value: &Value,
+    field_type: &Arc<LemmaType>,
+    template: &ExecutionPlan,
+) -> Result<BoundValueKind, String> {
+    let typed = crate::evaluation::evaluate_data::typed_literal_from_parsed(
+        value,
+        field_type,
+        template.expression_unit_index(),
+        &template.resolved_types.resolved,
+    )?;
+    execution_plan::validate_value_against_type(
+        typed.lemma_type.as_ref(),
+        &LiteralValue {
+            value: typed.value.clone(),
+        },
+        template.expression_unit_index(),
+    )?;
+    Ok(BoundValueKind {
+        value: typed.value,
+        unit: typed.lemma_type.unit().map(Arc::from),
+    })
+}
+
+fn unit_tokens_for_spec<'b>(
+    types: &'b ResolvedTypesMap,
+    spec: &LemmaSpec,
+) -> UnitTokenResolver<'b> {
+    match find_types_by_spec(types, spec) {
+        Some(resolved) => UnitTokenResolver::Declared {
+            unit_index: &resolved.unit_index,
+            named_types: &resolved.resolved,
+        },
+        None => UnitTokenResolver::Undeclared,
     }
 }
 
@@ -3848,6 +6344,9 @@ fn anonymous_rule_boundary_error(
 // Phase 1: Pure type inference (no validation, no error collection)
 // =============================================================================
 
+/// `RulePresence::Dropped` here means a nested template already recorded a planning error
+/// for the rule (see `Graph::rule_presence`). The dependent gets an undetermined type; the
+/// error is reported once, from the template.
 fn inferred_or_dropped(
     graph: &Graph,
     computed_rule_types: &HashMap<RulePath, Arc<LemmaType>>,
@@ -3858,8 +6357,18 @@ fn inferred_or_dropped(
     }
     match graph.rule_presence(rule_path) {
         RulePresence::Dropped => Arc::new(LemmaType::undetermined_type()),
-        RulePresence::Present => {
+        RulePresence::Present if graph.has_local_rule(rule_path) => {
             panic!("BUG: rule type not inferred before dependent in topological order")
+        }
+        RulePresence::Present => {
+            let (plan, local) =
+                peel_rule_from(&graph.data, &graph.instance_lists.templates, rule_path)
+                    .expect("BUG: Present import rule must peel");
+            let executable = plan
+                .rules
+                .get(local)
+                .expect("BUG: peeled import rule missing from template plan");
+            Arc::clone(&executable.rule_type)
         }
         RulePresence::Absent => {
             panic!("BUG: rule '{rule_path}' neither in graph nor dropped")
@@ -3867,47 +6376,51 @@ fn inferred_or_dropped(
     }
 }
 
-/// Infer the type of an expression without performing any validation.
-/// Returns `LemmaType::undetermined_type()` when a type cannot be determined (e.g. unknown data).
+/// Type of `expression`, without validation; `LemmaType::undetermined_type()` when it cannot
+/// be determined (e.g. unknown data). Every node of the table up to `expression` is typed in
+/// table order, each reading its operands' types from the typed prefix, so nothing recurses.
 fn infer_expression_type(
-    expression: &Expression,
+    expression: ExprRef<'_, ExpressionKind>,
     graph: &Graph,
     computed_rule_types: &HashMap<RulePath, Arc<LemmaType>>,
     resolved_types: &ResolvedTypesMap,
-    spec: &LemmaSpec,
+    cache: &mut InferExpressionTypeCache,
 ) -> Arc<LemmaType> {
-    let key = expression as *const Expression as usize;
-    let cached = INFER_EXPRESSION_TYPE_CACHE.with(|slot| {
-        slot.borrow()
-            .as_ref()
-            .and_then(|cache| cache.get(&key).cloned())
-    });
-    if let Some(lemma_type) = cached {
-        return lemma_type;
+    let key = expression.table as *const ExprTable<ExpressionKind> as usize;
+    let types = cache
+        .tables
+        .entry(key)
+        .or_insert_with(|| Vec::with_capacity(expression.table.len()));
+    for index in types.len()..=expression.id.index() {
+        let node = expression.child(ExprId::from_index(index));
+        let lemma_type =
+            infer_expression_type_uncached(node, graph, computed_rule_types, resolved_types, types);
+        types.push(lemma_type);
     }
-    let lemma_type = infer_expression_type_uncached(
-        expression,
-        graph,
-        computed_rule_types,
-        resolved_types,
-        spec,
-    );
-    INFER_EXPRESSION_TYPE_CACHE.with(|slot| {
-        if let Some(cache) = slot.borrow_mut().as_mut() {
-            cache.insert(key, Arc::clone(&lemma_type));
-        }
-    });
-    lemma_type
+    Arc::clone(&types[expression.id.index()])
+}
+
+/// Type of an operand of the node being typed. Operands precede their parent in the table,
+/// so they are always in the typed prefix.
+fn cached_expression_type(
+    cache: &[Arc<LemmaType>],
+    expression: ExprRef<'_, ExpressionKind>,
+) -> Arc<LemmaType> {
+    Arc::clone(
+        cache
+            .get(expression.id.index())
+            .expect("BUG: operand typed before its parent"),
+    )
 }
 
 fn infer_expression_type_uncached(
-    expression: &Expression,
+    expression: ExprRef<'_, ExpressionKind>,
     graph: &Graph,
     computed_rule_types: &HashMap<RulePath, Arc<LemmaType>>,
     resolved_types: &ResolvedTypesMap,
-    spec: &LemmaSpec,
+    cache: &[Arc<LemmaType>],
 ) -> Arc<LemmaType> {
-    match &expression.kind {
+    match expression.kind() {
         ExpressionKind::Literal(literal_value) => Arc::clone(&literal_value.lemma_type),
 
         ExpressionKind::DataPath(data_path) => {
@@ -3918,61 +6431,48 @@ fn infer_expression_type_uncached(
             inferred_or_dropped(graph, computed_rule_types, rule_path)
         }
 
-        ExpressionKind::LogicalAnd(left, right) => {
-            let left_type =
-                infer_expression_type(left, graph, computed_rule_types, resolved_types, spec);
-            let right_type =
-                infer_expression_type(right, graph, computed_rule_types, resolved_types, spec);
-            logical_and_type(&left_type, &right_type)
-        }
+        ExpressionKind::LogicalAnd { first, steps } => steps.iter().fold(
+            cached_expression_type(cache, expression.child(*first)),
+            |left_type, step| {
+                let right_type = cached_expression_type(cache, expression.child(step.operand));
+                logical_and_type(&left_type, &right_type)
+            },
+        ),
 
         ExpressionKind::LogicalNegation(operand, _) => {
-            let operand_type =
-                infer_expression_type(operand, graph, computed_rule_types, resolved_types, spec);
+            let operand_type = cached_expression_type(cache, expression.child(*operand));
             logical_not_type(&operand_type)
         }
 
-        ExpressionKind::Comparison(left, _op, right) => {
-            let left_type =
-                infer_expression_type(left, graph, computed_rule_types, resolved_types, spec);
-            let right_type =
-                infer_expression_type(right, graph, computed_rule_types, resolved_types, spec);
+        ExpressionKind::Comparison(left, _, right) => {
+            let left_type = cached_expression_type(cache, expression.child(*left));
+            let right_type = cached_expression_type(cache, expression.child(*right));
             comparison_type(&left_type, &right_type)
         }
 
-        ExpressionKind::Arithmetic(left, operator, right) => {
-            let left_type =
-                infer_expression_type(left, graph, computed_rule_types, resolved_types, spec);
-            let right_type =
-                infer_expression_type(right, graph, computed_rule_types, resolved_types, spec);
-            compute_arithmetic_result_type(
-                left_type,
-                operator,
-                right_type,
-                &arithmetic_scope(resolved_types, graph),
+        ExpressionKind::Arithmetic { first, steps } => {
+            let scope = arithmetic_scope(resolved_types, graph);
+            steps.iter().fold(
+                cached_expression_type(cache, expression.child(*first)),
+                |left_type, step| {
+                    let right_type = cached_expression_type(cache, expression.child(step.operand));
+                    compute_arithmetic_result_type(left_type, &step.op, right_type, &scope)
+                },
             )
         }
 
         ExpressionKind::UnitConversion(source_expression, target) => {
-            let source_type = infer_expression_type(
-                source_expression,
-                graph,
-                computed_rule_types,
-                resolved_types,
-                spec,
-            );
+            let source_type = cached_expression_type(cache, expression.child(*source_expression));
             unit_conversion_type(&source_type, target)
         }
 
         ExpressionKind::MathematicalComputation(op, operand) => {
-            let operand_type =
-                infer_expression_type(operand, graph, computed_rule_types, resolved_types, spec);
+            let operand_type = cached_expression_type(cache, expression.child(*operand));
             math_op_type(op, &operand_type, &arithmetic_scope(resolved_types, graph))
         }
 
         ExpressionKind::RangeBound(_, operand) => {
-            let operand_type =
-                infer_expression_type(operand, graph, computed_rule_types, resolved_types, spec);
+            let operand_type = cached_expression_type(cache, expression.child(*operand));
             if operand_type.vetoed() {
                 return Arc::new(LemmaType::veto_type());
             }
@@ -3988,8 +6488,7 @@ fn infer_expression_type_uncached(
         ExpressionKind::Veto(_) => Arc::new(LemmaType::veto_type()),
 
         ExpressionKind::ResultIsVeto(operand) => {
-            let _ =
-                infer_expression_type(operand, graph, computed_rule_types, resolved_types, spec);
+            cached_expression_type(cache, expression.child(*operand));
             result_is_veto_type()
         }
 
@@ -3997,16 +6496,13 @@ fn infer_expression_type_uncached(
 
         ExpressionKind::DateRelative(_, date_expr)
         | ExpressionKind::DateCalendar(_, _, date_expr) => {
-            let date_type =
-                infer_expression_type(date_expr, graph, computed_rule_types, resolved_types, spec);
+            let date_type = cached_expression_type(cache, expression.child(*date_expr));
             date_predicate_type(&date_type)
         }
 
         ExpressionKind::RangeContainment(value, range) => {
-            let value_type =
-                infer_expression_type(value, graph, computed_rule_types, resolved_types, spec);
-            let range_type =
-                infer_expression_type(range, graph, computed_rule_types, resolved_types, spec);
+            let value_type = cached_expression_type(cache, expression.child(*value));
+            let range_type = cached_expression_type(cache, expression.child(*range));
             if value_type.vetoed() || range_type.vetoed() {
                 return Arc::new(LemmaType::veto_type());
             }
@@ -4014,10 +6510,8 @@ fn infer_expression_type_uncached(
         }
 
         ExpressionKind::RangeLiteral(left, right) => {
-            let left_type =
-                infer_expression_type(left, graph, computed_rule_types, resolved_types, spec);
-            let right_type =
-                infer_expression_type(right, graph, computed_rule_types, resolved_types, spec);
+            let left_type = cached_expression_type(cache, expression.child(*left));
+            let right_type = cached_expression_type(cache, expression.child(*right));
             if left_type.vetoed() || right_type.vetoed() {
                 return Arc::new(LemmaType::veto_type());
             }
@@ -4028,42 +6522,44 @@ fn infer_expression_type_uncached(
         }
 
         ExpressionKind::PastFutureRange(_, offset_expr) => {
-            let offset_type = infer_expression_type(
-                offset_expr,
-                graph,
-                computed_rule_types,
-                resolved_types,
-                spec,
-            );
+            let offset_type = cached_expression_type(cache, expression.child(*offset_expr));
             past_future_range_type(&offset_type)
         }
 
-        ExpressionKind::SpecMember { base, targets, .. } => {
-            if targets.is_empty() {
+        ExpressionKind::SpecMember {
+            base,
+            path,
+            name,
+            targets,
+        } => {
+            let base_type = cached_expression_type(cache, expression.child(*base));
+            if base_type.vetoed() {
+                return Arc::new(LemmaType::veto_type());
+            }
+            if !base_type.is_spec() {
                 return Arc::new(LemmaType::undetermined_type());
             }
-            let base_type = inferred_or_dropped(graph, computed_rule_types, base);
-            if !base_type.is_spec() && !base_type.is_undetermined() && !base_type.vetoed() {
-                return Arc::new(LemmaType::undetermined_type());
+            if !targets.is_empty() {
+                return spec_member_type(targets, graph, computed_rule_types);
             }
-            spec_member_type(targets, graph, computed_rule_types)
+            match row_member_end(graph, &base_type, path, name) {
+                Some((fields, end)) => fields.end_type(&end, computed_rule_types),
+                None => Arc::new(LemmaType::undetermined_type()),
+            }
+        }
+
+        ExpressionKind::RowField { identity, end, .. } => {
+            row_fields(graph, identity).end_type(end, computed_rule_types)
         }
 
         ExpressionKind::Piecewise(arms) => {
             let mut result_type: Option<Arc<LemmaType>> = None;
             for (condition, result) in arms {
-                let condition_type = infer_expression_type(
-                    condition,
-                    graph,
-                    computed_rule_types,
-                    resolved_types,
-                    spec,
-                );
+                let condition_type = cached_expression_type(cache, expression.child(*condition));
                 if !condition_type.is_boolean() && !condition_type.is_undetermined() {
                     return Arc::new(LemmaType::undetermined_type());
                 }
-                let arm_result_type =
-                    infer_expression_type(result, graph, computed_rule_types, resolved_types, spec);
+                let arm_result_type = cached_expression_type(cache, expression.child(*result));
                 match &result_type {
                     None => result_type = Some(arm_result_type),
                     Some(existing) if *existing == arm_result_type => {}
@@ -4078,7 +6574,248 @@ fn infer_expression_type_uncached(
             }
             result_type.unwrap_or_else(|| Arc::new(LemmaType::undetermined_type()))
         }
+
+        ExpressionKind::ListCommand { list, op, .. } => infer_list_command_type(
+            expression,
+            expression.child(*list),
+            op,
+            graph,
+            resolved_types,
+            cache,
+        ),
     }
+}
+
+/// Fields of rows of one row spec while the consumer is typed.
+#[derive(Clone, Copy)]
+enum RowFields<'g> {
+    /// Row spec with its own template plan.
+    Plan(&'g ExecutionPlan),
+    /// Self-list: rows are the spec being typed.
+    Root(&'g Graph<'g>),
+}
+
+impl<'g> RowFields<'g> {
+    fn end(&self, name: &str) -> Option<RowEnd> {
+        match self {
+            RowFields::Plan(plan) => {
+                instance_list::row_end_of(instance_list::RowEndView::Plan(plan), name)
+            }
+            RowFields::Root(graph) => {
+                // Typing runs after conversion; present rules only (not main_spec
+                // forward refs). Membership matches the completed plan.
+                let rules: Vec<&RulePath> = graph.rules().keys().collect();
+                root_row_end(
+                    graph.data(),
+                    &graph.instance_lists().templates,
+                    &rules,
+                    name,
+                )
+            }
+        }
+    }
+
+    /// Type of `end`. A rule of the spec being typed reads `computed_rule_types`:
+    /// typing order puts it first, or it is the recursive rule's seed.
+    fn end_type(
+        &self,
+        end: &RowEnd,
+        computed_rule_types: &HashMap<RulePath, Arc<LemmaType>>,
+    ) -> Arc<LemmaType> {
+        match (self, end) {
+            (RowFields::Plan(plan), _) => instance_list::row_end_type(plan, end),
+            (RowFields::Root(graph), RowEnd::Data(path)) => {
+                if path.segments.is_empty() {
+                    if let Some(DataDefinition::Reference {
+                        target: ReferenceTarget::Rule(rule),
+                        ..
+                    }) = graph.data().get(path)
+                    {
+                        return inferred_or_dropped(graph, computed_rule_types, rule);
+                    }
+                    return instance_list::row_data_type(
+                        graph.data(),
+                        &graph.instance_lists().templates,
+                        path,
+                    );
+                }
+                let (_, _, definition) = graph
+                    .peel_data(path)
+                    .expect("BUG: root row field path must peel");
+                if let DataDefinition::Reference {
+                    target: ReferenceTarget::Rule(rule),
+                    ..
+                } = definition
+                {
+                    return inferred_or_dropped(graph, computed_rule_types, rule);
+                }
+                Arc::clone(
+                    definition
+                        .resolved_type_arc()
+                        .expect("BUG: peeled root row data must be typed"),
+                )
+            }
+            (RowFields::Root(graph), RowEnd::Rule(rule)) => {
+                inferred_or_dropped(graph, computed_rule_types, rule)
+            }
+        }
+    }
+
+    fn default(&self, path: &DataPath) -> Option<TypedLiteral> {
+        match self {
+            RowFields::Plan(plan) => instance_list::template_default(plan, path),
+            RowFields::Root(graph) => {
+                if path.segments.is_empty() {
+                    instance_list::template_default_local(graph.data(), path)
+                } else {
+                    let (_, _, definition) = graph
+                        .peel_data(path)
+                        .expect("BUG: root row default path must peel");
+                    let lemma_type = definition
+                        .resolved_type_arc()
+                        .expect("BUG: key field must be typed data");
+                    if let Some(bound) = definition.bound_value() {
+                        return Some(instance_list::typed_from_bound(bound, lemma_type));
+                    }
+                    definition
+                        .value()
+                        .map(|literal| crate::planning::semantics::TypedLiteral {
+                            value: literal.value,
+                            lemma_type: Arc::clone(lemma_type),
+                        })
+                }
+            }
+        }
+    }
+}
+
+/// Fields of rows of row spec `identity`. Every instance-list identity has a template
+/// plan, except a self-list's, whose rows are the spec being typed.
+fn row_fields<'g>(graph: &'g Graph<'g>, identity: &SpecIdentity) -> RowFields<'g> {
+    if *identity == graph.instance_lists().self_identity {
+        return RowFields::Root(graph);
+    }
+    RowFields::Plan(
+        graph
+            .instance_lists()
+            .templates
+            .get(identity)
+            .unwrap_or_else(|| panic!("BUG: no template plan for row spec '{identity}'")),
+    )
+}
+
+/// Row field `path.name` read on a base of spec type that yields instance-list rows.
+fn row_member_end<'g>(
+    graph: &'g Graph<'g>,
+    base_type: &LemmaType,
+    path: &[String],
+    name: &str,
+) -> Option<(RowFields<'g>, RowEnd)> {
+    let TypeSpecification::Spec { spec: identity } = &base_type.specifications else {
+        return None;
+    };
+    let is_row = *identity == graph.instance_lists().self_identity
+        || graph.instance_lists().templates.contains_key(identity);
+    if !is_row {
+        return None;
+    }
+    let fields = row_fields(graph, identity);
+    let mut key = path.join(".");
+    if !key.is_empty() {
+        key.push('.');
+    }
+    key.push_str(name);
+    fields.end(&key).map(|end| (fields, end))
+}
+
+/// Whether `path.name` on a row of `base_type` names a `uses` instance of the row spec.
+fn row_member_import(
+    graph: &Graph<'_>,
+    base_type: &LemmaType,
+    path: &[String],
+    name: &str,
+) -> bool {
+    let TypeSpecification::Spec { spec: identity } = &base_type.specifications else {
+        return false;
+    };
+    let is_row = *identity == graph.instance_lists().self_identity
+        || graph.instance_lists().templates.contains_key(identity);
+    if !is_row {
+        return false;
+    }
+    let mut key = path.join(".");
+    if !key.is_empty() {
+        key.push('.');
+    }
+    key.push_str(name);
+    match row_fields(graph, identity) {
+        RowFields::Plan(plan) => instance_list::is_row_import(&plan.data, &key),
+        RowFields::Root(graph) => instance_list::is_row_import(graph.data(), &key),
+    }
+}
+
+fn infer_list_command_type(
+    node: ExprRef<'_, ExpressionKind>,
+    list: ExprRef<'_, ExpressionKind>,
+    op: &ListOp,
+    graph: &Graph,
+    resolved_types: &ResolvedTypesMap,
+    cache: &[Arc<LemmaType>],
+) -> Arc<LemmaType> {
+    let list_type = cached_expression_type(cache, list);
+    if list_type.vetoed() {
+        return Arc::new(LemmaType::veto_type());
+    }
+    if list_type.is_undetermined() {
+        return Arc::new(LemmaType::undetermined_type());
+    }
+    if !list_type.is_list() {
+        return Arc::new(LemmaType::undetermined_type());
+    }
+    let instance_rows = list_has_instance_rows(&list_type);
+    let kind = match op {
+        ListOp::Count => ListCommandResultKind::Count,
+        ListOp::First | ListOp::Last | ListOp::Find { .. } => ListCommandResultKind::Element,
+        ListOp::Reduce {
+            argument: Some(_), ..
+        } if instance_rows => ListCommandResultKind::InstanceReduce,
+        ListOp::Reduce { argument: None, .. } if !instance_rows => ListCommandResultKind::Element,
+        ListOp::Reduce { .. } => return Arc::new(LemmaType::undetermined_type()),
+        ListOp::Sort {
+            argument: Some(_), ..
+        } if !instance_rows => return Arc::new(LemmaType::undetermined_type()),
+        ListOp::Predicate { kind, .. } | ListOp::InstancePredicate { kind, .. } => match kind {
+            ListPredKind::Any | ListPredKind::All => ListCommandResultKind::BooleanPredicate,
+            ListPredKind::Where => ListCommandResultKind::KeepList,
+        },
+        ListOp::Sort { .. } | ListOp::Top { .. } | ListOp::With { .. } | ListOp::WithRow { .. } => {
+            ListCommandResultKind::KeepList
+        }
+    };
+    let first_argument = match op {
+        ListOp::Reduce {
+            argument: Some(argument),
+            ..
+        } => Some(cached_expression_type(cache, node.child(*argument))),
+        _ => None,
+    };
+    list_command_result_type(
+        &list_type,
+        kind,
+        first_argument.as_ref(),
+        &arithmetic_scope(resolved_types, graph),
+    )
+}
+
+fn list_element_type(
+    list_type: &LemmaType,
+    graph: &Graph,
+    resolved_types: &ResolvedTypesMap,
+) -> Arc<LemmaType> {
+    resolve_anonymous_measure(
+        list_type.list_element_lemma_type(),
+        &arithmetic_scope(resolved_types, graph),
+    )
 }
 
 /// Infer the type of a data reference without producing errors.
@@ -4094,11 +6831,10 @@ fn infer_data_type(
     graph: &Graph,
     computed_rule_types: &HashMap<RulePath, Arc<LemmaType>>,
 ) -> Arc<LemmaType> {
-    let entry = match graph.data().get(data_path) {
-        Some(e) => e,
-        None => return Arc::new(LemmaType::undetermined_type()),
+    let Some(lookup) = graph.lookup_data(data_path) else {
+        return Arc::new(LemmaType::undetermined_type());
     };
-    match entry {
+    match lookup.definition() {
         DataDefinition::Value { resolved_type, .. } => Arc::clone(resolved_type),
         DataDefinition::TypeDeclaration { resolved_type, .. } => Arc::clone(resolved_type),
         DataDefinition::Reference {
@@ -4112,7 +6848,8 @@ fn infer_data_type(
                 inferred_or_dropped(graph, computed_rule_types, target_rule)
             }
         }
-        DataDefinition::Reference { resolved_type, .. } => Arc::clone(resolved_type),
+        DataDefinition::Reference { resolved_type, .. }
+        | DataDefinition::InstanceList { resolved_type, .. } => Arc::clone(resolved_type),
         DataDefinition::Import { .. } => Arc::new(LemmaType::undetermined_type()),
     }
 }
@@ -4127,11 +6864,11 @@ fn collect_rule_reference_dependencies(
     reference_ends: &IndexMap<DataPath, ReferenceEnd>,
     out: &mut BTreeSet<RulePath>,
 ) {
-    let mut paths: HashSet<DataPath> = HashSet::new();
-    expression.kind.collect_data_paths(&mut paths);
-    for path in paths {
-        if let Some(ReferenceEnd::Rule(target_rule)) = reference_ends.get(&path) {
-            out.insert(target_rule.clone());
+    for node in expression.table.nodes() {
+        if let ExpressionKind::DataPath(path) = &node.kind {
+            if let Some(ReferenceEnd::Rule(target_rule)) = reference_ends.get(path) {
+                out.insert(target_rule.clone());
+            }
         }
     }
 }
@@ -4265,6 +7002,47 @@ fn spec_value_not_operable(
     })
 }
 
+fn check_range_containment_types(
+    graph: &Graph,
+    value_type: &LemmaType,
+    range_type: &LemmaType,
+    source: &Source,
+) -> Result<(), Vec<Error>> {
+    if value_type.vetoed() || range_type.vetoed() {
+        return Ok(());
+    }
+    if !range_type.is_range() {
+        return Err(vec![engine_error_at_graph(
+            graph,
+            source,
+            format!(
+                "Right side of 'in' must be a range, got type '{}'",
+                range_type.name()
+            ),
+        )]);
+    }
+    let compatible = (range_type.is_date_range() && value_type.is_date())
+        || (range_type.is_time_range() && value_type.is_time())
+        || (range_type.is_number_range() && value_type.is_number())
+        || (range_type.is_measure_range()
+            && value_type.is_measure()
+            && measure_range_matches_measure(range_type, value_type))
+        || (range_type.is_ratio_range() && value_type.is_ratio())
+        || (range_type.is_calendar_like_range() && value_type.is_calendar_like());
+    if !compatible {
+        return Err(vec![engine_error_at_graph(
+            graph,
+            source,
+            format!(
+                "Cannot test whether {} is in {}.",
+                value_type.name(),
+                range_type.name()
+            ),
+        )]);
+    }
+    Ok(())
+}
+
 fn check_comparison_types(
     graph: &Graph,
     left_type: &LemmaType,
@@ -4377,7 +7155,7 @@ fn check_comparison_types(
 /// Literal zero on the right of `/` or `%` is rejected at planning time (runtime data divisors may Veto).
 fn arithmetic_literal_zero_divisor_planning_errors(
     graph: &Graph,
-    right: &Expression,
+    right: ExprRef<'_, ExpressionKind>,
     operator: &ArithmeticComputation,
     source: &Source,
 ) -> Result<(), Vec<Error>> {
@@ -4388,7 +7166,7 @@ fn arithmetic_literal_zero_divisor_planning_errors(
         return Ok(());
     }
 
-    if let ExpressionKind::Literal(literal) = &right.kind {
+    if let ExpressionKind::Literal(literal) = right.kind() {
         if let ValueKind::Number(number) = &literal.value {
             if crate::computation::rational::rational_is_zero(number) {
                 return Err(vec![engine_error_at_graph(
@@ -4405,10 +7183,8 @@ fn arithmetic_literal_zero_divisor_planning_errors(
 
 fn arithmetic_power_exponent_planning_errors(
     graph: &Graph,
-    _left: &Expression,
-    right: &Expression,
+    right: ExprRef<'_, ExpressionKind>,
     left_type: &LemmaType,
-    _right_type: &LemmaType,
     operator: &ArithmeticComputation,
     source: &Source,
 ) -> Result<(), Vec<Error>> {
@@ -4418,7 +7194,7 @@ fn arithmetic_power_exponent_planning_errors(
     // Measure ^ non-integer-literal is rejected: fractional dimensions are undefined,
     // and variable exponents cannot be statically verified to be integers at plan time.
     if left_type.is_measure() || left_type.is_duration_like() {
-        let is_integer_literal = if let ExpressionKind::Literal(lit) = &right.kind {
+        let is_integer_literal = if let ExpressionKind::Literal(lit) = right.kind() {
             if let crate::planning::semantics::ValueKind::Number(n) = &lit.value {
                 n.is_integer()
             } else {
@@ -4442,8 +7218,7 @@ fn arithmetic_power_exponent_planning_errors(
 /// literal zero divisors and integer power exponents where required.
 fn arithmetic_plan_time_exactness_planning_errors(
     graph: &Graph,
-    left: &Expression,
-    right: &Expression,
+    right: ExprRef<'_, ExpressionKind>,
     left_type: &LemmaType,
     right_type: &LemmaType,
     operator: &ArithmeticComputation,
@@ -4468,9 +7243,7 @@ fn arithmetic_plan_time_exactness_planning_errors(
         &mut errors,
     );
     collect(
-        arithmetic_power_exponent_planning_errors(
-            graph, left, right, left_type, right_type, operator, source,
-        ),
+        arithmetic_power_exponent_planning_errors(graph, right, left_type, operator, source),
         &mut errors,
     );
 
@@ -4623,6 +7396,35 @@ fn check_arithmetic_types(
     //   /   is allowed for all families (same-family → scalar Number; cross-family → anonymous measure).
     //   %   and ^ on two Quantities are always rejected.
     if left_type.is_measure() && right_type.is_measure() {
+        if let (
+            ArithmeticComputation::Multiply | ArithmeticComputation::Divide,
+            Some(left_decomposition),
+            Some(right_decomposition),
+        ) = (
+            operator,
+            left_type.measure_type_decomposition(),
+            right_type.measure_type_decomposition(),
+        ) {
+            if semantics::combine_decompositions(
+                left_decomposition,
+                right_decomposition,
+                matches!(operator, ArithmeticComputation::Multiply),
+            )
+            .is_none()
+            {
+                return Err(vec![engine_error_at_graph(
+                    graph,
+                    source,
+                    format!(
+                        "Cannot apply '{}' to {} and {}: a resulting unit exponent exceeds the maximum of {}.",
+                        operator,
+                        left_type.name(),
+                        right_type.name(),
+                        crate::limits::MAX_UNIT_EXPONENT
+                    ),
+                )]);
+            }
+        }
         return match operator {
             ArithmeticComputation::Add | ArithmeticComputation::Subtract => {
                 if left_type.same_measure_family(right_type)
@@ -4742,37 +7544,47 @@ fn check_arithmetic_types(
         return Ok(());
     }
 
-    let pair = |a: fn(&LemmaType) -> bool, b: fn(&LemmaType) -> bool| {
-        (a(left_type) && b(right_type)) || (b(left_type) && a(right_type))
+    struct OperandPair<'t> {
+        left_type: &'t LemmaType,
+        right_type: &'t LemmaType,
+    }
+    impl OperandPair<'_> {
+        fn check(&self, a: impl Fn(&LemmaType) -> bool, b: impl Fn(&LemmaType) -> bool) -> bool {
+            (a(self.left_type) && b(self.right_type)) || (b(self.left_type) && a(self.right_type))
+        }
+    }
+    let pair = OperandPair {
+        left_type,
+        right_type,
     };
 
     let allowed = match operator {
         ArithmeticComputation::Multiply => {
-            pair(LemmaType::is_measure, LemmaType::is_number)
-                || pair(LemmaType::is_measure, LemmaType::is_ratio)
-                || pair(LemmaType::is_measure, LemmaType::is_duration_like_measure)
-                || pair(LemmaType::is_measure, LemmaType::is_calendar_like)
-                || pair(LemmaType::is_duration_like_measure, LemmaType::is_number)
-                || pair(LemmaType::is_duration_like_measure, LemmaType::is_ratio)
-                || pair(LemmaType::is_calendar_like, LemmaType::is_number)
-                || pair(LemmaType::is_calendar_like, LemmaType::is_ratio)
-                || pair(LemmaType::is_number, LemmaType::is_ratio)
+            pair.check(LemmaType::is_measure, LemmaType::is_number)
+                || pair.check(LemmaType::is_measure, LemmaType::is_ratio)
+                || pair.check(LemmaType::is_measure, LemmaType::is_duration_like_measure)
+                || pair.check(LemmaType::is_measure, LemmaType::is_calendar_like)
+                || pair.check(LemmaType::is_duration_like_measure, LemmaType::is_number)
+                || pair.check(LemmaType::is_duration_like_measure, LemmaType::is_ratio)
+                || pair.check(LemmaType::is_calendar_like, LemmaType::is_number)
+                || pair.check(LemmaType::is_calendar_like, LemmaType::is_ratio)
+                || pair.check(LemmaType::is_number, LemmaType::is_ratio)
         }
         ArithmeticComputation::Divide => {
-            pair(LemmaType::is_measure, LemmaType::is_number)
+            pair.check(LemmaType::is_measure, LemmaType::is_number)
                 || (left_type.is_measure() && right_type.is_ratio())
-                || pair(LemmaType::is_measure, LemmaType::is_duration_like_measure)
-                || pair(LemmaType::is_measure, LemmaType::is_calendar_like)
+                || pair.check(LemmaType::is_measure, LemmaType::is_duration_like_measure)
+                || pair.check(LemmaType::is_measure, LemmaType::is_calendar_like)
                 || (left_type.is_duration_like() && right_type.is_number())
                 || (left_type.is_duration_like() && right_type.is_ratio())
                 || (left_type.is_calendar_like() && right_type.is_number())
                 || (left_type.is_calendar_like() && right_type.is_ratio())
                 || (left_type.is_number() && right_type.is_duration_like())
                 || (left_type.is_number() && right_type.is_calendar_like())
-                || pair(LemmaType::is_number, LemmaType::is_ratio)
+                || pair.check(LemmaType::is_number, LemmaType::is_ratio)
         }
         ArithmeticComputation::Add | ArithmeticComputation::Subtract => {
-            if pair(LemmaType::is_ratio, |t: &LemmaType| {
+            if pair.check(LemmaType::is_ratio, |t: &LemmaType| {
                 t.is_number() || t.is_measure() || t.is_duration_like() || t.is_calendar_like()
             }) {
                 return Err(vec![engine_error_at_graph(
@@ -4839,8 +7651,8 @@ fn check_arithmetic_types(
     Ok(())
 }
 
-fn has_explicit_unit(source: &Expression) -> bool {
-    match &source.kind {
+fn has_explicit_unit(source: ExprRef<'_, ExpressionKind>) -> bool {
+    match source.kind() {
         ExpressionKind::Literal(lit) => match &lit.value {
             ValueKind::Measure(_) => {
                 let sig = lit.lemma_type.measure_runtime_signature();
@@ -4854,27 +7666,64 @@ fn has_explicit_unit(source: &Expression) -> bool {
     }
 }
 
-fn expression_suggestion_label(expression: &Expression) -> String {
-    match &expression.kind {
-        ExpressionKind::DataPath(p) => p.data.clone(),
-        ExpressionKind::RulePath(p) => p.rule.clone(),
-        ExpressionKind::Arithmetic(left, op, right) => {
-            format!(
-                "{} {} {}",
-                expression_suggestion_label(left),
-                op,
-                expression_suggestion_label(right),
-            )
-        }
-        ExpressionKind::UnitConversion(inner, target) => {
-            format!("{} as {}", expression_suggestion_label(inner), target)
-        }
-        ExpressionKind::Literal(lit) => match &lit.value {
-            ValueKind::Number(n) => n.display_str(),
-            _ => "<value>".to_string(),
-        },
-        _ => "<expr>".to_string(),
+enum SuggestionPiece<'a> {
+    Node(ExprRef<'a, ExpressionKind>),
+    Text(String),
+}
+
+/// Pieces of `first op operand ...` over `steps`, in pop order.
+fn arithmetic_chain_pieces<'a>(
+    node: ExprRef<'a, ExpressionKind>,
+    first: ExprId,
+    steps: &[ast::ChainStep<ArithmeticComputation>],
+    pending: &mut Vec<SuggestionPiece<'a>>,
+) {
+    for step in steps.iter().rev() {
+        pending.push(SuggestionPiece::Node(node.child(step.operand)));
+        pending.push(SuggestionPiece::Text(format!(" {} ", step.op)));
     }
+    pending.push(SuggestionPiece::Node(node.child(first)));
+}
+
+fn expression_suggestion_label(expression: ExprRef<'_, ExpressionKind>) -> String {
+    suggestion_label(vec![SuggestionPiece::Node(expression)])
+}
+
+fn chain_prefix_suggestion_label(
+    expression: ExprRef<'_, ExpressionKind>,
+    first: ExprId,
+    prefix: &[ast::ChainStep<ArithmeticComputation>],
+) -> String {
+    let mut pending = Vec::new();
+    arithmetic_chain_pieces(expression, first, prefix, &mut pending);
+    suggestion_label(pending)
+}
+
+fn suggestion_label(mut pending: Vec<SuggestionPiece<'_>>) -> String {
+    use SuggestionPiece as Piece;
+    let mut out = String::new();
+    while let Some(piece) = pending.pop() {
+        match piece {
+            Piece::Text(text) => out.push_str(&text),
+            Piece::Node(node) => match node.kind() {
+                ExpressionKind::DataPath(p) => out.push_str(&p.data),
+                ExpressionKind::RulePath(p) => out.push_str(&p.rule),
+                ExpressionKind::Arithmetic { first, steps } => {
+                    arithmetic_chain_pieces(node, *first, steps, &mut pending);
+                }
+                ExpressionKind::UnitConversion(inner, target) => {
+                    pending.push(Piece::Text(format!(" as {target}")));
+                    pending.push(Piece::Node(node.child(*inner)));
+                }
+                ExpressionKind::Literal(lit) => match &lit.value {
+                    ValueKind::Number(n) => out.push_str(&n.display_str()),
+                    _ => out.push_str("<value>"),
+                },
+                _ => out.push_str("<expr>"),
+            },
+        }
+    }
+    out
 }
 
 fn first_unit_suggestion(source_type: &LemmaType) -> String {
@@ -4936,7 +7785,7 @@ fn is_valid_range_span_unit(
 
 fn check_unit_conversion_types(
     graph: &Graph,
-    source: &Expression,
+    source: ExprRef<'_, ExpressionKind>,
     source_type: &LemmaType,
     target: &SemanticConversionTarget,
     resolved_types: &ResolvedTypesMap,
@@ -5040,25 +7889,29 @@ fn check_unit_conversion_types(
                 )]);
             }
             if source_type.is_ratio() {
-                if let TypeSpecification::Ratio { units, .. } = &source_type.specifications {
-                    if units.get(unit_name).is_ok() {
-                        return Ok(());
-                    }
-                    let valid: Vec<&str> = units.0.iter().map(|u| u.name.as_str()).collect();
-                    return Err(vec![engine_error_at_graph(
-                        graph,
-                        source_loc,
-                        format!(
-                            "Unknown unit '{unit_name}' for ratio type '{}'. Valid units: {}",
-                            source_type.name(),
-                            valid.join(", ")
-                        ),
-                    )]);
+                // Target unit comes from the resolved owner (builtin percent/permille or
+                // an in-scope custom). Source need not declare that unit; builtins bridge.
+                if crate::computation::units::owning_type_declares_unit_name(owning_type, unit_name)
+                {
+                    return Ok(());
                 }
+                let valid = match &owning_type.specifications {
+                    TypeSpecification::Ratio { units, .. } => units
+                        .0
+                        .iter()
+                        .map(|u| u.name.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                    _ => String::new(),
+                };
                 return Err(vec![engine_error_at_graph(
                     graph,
                     source_loc,
-                    format!("Cannot convert ratio to unit '{unit_name}'."),
+                    format!(
+                        "Unknown unit '{unit_name}' for ratio type '{}'. Valid units: {}",
+                        owning_type.name(),
+                        valid
+                    ),
                 )]);
             }
             Err(vec![engine_error_at_graph(
@@ -5256,23 +8109,21 @@ fn check_data_reference(
     graph: &Graph,
     data_source: &Source,
 ) -> Result<(), Vec<Error>> {
-    let entry = match graph.data().get(data_path) {
-        Some(e) => e,
-        None => {
-            return Err(vec![engine_error_at_graph(
-                graph,
-                data_source,
-                format!("Unknown data reference '{}'", data_path),
-            )]);
-        }
+    let Some(lookup) = graph.lookup_data(data_path) else {
+        return Err(vec![engine_error_at_graph(
+            graph,
+            data_source,
+            format!("Unknown data reference '{}'", data_path),
+        )]);
     };
-    match entry {
+    match lookup.definition() {
         DataDefinition::Value { .. }
         | DataDefinition::TypeDeclaration { .. }
+        | DataDefinition::InstanceList { .. }
         | DataDefinition::Reference { .. } => Ok(()),
         DataDefinition::Import { .. } => Err(vec![engine_error_at_graph(
             graph,
-            entry.source(),
+            lookup.definition().source(),
             format!(
                 "Cannot compute type for spec reference data '{}'",
                 data_path
@@ -5281,34 +8132,127 @@ fn check_data_reference(
     }
 }
 
-/// Check a single expression for type errors, given precomputed inferred types.
+/// One step of a type check over an expression tree.
+enum CheckStep {
+    /// Errors found at the node, reported in order.
+    Report(Vec<Error>),
+    /// Check the child at this id, with its steps in order.
+    Visit(ExprId),
+}
+
+/// Traversal stacks of [`check_expression`], reused across calls. Empty between calls.
+#[derive(Default)]
+struct CheckScratch {
+    pending: Vec<CheckStep>,
+    steps: Vec<CheckStep>,
+}
+
+/// Ordered steps of one node's check: local errors interleaved with child visits.
+struct CheckSteps<'s> {
+    steps: &'s mut Vec<CheckStep>,
+    errors: Vec<Error>,
+}
+
+impl<'s> CheckSteps<'s> {
+    /// Steps are appended to `steps`.
+    fn new(steps: &'s mut Vec<CheckStep>) -> Self {
+        Self {
+            steps,
+            errors: Vec::new(),
+        }
+    }
+
+    fn push(&mut self, error: Error) {
+        self.errors.push(error);
+    }
+
+    fn collect(&mut self, result: Result<(), Vec<Error>>) {
+        if let Err(errs) = result {
+            self.errors.extend(errs);
+        }
+    }
+
+    fn visit(&mut self, child: &ExprId) {
+        self.flush();
+        self.steps.push(CheckStep::Visit(*child));
+    }
+
+    fn splice(&mut self, steps: Vec<CheckStep>) {
+        self.flush();
+        self.steps.extend(steps);
+    }
+
+    fn flush(&mut self) {
+        if !self.errors.is_empty() {
+            self.steps
+                .push(CheckStep::Report(std::mem::take(&mut self.errors)));
+        }
+    }
+
+    fn finish(mut self) {
+        self.flush();
+    }
+}
+
+/// Type errors of the expression at `expression` and its subtree.
+///
+/// Children are visited depth-first in source order with an explicit stack; each node's
+/// steps come from [`check_steps`].
 fn check_expression(
-    expression: &Expression,
+    expression: ExprRef<'_, ExpressionKind>,
     graph: &Graph,
     inferred_types: &HashMap<RulePath, Arc<LemmaType>>,
     resolved_types: &ResolvedTypesMap,
     spec: &LemmaSpec,
+    cache: &mut InferExpressionTypeCache,
+    scratch: &mut CheckScratch,
 ) -> Result<(), Vec<Error>> {
     let mut errors = Vec::new();
-
-    let collect = |result: Result<(), Vec<Error>>, errors: &mut Vec<Error>| {
-        if let Err(errs) = result {
-            errors.extend(errs);
+    let CheckScratch { pending, steps } = scratch;
+    pending.push(CheckStep::Visit(expression.id));
+    while let Some(step) = pending.pop() {
+        match step {
+            CheckStep::Report(found) => errors.extend(found),
+            CheckStep::Visit(id) => {
+                check_steps(
+                    expression.child(id),
+                    graph,
+                    inferred_types,
+                    resolved_types,
+                    spec,
+                    cache,
+                    steps,
+                );
+                pending.extend(steps.drain(..).rev());
+            }
         }
-    };
+    }
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors)
+    }
+}
 
-    match &expression.kind {
+/// Steps of the check of one node, not including its children's subtrees.
+fn check_steps(
+    expression: ExprRef<'_, ExpressionKind>,
+    graph: &Graph,
+    inferred_types: &HashMap<RulePath, Arc<LemmaType>>,
+    resolved_types: &ResolvedTypesMap,
+    spec: &LemmaSpec,
+    cache: &mut InferExpressionTypeCache,
+    steps: &mut Vec<CheckStep>,
+) {
+    let mut checks = CheckSteps::new(steps);
+    match expression.kind() {
         ExpressionKind::Literal(_) => {}
 
         ExpressionKind::DataPath(data_path) => {
             let data_source = expression
-                .source_location
-                .as_ref()
+                .source()
                 .expect("BUG: expression missing source in check_expression");
-            collect(
-                check_data_reference(data_path, graph, data_source),
-                &mut errors,
-            );
+            checks.collect(check_data_reference(data_path, graph, data_source));
         }
 
         ExpressionKind::RulePath(_) => {}
@@ -5317,25 +8261,41 @@ fn check_expression(
             base,
             targets,
             name,
-            ..
+            path,
         } => {
             let expr_source = expression
-                .source_location
-                .as_ref()
+                .source()
                 .expect("BUG: expression missing source in check_expression");
-            let base_type = inferred_or_dropped(graph, inferred_types, base);
+            checks.visit(base);
+            let base_type = infer_expression_type(
+                expression.child(*base),
+                graph,
+                inferred_types,
+                resolved_types,
+                cache,
+            );
+            let row_end = row_member_end(graph, &base_type, path, name);
             if !base_type.is_spec() && !base_type.is_undetermined() && !base_type.vetoed() {
-                errors.push(engine_error_at_graph(
-                    graph,
-                    expr_source,
-                    format!("rule '{base}' does not return a spec"),
-                ));
-            } else if targets.is_empty() && base_type.is_spec() {
-                errors.push(engine_error_at_graph(
-                    graph,
-                    expr_source,
-                    format!("no data or rule '{name}' on spec {}", base_type.name()),
-                ));
+                let message = match expression.child(*base).kind() {
+                    ExpressionKind::RulePath(rule) => {
+                        format!("rule '{rule}' does not return a spec")
+                    }
+                    _ => format!(
+                        "`.{name}` reads a field of a spec value, but the operand is {}",
+                        base_type.name()
+                    ),
+                };
+                checks.push(engine_error_at_graph(graph, expr_source, message));
+            } else if targets.is_empty() && base_type.is_spec() && row_end.is_none() {
+                let message = if row_member_import(graph, &base_type, path, name) {
+                    format!(
+                        "`{name}` is a `uses` instance of {}; read a field of it (`{name}.<field>`), not the instance",
+                        base_type.name()
+                    )
+                } else {
+                    format!("no data or rule '{name}' on spec {}", base_type.name())
+                };
+                checks.push(engine_error_at_graph(graph, expr_source, message));
             } else if targets.len() > 1 {
                 let first = spec_member_end_type(&targets[0].end, graph, inferred_types);
                 for target in targets.iter().skip(1) {
@@ -5346,7 +8306,7 @@ fn check_expression(
                         && !other.is_undetermined()
                         && !first.same_value_type(other.as_ref())
                     {
-                        errors.push(engine_error_at_graph(
+                        checks.push(engine_error_at_graph(
                             graph,
                             expr_source,
                             format!(
@@ -5359,343 +8319,363 @@ fn check_expression(
                     }
                 }
             }
+            if let (Some((fields, end)), Some(target)) = (&row_end, targets.first()) {
+                let row_type = fields.end_type(end, inferred_types);
+                let fixed_type = spec_member_end_type(&target.end, graph, inferred_types);
+                if !fixed_type.vetoed()
+                    && !fixed_type.is_undetermined()
+                    && !row_type.same_value_type(fixed_type.as_ref())
+                {
+                    checks.push(engine_error_at_graph(
+                        graph,
+                        expr_source,
+                        format!(
+                            "field '{name}' has type {} on a row and {} on an instance",
+                            row_type.name(),
+                            fixed_type.name()
+                        ),
+                    ));
+                }
+            }
         }
 
-        ExpressionKind::LogicalAnd(left, right) => {
-            collect(
-                check_expression(left, graph, inferred_types, resolved_types, spec),
-                &mut errors,
-            );
-            collect(
-                check_expression(right, graph, inferred_types, resolved_types, spec),
-                &mut errors,
-            );
+        ExpressionKind::RowField { .. } => {}
 
-            let left_type =
-                infer_expression_type(left, graph, inferred_types, resolved_types, spec);
-            let right_type =
-                infer_expression_type(right, graph, inferred_types, resolved_types, spec);
-            let expr_source = expression
-                .source_location
-                .as_ref()
-                .expect("BUG: expression missing source in check_expression");
-            collect(
-                check_logical_and_operands(graph, &left_type, &right_type, expr_source),
-                &mut errors,
+        ExpressionKind::LogicalAnd { first, steps } => {
+            checks.visit(first);
+            let mut left_type = infer_expression_type(
+                expression.child(*first),
+                graph,
+                inferred_types,
+                resolved_types,
+                cache,
             );
+            for step in steps {
+                checks.visit(&step.operand);
+                let right_type = infer_expression_type(
+                    expression.child(step.operand),
+                    graph,
+                    inferred_types,
+                    resolved_types,
+                    cache,
+                );
+                checks.collect(check_logical_and_operands(
+                    graph,
+                    &left_type,
+                    &right_type,
+                    &step.source_location,
+                ));
+                left_type = logical_and_type(&left_type, &right_type);
+            }
         }
 
         ExpressionKind::LogicalNegation(operand, _) => {
-            collect(
-                check_expression(operand, graph, inferred_types, resolved_types, spec),
-                &mut errors,
-            );
+            checks.visit(operand);
 
-            let operand_type =
-                infer_expression_type(operand, graph, inferred_types, resolved_types, spec);
-            let expr_source = expression
-                .source_location
-                .as_ref()
-                .expect("BUG: expression missing source in check_expression");
-            collect(
-                check_logical_operand(graph, &operand_type, expr_source),
-                &mut errors,
+            let operand_type = infer_expression_type(
+                expression.child(*operand),
+                graph,
+                inferred_types,
+                resolved_types,
+                cache,
             );
+            let expr_source = expression
+                .source()
+                .expect("BUG: expression missing source in check_expression");
+            checks.collect(check_logical_operand(graph, &operand_type, expr_source));
         }
 
         ExpressionKind::Comparison(left, op, right) => {
-            collect(
-                check_expression(left, graph, inferred_types, resolved_types, spec),
-                &mut errors,
-            );
-            collect(
-                check_expression(right, graph, inferred_types, resolved_types, spec),
-                &mut errors,
-            );
+            checks.visit(left);
+            checks.visit(right);
 
-            let left_type =
-                infer_expression_type(left, graph, inferred_types, resolved_types, spec);
-            let right_type =
-                infer_expression_type(right, graph, inferred_types, resolved_types, spec);
-            let expr_source = expression
-                .source_location
-                .as_ref()
-                .expect("BUG: expression missing source in check_expression");
-            collect(
-                check_comparison_types(graph, &left_type, op, &right_type, expr_source),
-                &mut errors,
+            let left_type = infer_expression_type(
+                expression.child(*left),
+                graph,
+                inferred_types,
+                resolved_types,
+                cache,
             );
+            let right_type = infer_expression_type(
+                expression.child(*right),
+                graph,
+                inferred_types,
+                resolved_types,
+                cache,
+            );
+            let expr_source = expression
+                .source()
+                .expect("BUG: expression missing source in check_expression");
+            checks.collect(check_comparison_types(
+                graph,
+                &left_type,
+                op,
+                &right_type,
+                expr_source,
+            ));
         }
 
-        ExpressionKind::Arithmetic(left, operator, right) => {
-            collect(
-                check_expression(left, graph, inferred_types, resolved_types, spec),
-                &mut errors,
+        ExpressionKind::Arithmetic { first, steps } => {
+            checks.visit(first);
+            let scope = arithmetic_scope(resolved_types, graph);
+            let mut left_type = infer_expression_type(
+                expression.child(*first),
+                graph,
+                inferred_types,
+                resolved_types,
+                cache,
             );
+            for (index, step) in steps.iter().enumerate() {
+                let operator = &step.op;
+                let right = &step.operand;
 
-            // Detect `left OP (inner as Unit{..})` where OP is *, /, or % and check whether
-            // the `as Unit` was meant to convert the operand or the result of the arithmetic.
-            // When the operand conversion is invalid but the result conversion would be valid,
-            // emit a targeted error with a parenthesized suggestion instead of the generic
-            // "different measure families" message that `check_unit_conversion_types` would emit.
-            //
-            // Three outcomes:
-            //   CheckedInlineConversionValid   — conversion on operand is valid; right was
-            //                                    checked inline; arithmetic checks must run.
-            //   CheckedConversionErrorEmitted  — conversion error (targeted or standard)
-            //                                    already emitted; arithmetic checks must be
-            //                                    skipped to avoid confusing secondary errors.
-            //   NotHandledInline               — pattern did not match; fall through to the
-            //                                    normal `check_expression(right)` call.
-            enum InlineConversionOutcome {
-                CheckedInlineConversionValid,
-                CheckedConversionErrorEmitted,
-                NotHandledInline,
-            }
+                // Detect `left OP (inner as Unit{..})` where OP is *, /, or % and check whether
+                // the `as Unit` was meant to convert the operand or the result of the arithmetic.
+                // When the operand conversion is invalid but the result conversion would be valid,
+                // emit a targeted error with a parenthesized suggestion instead of the generic
+                // "different measure families" message that `check_unit_conversion_types` would emit.
+                //
+                // Three outcomes:
+                //   CheckedInlineConversionValid   — conversion on operand is valid; right was
+                //                                    checked inline; arithmetic checks must run.
+                //   CheckedConversionErrorEmitted  — conversion error (targeted or standard)
+                //                                    already emitted; arithmetic checks must be
+                //                                    skipped to avoid confusing secondary errors.
+                //   NotHandledInline               — pattern did not match; fall through to the
+                //                                    normal `check_expression(right)` call.
+                enum InlineConversionOutcome {
+                    CheckedInlineConversionValid,
+                    CheckedConversionErrorEmitted,
+                    NotHandledInline,
+                }
 
-            let is_multiplicative = matches!(
-                operator,
-                ArithmeticComputation::Multiply
-                    | ArithmeticComputation::Divide
-                    | ArithmeticComputation::Modulo
-            );
+                let is_multiplicative = matches!(
+                    operator,
+                    ArithmeticComputation::Multiply
+                        | ArithmeticComputation::Divide
+                        | ArithmeticComputation::Modulo
+                );
 
-            let right_outcome = if is_multiplicative {
-                if let ExpressionKind::UnitConversion(
-                    inner_source,
-                    conversion_target @ SemanticConversionTarget::Unit { unit_name, .. },
-                ) = &right.kind
-                {
-                    // Always recurse into the inner source to catch errors in sub-expressions.
-                    collect(
-                        check_expression(inner_source, graph, inferred_types, resolved_types, spec),
-                        &mut errors,
-                    );
-
-                    let inner_type = infer_expression_type(
+                let right_outcome = if is_multiplicative {
+                    if let ExpressionKind::UnitConversion(
                         inner_source,
-                        graph,
-                        inferred_types,
-                        resolved_types,
-                        spec,
-                    );
-                    let expr_source = expression
-                        .source_location
-                        .as_ref()
-                        .expect("BUG: expression missing source in check_expression");
+                        conversion_target @ SemanticConversionTarget::Unit { unit_name, .. },
+                    ) = expression.child(*right).kind()
+                    {
+                        // Always descend into the inner source to catch errors in sub-expressions.
+                        checks.visit(inner_source);
 
-                    let target_type_opt = lookup_unit_type(resolved_types, spec, unit_name);
+                        let inner_type = infer_expression_type(
+                            expression.child(*inner_source),
+                            graph,
+                            inferred_types,
+                            resolved_types,
+                            cache,
+                        );
+                        let expr_source = &step.source_location;
 
-                    if let Some(target_type) = &target_type_opt {
-                        let inner_is_valid_conversion_source = inner_type.is_measure()
-                            && (inner_type.same_measure_family(target_type)
-                                || inner_type.compatible_with_anonymous_measure(target_type)
-                                || target_type.compatible_with_anonymous_measure(&inner_type));
+                        let target_type_opt = lookup_unit_type(resolved_types, spec, unit_name);
 
-                        if inner_is_valid_conversion_source {
-                            // The parse tree is correct: `left OP (inner as unit)`.
-                            // Run check_unit_conversion_types to catch explicit-unit requirements,
-                            // then let arithmetic checks run on the full `left OP right` below.
-                            collect(
-                                check_unit_conversion_types(
+                        if let Some(target_type) = &target_type_opt {
+                            let inner_is_valid_conversion_source = inner_type.is_measure()
+                                && (inner_type.same_measure_family(target_type)
+                                    || inner_type.compatible_with_anonymous_measure(target_type)
+                                    || target_type.compatible_with_anonymous_measure(&inner_type));
+
+                            if inner_is_valid_conversion_source {
+                                // The parse tree is correct: `left OP (inner as unit)`.
+                                // Run check_unit_conversion_types to catch explicit-unit requirements,
+                                // then let arithmetic checks run on the full `left OP right` below.
+                                checks.collect(check_unit_conversion_types(
                                     graph,
-                                    inner_source,
+                                    expression.child(*inner_source),
                                     &inner_type,
                                     conversion_target,
                                     resolved_types,
                                     expr_source,
                                     spec,
-                                ),
-                                &mut errors,
-                            );
-                            InlineConversionOutcome::CheckedInlineConversionValid
-                        } else if inner_type.is_measure() || inner_type.is_number() {
-                            // Conversion on the operand fails. Check whether converting the
-                            // result of the whole arithmetic expression would be valid instead.
-                            let left_type = infer_expression_type(
-                                left,
-                                graph,
-                                inferred_types,
-                                resolved_types,
-                                spec,
-                            );
-                            let combined_type = compute_arithmetic_result_type(
-                                Arc::clone(&left_type),
-                                operator,
-                                Arc::clone(&inner_type),
-                                &arithmetic_scope(resolved_types, graph),
-                            );
-                            let combined_is_valid_conversion_source = combined_type.is_measure()
-                                && (combined_type.same_measure_family(target_type)
-                                    || combined_type
-                                        .compatible_with_anonymous_measure(target_type)
-                                    || target_type
-                                        .compatible_with_anonymous_measure(&combined_type));
-
-                            if combined_is_valid_conversion_source {
-                                let inner_label = expression_suggestion_label(inner_source);
-                                let left_label = expression_suggestion_label(left);
-                                errors.push(engine_error_at_graph(
-                                    graph,
-                                    expr_source,
-                                    format!(
-                                        "'as {unit_name}' converts '{inner_label}' here, not \
-                                         the result of the expression. Write \
-                                         '({left_label} {operator} {inner_label}) as {unit_name}' \
-                                         to convert the result.",
-                                    ),
                                 ));
-                            } else {
-                                // Neither interpretation is valid. Emit the standard conversion
-                                // error so the user knows the unit is incompatible.
-                                collect(
-                                    check_unit_conversion_types(
+                                InlineConversionOutcome::CheckedInlineConversionValid
+                            } else if inner_type.is_measure() || inner_type.is_number() {
+                                // Conversion on the operand fails. Check whether converting the
+                                // result of the whole arithmetic expression would be valid instead.
+                                let combined_type = compute_arithmetic_result_type(
+                                    Arc::clone(&left_type),
+                                    operator,
+                                    Arc::clone(&inner_type),
+                                    &arithmetic_scope(resolved_types, graph),
+                                );
+                                let combined_is_valid_conversion_source = combined_type
+                                    .is_measure()
+                                    && (combined_type.same_measure_family(target_type)
+                                        || combined_type
+                                            .compatible_with_anonymous_measure(target_type)
+                                        || target_type
+                                            .compatible_with_anonymous_measure(&combined_type));
+
+                                if combined_is_valid_conversion_source {
+                                    let inner_label = expression_suggestion_label(
+                                        expression.child(*inner_source),
+                                    );
+                                    let left_label = chain_prefix_suggestion_label(
+                                        expression,
+                                        *first,
+                                        &steps[..index],
+                                    );
+                                    checks.push(engine_error_at_graph(
                                         graph,
-                                        inner_source,
+                                        expr_source,
+                                        format!(
+                                            "'as {unit_name}' converts '{inner_label}' here, not \
+                                             the result of the expression. Write \
+                                             '({left_label} {operator} {inner_label}) as {unit_name}' \
+                                             to convert the result.",
+                                        ),
+                                    ));
+                                } else {
+                                    // Neither interpretation is valid. Emit the standard conversion
+                                    // error so the user knows the unit is incompatible.
+                                    checks.collect(check_unit_conversion_types(
+                                        graph,
+                                        expression.child(*inner_source),
                                         &inner_type,
                                         conversion_target,
                                         resolved_types,
                                         expr_source,
                                         spec,
-                                    ),
-                                    &mut errors,
-                                );
+                                    ));
+                                }
+                                InlineConversionOutcome::CheckedConversionErrorEmitted
+                            } else {
+                                // Inner is not measure/number (e.g. text, boolean, date). Fall through
+                                // to standard path so check_expression(right) runs normally.
+                                InlineConversionOutcome::NotHandledInline
                             }
-                            InlineConversionOutcome::CheckedConversionErrorEmitted
                         } else {
-                            // Inner is not measure/number (e.g. text, boolean, date). Fall through
-                            // to standard path so check_expression(right) runs normally.
+                            // Unknown unit — fall through so check_expression(right) emits the standard
+                            // "Unknown unit" error from check_unit_conversion_types.
                             InlineConversionOutcome::NotHandledInline
                         }
                     } else {
-                        // Unknown unit — fall through so check_expression(right) emits the standard
-                        // "Unknown unit" error from check_unit_conversion_types.
                         InlineConversionOutcome::NotHandledInline
                     }
                 } else {
                     InlineConversionOutcome::NotHandledInline
-                }
-            } else {
-                InlineConversionOutcome::NotHandledInline
-            };
+                };
 
-            match right_outcome {
-                InlineConversionOutcome::NotHandledInline => {
-                    collect(
-                        check_expression(right, graph, inferred_types, resolved_types, spec),
-                        &mut errors,
-                    );
+                match right_outcome {
+                    InlineConversionOutcome::NotHandledInline => {
+                        checks.visit(right);
+                    }
+                    InlineConversionOutcome::CheckedInlineConversionValid
+                    | InlineConversionOutcome::CheckedConversionErrorEmitted => {
+                        // Right child was already checked inline; do not descend again.
+                    }
                 }
-                InlineConversionOutcome::CheckedInlineConversionValid
-                | InlineConversionOutcome::CheckedConversionErrorEmitted => {
-                    // Right child was already checked inline; do not recurse again.
-                }
-            }
 
-            let run_arithmetic_checks = matches!(
-                right_outcome,
-                InlineConversionOutcome::NotHandledInline
-                    | InlineConversionOutcome::CheckedInlineConversionValid
-            );
-
-            if run_arithmetic_checks {
-                let left_type =
-                    infer_expression_type(left, graph, inferred_types, resolved_types, spec);
-                let right_type =
-                    infer_expression_type(right, graph, inferred_types, resolved_types, spec);
-                let expr_source = expression
-                    .source_location
-                    .as_ref()
-                    .expect("BUG: expression missing source in check_expression");
-                collect(
-                    check_arithmetic_types(graph, &left_type, &right_type, operator, expr_source),
-                    &mut errors,
+                let run_arithmetic_checks = matches!(
+                    right_outcome,
+                    InlineConversionOutcome::NotHandledInline
+                        | InlineConversionOutcome::CheckedInlineConversionValid
                 );
-                collect(
-                    arithmetic_plan_time_exactness_planning_errors(
+
+                if run_arithmetic_checks {
+                    let right_type = infer_expression_type(
+                        expression.child(*right),
                         graph,
-                        left,
-                        right,
+                        inferred_types,
+                        resolved_types,
+                        cache,
+                    );
+                    let expr_source = &step.source_location;
+                    checks.collect(check_arithmetic_types(
+                        graph,
                         &left_type,
                         &right_type,
                         operator,
                         expr_source,
-                    ),
-                    &mut errors,
+                    ));
+                    checks.collect(arithmetic_plan_time_exactness_planning_errors(
+                        graph,
+                        expression.child(*right),
+                        &left_type,
+                        &right_type,
+                        operator,
+                        expr_source,
+                    ));
+                }
+                let right_type = infer_expression_type(
+                    expression.child(step.operand),
+                    graph,
+                    inferred_types,
+                    resolved_types,
+                    cache,
                 );
+                left_type = compute_arithmetic_result_type(left_type, &step.op, right_type, &scope);
             }
         }
 
         ExpressionKind::UnitConversion(source_expression, target) => {
-            collect(
-                check_expression(
-                    source_expression,
-                    graph,
-                    inferred_types,
-                    resolved_types,
-                    spec,
-                ),
-                &mut errors,
-            );
+            checks.visit(source_expression);
 
             let source_type = infer_expression_type(
-                source_expression,
+                expression.child(*source_expression),
                 graph,
                 inferred_types,
                 resolved_types,
-                spec,
+                cache,
             );
             let expr_source = expression
-                .source_location
-                .as_ref()
+                .source()
                 .expect("BUG: expression missing source in check_expression");
-            collect(
-                check_unit_conversion_types(
-                    graph,
-                    source_expression,
-                    &source_type,
-                    target,
-                    resolved_types,
-                    expr_source,
-                    spec,
-                ),
-                &mut errors,
-            );
+            checks.collect(check_unit_conversion_types(
+                graph,
+                expression.child(*source_expression),
+                &source_type,
+                target,
+                resolved_types,
+                expr_source,
+                spec,
+            ));
         }
 
         ExpressionKind::MathematicalComputation(op, operand) => {
-            collect(
-                check_expression(operand, graph, inferred_types, resolved_types, spec),
-                &mut errors,
-            );
+            checks.visit(operand);
 
-            let operand_type =
-                infer_expression_type(operand, graph, inferred_types, resolved_types, spec);
-            let expr_source = expression
-                .source_location
-                .as_ref()
-                .expect("BUG: expression missing source in check_expression");
-            collect(
-                check_mathematical_operand(graph, op, &operand_type, expr_source),
-                &mut errors,
+            let operand_type = infer_expression_type(
+                expression.child(*operand),
+                graph,
+                inferred_types,
+                resolved_types,
+                cache,
             );
+            let expr_source = expression
+                .source()
+                .expect("BUG: expression missing source in check_expression");
+            checks.collect(check_mathematical_operand(
+                graph,
+                op,
+                &operand_type,
+                expr_source,
+            ));
         }
 
         ExpressionKind::RangeBound(bound, operand) => {
-            collect(
-                check_expression(operand, graph, inferred_types, resolved_types, spec),
-                &mut errors,
-            );
+            checks.visit(operand);
 
-            let operand_type =
-                infer_expression_type(operand, graph, inferred_types, resolved_types, spec);
+            let operand_type = infer_expression_type(
+                expression.child(*operand),
+                graph,
+                inferred_types,
+                resolved_types,
+                cache,
+            );
             if !operand_type.vetoed() && !operand_type.is_undetermined() && !operand_type.is_range()
             {
                 let expr_source = expression
-                    .source_location
-                    .as_ref()
+                    .source()
                     .expect("BUG: expression missing source in check_expression");
-                errors.push(engine_error_at_graph(
+                checks.push(engine_error_at_graph(
                     graph,
                     expr_source,
                     format!(
@@ -5709,28 +8689,26 @@ fn check_expression(
         ExpressionKind::Veto(_) => {}
 
         ExpressionKind::ResultIsVeto(operand) => {
-            collect(
-                check_expression(operand, graph, inferred_types, resolved_types, spec),
-                &mut errors,
-            );
+            checks.visit(operand);
         }
 
         ExpressionKind::Now => {}
 
         ExpressionKind::DateRelative(_, date_expr) => {
-            collect(
-                check_expression(date_expr, graph, inferred_types, resolved_types, spec),
-                &mut errors,
-            );
+            checks.visit(date_expr);
 
-            let date_type =
-                infer_expression_type(date_expr, graph, inferred_types, resolved_types, spec);
+            let date_type = infer_expression_type(
+                expression.child(*date_expr),
+                graph,
+                inferred_types,
+                resolved_types,
+                cache,
+            );
             if !date_type.vetoed() && !date_type.is_date() {
                 let expr_source = expression
-                    .source_location
-                    .as_ref()
+                    .source()
                     .expect("BUG: expression missing source in check_expression");
-                errors.push(engine_error_at_graph(
+                checks.push(engine_error_at_graph(
                     graph,
                     expr_source,
                     format!(
@@ -5742,19 +8720,20 @@ fn check_expression(
         }
 
         ExpressionKind::DateCalendar(_, _, date_expr) => {
-            collect(
-                check_expression(date_expr, graph, inferred_types, resolved_types, spec),
-                &mut errors,
-            );
+            checks.visit(date_expr);
 
-            let date_type =
-                infer_expression_type(date_expr, graph, inferred_types, resolved_types, spec);
+            let date_type = infer_expression_type(
+                expression.child(*date_expr),
+                graph,
+                inferred_types,
+                resolved_types,
+                cache,
+            );
             if !date_type.vetoed() && !date_type.is_date() {
                 let expr_source = expression
-                    .source_location
-                    .as_ref()
+                    .source()
                     .expect("BUG: expression missing source in check_expression");
-                errors.push(engine_error_at_graph(
+                checks.push(engine_error_at_graph(
                     graph,
                     expr_source,
                     format!(
@@ -5766,29 +8745,32 @@ fn check_expression(
         }
 
         ExpressionKind::RangeLiteral(left, right) => {
-            collect(
-                check_expression(left, graph, inferred_types, resolved_types, spec),
-                &mut errors,
-            );
-            collect(
-                check_expression(right, graph, inferred_types, resolved_types, spec),
-                &mut errors,
-            );
+            checks.visit(left);
+            checks.visit(right);
 
-            let left_type =
-                infer_expression_type(left, graph, inferred_types, resolved_types, spec);
-            let right_type =
-                infer_expression_type(right, graph, inferred_types, resolved_types, spec);
+            let left_type = infer_expression_type(
+                expression.child(*left),
+                graph,
+                inferred_types,
+                resolved_types,
+                cache,
+            );
+            let right_type = infer_expression_type(
+                expression.child(*right),
+                graph,
+                inferred_types,
+                resolved_types,
+                cache,
+            );
             let expr_source = expression
-                .source_location
-                .as_ref()
+                .source()
                 .expect("BUG: expression missing source in check_expression");
 
             if !(left_type.vetoed() || right_type.vetoed()) {
                 let inferred_range_type =
                     infer_range_type_from_endpoint_types(&left_type, &right_type);
                 if inferred_range_type.is_undetermined() {
-                    errors.push(engine_error_at_graph(
+                    checks.push(engine_error_at_graph(
                         graph,
                         expr_source,
                         format!(
@@ -5798,14 +8780,15 @@ fn check_expression(
                         ),
                     ));
                 } else if inferred_range_type.is_time_range() {
-                    if let (ExpressionKind::Literal(left_lit), ExpressionKind::Literal(right_lit)) =
-                        (&left.kind, &right.kind)
-                    {
+                    if let (ExpressionKind::Literal(left_lit), ExpressionKind::Literal(right_lit)) = (
+                        expression.child(*left).kind(),
+                        expression.child(*right).kind(),
+                    ) {
                         if let (ValueKind::Time(left_time), ValueKind::Time(right_time)) =
                             (&left_lit.value, &right_lit.value)
                         {
                             if !time_range_endpoints_share_timezone(left_time, right_time) {
-                                errors.push(engine_error_at_graph(
+                                checks.push(engine_error_at_graph(
                                     graph,
                                     expr_source,
                                     "Time range endpoints must use the same timezone".to_string(),
@@ -5818,22 +8801,23 @@ fn check_expression(
         }
 
         ExpressionKind::PastFutureRange(_, offset_expr) => {
-            collect(
-                check_expression(offset_expr, graph, inferred_types, resolved_types, spec),
-                &mut errors,
-            );
+            checks.visit(offset_expr);
 
-            let offset_type =
-                infer_expression_type(offset_expr, graph, inferred_types, resolved_types, spec);
+            let offset_type = infer_expression_type(
+                expression.child(*offset_expr),
+                graph,
+                inferred_types,
+                resolved_types,
+                cache,
+            );
             if !offset_type.vetoed()
                 && !offset_type.is_duration_like()
                 && !offset_type.is_calendar_like()
             {
                 let expr_source = expression
-                    .source_location
-                    .as_ref()
+                    .source()
                     .expect("BUG: expression missing source in check_expression");
-                errors.push(engine_error_at_graph(
+                checks.push(engine_error_at_graph(
                     graph,
                     expr_source,
                     format!(
@@ -5845,76 +8829,52 @@ fn check_expression(
         }
 
         ExpressionKind::RangeContainment(value, range) => {
-            collect(
-                check_expression(value, graph, inferred_types, resolved_types, spec),
-                &mut errors,
-            );
-            collect(
-                check_expression(range, graph, inferred_types, resolved_types, spec),
-                &mut errors,
-            );
+            checks.visit(value);
+            checks.visit(range);
 
-            let value_type =
-                infer_expression_type(value, graph, inferred_types, resolved_types, spec);
-            let range_type =
-                infer_expression_type(range, graph, inferred_types, resolved_types, spec);
+            let value_type = infer_expression_type(
+                expression.child(*value),
+                graph,
+                inferred_types,
+                resolved_types,
+                cache,
+            );
+            let range_type = infer_expression_type(
+                expression.child(*range),
+                graph,
+                inferred_types,
+                resolved_types,
+                cache,
+            );
             let expr_source = expression
-                .source_location
-                .as_ref()
+                .source()
                 .expect("BUG: expression missing source in check_expression");
 
-            if !(value_type.vetoed() || range_type.vetoed()) {
-                if !range_type.is_range() {
-                    errors.push(engine_error_at_graph(
-                        graph,
-                        expr_source,
-                        format!(
-                            "Right side of 'in' must be a range, got type '{}'",
-                            range_type.name()
-                        ),
-                    ));
-                } else {
-                    let compatible = (range_type.is_date_range() && value_type.is_date())
-                        || (range_type.is_time_range() && value_type.is_time())
-                        || (range_type.is_number_range() && value_type.is_number())
-                        || (range_type.is_measure_range()
-                            && value_type.is_measure()
-                            && measure_range_matches_measure(&range_type, &value_type))
-                        || (range_type.is_ratio_range() && value_type.is_ratio())
-                        || (range_type.is_calendar_like_range() && value_type.is_calendar_like());
-                    if !compatible {
-                        errors.push(engine_error_at_graph(
-                            graph,
-                            expr_source,
-                            format!(
-                                "Cannot test whether {} is in {}.",
-                                value_type.name(),
-                                range_type.name()
-                            ),
-                        ));
-                    }
-                }
-            }
+            checks.collect(check_range_containment_types(
+                graph,
+                &value_type,
+                &range_type,
+                expr_source,
+            ));
         }
 
         ExpressionKind::Piecewise(arms) => {
             for (condition, result) in arms {
-                collect(
-                    check_expression(condition, graph, inferred_types, resolved_types, spec),
-                    &mut errors,
+                checks.visit(condition);
+                checks.visit(result);
+                let condition_type = infer_expression_type(
+                    expression.child(*condition),
+                    graph,
+                    inferred_types,
+                    resolved_types,
+                    cache,
                 );
-                collect(
-                    check_expression(result, graph, inferred_types, resolved_types, spec),
-                    &mut errors,
-                );
-                let condition_type =
-                    infer_expression_type(condition, graph, inferred_types, resolved_types, spec);
                 if !condition_type.vetoed() && !condition_type.is_boolean() {
-                    let expr_source = condition
-                        .source_location
-                        .as_ref()
+                    let expr_source = expression
+                        .child(*condition)
+                        .source()
                         .expect("BUG: expression missing source in check_expression");
-                    errors.push(engine_error_at_graph(
+                    checks.push(engine_error_at_graph(
                         graph,
                         expr_source,
                         format!(
@@ -5925,13 +8885,652 @@ fn check_expression(
                 }
             }
         }
+
+        ExpressionKind::ListCommand { list, op, .. } => {
+            checks.visit(list);
+            let list_type = infer_expression_type(
+                expression.child(*list),
+                graph,
+                inferred_types,
+                resolved_types,
+                cache,
+            );
+            let expr_source = expression
+                .source()
+                .expect("BUG: expression missing source in check_expression");
+            if !list_type.is_list() && !list_type.is_undetermined() && !list_type.vetoed() {
+                checks.push(engine_error_at_graph(
+                    graph,
+                    expr_source,
+                    format!("`->` commands require a list, got {}", list_type.name()),
+                ));
+            }
+            let mut typing = TypingScope {
+                graph,
+                inferred_types,
+                resolved_types,
+                cache,
+            };
+            checks.splice(check_list_op(
+                op,
+                expression,
+                expression.child(*list),
+                &list_type,
+                &mut typing,
+                expr_source,
+            ));
+        }
     }
 
+    checks.finish();
+}
+
+fn check_list_op(
+    op: &ListOp,
+    node: ExprRef<'_, ExpressionKind>,
+    list: ExprRef<'_, ExpressionKind>,
+    list_type: &LemmaType,
+    typing: &mut TypingScope<'_>,
+    source: &Source,
+) -> Vec<CheckStep> {
+    let TypingScope {
+        graph,
+        inferred_types,
+        resolved_types,
+        ..
+    } = *typing;
+    if let TypeSpecification::List { element, key } = &list_type.specifications {
+        if let TypeSpecification::Spec { spec: identity } = &element.specifications {
+            return check_instance_list_op(op, node, list, identity, key, typing, source);
+        }
+    }
+    let mut steps = Vec::new();
+    let mut checks = CheckSteps::new(&mut steps);
+    match op {
+        ListOp::First | ListOp::Last | ListOp::Count => {}
+        ListOp::Find { keys } => {
+            for key in keys {
+                checks.visit(key);
+            }
+            if keys.len() != 1 {
+                checks.push(engine_error_at_graph(
+                    graph,
+                    source,
+                    "numbered `-> find` takes one row number".to_string(),
+                ));
+            } else {
+                checks.collect(check_numbered_find_key(node.child(keys[0]), graph, source));
+            }
+        }
+        ListOp::Reduce { argument, .. } => {
+            if let Some(argument) = argument {
+                checks.visit(argument);
+                checks.push(engine_error_at_graph(
+                    graph,
+                    source,
+                    "value lists do not take a field argument; write `fares -> sum`".to_string(),
+                ));
+            }
+        }
+        ListOp::Predicate { right, .. } => checks.visit(right),
+        ListOp::InstancePredicate { expr, .. } => {
+            checks.visit(expr);
+            checks.push(engine_error_at_graph(
+                graph,
+                source,
+                "value-list `any`/`all`/`where` take a comparison (`>= 100 eur`), not a field expression"
+                    .to_string(),
+            ));
+        }
+        ListOp::Sort { argument, .. } => {
+            if let Some(argument) = argument {
+                checks.visit(argument);
+                checks.push(engine_error_at_graph(
+                    graph,
+                    source,
+                    "value-list `sort` takes `asc` or `desc`, not a field".to_string(),
+                ));
+            }
+        }
+        ListOp::Top { n } => {
+            checks.visit(n);
+            checks.collect(check_top_count(
+                node.child(*n),
+                graph,
+                inferred_types,
+                resolved_types,
+                source,
+                typing.cache,
+            ));
+        }
+        ListOp::With { rows } => {
+            for row in rows {
+                checks.visit(row);
+            }
+        }
+        ListOp::WithRow { .. } => {
+            unreachable!("BUG: `-> with field: value` converted on a value list")
+        }
+    }
+    if list_type.is_list() {
+        let element_type = list_element_type(list_type, graph, resolved_types);
+        checks.collect(check_list_element_op(
+            op,
+            &element_type,
+            node,
+            typing,
+            source,
+        ));
+    }
+    checks.finish();
+    steps
+}
+
+fn check_top_count(
+    n: ExprRef<'_, ExpressionKind>,
+    graph: &Graph,
+    inferred_types: &HashMap<RulePath, Arc<LemmaType>>,
+    resolved_types: &ResolvedTypesMap,
+    source: &Source,
+    cache: &mut InferExpressionTypeCache,
+) -> Result<(), Vec<Error>> {
+    let error = |message: String| Err(vec![engine_error_at_graph(graph, source, message)]);
+    match n.kind() {
+        ExpressionKind::Literal(literal) => match &literal.value {
+            ValueKind::Number(count) => {
+                let reduced = RationalInteger::try_reduce_ref(count)
+                    .map_err(|failure: NumericFailure| {
+                        vec![engine_error_at_graph(graph, source, failure.to_string())]
+                    })?;
+                if reduced.is_integer() && !reduced.numer_is_negative() {
+                    Ok(())
+                } else {
+                    error(format!(
+                        "`top` takes a whole number >= 0, got {}",
+                        count.display_str()
+                    ))
+                }
+            }
+            _ => error(format!("`top` takes a number, got {literal}")),
+        },
+        ExpressionKind::DataPath(_) | ExpressionKind::RulePath(_) => {
+            let n_type = infer_expression_type(n, graph, inferred_types, resolved_types, cache);
+            if n_type.is_number() || n_type.is_undetermined() || n_type.vetoed() {
+                Ok(())
+            } else {
+                error(format!("`top` takes a number, got {}", n_type.name()))
+            }
+        }
+        _ => error(
+            "`top` takes a number literal or a data or rule reference; compute other counts in a rule"
+                .to_string(),
+        ),
+    }
+}
+
+/// Row-type restrictions of value-list commands.
+fn check_list_element_op(
+    op: &ListOp,
+    element_type: &LemmaType,
+    node: ExprRef<'_, ExpressionKind>,
+    typing: &mut TypingScope<'_>,
+    source: &Source,
+) -> Result<(), Vec<Error>> {
+    let graph = typing.graph;
+    if element_type.is_undetermined() || element_type.vetoed() || element_type.is_spec() {
+        return Ok(());
+    }
+    let error = |message: String| Err(vec![engine_error_at_graph(graph, source, message)]);
+    let summable = element_type.is_numeric() || element_type.is_ratio();
+    let ordered = summable || element_type.is_date() || element_type.is_time();
+    match op {
+        ListOp::Reduce {
+            kind,
+            argument: None,
+        } => match kind {
+            ListReduce::Sum | ListReduce::Avg if !summable => error(format!(
+                "`{}` takes number, measure or ratio rows, got {}",
+                kind.keyword(),
+                element_type.name()
+            )),
+            ListReduce::Product if element_type.is_measure() => error(format!(
+                "`product` of {} rows would have a unit that depends on the row count; multiply in a rule instead",
+                element_type.name()
+            )),
+            ListReduce::Product if !(element_type.is_number() || element_type.is_ratio()) => {
+                error(format!(
+                    "`product` takes number or ratio rows, got {}",
+                    element_type.name()
+                ))
+            }
+            ListReduce::Min | ListReduce::Max if !ordered => error(format!(
+                "`{}` needs ordered rows (number, measure, ratio, date, time), got {}",
+                kind.keyword(),
+                element_type.name()
+            )),
+            _ => Ok(()),
+        },
+        ListOp::Sort { argument: None, .. } if !ordered => error(format!(
+            "`sort` needs ordered rows (number, measure, ratio, date, time), got {}",
+            element_type.name()
+        )),
+        ListOp::Predicate { op, right, .. } => {
+            let right_type = typing.infer(node.child(*right));
+            match op {
+                RowCondition::Compare(comparison) => {
+                    check_comparison_types(graph, element_type, comparison, &right_type, source)
+                }
+                RowCondition::In => {
+                    check_range_containment_types(graph, element_type, &right_type, source)
+                }
+            }
+        }
+        ListOp::Find { keys } if keys.len() == 1 => {
+            let key_type = typing.infer(node.child(keys[0]));
+            if key_type.is_number() || key_type.is_undetermined() || key_type.vetoed() {
+                Ok(())
+            } else {
+                error(format!(
+                    "numbered `find` takes a row number, got {}",
+                    key_type.name()
+                ))
+            }
+        }
+        _ => Ok(()),
+    }
+}
+/// Inputs every typing check reads, plus the inference memo they share.
+struct TypingScope<'t> {
+    graph: &'t Graph<'t>,
+    inferred_types: &'t HashMap<RulePath, Arc<LemmaType>>,
+    resolved_types: &'t ResolvedTypesMap<'t>,
+    cache: &'t mut InferExpressionTypeCache,
+}
+
+impl TypingScope<'_> {
+    fn infer(&mut self, expression: ExprRef<'_, ExpressionKind>) -> Arc<LemmaType> {
+        infer_expression_type(
+            expression,
+            self.graph,
+            self.inferred_types,
+            self.resolved_types,
+            self.cache,
+        )
+    }
+
+    fn error(&self, source: &Source, message: impl Into<String>) -> Error {
+        engine_error_at_graph(self.graph, source, message)
+    }
+}
+
+/// Commands on a list whose rows are instances of `identity`.
+fn check_instance_list_op(
+    op: &ListOp,
+    node: ExprRef<'_, ExpressionKind>,
+    list: ExprRef<'_, ExpressionKind>,
+    identity: &SpecIdentity,
+    key: &ListKey,
+    typing: &mut TypingScope<'_>,
+    source: &Source,
+) -> Vec<CheckStep> {
+    let mut steps = Vec::new();
+    let mut checks = CheckSteps::new(&mut steps);
+    let template = row_fields(typing.graph, identity);
+    let row_spec = &identity.spec;
+    match op {
+        ListOp::First | ListOp::Last | ListOp::Count => {}
+        ListOp::Find { keys } => {
+            for key_expression in keys {
+                checks.visit(key_expression);
+            }
+            checks.collect(check_instance_find(
+                keys, node, key, template, typing, source,
+            ));
+        }
+        ListOp::Reduce { kind, argument } => match argument {
+            None => checks.collect(Err(vec![typing.error(
+                source,
+                format!(
+                    "`{}` on `{row_spec}` rows needs a field, for example `-> {} <field>`",
+                    kind.keyword(),
+                    kind.keyword()
+                ),
+            )])),
+            Some(argument) => {
+                checks.visit(argument);
+                let argument_type = typing.infer(node.child(*argument));
+                checks.collect(check_list_element_op(
+                    &ListOp::Reduce {
+                        kind: *kind,
+                        argument: None,
+                    },
+                    &argument_type,
+                    node,
+                    typing,
+                    source,
+                ));
+            }
+        },
+        ListOp::Sort {
+            descending,
+            argument,
+        } => match argument {
+            None => checks.collect(Err(vec![typing.error(
+                source,
+                format!("`sort` on `{row_spec}` rows needs a field, for example `-> sort <field>`"),
+            )])),
+            Some(argument) => {
+                checks.visit(argument);
+                let argument_type = typing.infer(node.child(*argument));
+                checks.collect(check_list_element_op(
+                    &ListOp::Sort {
+                        descending: *descending,
+                        argument: None,
+                    },
+                    &argument_type,
+                    node,
+                    typing,
+                    source,
+                ));
+            }
+        },
+        ListOp::Predicate { kind, right, .. } => {
+            checks.visit(right);
+            checks.collect(Err(vec![typing.error(
+                source,
+                format!(
+                    "`{}` on `{row_spec}` rows takes a row expression such as `price > 3 eur`, not a bare comparison",
+                    kind.keyword()
+                ),
+            )]));
+        }
+        ListOp::InstancePredicate { kind, expr } => {
+            checks.visit(expr);
+            let condition_type = typing.infer(node.child(*expr));
+            if !condition_type.is_boolean()
+                && !condition_type.is_undetermined()
+                && !condition_type.vetoed()
+            {
+                checks.collect(Err(vec![typing.error(
+                    source,
+                    format!(
+                        "`{}` on `{row_spec}` rows needs a boolean row expression, got {}",
+                        kind.keyword(),
+                        condition_type.name()
+                    ),
+                )]));
+            }
+        }
+        ListOp::Top { n } => {
+            checks.visit(n);
+            checks.collect(check_top_count(
+                node.child(*n),
+                typing.graph,
+                typing.inferred_types,
+                typing.resolved_types,
+                source,
+                typing.cache,
+            ));
+        }
+        ListOp::With { rows } => {
+            for row in rows {
+                checks.visit(row);
+            }
+            checks.collect(Err(vec![typing.error(
+                source,
+                format!("`-> with` on `{row_spec}` rows takes `field: value` pairs"),
+            )]));
+        }
+        ListOp::WithRow { fields } => {
+            for (path, value) in fields {
+                checks.visit(value);
+                let field_type =
+                    template.end_type(&RowEnd::Data(path.clone()), typing.inferred_types);
+                let value_type = typing.infer(node.child(*value));
+                if !value_type.is_undetermined()
+                    && !value_type.vetoed()
+                    && !field_type.same_value_type(value_type.as_ref())
+                {
+                    checks.collect(Err(vec![typing.error(
+                        source,
+                        format!(
+                            "row field `{}` of `{row_spec}` is {}, got {}",
+                            path.input_key(),
+                            field_type.name(),
+                            value_type.name()
+                        ),
+                    )]));
+                }
+            }
+            if let ListKey::Fields(key_fields) = key {
+                for field in key_fields {
+                    let path = match template.end(field) {
+                        Some(RowEnd::Data(path)) => path,
+                        other => {
+                            panic!("BUG: key field '{field}' must be template data, got {other:?}")
+                        }
+                    };
+                    let written = fields.iter().any(|(written, _)| *written == path);
+                    if !written && template.default(&path).is_none() {
+                        checks.collect(Err(vec![typing.error(
+                            source,
+                            format!("`-> with` row must set key field `{field}`"),
+                        )]));
+                    }
+                }
+            }
+            checks.collect(check_appended_row_key(
+                list, node, fields, key, typing, source,
+            ));
+        }
+    }
+    checks.finish();
+    steps
+}
+
+/// `-> find` on instance rows: one row number on a numbered list, one value per key field otherwise.
+fn check_instance_find(
+    keys: &[ExprId],
+    node: ExprRef<'_, ExpressionKind>,
+    key: &ListKey,
+    template: RowFields<'_>,
+    typing: &mut TypingScope<'_>,
+    source: &Source,
+) -> Result<(), Vec<Error>> {
+    let fields = match key {
+        ListKey::Numbered => {
+            if keys.len() != 1 {
+                return Err(vec![
+                    typing.error(source, "numbered `-> find` takes one row number")
+                ]);
+            }
+            check_numbered_find_key(node.child(keys[0]), typing.graph, source)?;
+            let key_type = typing.infer(node.child(keys[0]));
+            if key_type.is_number() || key_type.is_undetermined() || key_type.vetoed() {
+                return Ok(());
+            }
+            return Err(vec![typing.error(
+                source,
+                format!(
+                    "numbered `find` takes a row number, got {}",
+                    key_type.name()
+                ),
+            )]);
+        }
+        ListKey::Fields(fields) => fields,
+    };
+    if keys.len() != fields.len() {
+        return Err(vec![typing.error(
+            source,
+            format!(
+                "`-> find` takes {} key fields ({}), got {}",
+                fields.len(),
+                fields.join(", "),
+                keys.len()
+            ),
+        )]);
+    }
+    let mut errors = Vec::new();
+    for (key_expression, field) in keys.iter().zip(fields) {
+        let key_expression = node.child(*key_expression);
+        let end = template
+            .end(field)
+            .expect("BUG: key field must be data of the template");
+        let field_type = template.end_type(&end, typing.inferred_types);
+        let key_type = typing.infer(key_expression);
+        let result = if field_type.is_range() {
+            check_range_containment_types(typing.graph, &key_type, &field_type, source)
+        } else {
+            check_comparison_types(
+                typing.graph,
+                &field_type,
+                &ComparisonComputation::Is,
+                &key_type,
+                source,
+            )
+        };
+        if let Err(found) = result {
+            errors.push(typing.error(
+                source,
+                format!(
+                    "key field `{field}` is {}, got {}: {}",
+                    field_type.name(),
+                    key_type.name(),
+                    found
+                        .iter()
+                        .map(|error| error.message().to_string())
+                        .collect::<Vec<_>>()
+                        .join("; ")
+                ),
+            ));
+        }
+    }
     if errors.is_empty() {
         Ok(())
     } else {
         Err(errors)
     }
+}
+
+/// An appended row with literal key values must not collide with the declared source rows.
+/// Type name in a branch mismatch; lists also name their key, which must match too.
+fn branch_type_label(lemma_type: &LemmaType) -> String {
+    match &lemma_type.specifications {
+        TypeSpecification::List {
+            key: ListKey::Fields(fields),
+            ..
+        } => format!("{} (key {})", lemma_type.name(), fields.join(", ")),
+        TypeSpecification::List {
+            key: ListKey::Numbered,
+            ..
+        } => format!("{} (numbered rows)", lemma_type.name()),
+        _ => lemma_type.name().to_string(),
+    }
+}
+
+fn check_appended_row_key(
+    list: ExprRef<'_, ExpressionKind>,
+    node: ExprRef<'_, ExpressionKind>,
+    fields: &[(DataPath, ExprId)],
+    key: &ListKey,
+    typing: &TypingScope<'_>,
+    source: &Source,
+) -> Result<(), Vec<Error>> {
+    let ListKey::Fields(key_fields) = key else {
+        return Ok(());
+    };
+    let ExpressionKind::DataPath(list_path) = list.kind() else {
+        return Ok(());
+    };
+    let Some(list_source) = typing.graph.instance_lists().sources.get(list_path) else {
+        return Ok(());
+    };
+    let template = row_fields(typing.graph, &list_source.identity);
+    let key_paths: Vec<DataPath> = key_fields
+        .iter()
+        .map(|field| match template.end(field) {
+            Some(RowEnd::Data(path)) => path,
+            other => panic!("BUG: key field '{field}' must be template data, got {other:?}"),
+        })
+        .collect();
+    let mut appended = Vec::with_capacity(key_paths.len());
+    for path in &key_paths {
+        let written = fields
+            .iter()
+            .find(|(field, _)| field == path)
+            .map(|(_, value)| value);
+        let value = match written.map(|value| node.child(*value).kind()) {
+            Some(ExpressionKind::Literal(literal)) => literal.as_ref().clone(),
+            Some(_) => return Ok(()),
+            None => match template.default(path) {
+                Some(default) => default,
+                None => return Ok(()),
+            },
+        };
+        appended.push(value);
+    }
+    let mut keyed: Vec<KeyedRow> = Vec::with_capacity(list_source.rows.len() + 1);
+    for (index, row) in list_source.rows.iter().enumerate() {
+        let mut values = Vec::with_capacity(key_paths.len());
+        for path in &key_paths {
+            let field_type = template.end_type(&RowEnd::Data(path.clone()), typing.inferred_types);
+            let bound = row.fields.iter().find(|(field, _)| field == path);
+            let value = match bound {
+                Some((_, DataSource::Literal(bound))) => {
+                    instance_list::typed_from_bound(bound, &field_type)
+                }
+                Some((_, DataSource::Reference(_))) => return Ok(()),
+                None => match template.default(path) {
+                    Some(default) => default,
+                    None => return Ok(()),
+                },
+            };
+            values.push(value);
+        }
+        keyed.push(KeyedRow {
+            label: format!("row {}", index + 1),
+            values,
+        });
+    }
+    keyed.push(KeyedRow {
+        label: "the appended row".to_string(),
+        values: appended,
+    });
+    match instance_list::key_conflict(key_fields, &keyed) {
+        Some(message) => Err(vec![typing.error(source, message)]),
+        None => Ok(()),
+    }
+}
+
+fn check_numbered_find_key(
+    key: ExprRef<'_, ExpressionKind>,
+    graph: &Graph,
+    source: &Source,
+) -> Result<(), Vec<Error>> {
+    let ExpressionKind::Literal(literal) = key.kind() else {
+        return Ok(());
+    };
+    let ValueKind::Number(n) = &literal.value else {
+        return Ok(());
+    };
+    let decimal = n
+        .try_to_decimal()
+        .map_err(|failure| vec![engine_error_at_graph(graph, source, failure.to_string())])?;
+    if decimal.fract() != Decimal::ZERO {
+        return Err(vec![engine_error_at_graph(
+            graph,
+            source,
+            format!("row number must be a whole number, got {decimal}"),
+        )]);
+    }
+    if decimal <= Decimal::ZERO {
+        return Err(vec![engine_error_at_graph(
+            graph,
+            source,
+            format!("row number must be >= 1, got {decimal}"),
+        )]);
+    }
+    Ok(())
 }
 
 /// Check all rule types in topological order, given precomputed inferred types.
@@ -5944,8 +9543,10 @@ fn check_rule_types(
     rule_order: &[RulePath],
     inferred_types: &HashMap<RulePath, Arc<LemmaType>>,
     resolved_types: &ResolvedTypesMap,
+    cache: &mut InferExpressionTypeCache,
 ) -> Result<(), Vec<Error>> {
     let mut errors = Vec::new();
+    let mut scratch = CheckScratch::default();
 
     let collect = |result: Result<(), Vec<Error>>, errors: &mut Vec<Error>| {
         if let Err(errs) = result {
@@ -5965,20 +9566,27 @@ fn check_rule_types(
             continue;
         }
 
-        let (_, default_result) = &branches[0];
+        let default_result = rule_node.expression.at(branches[0].1);
         collect(
-            check_expression(default_result, graph, inferred_types, resolved_types, spec),
+            check_expression(
+                default_result,
+                graph,
+                inferred_types,
+                resolved_types,
+                spec,
+                cache,
+                &mut scratch,
+            ),
             &mut errors,
         );
         let default_type =
-            infer_expression_type(default_result, graph, inferred_types, resolved_types, spec);
+            infer_expression_type(default_result, graph, inferred_types, resolved_types, cache);
 
         if default_type.is_anonymous_measure() {
             if let Some(decomp) = default_type.measure_type_decomposition() {
                 if !decomp.is_empty() && anonymous_rule_boundary_requires_rejection() {
                     let default_source = default_result
-                        .source_location
-                        .as_ref()
+                        .source()
                         .expect("BUG: default branch result expression has no source location");
                     errors.push(engine_error_at_graph(
                         graph,
@@ -6002,7 +9610,9 @@ fn check_rule_types(
         }
 
         for (branch_index, (condition, result)) in branches.iter().enumerate().skip(1) {
-            if let Some(condition_expression) = condition {
+            let result = rule_node.expression.at(*result);
+            if let Some(condition) = condition {
+                let condition_expression = rule_node.expression.at(*condition);
                 collect(
                     check_expression(
                         condition_expression,
@@ -6010,6 +9620,8 @@ fn check_rule_types(
                         inferred_types,
                         resolved_types,
                         spec,
+                        cache,
+                        &mut scratch,
                     ),
                     &mut errors,
                 );
@@ -6018,15 +9630,14 @@ fn check_rule_types(
                     graph,
                     inferred_types,
                     resolved_types,
-                    spec,
+                    cache,
                 );
                 if !condition_type.vetoed()
                     && !condition_type.is_boolean()
                     && !condition_type.is_undetermined()
                 {
                     let condition_source = condition_expression
-                        .source_location
-                        .as_ref()
+                        .source()
                         .expect("BUG: condition expression missing source in check_rule_types");
                     errors.push(engine_error_at_graph(
                         graph,
@@ -6040,18 +9651,25 @@ fn check_rule_types(
             }
 
             collect(
-                check_expression(result, graph, inferred_types, resolved_types, spec),
+                check_expression(
+                    result,
+                    graph,
+                    inferred_types,
+                    resolved_types,
+                    spec,
+                    cache,
+                    &mut scratch,
+                ),
                 &mut errors,
             );
             let result_type =
-                infer_expression_type(result, graph, inferred_types, resolved_types, spec);
+                infer_expression_type(result, graph, inferred_types, resolved_types, cache);
 
             if result_type.is_anonymous_measure() {
                 if let Some(decomp) = result_type.measure_type_decomposition() {
                     if !decomp.is_empty() && anonymous_rule_boundary_requires_rejection() {
                         let branch_source = result
-                            .source_location
-                            .as_ref()
+                            .source()
                             .expect("BUG: unless branch result expression has no source location");
                         errors.push(engine_error_at_graph(
                             graph,
@@ -6081,20 +9699,19 @@ fn check_rule_types(
                             );
                         };
                         let rule_source = &rule_node.source;
-                        let default_expr = &branches[0].1;
 
                         let mut location_parts = vec![format!(
                             "{}:{}:{}",
                             rule_source.source_type, rule_source.span.line, rule_source.span.col
                         )];
 
-                        if let Some(loc) = &default_expr.source_location {
+                        if let Some(loc) = default_result.source() {
                             location_parts.push(format!(
                                 "default branch at {}:{}:{}",
                                 loc.source_type, loc.span.line, loc.span.col
                             ));
                         }
-                        if let Some(loc) = &result.source_location {
+                        if let Some(loc) = result.source() {
                             location_parts.push(format!(
                                 "unless clause {} at {}:{}:{}",
                                 branch_index, loc.source_type, loc.span.line, loc.span.col
@@ -6106,9 +9723,9 @@ fn check_rule_types(
                             rule_path.rule,
                             spec.name,
                             location_parts.join(", "),
-                            existing_type.name(),
+                            branch_type_label(existing_type),
                             branch_index,
-                            result_type.name()),
+                            branch_type_label(&result_type)),
                             Some(rule_source.clone()),
                             None::<String>,
                             Some(graph.main_spec),
@@ -6142,15 +9759,17 @@ fn apply_inferred_types(graph: &mut Graph, inferred_types: HashMap<RulePath, Arc
     }
 }
 
-/// Infer the types of all rules in topological order without performing any validation.
-/// Returns a map from rule path to its inferred type.
-/// This function is pure: it takes `&Graph` and returns data with no side effects.
+/// Infer the types of all rules in topological order without validating expressions.
+/// Returns a map from rule path to its inferred type, and the Errors of recursive
+/// rules whose type cannot be seeded or does not match its seed.
 fn infer_rule_types(
     graph: &Graph,
     rule_order: &[RulePath],
     resolved_types: &ResolvedTypesMap,
-) -> HashMap<RulePath, Arc<LemmaType>> {
+    cache: &mut InferExpressionTypeCache,
+) -> (HashMap<RulePath, Arc<LemmaType>>, Vec<Error>) {
     let mut computed_types: HashMap<RulePath, Arc<LemmaType>> = HashMap::new();
+    let mut errors = Vec::new();
 
     for rule_path in rule_order {
         let rule_node = graph
@@ -6158,32 +9777,182 @@ fn infer_rule_types(
             .get(rule_path)
             .expect("BUG: rule from topological sort not in graph");
         let branches = &rule_node.branches;
-        let spec = &rule_node.spec;
 
         if branches.is_empty() {
             continue;
         }
 
-        let body_types = branches.iter().map(|(_condition, result)| {
-            infer_expression_type(result, graph, &computed_types, resolved_types, spec)
+        let seed = if rule_node.recursive {
+            match recursive_rule_seed(rule_path, graph, &mut computed_types, resolved_types, cache)
+            {
+                Ok(seed) => Some(seed),
+                Err(message) => {
+                    errors.push(reference_error(graph.main_spec, &rule_node.source, message));
+                    computed_types
+                        .insert(rule_path.clone(), Arc::new(LemmaType::undetermined_type()));
+                    continue;
+                }
+            }
+        } else {
+            None
+        };
+
+        let body_types = branches.iter().map(|(_, result)| {
+            infer_expression_type(
+                rule_node.expression.at(*result),
+                graph,
+                &computed_types,
+                resolved_types,
+                cache,
+            )
         });
         let rule_type = piecewise_type(body_types);
+        if let Some(seed) = seed {
+            let determined = !rule_type.vetoed() && !rule_type.is_undetermined();
+            if determined && !rule_type.same_value_type(&seed) {
+                errors.push(reference_error(
+                    graph.main_spec,
+                    &rule_node.source,
+                    format!(
+                        "recursive rule `{}` is {} from its non-recursive part, but {} as a whole",
+                        rule_path.rule,
+                        seed.name(),
+                        rule_type.name()
+                    ),
+                ));
+            }
+        }
         computed_types.insert(rule_path.clone(), rule_type);
     }
 
-    computed_types
+    (computed_types, errors)
 }
 
+/// Type of recursive rule `rule_path` from the parts of its body that do not read it
+/// on rows: `own + components -> sum(total)` is the type of `own`. Leaves the seed in
+/// `computed_types` and clears the inference cache, so the full body is inferred
+/// against it.
+fn recursive_rule_seed(
+    rule_path: &RulePath,
+    graph: &Graph,
+    computed_types: &mut HashMap<RulePath, Arc<LemmaType>>,
+    resolved_types: &ResolvedTypesMap,
+    cache: &mut InferExpressionTypeCache,
+) -> Result<Arc<LemmaType>, String> {
+    let rule_node = graph
+        .rules()
+        .get(rule_path)
+        .expect("BUG: recursive rule not in graph");
+    computed_types.insert(rule_path.clone(), Arc::new(LemmaType::undetermined_type()));
+    let seed = rule_node.branches.iter().find_map(|(_, result)| {
+        seed_type(
+            rule_node.expression.at(*result),
+            graph,
+            computed_types,
+            resolved_types,
+            cache,
+        )
+    });
+    cache.clear();
+    let seed = seed.ok_or_else(|| {
+        format!(
+            "recursive rule `{}` needs a non-recursive part to determine its type",
+            rule_path.rule
+        )
+    })?;
+    computed_types.insert(rule_path.clone(), Arc::clone(&seed));
+    Ok(seed)
+}
+
+/// Type `expression` has whatever the recursive rule being seeded (typed undetermined
+/// in `computed_types`) turns out to be, when its non-recursive parts fix it.
+fn seed_type(
+    expression: ExprRef<'_, ExpressionKind>,
+    graph: &Graph,
+    computed_types: &HashMap<RulePath, Arc<LemmaType>>,
+    resolved_types: &ResolvedTypesMap,
+    cache: &mut InferExpressionTypeCache,
+) -> Option<Arc<LemmaType>> {
+    let mut pending = vec![expression];
+    while let Some(node) = pending.pop() {
+        let inferred = infer_expression_type(node, graph, computed_types, resolved_types, cache);
+        if !inferred.vetoed() && !inferred.is_undetermined() {
+            return Some(inferred);
+        }
+        let (fixed, children) = seed_candidates(node);
+        if fixed.is_some() {
+            return fixed;
+        }
+        pending.extend(children.into_iter().rev().map(|id| node.child(id)));
+    }
+    None
+}
+
+/// The type a node's kind fixes without looking inside, and otherwise the children whose
+/// seeds are tried in order.
+fn seed_candidates(node: ExprRef<'_, ExpressionKind>) -> (Option<Arc<LemmaType>>, Vec<ExprId>) {
+    match node.kind() {
+        ExpressionKind::Arithmetic { first, steps }
+            if steps.iter().all(|step| {
+                matches!(
+                    step.op,
+                    ArithmeticComputation::Add | ArithmeticComputation::Subtract
+                )
+            }) =>
+        {
+            (
+                None,
+                std::iter::once(*first)
+                    .chain(steps.iter().map(|step| step.operand))
+                    .collect(),
+            )
+        }
+        ExpressionKind::Comparison(..)
+        | ExpressionKind::LogicalAnd { .. }
+        | ExpressionKind::LogicalNegation(..) => {
+            (Some(primitive_boolean_arc().clone()), Vec::new())
+        }
+        ExpressionKind::ListCommand { op, .. } => match op {
+            ListOp::Count => (Some(primitive_number_arc().clone()), Vec::new()),
+            ListOp::Predicate { kind, .. } | ListOp::InstancePredicate { kind, .. } => match kind {
+                ListPredKind::Any | ListPredKind::All => {
+                    (Some(primitive_boolean_arc().clone()), Vec::new())
+                }
+                ListPredKind::Where => (None, Vec::new()),
+            },
+            ListOp::Reduce {
+                kind: ListReduce::Sum | ListReduce::Min | ListReduce::Max | ListReduce::Avg,
+                argument: Some(argument),
+            } => (None, vec![*argument]),
+            _ => (None, Vec::new()),
+        },
+        ExpressionKind::Piecewise(arms) => (None, arms.iter().map(|(_, result)| *result).collect()),
+        _ => (None, Vec::new()),
+    }
+}
+
+/// Unit name -> (owning type name when local to the spec, decomposition, factor).
 type UnitDecompLookup = HashMap<
     String,
     (
-        String,
+        Option<String>,
         BaseMeasureVector,
         crate::computation::rational::RationalInteger,
     ),
 >;
 
-fn declared_measure_decomposition(type_name: &str, lemma_type: &LemmaType) -> BaseMeasureVector {
+fn local_owner_name(owner: &PlanningOwner) -> Option<String> {
+    match owner {
+        PlanningOwner::Local { type_name } => Some(type_name.clone()),
+        PlanningOwner::PrimitiveRatio | PlanningOwner::Imported { .. } => None,
+    }
+}
+
+fn unwrap_unique_resolved_type(arc: Arc<LemmaType>) -> LemmaType {
+    Arc::try_unwrap(arc).expect("BUG: resolved LemmaType Arc unique during type resolution")
+}
+
+fn declared_measure_decomposition(lemma_type: &LemmaType) -> BaseMeasureVector {
     match &lemma_type.specifications {
         TypeSpecification::Measure { traits, .. }
             if traits.contains(&semantics::MeasureTrait::Duration) =>
@@ -6196,191 +9965,30 @@ fn declared_measure_decomposition(type_name: &str, lemma_type: &LemmaType) -> Ba
             calendar_decomposition()
         }
         _ => {
-            let dimension_key = lemma_type
-                .measure_family_name()
-                .unwrap_or(type_name)
-                .to_string();
-            [(dimension_key, 1i32)].into_iter().collect()
+            let family = lemma_type
+                .measure_family()
+                .expect("BUG: named measure type must carry a family");
+            [(semantics::Dimension::Family(family.clone()), 1i32)]
+                .into_iter()
+                .collect()
         }
     }
 }
 
-/// Extract owned `LemmaType` from an `Arc` that the build pipeline holds exclusively.
-/// During build, every `Arc<LemmaType>` in `ResolvedSpecTypes.{resolved,unit_index}` has
-/// refcount 1 until the value is moved into [`ExecutionPlan::resolved_types`]; `try_unwrap`
-/// always succeeds without cloning. The fallback clone is defensive and never executes
-/// in normal flow.
-fn arc_unwrap(arc: Arc<LemmaType>) -> LemmaType {
-    Arc::try_unwrap(arc).unwrap_or_else(|shared| (*shared).clone())
-}
-
-fn unit_index_arc_declares_unit(lemma_type: &LemmaType, unit_name: &str) -> bool {
-    match &lemma_type.specifications {
-        TypeSpecification::Measure { units, .. } => units.get(unit_name).is_ok(),
-        TypeSpecification::Ratio { units, .. } => units.get(unit_name).is_ok(),
-        _ => false,
-    }
-}
-
-fn sync_unit_index_from_resolved(
-    resolved: &IndexMap<String, Arc<LemmaType>>,
-    unit_index: UnitIndex,
-) -> UnitIndex {
-    let mut synced = UnitIndex::new();
-    for (unit_name, owner) in unit_index.into_iter_owners() {
-        let pre_decomp_type = owner.owning_type;
-        let lookup_name = pre_decomp_type
-            .name
-            .as_deref()
-            .or_else(|| pre_decomp_type.measure_family_name());
-        let post = if pre_decomp_type.is_measure() {
-            let type_name = lookup_name
-                .expect("BUG: measure arc in unit_index must carry name or family for sync");
-            if let Some(synced_type) = resolved.get(type_name).or_else(|| {
-                pre_decomp_type
-                    .measure_family_name()
-                    .and_then(|family| resolved.get(family))
-            }) {
-                Arc::clone(synced_type)
-            } else if pre_decomp_type.measure_type_decomposition().is_some() {
-                pre_decomp_type
-            } else {
-                panic!(
-                    "BUG: measure unit_index unit '{}' type '{}' must exist in resolved or carry decomposition after import merge",
-                    unit_name, type_name
-                )
-            }
-        } else {
-            lookup_name
-                .and_then(|type_name| {
-                    resolved.get(type_name).or_else(|| {
-                        pre_decomp_type
-                            .measure_family_name()
-                            .and_then(|family| resolved.get(family))
-                    })
-                })
-                .map(Arc::clone)
-                .unwrap_or(pre_decomp_type)
-        };
-        if unit_index_arc_declares_unit(post.as_ref(), &unit_name) {
-            synced.insert_owner(
-                unit_name,
-                UnitOwner {
-                    owning_type: post,
-                    type_name: owner.type_name,
-                    import_alias: owner.import_alias,
-                },
-            );
-        }
-    }
-    merge_family_root_measure_units_into_index(resolved, synced)
-}
-
-/// Ensure every unit declared on a family-root measure type in `resolved` has an index entry.
-fn merge_family_root_measure_units_into_index(
-    resolved: &IndexMap<String, Arc<LemmaType>>,
-    mut unit_index: UnitIndex,
-) -> UnitIndex {
-    for (type_name, lemma_type) in resolved {
-        let TypeSpecification::Measure { units, .. } = &lemma_type.specifications else {
-            continue;
-        };
-        let is_family_root = lemma_type
-            .measure_family_name()
-            .is_some_and(|family| family == type_name.as_str());
-        if !is_family_root {
-            continue;
-        }
-        for unit in units.iter() {
-            let already = unit_index.owners_for(&unit.name).iter().any(|owner| {
-                owner.type_name == *type_name
-                    || owner.owning_type.same_measure_family(lemma_type.as_ref())
-            });
-            if !already {
-                unit_index.insert_owner(
-                    unit.name.clone(),
-                    UnitOwner {
-                        owning_type: Arc::clone(lemma_type),
-                        type_name: type_name.clone(),
-                        import_alias: None,
-                    },
-                );
-            }
-        }
-    }
-    unit_index
-}
-
-/// `uses`-merged measure rows in `unit_index` can still have empty `decomposition` until synced from
-/// `resolved`. Compound unit resolution consults `unit_index` first; fill simple base measures here
-/// before building [`UnitDecompLookup`].
-fn repair_empty_simple_measure_decomposition_in_unit_index(unit_index: UnitIndex) -> UnitIndex {
-    let mut repaired = UnitIndex::new();
-    for (unit_key, owner) in unit_index.into_iter_owners() {
-        repaired.insert_owner(
-            unit_key,
-            UnitOwner {
-                owning_type: Arc::new(repair_simple_measure_decomposition(arc_unwrap(
-                    owner.owning_type,
-                ))),
-                type_name: owner.type_name,
-                import_alias: owner.import_alias,
-            },
-        );
-    }
-    repaired
-}
-
-fn repair_simple_measure_decomposition(lemma_type: LemmaType) -> LemmaType {
-    let Some(base_decomp) = simple_measure_repair_decomposition(&lemma_type) else {
-        return lemma_type;
-    };
-    lemma_type.map_measure(|units, _decomposition| {
-        let units = units.map(|u| u.with_decomposition(base_decomp.clone()));
-        (units, Some(base_decomp))
-    })
-}
-
-fn simple_measure_repair_decomposition(lemma_type: &LemmaType) -> Option<BaseMeasureVector> {
-    let TypeSpecification::Measure {
-        units,
-        decomposition,
-        ..
-    } = &lemma_type.specifications
-    else {
-        return None;
-    };
-    if decomposition.is_some() {
-        return None;
-    }
-    if units.is_empty() || units.iter().any(|u| !measure_unit_is_simple(u)) {
-        return None;
-    }
-    let type_name = lemma_type.name.as_deref()?;
-    if type_name.is_empty() {
-        return None;
-    }
-    let candidate = declared_measure_decomposition(type_name, lemma_type);
-    (!candidate.is_empty()).then_some(candidate)
-}
-
-fn owning_measure_type_name_for_unit(
+/// Local type owning `unit_name`; `None` when unknown or imported.
+fn local_owning_measure_type_for_unit(
     unit_name: &str,
     lookup: &UnitDecompLookup,
-    unit_index: &UnitIndex,
+    unit_index: &PlanningUnitIndex,
+    resolved: &IndexMap<String, Arc<LemmaType>>,
 ) -> Option<String> {
     if let Some((owning_measure_name, _, _)) = lookup.get(unit_name) {
-        return Some(owning_measure_name.clone());
+        return owning_measure_name.clone();
     }
     unit_index
-        .resolve(unit_name)
+        .resolve_owner(unit_name, resolved)
         .ok()
-        .and_then(|(_, lemma_type)| {
-            lemma_type
-                .name
-                .clone()
-                .or_else(|| lemma_type.measure_family_name().map(str::to_string))
-        })
+        .and_then(|(_, owner)| local_owner_name(owner))
 }
 
 /// Order compound measure types so every referenced unit from another compound type is resolved first.
@@ -6389,8 +9997,8 @@ fn sort_derived_measure_types_for_resolution(
     derived_measure_type_names: Vec<String>,
     resolved: &IndexMap<String, Arc<LemmaType>>,
     lookup: &UnitDecompLookup,
-    unit_index: &UnitIndex,
-    source_for: &dyn Fn(&str) -> Option<Source>,
+    unit_index: &PlanningUnitIndex,
+    type_sources: &HashMap<String, Source>,
 ) -> Result<Vec<String>, Error> {
     let derived_measure_type_count = derived_measure_type_names.len();
     if derived_measure_type_count == 0 {
@@ -6412,9 +10020,12 @@ fn sort_derived_measure_types_for_resolution(
         };
         for unit in units.iter() {
             for (factor_unit_name, _) in &unit.derived_measure_factors {
-                let Some(owning_measure_name) =
-                    owning_measure_type_name_for_unit(factor_unit_name, lookup, unit_index)
-                else {
+                let Some(owning_measure_name) = local_owning_measure_type_for_unit(
+                    factor_unit_name,
+                    lookup,
+                    unit_index,
+                    resolved,
+                ) else {
                     continue;
                 };
                 let Some(dependency_index) = type_index.get(owning_measure_name.as_str()).copied()
@@ -6466,7 +10077,7 @@ fn sort_derived_measure_types_for_resolution(
                 spec_name,
                 cycle_type_names.join(", ")
             ),
-            source_for(&cycle_type_names[0]),
+            type_sources.get(&cycle_type_names[0]).cloned(),
             None::<String>,
         ));
     }
@@ -6549,99 +10160,45 @@ fn refresh_named_range_specs(
     resolver: &TypeResolver<'_>,
     spec: &LemmaSpec,
     data_defs: &HashMap<String, DataTypeDef>,
-    resolved: &mut TypeMap,
-    declared_suggestions: &mut IndexMap<String, BoundValueKind>,
+    resolved_types: &mut ResolvedSpecTypes,
     already_resolved: &ResolvedTypesMap<'_>,
     at: &EffectiveDate,
 ) -> Vec<Error> {
+    let local = local_type_entries(resolved_types);
+    let resolved = &mut resolved_types.resolved;
+    let declared_suggestions = &mut resolved_types.declared_suggestions;
     let mut errors = Vec::new();
     for (type_name, def) in data_defs {
         let ParentType::Ranged { .. } = &def.parent else {
             continue;
         };
         let element = element_parent_type(&def.parent);
-        let element_type = match element {
-            ParentType::Custom { name } => resolved.get(name.as_str()).cloned().or_else(|| {
-                spec.data
-                    .iter()
-                    .filter_map(|row| match &row.value {
-                        ParsedDataValue::Import { spec_ref, .. } => Some(spec_ref),
-                        _ => None,
-                    })
-                    .find_map(|spec_ref| {
-                        let (_, imported_spec) = resolver
-                            .resolve_spec_for_import(spec, spec_ref, &def.source, at)
-                            .ok()?;
-                        already_resolved
-                            .iter()
-                            .find(|(_, s, _)| discovery::same_loaded_spec(s, imported_spec))
-                            .and_then(|(_, _, rts)| rts.resolved.get(name.as_str()).cloned())
-                    })
-            }),
-            ParentType::Qualified {
-                spec_alias,
-                inner: qualified_inner,
-            } => {
-                let ParentType::Custom { name } = qualified_inner.as_ref() else {
-                    continue;
-                };
-                let import_name = format!("{spec_alias}.{name}");
-                if let Some(local) = resolved
-                    .get(name.as_str())
-                    .or_else(|| resolved.get(import_name.as_str()))
-                    .cloned()
-                {
-                    Some(local)
-                } else {
-                    let spec_ref = ast::SpecRef::same_repository(spec_alias.clone());
-                    match resolver.resolve_spec_for_import(spec, &spec_ref, &def.source, at) {
-                        Ok((_, target_spec)) => already_resolved
-                            .iter()
-                            .find(|(_, imported, _)| {
-                                discovery::same_loaded_spec(imported, target_spec)
-                            })
-                            .and_then(|(_, _, rts)| rts.resolved.get(name.as_str()).cloned()),
-                        Err(_) => None,
-                    }
-                }
-            }
-            ParentType::Primitive { .. } => continue,
-            ParentType::Ranged { .. } => {
-                unreachable!("BUG: element_parent_type must unwrap Ranged")
+        if matches!(element, ParentType::Primitive { .. }) {
+            continue;
+        }
+        let scope = ParentLookup {
+            resolver,
+            spec,
+            source: &def.source,
+            at,
+            already_resolved,
+            resolved: &local,
+            site: TypeUseSite::DataDefinition,
+        };
+        let endpoint_type = match lookup_parent_type(&scope, element) {
+            Ok((.., endpoint_type)) => endpoint_type,
+            Err(lookup_errors) => {
+                errors.extend(lookup_errors);
+                continue;
             }
         };
-        let Some(endpoint_type) = element_type else {
-            let missing_name = match element {
-                ParentType::Custom { name } => name.clone(),
-                ParentType::Qualified {
-                    spec_alias,
-                    inner: qualified_inner,
-                } => {
-                    let ParentType::Custom { name } = qualified_inner.as_ref() else {
-                        continue;
-                    };
-                    format!("{spec_alias}.{name}")
-                }
-                _ => continue,
-            };
-            errors.push(Error::validation_with_context(
-                format!(
-                    "In spec '{}': ranged type '{}' references missing element type '{}'",
-                    spec.name, type_name, missing_name
-                ),
-                Some(def.source.clone()),
-                None::<String>,
-                Some(spec),
-                None,
-            ));
-            continue;
-        };
-        let Some(range_spec) = endpoint_type.specifications.range_from_element() else {
-            continue;
-        };
-        let Some(lemma_type) = resolved.get_mut(type_name.as_str()) else {
-            continue;
-        };
+        let range_spec = endpoint_type
+            .specifications
+            .range_from_element()
+            .expect("BUG: ranged element was checked rangeable when the type was resolved");
+        let lemma_type = resolved
+            .get_mut(type_name.as_str())
+            .expect("BUG: ranged type resolved before its range spec is refreshed");
         let mut updated = lemma_type.as_ref().clone();
         updated.specifications = range_spec;
         *lemma_type = Arc::new(updated);
@@ -6705,9 +10262,9 @@ fn apply_deferred_named_range_constraints(
     data_defs: &HashMap<String, DataTypeDef>,
     resolved: &mut TypeMap,
     declared_suggestions: &mut IndexMap<String, BoundValueKind>,
-    declared_fills: &mut IndexMap<String, BoundValueKind>,
+    declared_values: &mut IndexMap<String, BoundValueKind>,
     type_sources: &HashMap<String, Source>,
-    unit_index: &UnitIndex,
+    unit_index: &PlanningUnitIndex,
 ) -> Vec<Error> {
     let mut errors = Vec::new();
     for (type_name, def) in data_defs {
@@ -6721,11 +10278,10 @@ fn apply_deferred_named_range_constraints(
             continue;
         };
         let mut declared_suggestion: Option<RawSuggestion> = None;
-        let mut declared_fill: Option<RawSuggestion> = None;
-        let resolve = |unit: &str| {
-            unit_index
-                .resolve_with_named_types(unit, resolved)
-                .map(|(bare, _)| bare)
+        let mut declared_value: Option<RawSuggestion> = None;
+        let resolve = UnitTokenResolver::Planning {
+            unit_index,
+            named_types: resolved,
         };
         match apply_constraints_to_spec(
             spec,
@@ -6735,7 +10291,7 @@ fn apply_deferred_named_range_constraints(
             &def.source,
             ConstraintSuggestionSink {
                 suggestion: &mut declared_suggestion,
-                fill: &mut declared_fill,
+                value: &mut declared_value,
                 resolve_unit: Some(&resolve),
             },
         ) {
@@ -6767,14 +10323,14 @@ fn apply_deferred_named_range_constraints(
                         }
                     }
                 }
-                if let Some(raw) = declared_fill {
+                if let Some(raw) = declared_value {
                     match bound_value_kind_from_raw_suggestion(
                         raw,
                         &updated_arc.specifications,
                         type_name.as_str(),
                     ) {
                         Ok(value_kind) => {
-                            declared_fills.insert(type_name.clone(), value_kind);
+                            declared_values.insert(type_name.clone(), value_kind);
                         }
                         Err(message) => {
                             let source = type_sources
@@ -6799,14 +10355,452 @@ fn apply_deferred_named_range_constraints(
     errors
 }
 
+/// Where a type is written, for planning error wording.
+#[derive(Clone, Copy)]
+enum TypeUseSite {
+    DataDefinition,
+    RuleListType,
+}
+
+impl fmt::Display for TypeUseSite {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            TypeUseSite::DataDefinition => write!(f, "data definition"),
+            TypeUseSite::RuleListType => write!(f, "list type in a rule"),
+        }
+    }
+}
+
+/// Scope a parent type name resolves in: the spec's local types so far, the specs it
+/// imports, and where the type is written.
+#[derive(Clone, Copy)]
+struct ParentLookup<'s, 'a> {
+    resolver: &'s TypeResolver<'a>,
+    spec: &'s LemmaSpec,
+    source: &'s Source,
+    at: &'s EffectiveDate,
+    already_resolved: &'s ResolvedTypesMap<'a>,
+    resolved: &'s HashMap<String, ResolvedTypeEntry>,
+    site: TypeUseSite,
+}
+
+fn lookup_parent_type(
+    scope: &ParentLookup<'_, '_>,
+    parent: &ParentType,
+) -> Result<ParentLookupOk, Vec<Error>> {
+    let mut wrappers = Vec::new();
+    let mut leaf = parent;
+    while let ParentType::List { inner } | ParentType::Ranged { inner } = leaf {
+        wrappers.push(leaf);
+        leaf = inner.as_ref();
+    }
+    let mut lookup = lookup_leaf_parent_type(scope, leaf)?;
+    while let Some(wrapper) = wrappers.pop() {
+        lookup = lookup_wrapper_parent_type(scope, wrapper, lookup)?;
+    }
+    Ok(lookup)
+}
+
+/// Lookup of a `list` or `range` wrapper, given the lookup of its `inner`.
+fn lookup_wrapper_parent_type(
+    scope: &ParentLookup<'_, '_>,
+    wrapper: &ParentType,
+    inner_lookup: ParentLookupOk,
+) -> Result<ParentLookupOk, Vec<Error>> {
+    let ParentLookup { spec, source, .. } = *scope;
+    let (element_specs, .., element_type) = inner_lookup;
+    match wrapper {
+        ParentType::List { inner } => {
+            let element = if matches!(inner.as_ref(), ParentType::Ranged { .. }) {
+                Arc::new(LemmaType::primitive(element_specs))
+            } else {
+                element_type
+            };
+            let lemma_type = Arc::new(LemmaType::list_of(element));
+            Ok((lemma_type.specifications.clone(), None, None, lemma_type))
+        }
+        ParentType::Ranged { inner } => {
+            let range_spec = element_specs.range_from_element().ok_or_else(|| {
+                vec![Error::validation_with_context(
+                    format!(
+                        "'{inner}' is not rangeable: only measure, number, ratio, date, and time types support ranges"
+                    ),
+                    Some(source.clone()),
+                    None::<String>,
+                    Some(spec),
+                    None,
+                )]
+            })?;
+            Ok((range_spec, None, None, element_type))
+        }
+        ParentType::Primitive { .. } | ParentType::Custom { .. } | ParentType::Qualified { .. } => {
+            unreachable!("BUG: lookup_wrapper_parent_type called on a leaf parent")
+        }
+    }
+}
+
+/// Lookup of a parent that is not a `list` or `range` wrapper.
+fn lookup_leaf_parent_type(
+    scope: &ParentLookup<'_, '_>,
+    parent: &ParentType,
+) -> Result<ParentLookupOk, Vec<Error>> {
+    let ParentLookup {
+        resolver,
+        spec,
+        source,
+        at,
+        already_resolved,
+        resolved,
+        site,
+    } = *scope;
+    match parent {
+        ParentType::List { .. } | ParentType::Ranged { .. } => {
+            unreachable!("BUG: list and range wrappers are unwound before the leaf lookup")
+        }
+        ParentType::Primitive { primitive: kind } => {
+            let lemma_type = Arc::clone(semantics::lemma_type_for_primitive(*kind));
+            Ok((
+                lemma_type.as_ref().specifications.clone(),
+                None,
+                None,
+                lemma_type,
+            ))
+        }
+        ParentType::Custom { name } => {
+            if let Some((parent_type, parent_suggestion, parent_value)) =
+                resolved.get(name.as_str())
+            {
+                return Ok((
+                    parent_type.as_ref().specifications.clone(),
+                    parent_suggestion.clone(),
+                    parent_value.clone(),
+                    Arc::clone(parent_type),
+                ));
+            }
+            let type_exists = resolver
+                .data_types
+                .iter()
+                .find(|(s, _)| discovery::same_loaded_spec(s, spec))
+                .map(|(_, type_map)| type_map.contains_key(name.as_str()))
+                .unwrap_or(false);
+            if !type_exists {
+                if spec.data.iter().any(|data| {
+                    data.reference.is_local()
+                        && data.reference.name == name.as_str()
+                        && data.value.uses_spec_ref().is_some()
+                }) {
+                    return Err(vec![Error::validation_with_context(
+                        format!(
+                            "'{name}' names a spec import alias, not a type. Use `data x: {name}.TypeName` after `uses`"
+                        ),
+                        Some(source.clone()),
+                        None::<String>,
+                        Some(spec),
+                        None,
+                    )]);
+                }
+                if spec.rules.iter().any(|rule| rule.name == name.as_str()) {
+                    return Err(vec![Error::validation_with_context(
+                        format!(
+                            "Unknown parent '{parent}' for {site}: '{name}' is a local rule, not a type. Use a type name, or a reference expression if you meant the rule's value."
+                        ),
+                        Some(source.clone()),
+                        None::<String>,
+                        Some(spec),
+                        None,
+                    )]);
+                }
+                let mut imported_aliases: Vec<&str> = Vec::new();
+                for data_row in &spec.data {
+                    let Some(spec_ref) = data_row.value.uses_spec_ref() else {
+                        continue;
+                    };
+                    let import_alias = &data_row.reference.name;
+                    let (_, imported_spec) =
+                        match resolver.resolve_spec_for_import(spec, spec_ref, source, at) {
+                            Ok(pair) => pair,
+                            Err(_) => continue,
+                        };
+                    let Some(imported_resolved) = already_resolved
+                        .iter()
+                        .find(|(_, s, _)| discovery::same_loaded_spec(s, imported_spec))
+                        .map(|(_, _, r)| r)
+                    else {
+                        continue;
+                    };
+                    if imported_resolved.resolved.contains_key(name.as_str()) {
+                        imported_aliases.push(import_alias.as_str());
+                    }
+                }
+                if !imported_aliases.is_empty() {
+                    let forms = imported_aliases
+                        .iter()
+                        .map(|alias| format!("{alias}.{name}"))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    return Err(vec![Error::validation_with_context(
+                        format!(
+                            "Unknown parent '{parent}' for {site}: '{name}' is declared by import{}; write {forms}",
+                            if imported_aliases.len() == 1 {
+                                format!(" '{}'", imported_aliases[0])
+                            } else {
+                                format!("s {}", imported_aliases.join(", "))
+                            }
+                        ),
+                        Some(source.clone()),
+                        None::<String>,
+                        Some(spec),
+                        None,
+                    )]);
+                }
+                return Err(vec![Error::validation_with_context(
+                    format!(
+                        "Unknown parent '{parent}' for {site}. Parent must be defined before use. Valid primitive types are: boolean, measure, number, ratio, text, date, time"
+                    ),
+                    Some(source.clone()),
+                    None::<String>,
+                    Some(spec),
+                    None,
+                )]);
+            }
+            Err(vec![Error::validation_with_context(
+                format!(
+                    "Circular dependency detected in type resolution: {}::{}",
+                    spec.name, name
+                ),
+                Some(source.clone()),
+                None::<String>,
+                Some(spec),
+                None,
+            )])
+        }
+        ParentType::Qualified { spec_alias, inner } => {
+            let spec_ref = ast::SpecRef::same_repository(spec_alias.clone());
+            let (_, target_spec) =
+                match resolver.resolve_spec_for_import(spec, &spec_ref, source, at) {
+                    Ok(import_pair) => import_pair,
+                    Err(error) => return Err(vec![error]),
+                };
+            match inner.as_ref() {
+                ParentType::Primitive { primitive: kind } => {
+                    let lemma_type = Arc::clone(semantics::lemma_type_for_primitive(*kind));
+                    Ok((
+                        lemma_type.as_ref().specifications.clone(),
+                        None,
+                        None,
+                        lemma_type,
+                    ))
+                }
+                ParentType::Custom { name } => {
+                    let Some(resolved_spec_types) = already_resolved
+                        .iter()
+                        .find(|(_, imported, _)| discovery::same_loaded_spec(imported, target_spec))
+                        .map(|(_, _, resolved_spec_types)| resolved_spec_types)
+                    else {
+                        // The import target exists but failed its own type
+                        // resolution (its errors were already collected), so
+                        // the consumer cannot resolve this qualified type.
+                        return Err(vec![Error::validation_with_context(
+                            format!(
+                                "Cannot resolve type '{name}' from spec '{}' (via import '{spec_alias}'): spec '{}' failed type resolution",
+                                target_spec.name, target_spec.name
+                            ),
+                            Some(source.clone()),
+                            None::<String>,
+                            Some(spec),
+                            None,
+                        )]);
+                    };
+                    let Some(parent_type) = resolved_spec_types.resolved.get(name.as_str()) else {
+                        let type_exists = resolver
+                            .data_types
+                            .iter()
+                            .find(|(s, _)| discovery::same_loaded_spec(s, target_spec))
+                            .map(|(_, type_map)| type_map.contains_key(name.as_str()))
+                            .unwrap_or(false);
+                        if !type_exists {
+                            return Err(vec![Error::validation_with_context(
+                                format!(
+                                    "Type '{name}' is not defined in spec '{}' (via import '{spec_alias}')",
+                                    target_spec.name
+                                ),
+                                Some(source.clone()),
+                                None::<String>,
+                                Some(spec),
+                                None,
+                            )]);
+                        }
+                        return Err(vec![Error::validation_with_context(
+                            format!(
+                                "Circular dependency detected in type resolution: {}::{}",
+                                target_spec.name, name
+                            ),
+                            Some(source.clone()),
+                            None::<String>,
+                            Some(spec),
+                            None,
+                        )]);
+                    };
+                    Ok((
+                        parent_type.as_ref().specifications.clone(),
+                        resolved_spec_types
+                            .source_defaults
+                            .get(name.as_str())
+                            .cloned(),
+                        resolved_spec_types
+                            .source_value_defaults
+                            .get(name.as_str())
+                            .cloned(),
+                        Arc::clone(parent_type),
+                    ))
+                }
+                ParentType::Qualified { .. } => Err(vec![Error::validation_with_context(
+                    "Nested qualified parent types are invalid",
+                    Some(source.clone()),
+                    None::<String>,
+                    Some(spec),
+                    None,
+                )]),
+                ParentType::Ranged { .. } => Err(vec![Error::validation_with_context(
+                    "Nested ranged parent types are invalid",
+                    Some(source.clone()),
+                    None::<String>,
+                    Some(spec),
+                    None,
+                )]),
+                ParentType::List { .. } => Err(vec![Error::validation_with_context(
+                    "Nested list parent types are invalid",
+                    Some(source.clone()),
+                    None::<String>,
+                    Some(spec),
+                    None,
+                )]),
+            }
+        }
+    }
+}
+
+/// Order `type_names` so each type follows its local element parent. A cycle is a planning Error.
+fn topo_sort_type_names(
+    spec: &LemmaSpec,
+    data_defs: &HashMap<String, DataTypeDef>,
+    mut type_names: Vec<String>,
+) -> Result<Vec<String>, Vec<Error>> {
+    type_names.sort();
+    if type_names.is_empty() {
+        return Ok(type_names);
+    }
+    let type_index: HashMap<&str, usize> = type_names
+        .iter()
+        .enumerate()
+        .map(|(index, name)| (name.as_str(), index))
+        .collect();
+    let type_count = type_names.len();
+    let mut in_degree = vec![0usize; type_count];
+    let mut dependents: Vec<Vec<usize>> = vec![Vec::new(); type_count];
+    for (child_index, type_name) in type_names.iter().enumerate() {
+        let custom_parent = match element_parent_type(&data_defs[type_name].parent) {
+            ParentType::Custom { name } => Some(name.as_str()),
+            _ => None,
+        };
+        let Some(parent_name) = custom_parent else {
+            continue;
+        };
+        let Some(&parent_index) = type_index.get(parent_name) else {
+            continue;
+        };
+        if parent_index == child_index {
+            continue;
+        }
+        in_degree[child_index] += 1;
+        dependents[parent_index].push(child_index);
+    }
+    let mut queue: std::collections::VecDeque<usize> = (0..type_count)
+        .filter(|&index| in_degree[index] == 0)
+        .collect();
+    let mut sorted = Vec::with_capacity(type_count);
+    while let Some(index) = queue.pop_front() {
+        sorted.push(type_names[index].clone());
+        for &dependent_index in &dependents[index] {
+            in_degree[dependent_index] -= 1;
+            if in_degree[dependent_index] == 0 {
+                queue.push_back(dependent_index);
+            }
+        }
+    }
+    if sorted.len() != type_count {
+        let cycle_type_name = type_names
+            .iter()
+            .find(|name| in_degree[type_index[name.as_str()]] > 0)
+            .expect("BUG: incomplete topo sort without cycle participant");
+        return Err(vec![Error::validation_with_context(
+            format!(
+                "Circular dependency detected in type resolution: {}::{}",
+                spec.name, cycle_type_name
+            ),
+            Some(data_defs[cycle_type_name].source.clone()),
+            None::<String>,
+            Some(spec),
+            None,
+        )]);
+    }
+    Ok(sorted)
+}
+
+/// Split local type declarations into scalar types and list types.
+///
+/// A list type (`money list`, or a type extending one) is resolved after every scalar
+/// pass has finished, so its element is the final element type.
+fn partition_list_type_names(
+    data_defs: &HashMap<String, DataTypeDef>,
+) -> (Vec<String>, Vec<String>) {
+    fn has_list(parent: &ParentType) -> bool {
+        let mut current = parent;
+        loop {
+            match current {
+                ParentType::List { .. } => return true,
+                ParentType::Ranged { inner } | ParentType::Qualified { inner, .. } => {
+                    current = inner.as_ref();
+                }
+                ParentType::Primitive { .. } | ParentType::Custom { .. } => return false,
+            }
+        }
+    }
+    let mut list_names: HashSet<String> = data_defs
+        .iter()
+        .filter(|(_, def)| has_list(&def.parent))
+        .map(|(name, _)| name.clone())
+        .collect();
+    loop {
+        let before = list_names.len();
+        for (name, def) in data_defs {
+            if let ParentType::Custom { name: parent } = element_parent_type(&def.parent) {
+                if list_names.contains(parent) {
+                    list_names.insert(name.clone());
+                }
+            }
+        }
+        if list_names.len() == before {
+            break;
+        }
+    }
+    let scalar_names = data_defs
+        .keys()
+        .filter(|name| !list_names.contains(*name))
+        .cloned()
+        .collect();
+    (scalar_names, list_names.into_iter().collect())
+}
+
 type TypeMap = IndexMap<String, Arc<LemmaType>>;
 
 fn resolve_measure_decompositions(
     spec_name: &str,
+    this_spec: &SpecIdentity,
     mut resolved: TypeMap,
-    mut unit_index: UnitIndex,
+    unit_index: &PlanningUnitIndex,
     type_sources: &HashMap<String, Source>,
-) -> (TypeMap, UnitIndex, Vec<Error>) {
+) -> (TypeMap, Vec<Error>) {
     let mut errors: Vec<Error> = Vec::new();
 
     let source_for = |type_name: &str| -> Option<Source> { type_sources.get(type_name).cloned() };
@@ -6824,12 +10818,12 @@ fn resolve_measure_decompositions(
         .collect();
 
     for type_name in &base_type_names {
-        let owned = arc_unwrap(
+        let owned = unwrap_unique_resolved_type(
             resolved
                 .shift_remove(type_name)
                 .expect("BUG: type_name comes from resolved's own keys"),
         );
-        let base_decomp = declared_measure_decomposition(type_name, &owned);
+        let base_decomp = declared_measure_decomposition(&owned);
 
         let reserved_collision = reserved_calendar_units_in_measure(&owned);
         if !reserved_collision.is_empty() && !owned.has_trait_calendar() {
@@ -6845,26 +10839,53 @@ fn resolve_measure_decompositions(
             continue;
         }
 
-        let updated = owned.map_measure(|units, _decomposition| {
+        let updated = owned.map_measure(|units, _| {
             let units = units.map(|u| u.with_decomposition(base_decomp.clone()));
             (units, Some(base_decomp.clone()))
         });
         resolved.insert(type_name.clone(), Arc::new(updated));
     }
 
-    unit_index = repair_empty_simple_measure_decomposition_in_unit_index(unit_index);
+    for lemma_type in resolved.values_mut() {
+        let TypeSpecification::MeasureRange { units, .. } = &lemma_type.specifications else {
+            continue;
+        };
+        if units.is_empty() {
+            continue;
+        }
+        let family = lemma_type
+            .family()
+            .expect("BUG: measure range declaring units must be a named custom type");
+        let range_decomp: BaseMeasureVector =
+            [(semantics::Dimension::Family(family.clone()), 1i32)]
+                .into_iter()
+                .collect();
+        let TypeSpecification::MeasureRange {
+            units,
+            decomposition,
+            ..
+        } = &mut Arc::get_mut(lemma_type)
+            .expect("BUG: resolved LemmaType Arc unique during type resolution")
+            .specifications
+        else {
+            unreachable!("BUG: matched MeasureRange above");
+        };
+        *units = std::mem::take(units).map(|u| u.with_decomposition(range_decomp.clone()));
+        *decomposition = Some(range_decomp);
+    }
 
     let mut lookup = UnitDecompLookup::new();
 
-    for (unit_name, lemma_type) in unit_index.iter_entries() {
+    for (unit_name, owner) in unit_index.iter_owners() {
         let unit_name = unit_name.to_string();
+        let lemma_type = owner.lemma_type(&resolved);
         if let TypeSpecification::Measure {
             decomposition: Some(decomposition),
             units,
             ..
         } = &lemma_type.specifications
         {
-            let measure_name = lemma_type.name.clone().unwrap_or_default();
+            let measure_name = local_owner_name(owner);
             let factor = units
                 .iter()
                 .find(|u| u.name == unit_name)
@@ -6893,18 +10914,26 @@ fn resolve_measure_decompositions(
             ..
         } = &lemma_type.specifications
         {
-            let is_defining_type = lemma_type
-                .measure_family_name()
-                .map(|family| family == type_name.as_str())
-                .unwrap_or(false);
+            let is_defining_type = lemma_type.measure_family().is_some_and(|family| {
+                family.is_declared_in(this_spec) && family.name == *type_name
+            });
             if !is_defining_type {
                 continue;
             }
             for unit in units.iter() {
+                let declared_by_other_family =
+                    unit_index.owners_for(&unit.name).iter().any(|owner| {
+                        !owner
+                            .lemma_type(&resolved)
+                            .same_measure_family(lemma_type.as_ref())
+                    });
+                if declared_by_other_family {
+                    continue;
+                }
                 lookup.insert(
                     unit.name.clone(),
                     (
-                        type_name.clone(),
+                        Some(type_name.clone()),
                         decomposition.clone(),
                         unit.factor.clone(),
                     ),
@@ -6930,13 +10959,13 @@ fn resolve_measure_decompositions(
         derived_measure_type_names_unsorted,
         &resolved,
         &lookup,
-        &unit_index,
-        &|type_name| source_for(type_name),
+        unit_index,
+        type_sources,
     ) {
         Ok(sorted) => sorted,
         Err(error) => {
             errors.push(error);
-            return (resolved, unit_index, errors);
+            return (resolved, errors);
         }
     };
 
@@ -6968,16 +10997,24 @@ fn resolve_measure_decompositions(
                 continue;
             }
             if measure_unit_is_simple(unit) {
-                let simple_decomp = declared_measure_decomposition(type_name, &resolved[type_name]);
+                let simple_decomp = declared_measure_decomposition(&resolved[type_name]);
 
                 if let Some(existing) = &resolved_type_decomp {
                     if existing != &simple_decomp {
                         unit_errors.push(Error::validation(
                             format!(
                                 "In spec '{}': measure type '{}' has inconsistent unit decompositions. \
-                                 Unit '{}' is a simple unit (decomposition {{{}: 1}}) but other units \
-                                 have decomposition {:?}.",
-                                spec_name, type_name, unit.name, type_name, existing
+                                 Unit '{}' is a simple unit (decomposition {}) but other units \
+                                 have decomposition {}.",
+                                spec_name,
+                                type_name,
+                                unit.name,
+                                semantics::format_signature_operator_style(
+                                    &semantics::base_measure_vector_as_signature(&simple_decomp)
+                                ),
+                                semantics::format_signature_operator_style(
+                                    &semantics::base_measure_vector_as_signature(existing)
+                                )
                             ),
                             type_source.clone(),
                             None::<String>,
@@ -6996,7 +11033,8 @@ fn resolve_measure_decompositions(
                 type_name,
                 unit,
                 &lookup,
-                &unit_index,
+                unit_index,
+                &resolved,
                 type_source.as_ref(),
             ) {
                 Ok((unit_decomp, derived_factor)) => {
@@ -7034,13 +11072,13 @@ fn resolve_measure_decompositions(
             None => continue,
         };
 
-        let owned = arc_unwrap(
+        let owned = unwrap_unique_resolved_type(
             resolved
                 .shift_remove(type_name)
                 .expect("BUG: type_name comes from resolved's own keys"),
         );
 
-        let updated = owned.map_measure(|units, _decomposition| {
+        let updated = owned.map_measure(|units, _| {
             let units = MeasureUnits(
                 units
                     .0
@@ -7062,7 +11100,11 @@ fn resolve_measure_decompositions(
             for unit in units.iter() {
                 lookup.insert(
                     unit.name.clone(),
-                    (type_name.clone(), type_decomp.clone(), unit.factor.clone()),
+                    (
+                        Some(type_name.clone()),
+                        type_decomp.clone(),
+                        unit.factor.clone(),
+                    ),
                 );
             }
         }
@@ -7070,11 +11112,8 @@ fn resolve_measure_decompositions(
     }
 
     let resolved = canonicalize_unit_signatures(resolved);
-    let unit_index = sync_unit_index_from_resolved(&resolved, unit_index);
-    let unit_index = repair_empty_simple_measure_decomposition_in_unit_index(unit_index);
-    let unit_index = canonicalize_unit_index_signatures(unit_index);
 
-    (resolved, unit_index, errors)
+    (resolved, errors)
 }
 
 /// Functional wrapper around the still-`&mut`-based
@@ -7119,9 +11158,9 @@ fn finalize_measure_magnitudes_in_resolved(
                     type_name, spec_name
                 )
             });
-            let fallback = (*arc).clone();
+            let owned = unwrap_unique_resolved_type(arc);
             let lemma_type = match finalize_lemma_measure_magnitudes(
-                arc_unwrap(arc),
+                owned.clone(),
                 declared_suggestions.get(&type_name),
                 &type_name,
             ) {
@@ -7137,118 +11176,13 @@ fn finalize_measure_magnitudes_in_resolved(
                         Some(spec),
                         None,
                     ));
-                    fallback
+                    owned
                 }
             };
             acc.insert(type_name, Arc::new(lemma_type));
             (acc, errors)
         },
     )
-}
-
-fn finalize_measure_magnitudes_in_unit_index(
-    unit_index: UnitIndex,
-    declared_suggestions: &IndexMap<String, BoundValueKind>,
-    type_sources: &HashMap<String, Source>,
-    all_data_types: &[(&LemmaSpec, HashMap<String, DataTypeDef>)],
-    spec: &LemmaSpec,
-) -> (UnitIndex, Vec<Error>) {
-    let mut out = UnitIndex::new();
-    let mut errors = Vec::new();
-    let mut finalized_types: HashMap<(Option<String>, String), Arc<LemmaType>> = HashMap::new();
-
-    for (unit_name, owner) in unit_index.into_iter_owners() {
-        let cache_key = (owner.import_alias.clone(), owner.type_name.clone());
-        if let Some(existing) = finalized_types.get(&cache_key) {
-            out.insert_owner(
-                unit_name,
-                UnitOwner {
-                    owning_type: Arc::clone(existing),
-                    type_name: owner.type_name,
-                    import_alias: owner.import_alias,
-                },
-            );
-            continue;
-        }
-
-        let arc = owner.owning_type;
-        let type_name_opt = arc
-            .name
-            .as_deref()
-            .or_else(|| arc.measure_family_name())
-            .map(str::to_string);
-        let Some(type_name) = type_name_opt else {
-            let arc = Arc::clone(&arc);
-            finalized_types.insert(cache_key, Arc::clone(&arc));
-            out.insert_owner(
-                unit_name,
-                UnitOwner {
-                    owning_type: arc,
-                    type_name: owner.type_name,
-                    import_alias: owner.import_alias,
-                },
-            );
-            continue;
-        };
-        if !arc.is_measure() {
-            finalized_types.insert(cache_key, Arc::clone(&arc));
-            out.insert_owner(
-                unit_name,
-                UnitOwner {
-                    owning_type: arc,
-                    type_name: owner.type_name,
-                    import_alias: owner.import_alias,
-                },
-            );
-            continue;
-        }
-        let fallback = (*arc).clone();
-        let lemma_type = match finalize_lemma_measure_magnitudes(
-            arc_unwrap(arc),
-            declared_suggestions.get(type_name.as_str()),
-            type_name.as_str(),
-        ) {
-            Ok(lt) => lt,
-            Err(message) => {
-                let source = type_sources
-                    .get(type_name.as_str())
-                    .cloned()
-                    .or_else(|| {
-                        all_data_types.iter().find_map(|(_, defs)| {
-                            defs.get(type_name.as_str()).map(|def| def.source.clone())
-                        })
-                    })
-                    .unwrap_or_else(|| {
-                        unreachable!(
-                            "BUG: measure type '{}' in unit_index has no DataTypeDef source",
-                            type_name
-                        )
-                    });
-                errors.push(Error::validation_with_context(
-                    format!(
-                        "Type '{}' has invalid measure unit constraints: {}",
-                        type_name, message
-                    ),
-                    Some(source),
-                    None::<String>,
-                    Some(spec),
-                    None,
-                ));
-                fallback
-            }
-        };
-        let arc = Arc::new(lemma_type);
-        finalized_types.insert(cache_key, Arc::clone(&arc));
-        out.insert_owner(
-            unit_name,
-            UnitOwner {
-                owning_type: arc,
-                type_name: owner.type_name,
-                import_alias: owner.import_alias,
-            },
-        );
-    }
-    (out, errors)
 }
 
 /// Populate every unit's `derived_measure_factors` to its canonical symbolic signature.
@@ -7264,27 +11198,12 @@ fn canonicalize_unit_signatures(types: TypeMap) -> TypeMap {
         .map(|(name, arc)| {
             (
                 name,
-                Arc::new(canonicalize_lemma_unit_signatures(arc_unwrap(arc))),
+                Arc::new(canonicalize_lemma_unit_signatures(
+                    unwrap_unique_resolved_type(arc),
+                )),
             )
         })
         .collect()
-}
-
-fn canonicalize_unit_index_signatures(unit_index: UnitIndex) -> UnitIndex {
-    let mut out = UnitIndex::new();
-    for (bare, owner) in unit_index.into_iter_owners() {
-        out.insert_owner(
-            bare,
-            UnitOwner {
-                owning_type: Arc::new(canonicalize_lemma_unit_signatures(arc_unwrap(
-                    owner.owning_type,
-                ))),
-                type_name: owner.type_name,
-                import_alias: owner.import_alias,
-            },
-        );
-    }
-    out
 }
 
 fn canonicalize_lemma_unit_signatures(lemma_type: LemmaType) -> LemmaType {
@@ -7326,7 +11245,8 @@ fn resolve_compound_unit(
     declaring_type_name: &str,
     unit: &MeasureUnit,
     lookup: &UnitDecompLookup,
-    unit_index: &UnitIndex,
+    unit_index: &PlanningUnitIndex,
+    resolved: &IndexMap<String, Arc<LemmaType>>,
     source: Option<&Source>,
 ) -> Result<
     (
@@ -7335,7 +11255,8 @@ fn resolve_compound_unit(
     ),
     Error,
 > {
-    use crate::computation::rational::{checked_mul, checked_pow_i32};
+    use crate::computation::bigint::BigInt;
+    use crate::computation::rational::{checked_mul, checked_pow_integer};
 
     let mut result: BaseMeasureVector = BaseMeasureVector::new();
     let mut derived_factor = unit.factor.clone();
@@ -7346,18 +11267,21 @@ fn resolve_compound_unit(
         {
             (entry.0.clone(), entry.1.clone(), entry.2.clone())
         } else {
-            let (bare, owning_type) = unit_index.resolve(measure_ref).map_err(|err| {
-                Error::validation(
-                    format!(
-                        "In spec '{}': unit '{}' in measure type '{}' references '{}': {}. \
+            let (bare, owner) = unit_index
+                .resolve_owner(measure_ref, resolved)
+                .map_err(|err| {
+                    Error::validation(
+                        format!(
+                            "In spec '{}': unit '{}' in measure type '{}' references '{}': {}. \
                              Add `uses <spec>` (or declare the owning measure type in this spec) \
                              so its units are in scope.",
-                        spec_name, unit.name, declaring_type_name, measure_ref, err
-                    ),
-                    source.cloned(),
-                    None::<String>,
-                )
-            })?;
+                            spec_name, unit.name, declaring_type_name, measure_ref, err
+                        ),
+                        source.cloned(),
+                        None::<String>,
+                    )
+                })?;
+            let owning_type = owner.lemma_type(resolved);
             let TypeSpecification::Measure {
                 decomposition: Some(decomposition),
                 units,
@@ -7365,13 +11289,13 @@ fn resolve_compound_unit(
             } = &owning_type.specifications
             else {
                 return Err(Error::validation(
-                        format!(
-                            "In spec '{}': unit '{}' in measure type '{}' references '{}' which did not resolve to a measure unit",
-                            spec_name, unit.name, declaring_type_name, measure_ref
-                        ),
-                        source.cloned(),
-                        None::<String>,
-                    ));
+                    format!(
+                        "In spec '{}': unit '{}' in measure type '{}' references '{}' which did not resolve to a measure unit",
+                        spec_name, unit.name, declaring_type_name, measure_ref
+                    ),
+                    source.cloned(),
+                    None::<String>,
+                ));
             };
             let factor = units
                 .iter()
@@ -7385,17 +11309,12 @@ fn resolve_compound_unit(
                 })
                 .factor
                 .clone();
-            (
-                owning_type.name.clone().unwrap_or_default(),
-                decomposition.clone(),
-                factor,
-            )
+            (local_owner_name(owner), decomposition.clone(), factor)
         };
-        let owning_measure_name = owning_measure_name.as_str();
         let owning_decomp = &owning_decomp;
         let unit_factor = &unit_factor;
 
-        if owning_measure_name == declaring_type_name {
+        if owning_measure_name.as_deref() == Some(declaring_type_name) {
             return Err(Error::validation(
                 format!(
                     "In spec '{}': unit '{}' in measure type '{}' references unit '{}' which \
@@ -7409,19 +11328,32 @@ fn resolve_compound_unit(
         }
 
         for (dim, &dim_exp) in owning_decomp {
-            accumulate(&mut result, dim, dim_exp * exponent);
+            let combined = dim_exp
+                .checked_mul(*exponent)
+                .and_then(|value| accumulate(&mut result, dim, value));
+            if combined.is_none() {
+                return Err(unit_exponent_limit_error(
+                    spec_name,
+                    &unit.name,
+                    declaring_type_name,
+                    source,
+                ));
+            }
         }
 
-        let component_contribution = checked_pow_i32(unit_factor, *exponent).map_err(|error| {
-            overflow_to_validation_error(
-                spec_name,
-                &unit.name,
-                declaring_type_name,
-                measure_ref,
-                error,
-                source,
-            )
-        })?;
+        let component_contribution =
+            checked_pow_integer(unit_factor, &BigInt::from_i64(i64::from(*exponent))).map_err(
+                |error| {
+                    overflow_to_validation_error(
+                        spec_name,
+                        &unit.name,
+                        declaring_type_name,
+                        measure_ref,
+                        error,
+                        source,
+                    )
+                },
+            )?;
         derived_factor =
             checked_mul(&derived_factor, &component_contribution).map_err(|error| {
                 overflow_to_validation_error(
@@ -7456,12 +11388,40 @@ fn overflow_to_validation_error(
     )
 }
 
-fn accumulate(result: &mut BaseMeasureVector, dim: &str, value: i32) {
-    let entry = result.entry(dim.to_string()).or_insert(0);
-    *entry += value;
+fn unit_exponent_limit_error(
+    spec_name: &str,
+    unit_name: &str,
+    declaring_type_name: &str,
+    source: Option<&Source>,
+) -> Error {
+    Error::validation(
+        format!(
+            "In spec '{}': unit '{}' in measure type '{}' has a unit exponent exceeding the maximum of {}",
+            spec_name,
+            unit_name,
+            declaring_type_name,
+            crate::limits::MAX_UNIT_EXPONENT
+        ),
+        source.cloned(),
+        None::<String>,
+    )
+}
+
+/// `None` when the accumulated exponent leaves [`crate::limits::MAX_UNIT_EXPONENT`].
+fn accumulate(
+    result: &mut BaseMeasureVector,
+    dim: &semantics::Dimension,
+    value: i32,
+) -> Option<()> {
+    let entry = result.entry(dim.clone()).or_insert(0);
+    *entry = entry.checked_add(value)?;
+    if entry.unsigned_abs() > crate::limits::MAX_UNIT_EXPONENT.unsigned_abs() {
+        return None;
+    }
     if *entry == 0 {
         result.remove(dim);
     }
+    Some(())
 }
 
 #[cfg(test)]
@@ -7510,6 +11470,7 @@ mod tests {
                 },
             )?;
         let ordered_dependencies = Box::leak(Box::new(ordered_dependencies));
+        let mut interners = instance_list::PassInterners::default();
         match Graph::build(
             ctx,
             &repository,
@@ -7517,8 +11478,9 @@ mod tests {
             ordered_dependencies,
             &effective,
             limits,
+            &mut interners,
         ) {
-            Ok((graph, _types)) => Ok(graph),
+            Ok((graph, _)) => Ok(graph),
             Err(errors) => Err(errors),
         }
     }
@@ -7543,10 +11505,7 @@ mod tests {
     }
 
     fn create_literal_expr(value: Value) -> ast::Expression {
-        ast::Expression {
-            kind: ast::ExpressionKind::Literal(value),
-            source_location: Some(test_source()),
-        }
+        ast::Expression::leaf(ast::ExpressionKind::Literal(value), Some(test_source()))
     }
 
     #[test]
@@ -7577,10 +11536,10 @@ mod tests {
         let mut spec = create_test_spec("test");
         spec = spec.add_rule(LemmaRule {
             name: "no_location".to_string(),
-            expression: ast::Expression {
-                kind: ast::ExpressionKind::Literal(Value::Number(1.into())),
-                source_location: None,
-            },
+            expression: ast::Expression::leaf(
+                ast::ExpressionKind::Literal(Value::Number(1.into())),
+                None,
+            ),
             unless_clauses: Vec::new(),
             source_location: test_source(),
         });
@@ -7597,18 +11556,24 @@ mod tests {
 
     #[test]
     fn programmatic_ast_nested_expression_without_source_location_is_validation_error() {
-        let inner = ast::Expression {
-            kind: ast::ExpressionKind::Literal(Value::Number(1.into())),
-            source_location: None,
-        };
-        let outer = ast::Expression {
-            kind: ast::ExpressionKind::Arithmetic(
-                Arc::new(create_literal_expr(Value::Number(2.into()))),
-                ast::ArithmeticComputation::Add,
-                Arc::new(inner),
-            ),
-            source_location: Some(test_source()),
-        };
+        let mut table = ast::ExprTable::default();
+        let first = table.push(
+            ast::ExpressionKind::Literal(Value::Number(2.into())),
+            Some(test_source()),
+        );
+        let operand = table.push(ast::ExpressionKind::Literal(Value::Number(1.into())), None);
+        let root = table.push(
+            ast::ExpressionKind::Arithmetic {
+                first,
+                steps: vec![ast::ChainStep {
+                    op: ast::ArithmeticComputation::Add,
+                    operand,
+                    source_location: test_source(),
+                }],
+            },
+            Some(test_source()),
+        );
+        let outer = ast::Expression::new(table, root);
         let mut spec = create_test_spec("test");
         spec = spec.add_rule(LemmaRule {
             name: "nested_no_location".to_string(),
@@ -7704,13 +11669,13 @@ mod tests {
     fn test_missing_data_reference() {
         let mut spec = create_test_spec("test");
 
-        let missing_data_expr = ast::Expression {
-            kind: ast::ExpressionKind::Reference(Reference {
+        let missing_data_expr = ast::Expression::leaf(
+            ast::ExpressionKind::Reference(Reference {
                 segments: Vec::new(),
                 name: "nonexistent".to_string(),
             }),
-            source_location: Some(test_source()),
-        };
+            Some(test_source()),
+        );
 
         let rule = LemmaRule {
             name: "test_rule".to_string(),
@@ -7727,6 +11692,83 @@ mod tests {
         assert!(errors
             .iter()
             .any(|e| e.to_string().contains("Reference 'nonexistent' not found")));
+    }
+
+    fn rule_node_of<'g>(graph: &'g Graph<'static>, rule: &str) -> &'g RuleNode<'static> {
+        graph
+            .rules()
+            .iter()
+            .find(|(path, _)| path.rule == rule)
+            .map(|(_, node)| node)
+            .expect("rule in graph")
+    }
+
+    fn graph_of(source: &str) -> Graph<'static> {
+        let specs = crate::parse(
+            source,
+            crate::parsing::source::SourceType::Volatile,
+            &crate::ResourceLimits::default(),
+        )
+        .expect("fixture parses")
+        .into_flattened_specs();
+        let s = specs.iter().find(|d| d.name == "s").expect("spec s");
+        build_graph(s, &specs).expect("fixture plans")
+    }
+
+    #[test]
+    fn rule_without_unless_is_its_default_expression() {
+        let graph = graph_of("spec s\ndata x: number\nrule r: x + 9\n");
+        let node = rule_node_of(&graph, "r");
+        node.expression.assert_is_tree();
+        assert_eq!(node.branches, vec![(None, node.expression.root)]);
+        assert!(matches!(
+            node.expression.root_kind(),
+            ExpressionKind::Arithmetic { .. }
+        ));
+    }
+
+    #[test]
+    fn unless_rule_is_one_piecewise_table_in_source_order() {
+        let graph = graph_of(
+            "spec s\ndata x: number\nrule r: 0\n unless x > 10 then 100\n unless x > 5 then 50\n",
+        );
+        let node = rule_node_of(&graph, "r");
+        node.expression.assert_is_tree();
+        let ExpressionKind::Piecewise(arms) = node.expression.root_kind() else {
+            panic!(
+                "expected Piecewise root, got {:?}",
+                node.expression.root_kind()
+            );
+        };
+        let number = |id: ExprId| match node.expression.at(id).kind() {
+            ExpressionKind::Literal(literal) => match &literal.value {
+                ValueKind::Number(n) => n.clone(),
+                other => panic!("expected number, got {other:?}"),
+            },
+            other => panic!("expected literal, got {other:?}"),
+        };
+        assert_eq!(arms.len(), 3);
+        assert!(matches!(
+            node.expression.at(arms[0].0).kind(),
+            ExpressionKind::Literal(literal) if matches!(literal.value, ValueKind::Boolean(true))
+        ));
+        assert_eq!(number(arms[0].1), number(node.branches[0].1));
+        for (index, expected) in [(1, 100), (2, 50)] {
+            assert!(matches!(
+                node.expression.at(arms[index].0).kind(),
+                ExpressionKind::Comparison(..)
+            ));
+            assert_eq!(
+                (Some(arms[index].0), arms[index].1),
+                node.branches[index],
+                "branch ids name the Piecewise arm"
+            );
+            assert_eq!(
+                number(arms[index].1),
+                crate::computation::rational::rational_new(expected, 1)
+            );
+        }
+        assert_eq!(node.branches[0].0, None);
     }
 
     #[test]
@@ -7870,13 +11912,13 @@ rule landed_cost_per_kg:
             Value::Number(rust_decimal::Decimal::from(25)),
         ));
 
-        let age_expr = ast::Expression {
-            kind: ast::ExpressionKind::Reference(Reference {
+        let age_expr = ast::Expression::leaf(
+            ast::ExpressionKind::Reference(Reference {
                 segments: Vec::new(),
                 name: "age".to_string(),
             }),
-            source_location: Some(test_source()),
-        };
+            Some(test_source()),
+        );
 
         let rule = LemmaRule {
             name: "test_rule".to_string(),
@@ -7893,7 +11935,7 @@ rule landed_cost_per_kg:
         let rule_node = graph.rules().values().next().unwrap();
 
         assert!(matches!(
-            rule_node.branches[0].1.kind,
+            rule_node.expression.at(rule_node.branches[0].1).kind(),
             ExpressionKind::DataPath(_)
         ));
     }
@@ -7902,13 +11944,13 @@ rule landed_cost_per_kg:
     fn test_rule_reference_conversion() {
         let mut spec = create_test_spec("test");
 
-        let rule1_expr = ast::Expression {
-            kind: ast::ExpressionKind::Reference(Reference {
+        let rule1_expr = ast::Expression::leaf(
+            ast::ExpressionKind::Reference(Reference {
                 segments: Vec::new(),
                 name: "age".to_string(),
             }),
-            source_location: Some(test_source()),
-        };
+            Some(test_source()),
+        );
 
         let rule1 = LemmaRule {
             name: "rule1".to_string(),
@@ -7918,13 +11960,13 @@ rule landed_cost_per_kg:
         };
         spec = spec.add_rule(rule1);
 
-        let rule2_expr = ast::Expression {
-            kind: ast::ExpressionKind::Reference(Reference {
+        let rule2_expr = ast::Expression::leaf(
+            ast::ExpressionKind::Reference(Reference {
                 segments: Vec::new(),
                 name: "rule1".to_string(),
             }),
-            source_location: Some(test_source()),
-        };
+            Some(test_source()),
+        );
 
         let rule2 = LemmaRule {
             name: "rule2".to_string(),
@@ -7954,7 +11996,7 @@ rule landed_cost_per_kg:
         assert_eq!(rule2_node.depends_on_rules.len(), 1);
         // Source branches preserve RulePath; normalized_expression must inline deps and must not.
         assert!(matches!(
-            rule2_node.branches[0].1.kind,
+            rule2_node.expression.at(rule2_node.branches[0].1).kind(),
             ExpressionKind::RulePath(_)
         ));
     }
@@ -7971,13 +12013,13 @@ rule landed_cost_per_kg:
             Value::Number(rust_decimal::Decimal::from(30)),
         ));
 
-        let missing_data_expr = ast::Expression {
-            kind: ast::ExpressionKind::Reference(Reference {
+        let missing_data_expr = ast::Expression::leaf(
+            ast::ExpressionKind::Reference(Reference {
                 segments: Vec::new(),
                 name: "nonexistent".to_string(),
             }),
-            source_location: Some(test_source()),
-        };
+            Some(test_source()),
+        );
 
         let rule = LemmaRule {
             name: "test_rule".to_string(),
@@ -8125,9 +12167,12 @@ rule result: m.x"#;
             data: "x".to_string(),
         };
         assert!(
-            graph.data.contains_key(&data_path),
-            "Ref should resolve to myspec. Data: {:?}",
-            graph.data.keys().collect::<Vec<_>>()
+            !graph.data.contains_key(&data_path),
+            "scalar nested data stays on the template; consumer holds the Import marker only"
+        );
+        assert!(
+            matches!(graph.lookup_data(&data_path), Some(DataLookup::Import(_))),
+            "Ref should peel to myspec.x"
         );
     }
 
@@ -8180,8 +12225,8 @@ rule r: i.x
             data: "i".to_string(),
         };
         match graph.data().get(&alias_path) {
-            Some(DataDefinition::Import { target_name, .. }) => {
-                assert_eq!(target_name, "inner");
+            Some(DataDefinition::Import { identity, .. }) => {
+                assert_eq!(identity.spec, "inner");
             }
             other => panic!(
                 "alias path 'i' must be DataDefinition::Import, got {:?}",
@@ -8198,8 +12243,16 @@ rule r: i.x
             data: "x".to_string(),
         };
         assert!(
-            graph.data().contains_key(&nested_path),
-            "nested data i.x must exist after nested build_spec"
+            !graph.data().contains_key(&nested_path),
+            "scalar nested data stays on the template; consumer holds the Import marker only"
+        );
+        let peeled = graph
+            .lookup_data(&nested_path)
+            .expect("nested data i.x must peel to the inner template field");
+        assert!(
+            matches!(peeled, DataLookup::Import(_)),
+            "i.x must resolve through the import template, got {:?}",
+            peeled.definition()
         );
     }
 
@@ -8254,26 +12307,19 @@ rule r: i.x
             (ctx, eff)
         }
 
-        fn ordered_dependencies_and_spec() -> (
-            &'static [discovery::DependencySpec<'static>],
-            &'static LemmaSpec,
-        ) {
+        fn context_with_test_spec() -> (&'static Context, &'static LemmaSpec) {
             use crate::engine::Context;
             let mut ctx = Context::new();
             let repository = ctx.workspace();
             let spec = LemmaSpec::new("test_spec".to_string());
             ctx.insert_spec(Arc::clone(&repository), spec).unwrap();
-            let ctx = Box::leak(Box::new(ctx));
+            let ctx: &'static Context = Box::leak(Box::new(ctx));
             let repository = ctx.workspace();
             let spec = ctx
                 .spec_set(&repository, "test_spec")
                 .and_then(|ss| ss.get_exact(None))
                 .expect("inserted");
-            let ordered_dependencies = Box::leak(Box::new(vec![discovery::DependencySpec {
-                repository: Arc::clone(&repository),
-                spec,
-            }]));
-            (ordered_dependencies.as_slice(), spec)
+            (ctx, spec)
         }
 
         fn resolver_for_code(code: &str) -> (TypeResolver<'static>, Vec<&'static LemmaSpec>) {
@@ -8344,8 +12390,7 @@ rule r: i.x
 
         #[test]
         fn test_register_data_type_def() {
-            let (_ordered_dependencies, spec) = ordered_dependencies_and_spec();
-            let (ctx, _) = test_context_and_effective(&[spec]);
+            let (ctx, spec) = context_with_test_spec();
             let mut resolver = TypeResolver::new(ctx);
             let ftd = DataTypeDef {
                 parent: ParentType::Primitive {
@@ -8406,8 +12451,7 @@ rule r: i.x
 
         #[test]
         fn test_register_duplicate_type_fails() {
-            let (_ordered_dependencies, spec) = ordered_dependencies_and_spec();
-            let (ctx, _) = test_context_and_effective(&[spec]);
+            let (ctx, spec) = context_with_test_spec();
             let mut resolver = TypeResolver::new(ctx);
             let ftd = DataTypeDef {
                 parent: ParentType::Primitive {
@@ -8433,8 +12477,7 @@ rule r: i.x
 
         #[test]
         fn test_resolve_custom_type_from_primitive() {
-            let (_ordered_dependencies, spec) = ordered_dependencies_and_spec();
-            let (ctx, _) = test_context_and_effective(&[spec]);
+            let (ctx, spec) = context_with_test_spec();
             let mut resolver = TypeResolver::new(ctx);
             let ftd = DataTypeDef {
                 parent: ParentType::Primitive {
@@ -8490,6 +12533,13 @@ rule r: i.x
 
             let kilometer_owner = resolved_types.unit_index.unique_owner("kilometer").unwrap();
             assert_eq!(kilometer_owner.name.as_deref(), Some("road_length"));
+            assert!(
+                Arc::ptr_eq(
+                    kilometer_owner,
+                    resolved_types.resolved.get("road_length").unwrap()
+                ),
+                "bound kilometer owner must be the resolved road_length Arc"
+            );
         }
 
         #[test]
@@ -8709,11 +12759,11 @@ rule r: i.x
 
             let resolved = result.unwrap();
             assert!(
-                resolved.unit_index.has_unique_owner("eur"),
+                resolved.unit_index.unique_owner("eur").is_some(),
                 "eur should be in unit_index"
             );
             assert!(
-                resolved.unit_index.has_unique_owner("usd"),
+                resolved.unit_index.unique_owner("usd").is_some(),
                 "usd should be in unit_index"
             );
             let eur_type = resolved.unit_index.unique_owner("eur").unwrap();
@@ -8727,6 +12777,14 @@ rule r: i.x
                 usd_type.name.as_deref(),
                 Some("money2"),
                 "usd defined on money2 should be owned by money2"
+            );
+            assert!(
+                Arc::ptr_eq(eur_type, resolved.resolved.get("money").unwrap()),
+                "bound eur owner must be the resolved money Arc"
+            );
+            assert!(
+                Arc::ptr_eq(usd_type, resolved.resolved.get("money2").unwrap()),
+                "bound usd owner must be the resolved money2 Arc"
             );
         }
 
@@ -8852,11 +12910,11 @@ rule r: i.x
                 .expect("money2 resolved")
                 .clone();
             assert!(
-                resolved.unit_index.has_unique_owner("eur"),
+                resolved.unit_index.unique_owner("eur").is_some(),
                 "eur must be in unit_index"
             );
             assert!(
-                resolved.unit_index.has_unique_owner("usd"),
+                resolved.unit_index.unique_owner("usd").is_some(),
                 "usd must be in unit_index"
             );
             let eur_owner = resolved.unit_index.unique_owner("eur").expect("eur owner");
@@ -8996,7 +13054,7 @@ rule r: i.x
         }
 
         #[test]
-        fn import_merge_skips_locally_owned_family_root() {
+        fn same_named_local_root_does_not_hide_imported_units() {
             let code = r#"spec std_units
     data mass: measure
       -> unit kilogram: 1
@@ -9041,25 +13099,24 @@ rule r: i.x
                 .clone();
 
             assert!(
-                consumer_types.unit_index.has_unique_owner("kg"),
+                consumer_types.unit_index.unique_owner("kg").is_some(),
                 "local kg must be indexed"
             );
             assert!(
-                consumer_types.unit_index.has_unique_owner("tonne"),
+                consumer_types.unit_index.unique_owner("tonne").is_some(),
                 "local tonne must be indexed"
             );
-            assert!(
-                !consumer_types.unit_index.has_unique_owner("kilogram"),
-                "import kilogram must not leak after local shadow"
-            );
-            assert!(
-                !consumer_types.unit_index.has_unique_owner("kilograms"),
-                "import kilograms must not leak after local shadow"
-            );
-            assert!(
-                !consumer_types.unit_index.has_unique_owner("gram"),
-                "import gram must not leak after local shadow"
-            );
+            for imported_unit in ["kilogram", "kilograms", "gram"] {
+                let owner = consumer_types
+                    .unit_index
+                    .unique_owner(imported_unit)
+                    .unwrap_or_else(|| panic!("imported {imported_unit} must stay in scope"));
+                assert_eq!(
+                    owner.measure_family().map(|family| family.spec.as_str()),
+                    Some("std_units"),
+                    "{imported_unit} must belong to std_units.mass, not the local mass"
+                );
+            }
 
             let kg_owner = consumer_types
                 .unit_index
@@ -9108,38 +13165,35 @@ rule r: i.x
                 .resolve_and_validate(consumer_arc, &EffectiveDate::Origin, &already_resolved)
                 .expect("double import of same duration must be idempotent");
 
-            assert!(
-                consumer_types.unit_index.has_unique_owner("hour"),
-                "hour must be indexed once"
+            assert_eq!(
+                consumer_types.unit_index.owners_for("hour").len(),
+                2,
+                "each import path keeps its hour owner"
             );
+            consumer_types
+                .unit_index
+                .resolve("hour")
+                .expect("bare hour collapses across identical import paths");
         }
 
         #[test]
-        fn same_family_same_unit_different_factor_errors() {
-            let code = r#"spec units_a
+        fn different_version_families_keep_separate_hour_owners() {
+            // Two versions are different families; merge keeps both owners.
+            // Bare `hour` is ambiguous at use (see type_identity_versions).
+            let code = r#"spec units 2024-01-01
     data duration: measure
       -> unit hour: 1
 
-    spec units_b
+    spec units 2025-01-01
     data duration: measure
       -> unit hour: 60
 
     spec consumer
-    uses a: units_a
-    uses b: units_b
+    uses a: units 2024-01-01
+    uses b: units 2025-01-01
     rule smoke: true
     "#;
             let (resolver, spec_arcs) = resolver_for_code(code);
-            let units_a_arc = spec_arcs
-                .iter()
-                .find(|spec| spec.name == "units_a")
-                .cloned()
-                .expect("units_a spec");
-            let units_b_arc = spec_arcs
-                .iter()
-                .find(|spec| spec.name == "units_b")
-                .cloned()
-                .expect("units_b spec");
             let consumer_arc = spec_arcs
                 .iter()
                 .find(|spec| spec.name == "consumer")
@@ -9149,38 +13203,25 @@ rule r: i.x
             let repository = context.workspace();
 
             let mut already_resolved = ResolvedTypesMap::new();
-            for units_arc in [units_a_arc, units_b_arc] {
+            for units_arc in spec_arcs.iter().filter(|spec| spec.name == "units") {
                 let units_types = resolver
-                    .resolve_and_validate(units_arc, &EffectiveDate::Origin, &already_resolved)
-                    .expect("units spec resolves");
+                    .resolve_and_validate(units_arc, &units_arc.effective_from, &already_resolved)
+                    .expect("units version resolves");
                 already_resolved.push((Arc::clone(&repository), units_arc, units_types));
             }
 
-            let result = resolver.resolve_and_validate(
-                consumer_arc,
-                &EffectiveDate::Origin,
-                &already_resolved,
-            );
-            assert!(
-                result.is_err(),
-                "conflicting hour factors in same family must error"
-            );
-            let error_msg = result
-                .unwrap_err()
-                .iter()
-                .map(ToString::to_string)
-                .collect::<Vec<_>>()
-                .join("; ");
-            assert!(
-                error_msg.contains("hour")
-                    && (error_msg.contains("different values")
-                        || error_msg.contains("conflicting factors")),
-                "expected conflicting factor error for hour, got: {error_msg}"
+            let consumer_types = resolver
+                .resolve_and_validate(consumer_arc, &EffectiveDate::Origin, &already_resolved)
+                .expect("different version families resolve without merge conflict");
+            assert_eq!(
+                consumer_types.unit_index.owners_for("hour").len(),
+                2,
+                "each version keeps its own hour owner"
             );
         }
 
         #[test]
-        fn test_spec_level_duplicate_unit_names_rejected() {
+        fn test_spec_level_same_unit_names_keep_every_declarer() {
             let (resolver, spec) = resolver_single_spec(
                 r#"spec test
     data money_a: measure
@@ -9198,27 +13239,45 @@ rule r: i.x
       -> unit meter: 1.0"#,
             );
 
-            let result = resolver.resolve_and_validate(spec, &EffectiveDate::Origin, &Vec::new());
-            assert!(
-                result.is_err(),
-                "second independent declarer of same unit name must Error"
+            let resolved = resolver
+                .resolve_and_validate(spec, &EffectiveDate::Origin, &Vec::new())
+                .expect("independent declarers of one unit name must load");
+            assert_eq!(
+                resolved.unit_index.owners_for("eur").len(),
+                2,
+                "every declarer of 'eur' stays in scope"
             );
-            let error_msg = result
-                .unwrap_err()
-                .iter()
-                .map(ToString::to_string)
-                .collect::<Vec<_>>()
-                .join("; ");
             assert!(
-                error_msg.contains("eur")
-                    || error_msg.contains("meter")
-                    || error_msg.contains("usd"),
-                "expected duplicate unit name Error, got: {error_msg}"
+                resolved.unit_index.resolve("eur").is_err(),
+                "bare 'eur' with two declarers must be qualified"
             );
+            assert_eq!(
+                resolved.unit_index.owners_for("usd").len(),
+                2,
+                "every declarer of 'usd' stays in scope"
+            );
+            assert!(
+                resolved.unit_index.resolve("usd").is_err(),
+                "bare 'usd' with two declarers must be qualified"
+            );
+            assert_eq!(
+                resolved.unit_index.owners_for("meter").len(),
+                2,
+                "every declarer of 'meter' stays in scope"
+            );
+            assert!(
+                resolved.unit_index.resolve("meter").is_err(),
+                "bare 'meter' with two declarers must be qualified"
+            );
+            let (_, owner) = resolved
+                .unit_index
+                .resolve("money_b.usd")
+                .expect("qualified unit must resolve");
+            assert_eq!(owner.name(), "money_b");
         }
 
         #[test]
-        fn test_ratio_unit_cross_family_collision_errors() {
+        fn test_measure_and_ratio_sharing_a_unit_name_keep_both_declarers() {
             let (resolver, spec) = resolver_single_spec(
                 r#"spec test
     data q: measure
@@ -9228,26 +13287,27 @@ rule r: i.x
       -> unit foo: 100"#,
             );
 
-            let result = resolver.resolve_and_validate(spec, &EffectiveDate::Origin, &Vec::new());
-            assert!(
-                result.is_err(),
-                "measure and ratio must not share a unit name"
+            let resolved = resolver
+                .resolve_and_validate(spec, &EffectiveDate::Origin, &Vec::new())
+                .expect("independent declarers of one unit name must load");
+            assert_eq!(
+                resolved.unit_index.owners_for("foo").len(),
+                2,
+                "every declarer of 'foo' stays in scope"
             );
-            let error_msg = result
-                .unwrap_err()
-                .iter()
-                .map(ToString::to_string)
-                .collect::<Vec<_>>()
-                .join("; ");
             assert!(
-                error_msg.contains("foo"),
-                "expected cross-family collision on 'foo', got: {}",
-                error_msg
+                resolved.unit_index.resolve("foo").is_err(),
+                "bare 'foo' with two declarers must be qualified"
             );
+            let (_, owner) = resolved
+                .unit_index
+                .resolve("r.foo")
+                .expect("qualified unit must resolve");
+            assert_eq!(owner.name(), "r");
         }
 
         #[test]
-        fn test_same_ratio_unit_across_types_rejected() {
+        fn test_same_ratio_unit_across_types_keeps_both_declarers() {
             let (resolver, spec) = resolver_single_spec(
                 r#"spec test
     data spread_a: ratio
@@ -9257,25 +13317,27 @@ rule r: i.x
       -> unit basis_points: 10000"#,
             );
 
-            let result = resolver.resolve_and_validate(spec, &EffectiveDate::Origin, &Vec::new());
-            assert!(
-                result.is_err(),
-                "second independent declarer of same ratio unit must Error"
+            let resolved = resolver
+                .resolve_and_validate(spec, &EffectiveDate::Origin, &Vec::new())
+                .expect("independent declarers of one unit name must load");
+            assert_eq!(
+                resolved.unit_index.owners_for("basis_points").len(),
+                2,
+                "every declarer of 'basis_points' stays in scope"
             );
-            let error_msg = result
-                .unwrap_err()
-                .iter()
-                .map(ToString::to_string)
-                .collect::<Vec<_>>()
-                .join("; ");
             assert!(
-                error_msg.contains("basis_points"),
-                "expected duplicate ratio unit Error, got: {error_msg}"
+                resolved.unit_index.resolve("basis_points").is_err(),
+                "bare 'basis_points' with two declarers must be qualified"
             );
+            let (_, owner) = resolved
+                .unit_index
+                .resolve("spread_a.basis_points")
+                .expect("qualified unit must resolve");
+            assert_eq!(owner.name(), "spread_a");
         }
 
         #[test]
-        fn test_different_ratio_unit_factor_across_types_errors() {
+        fn test_different_ratio_unit_factor_across_types_keeps_both_declarers() {
             let (resolver, spec) = resolver_single_spec(
                 r#"spec test
     data spread_a: ratio
@@ -9285,22 +13347,23 @@ rule r: i.x
       -> unit basis_points: 5000"#,
             );
 
-            let result = resolver.resolve_and_validate(spec, &EffectiveDate::Origin, &Vec::new());
-            assert!(
-                result.is_err(),
-                "unrelated ratio types with different factors for the same unit must error"
+            let resolved = resolver
+                .resolve_and_validate(spec, &EffectiveDate::Origin, &Vec::new())
+                .expect("independent declarers of one unit name must load");
+            assert_eq!(
+                resolved.unit_index.owners_for("basis_points").len(),
+                2,
+                "every declarer of 'basis_points' stays in scope"
             );
-            let error_msg = result
-                .unwrap_err()
-                .iter()
-                .map(ToString::to_string)
-                .collect::<Vec<_>>()
-                .join("; ");
             assert!(
-                error_msg.contains("spread_a") && error_msg.contains("spread_b"),
-                "expected ambiguous ratio unit between types, got: {}",
-                error_msg
+                resolved.unit_index.resolve("basis_points").is_err(),
+                "bare 'basis_points' with two declarers must be qualified"
             );
+            let (_, owner) = resolved
+                .unit_index
+                .resolve("spread_b.basis_points")
+                .expect("qualified unit must resolve");
+            assert_eq!(owner.name(), "spread_b");
         }
 
         #[test]
@@ -9347,14 +13410,16 @@ rule r: i.x
                 .resolve_and_validate(spec, &EffectiveDate::Origin, &Vec::new())
                 .expect("two ratio types with only builtin units");
 
-            assert!(
-                resolved.unit_index.has_unique_owner("percent"),
-                "percent must remain in unit index"
-            );
-            assert!(
-                resolved.unit_index.has_unique_owner("permille"),
-                "permille must remain in unit index"
-            );
+            let (_, percent) = resolved
+                .unit_index
+                .resolve("percent")
+                .expect("bare percent binds PrimitiveRatio");
+            assert_eq!(percent.name(), "ratio");
+            let (_, permille) = resolved
+                .unit_index
+                .resolve("permille")
+                .expect("bare permille binds PrimitiveRatio");
+            assert_eq!(permille.name(), "ratio");
         }
 
         #[test]
@@ -10053,17 +14118,17 @@ rule r: i.x
                     bound_literal: None,
                 },
             );
-            let mut resolved = IndexMap::new();
-            resolved.insert("band".to_string(), primitive_measure_arc().clone());
-            let mut defaults = IndexMap::new();
+            let mut resolved_types = ResolvedSpecTypes::default();
+            resolved_types
+                .resolved
+                .insert("band".to_string(), primitive_measure_arc().clone());
             let already_resolved = ResolvedTypesMap::new();
 
             let errors = refresh_named_range_specs(
                 &resolver,
                 &spec,
                 &data_defs,
-                &mut resolved,
-                &mut defaults,
+                &mut resolved_types,
                 &already_resolved,
                 &EffectiveDate::Origin,
             );
@@ -10075,7 +14140,7 @@ rule r: i.x
             assert!(
                 errors[0]
                     .to_string()
-                    .contains("references missing element type 'ghost'"),
+                    .contains("Unknown parent 'ghost' for data definition"),
                 "got: {}",
                 errors[0]
             );
@@ -10096,7 +14161,7 @@ rule r: i.x
                 })
                 .collect();
             let mut suggestion = None;
-            let mut fill = None;
+            let mut value = None;
             apply_constraints_to_spec(
                 &spec,
                 "code",
@@ -10105,7 +14170,7 @@ rule r: i.x
                 &source,
                 ConstraintSuggestionSink {
                     suggestion: &mut suggestion,
-                    fill: &mut fill,
+                    value: &mut value,
                     resolve_unit: None,
                 },
             )
@@ -10334,7 +14399,10 @@ rule r: i.x
                     unit: None,
                     help: String::new(),
                 },
-                TypeExtends::Primitive,
+                TypeExtends::custom_local(
+                    "measure".to_string(),
+                    crate::planning::semantics::tests::test_type_family("weight"),
+                ),
             ))
         }
 
@@ -10579,6 +14647,7 @@ rule r: i.x
 pub struct ResolvedSpecTypes {
     /// Resolved [`LemmaType`] for each **data type row name** declared in this spec (`data name: …`).
     /// Planning-only: includes measure units and post-`resolve_measure_decompositions` decomposition.
+    #[serde(with = "crate::snapshot::shared::arc_index_map")]
     pub resolved: IndexMap<String, Arc<LemmaType>>,
 
     /// Declared default per named type (e.g. `type rate: ratio -> suggest 50%`).
@@ -10588,26 +14657,35 @@ pub struct ResolvedSpecTypes {
     /// Populated after [`bound_value_kind_from_raw_suggestion`] (post-decomposition).
     pub declared_suggestions: IndexMap<String, BoundValueKind>,
 
-    /// Declared fill per named type (e.g. `type rate: ratio -> fill 50%`).
-    /// Only present for types that declared a `-> fill ...` constraint anywhere
-    /// in their extension chain; the inner-most `-> fill` wins.
-    pub declared_fills: IndexMap<String, BoundValueKind>,
+    /// Declared value per named type (e.g. `type rate: ratio -> with 50%`).
+    /// Only present for types that declared a `-> with ...` constraint anywhere
+    /// in their extension chain; the inner-most `-> with` wins.
+    pub declared_values: IndexMap<String, BoundValueKind>,
 
     /// Defaults captured during type resolution, before measure unit factors are final.
     pub(crate) raw_suggestions: Vec<(String, RawSuggestion)>,
 
     /// Raw fills captured during type resolution, before measure unit factors are final.
-    pub(crate) raw_fills: Vec<(String, RawSuggestion)>,
+    pub(crate) raw_values: Vec<(String, RawSuggestion)>,
 
     /// Raw defaults retained after [`bound_value_kind_from_raw_suggestion`] for cross-spec parent lookup during later specs.
     pub(crate) source_defaults: IndexMap<String, RawSuggestion>,
 
     /// Raw fills retained for cross-spec parent lookup during later specs.
-    pub(crate) source_fill_defaults: IndexMap<String, RawSuggestion>,
+    pub(crate) source_value_defaults: IndexMap<String, RawSuggestion>,
+
+    /// List types written in this spec's rules (`money list -> with ...`), keyed by the
+    /// written type, in order of first appearance.
+    #[serde(with = "crate::snapshot::shared::arc_pair_vec")]
+    pub(crate) rule_list_types: Vec<(ParentType, Arc<LemmaType>)>,
 
     /// Expression-scope units. One declarer per bare unit name; qualify with Type.unit or alias.Type.unit.
     /// Binding aliases never appear as index keys.
     pub unit_index: crate::planning::unit_index::UnitIndex,
+
+    /// Names of unit owners until [`PlanningUnitIndex::bind`] after magnitudes.
+    #[serde(skip)]
+    planning_unit_index: PlanningUnitIndex,
 
     /// Reverse index: canonical-form unit signature → (unit_name, owning type).
     /// Built from [`Self::unit_index`] during resolve; cloned into the execution plan.
@@ -10642,10 +14720,11 @@ pub(crate) struct TypeResolver<'a> {
 
 /// Parent type used for measure-family lookup, unwrapping [`ParentType::Ranged`].
 fn element_parent_type(parent: &ParentType) -> &ParentType {
-    match parent {
-        ParentType::Ranged { inner } => element_parent_type(inner),
-        other => other,
+    let mut current = parent;
+    while let ParentType::Ranged { inner } | ParentType::List { inner } = current {
+        current = inner.as_ref();
     }
+    current
 }
 
 fn time_range_endpoints_share_timezone(
@@ -10654,10 +14733,7 @@ fn time_range_endpoints_share_timezone(
 ) -> bool {
     match (&left.timezone, &right.timezone) {
         (None, None) => true,
-        (Some(left_tz), Some(right_tz)) => {
-            left_tz.offset_hours == right_tz.offset_hours
-                && left_tz.offset_minutes == right_tz.offset_minutes
-        }
+        (Some(left_tz), Some(right_tz)) => left_tz.offset_minutes == right_tz.offset_minutes,
         _ => false,
     }
 }
@@ -10739,6 +14815,63 @@ impl<'a> TypeResolver<'a> {
             all_registered_specs: Vec::new(),
             specs_with_failed_registration: Vec::new(),
         }
+    }
+
+    /// `data x: some_spec list` names a spec where a type belongs; suggest `uses`.
+    fn spec_list_error(
+        &self,
+        spec: &LemmaSpec,
+        declared_name: &str,
+        parent: &ParentType,
+        source: &Source,
+    ) -> Option<Error> {
+        let name = self.list_of_spec_name(spec, parent)?;
+        Some(Error::validation_with_context(
+            format!(
+                "'{name}' names a spec. Declare an instance list with `uses {declared_name}: {name} list`"
+            ),
+            Some(source.clone()),
+            None::<String>,
+            Some(spec),
+            None,
+        ))
+    }
+
+    /// [`Self::spec_list_error`] for a list type written in a rule.
+    fn rule_spec_list_error(
+        &self,
+        spec: &LemmaSpec,
+        parent: &ParentType,
+        source: &Source,
+    ) -> Option<Error> {
+        let name = self.list_of_spec_name(spec, parent)?;
+        Some(Error::validation_with_context(
+            format!(
+                "'{name}' names a spec. Instance lists are declared as data with `uses`, not built in a rule"
+            ),
+            Some(source.clone()),
+            None::<String>,
+            Some(spec),
+            None,
+        ))
+    }
+
+    /// `name` when `parent` is `name list` and `name` is a spec in `spec`'s repository.
+    fn list_of_spec_name<'p>(&self, spec: &LemmaSpec, parent: &'p ParentType) -> Option<&'p str> {
+        let ParentType::List { inner } = parent else {
+            return None;
+        };
+        let ParentType::Custom { name } = inner.as_ref() else {
+            return None;
+        };
+        self.names_spec_in_repository_of(spec, name)
+            .then_some(name.as_str())
+    }
+
+    /// Whether `name` is a spec in the repository that holds `spec`.
+    fn names_spec_in_repository_of(&self, spec: &LemmaSpec, name: &str) -> bool {
+        let repository = discovery::owning_repository(self.context, spec);
+        self.context.spec_set(&repository, name).is_some()
     }
 
     pub fn is_registered(&self, spec: &LemmaSpec) -> bool {
@@ -10840,7 +14973,7 @@ impl<'a> TypeResolver<'a> {
                         errors.push(e);
                     }
                 }
-                ParsedDataValue::Import { .. } => {}
+                ParsedDataValue::Import { .. } | ParsedDataValue::ImportList { .. } => {}
             }
         }
         errors
@@ -10883,14 +15016,15 @@ impl<'a> TypeResolver<'a> {
         at: &EffectiveDate,
         already_resolved: &ResolvedTypesMap,
     ) -> Result<ResolvedSpecTypes, Vec<Error>> {
-        let mut resolved_types = self.resolve_types_internal(spec, at, already_resolved)?;
+        let (mut resolved_types, list_type_names) =
+            self.resolve_types_internal(spec, at, already_resolved)?;
         resolved_types.source_defaults = resolved_types
             .raw_suggestions
             .iter()
             .map(|(name, raw)| (name.clone(), raw.clone()))
             .collect();
-        resolved_types.source_fill_defaults = resolved_types
-            .raw_fills
+        resolved_types.source_value_defaults = resolved_types
+            .raw_values
             .iter()
             .map(|(name, raw)| (name.clone(), raw.clone()))
             .collect();
@@ -10900,6 +15034,7 @@ impl<'a> TypeResolver<'a> {
         let type_sources: std::collections::HashMap<String, Source> = resolved_types
             .resolved
             .keys()
+            .chain(list_type_names.iter())
             .filter_map(|type_name| {
                 self.data_types
                     .iter()
@@ -10910,15 +15045,15 @@ impl<'a> TypeResolver<'a> {
             .collect();
 
         // Run the decomposition pass to populate `BaseMeasureVector` on all Measure types.
-        // The pass also syncs `unit_index` with the post-decomp types as its final phase.
-        let (new_resolved, new_unit_index, decomp_errors) = resolve_measure_decompositions(
+        let this_spec = SpecIdentity::of(&discovery::owning_repository(self.context, spec), spec);
+        let (new_resolved, decomp_errors) = resolve_measure_decompositions(
             &spec.name,
+            &this_spec,
             std::mem::take(&mut resolved_types.resolved),
-            std::mem::take(&mut resolved_types.unit_index),
+            &resolved_types.planning_unit_index,
             &type_sources,
         );
         resolved_types.resolved = new_resolved;
-        resolved_types.unit_index = new_unit_index;
         errors.extend(decomp_errors);
 
         for (type_name, raw) in std::mem::take(&mut resolved_types.raw_suggestions) {
@@ -10949,7 +15084,7 @@ impl<'a> TypeResolver<'a> {
             }
         }
 
-        for (type_name, raw) in std::mem::take(&mut resolved_types.raw_fills) {
+        for (type_name, raw) in std::mem::take(&mut resolved_types.raw_values) {
             let lemma_type = resolved_types
                 .resolved
                 .get(&type_name)
@@ -10957,33 +15092,7 @@ impl<'a> TypeResolver<'a> {
             match bound_value_kind_from_raw_suggestion(raw, &lemma_type.specifications, &type_name)
             {
                 Ok(value_kind) => {
-                    resolved_types.declared_fills.insert(type_name, value_kind);
-                }
-                Err(message) => {
-                    let source = type_sources
-                        .get(&type_name)
-                        .cloned()
-                        .unwrap_or_else(|| unreachable!("BUG: type '{}' has no source", type_name));
-                    errors.push(Error::validation_with_context(
-                        message,
-                        Some(source),
-                        None::<String>,
-                        Some(spec),
-                        None,
-                    ));
-                }
-            }
-        }
-
-        for (type_name, raw) in std::mem::take(&mut resolved_types.raw_fills) {
-            let lemma_type = resolved_types
-                .resolved
-                .get(&type_name)
-                .expect("BUG: raw fill for type not in resolved");
-            match bound_value_kind_from_raw_suggestion(raw, &lemma_type.specifications, &type_name)
-            {
-                Ok(value_kind) => {
-                    resolved_types.declared_fills.insert(type_name, value_kind);
+                    resolved_types.declared_values.insert(type_name, value_kind);
                 }
                 Err(message) => {
                     let source = type_sources
@@ -11010,8 +15119,7 @@ impl<'a> TypeResolver<'a> {
                 self,
                 spec,
                 data_defs,
-                &mut resolved_types.resolved,
-                &mut resolved_types.declared_suggestions,
+                &mut resolved_types,
                 already_resolved,
                 at,
             ));
@@ -11020,9 +15128,9 @@ impl<'a> TypeResolver<'a> {
                 data_defs,
                 &mut resolved_types.resolved,
                 &mut resolved_types.declared_suggestions,
-                &mut resolved_types.declared_fills,
+                &mut resolved_types.declared_values,
                 &type_sources,
-                &resolved_types.unit_index,
+                &resolved_types.planning_unit_index,
             ));
         }
 
@@ -11035,28 +15143,34 @@ impl<'a> TypeResolver<'a> {
         );
         resolved_types.resolved = new_resolved;
 
-        resolved_types.unit_index = sync_unit_index_from_resolved(
-            &resolved_types.resolved,
-            std::mem::take(&mut resolved_types.unit_index),
-        );
-
-        let (new_unit_index, unit_index_errors) = finalize_measure_magnitudes_in_unit_index(
-            std::mem::take(&mut resolved_types.unit_index),
-            &resolved_types.declared_suggestions,
-            &type_sources,
-            &self.data_types,
-            spec,
-        );
-        resolved_types.unit_index = new_unit_index;
+        resolved_types.unit_index = std::mem::take(&mut resolved_types.planning_unit_index)
+            .bind(&resolved_types.resolved, &this_spec);
 
         match build_signature_index(&spec.name, &resolved_types.unit_index) {
             Ok(index) => resolved_types.signature_index = index,
             Err(error) => errors.push(error),
         }
 
-        if !resolved_errors.is_empty() || !unit_index_errors.is_empty() {
+        if !resolved_errors.is_empty() {
             errors.extend(resolved_errors);
-            errors.extend(unit_index_errors);
+            return Err(errors);
+        }
+
+        if let Err(list_errors) = self.resolve_list_types(
+            spec,
+            at,
+            already_resolved,
+            &list_type_names,
+            &mut resolved_types,
+        ) {
+            errors.extend(list_errors);
+            return Err(errors);
+        }
+
+        if let Err(rule_list_errors) =
+            self.resolve_rule_list_types(spec, at, already_resolved, &mut resolved_types)
+        {
+            errors.extend(rule_list_errors);
             return Err(errors);
         }
 
@@ -11100,8 +15214,8 @@ impl<'a> TypeResolver<'a> {
             ));
             errors.extend(validate_type_specifications(
                 &lemma_type.specifications,
-                resolved_types.declared_fills.get(type_name),
-                "fill",
+                resolved_types.declared_values.get(type_name),
+                "with",
                 type_name,
                 &source,
                 Some(spec),
@@ -11128,8 +15242,8 @@ impl<'a> TypeResolver<'a> {
             errors.append(&mut spec_errors);
             let mut fill_errors = validate_type_specifications(
                 &lemma_type.specifications,
-                resolved_types.declared_fills.get(type_name),
-                "fill",
+                resolved_types.declared_values.get(type_name),
+                "with",
                 type_name,
                 &source,
                 Some(spec),
@@ -11176,7 +15290,7 @@ impl<'a> TypeResolver<'a> {
                     ));
                 }
             }
-            if let Some(default_kind) = resolved_types.declared_fills.get(type_name.as_str()) {
+            if let Some(default_kind) = resolved_types.declared_values.get(type_name.as_str()) {
                 let lit = TypedLiteral {
                     value: default_kind.value.clone(),
                     lemma_type: Arc::clone(lemma_type),
@@ -11187,7 +15301,7 @@ impl<'a> TypeResolver<'a> {
                     &resolved_types.unit_index,
                 ) {
                     errors.push(Error::validation_with_context(
-                        format!("Type '{}' fill is invalid: {}", type_name, message),
+                        format!("Type '{}' with is invalid: {}", type_name, message),
                         Some(source),
                         None::<String>,
                         Some(spec),
@@ -11208,12 +15322,272 @@ impl<'a> TypeResolver<'a> {
     // Private resolution methods
     // =========================================================================
 
+    /// Resolve list types once every scalar type is final, and convert their declared rows.
+    fn resolve_list_types(
+        &self,
+        spec: &LemmaSpec,
+        at: &EffectiveDate,
+        already_resolved: &ResolvedTypesMap,
+        list_type_names: &[String],
+        resolved_types: &mut ResolvedSpecTypes,
+    ) -> Result<(), Vec<Error>> {
+        if list_type_names.is_empty() {
+            return Ok(());
+        }
+        let data_defs = self
+            .data_types
+            .iter()
+            .find(|(s, _)| discovery::same_loaded_spec(s, spec))
+            .map(|(_, defs)| defs)
+            .expect("BUG: list type names come from this spec's type definitions");
+        let mut local = local_type_entries(resolved_types);
+        let mut errors = Vec::new();
+        for type_name in list_type_names {
+            let ftd = data_defs
+                .get(type_name.as_str())
+                .expect("BUG: topo-sorted list type missing from registry");
+            let (lemma_type, suggestion, value) =
+                self.resolve_type_def(spec, type_name, ftd, at, already_resolved, &local)?;
+            let to_error = |message: String| {
+                Error::validation_with_context(
+                    message,
+                    Some(ftd.source.clone()),
+                    None::<String>,
+                    Some(spec),
+                    None,
+                )
+            };
+            if let Some(raw) = &suggestion {
+                resolved_types
+                    .source_defaults
+                    .insert(type_name.clone(), raw.clone());
+                match bound_value_kind_from_raw_suggestion(
+                    raw.clone(),
+                    &lemma_type.specifications,
+                    type_name,
+                ) {
+                    Ok(bound) => {
+                        resolved_types
+                            .declared_suggestions
+                            .insert(type_name.clone(), bound);
+                    }
+                    Err(message) => errors.push(to_error(message)),
+                }
+            }
+            if let Some(raw) = &value {
+                resolved_types
+                    .source_value_defaults
+                    .insert(type_name.clone(), raw.clone());
+                match bound_value_kind_from_raw_suggestion(
+                    raw.clone(),
+                    &lemma_type.specifications,
+                    type_name,
+                ) {
+                    Ok(bound) => {
+                        resolved_types
+                            .declared_values
+                            .insert(type_name.clone(), bound);
+                    }
+                    Err(message) => errors.push(to_error(message)),
+                }
+            }
+            resolved_types
+                .resolved
+                .insert(type_name.clone(), Arc::clone(&lemma_type));
+            local.insert(type_name.clone(), (lemma_type, suggestion, value));
+        }
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(errors)
+        }
+    }
+
+    /// Resolve the list types written in `spec`'s rules against the same scope as its data
+    /// types, once every local type is final.
+    fn resolve_rule_list_types<'s>(
+        &self,
+        spec: &'s LemmaSpec,
+        at: &EffectiveDate,
+        already_resolved: &ResolvedTypesMap,
+        resolved_types: &mut ResolvedSpecTypes,
+    ) -> Result<(), Vec<Error>> {
+        let mut written: Vec<(&'s ParentType, &'s Source)> = Vec::new();
+        for rule in &spec.rules {
+            let trees = std::iter::once(&rule.expression).chain(
+                rule.unless_clauses
+                    .iter()
+                    .flat_map(|clause| [&clause.condition, &clause.result]),
+            );
+            for tree in trees {
+                let mut pending = vec![tree.root()];
+                while let Some(node) = pending.pop() {
+                    if let ast::ExpressionKind::ListType { element } = node.kind() {
+                        if written.iter().all(|(seen, _)| *seen != element) {
+                            let source = node
+                                .source()
+                                .expect("BUG: AST expression missing source location");
+                            written.push((element, source));
+                        }
+                    }
+                    node.push_children(&mut pending);
+                }
+            }
+        }
+        if written.is_empty() {
+            return Ok(());
+        }
+        let local = local_type_entries(resolved_types);
+        let mut errors = Vec::new();
+        for (element, source) in written {
+            let scope = ParentLookup {
+                resolver: self,
+                spec,
+                source,
+                at,
+                already_resolved,
+                resolved: &local,
+                site: TypeUseSite::RuleListType,
+            };
+            match lookup_parent_type(&scope, element) {
+                Ok((.., lemma_type)) => {
+                    resolved_types
+                        .rule_list_types
+                        .push((element.clone(), lemma_type));
+                }
+                Err(lookup_errors) => match self.rule_spec_list_error(spec, element, source) {
+                    Some(error) => errors.push(error),
+                    None => errors.extend(lookup_errors),
+                },
+            }
+        }
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(errors)
+        }
+    }
+
+    /// Resolve one data type declaration against `resolved` (already resolved local types).
+    fn resolve_type_def(
+        &self,
+        spec: &LemmaSpec,
+        type_name: &str,
+        ftd: &DataTypeDef,
+        at: &EffectiveDate,
+        already_resolved: &ResolvedTypesMap,
+        resolved: &HashMap<String, ResolvedTypeEntry>,
+    ) -> Result<ResolvedTypeEntry, Vec<Error>> {
+        let parent = &ftd.parent;
+        let constraints = &ftd.constraints;
+
+        let scope = ParentLookup {
+            resolver: self,
+            spec,
+            source: &ftd.source,
+            at,
+            already_resolved,
+            resolved,
+            site: TypeUseSite::DataDefinition,
+        };
+        let (parent_specs, parent_suggestion, parent_value, parent_type) =
+            lookup_parent_type(&scope, parent).map_err(|errors| {
+                self.spec_list_error(spec, type_name, parent, &ftd.source)
+                    .map_or(errors, |error| vec![error])
+            })?;
+
+        let mut declared_suggestion = parent_suggestion;
+        let mut declared_value = parent_value;
+        let final_specs = if should_defer_ranged_constraints(parent) {
+            parent_specs
+        } else if let Some(constraints) = &constraints {
+            let resolve_unit = UnitTokenResolver::Search(
+                already_resolved
+                    .iter()
+                    .map(|(_, _, rts)| (&rts.unit_index, &rts.resolved))
+                    .collect(),
+            );
+            apply_constraints_to_spec(
+                spec,
+                &constraint_application_type_name(parent, type_name),
+                parent_specs,
+                constraints,
+                &ftd.source,
+                ConstraintSuggestionSink {
+                    suggestion: &mut declared_suggestion,
+                    value: &mut declared_value,
+                    resolve_unit: Some(&resolve_unit),
+                },
+            )?
+        } else {
+            parent_specs
+        };
+
+        if matches!(&final_specs, TypeSpecification::List { .. }) && declared_value.is_none() {
+            declared_value = Some(RawSuggestion::List(Vec::new()));
+        }
+
+        let this_spec = SpecIdentity::of(&discovery::owning_repository(self.context, spec), spec);
+        let family = match (element_parent_type(parent), parent_type.family()) {
+            (ParentType::Primitive { .. }, _) | (_, None) => {
+                TypeFamily::declared_in(&this_spec, type_name)
+            }
+            (_, Some(parent_family)) => parent_family.clone(),
+        };
+        let defining_spec = match element_parent_type(parent) {
+            ParentType::Qualified { .. } => TypeDefiningSpec::Import,
+            _ => TypeDefiningSpec::Local,
+        };
+        let extends = TypeExtends::Custom {
+            parent: parent.to_string(),
+            family,
+            defining_spec,
+        };
+
+        let declared_suggestion = match &ftd.bound_literal {
+            Some(literal) => {
+                let resolve_unit = UnitTokenResolver::Search(
+                    already_resolved
+                        .iter()
+                        .map(|(_, _, rts)| (&rts.unit_index, &rts.resolved))
+                        .collect(),
+                );
+                match semantics::parser_value_to_value_kind(
+                    literal,
+                    &final_specs,
+                    Some(&resolve_unit),
+                ) {
+                    Ok(value_kind) => Some(RawSuggestion::Value(value_kind)),
+                    Err(message) => {
+                        return Err(vec![Error::validation_with_context(
+                            message,
+                            Some(ftd.source.clone()),
+                            None::<String>,
+                            Some(spec),
+                            None,
+                        )]);
+                    }
+                }
+            }
+            None => declared_suggestion,
+        };
+
+        let lemma_type = Arc::new(LemmaType {
+            name: Some(type_name.to_string()),
+            specifications: final_specs,
+            extends,
+        });
+        Ok((lemma_type, declared_suggestion, declared_value))
+    }
+
+    /// Resolve the spec's scalar types. Returns them with the topo-sorted list type names,
+    /// which [`Self::resolve_list_types`] resolves once the scalar passes are done.
     fn resolve_types_internal(
         &self,
         spec: &LemmaSpec,
         at: &EffectiveDate,
         already_resolved: &ResolvedTypesMap,
-    ) -> Result<ResolvedSpecTypes, Vec<Error>> {
+    ) -> Result<(ResolvedSpecTypes, Vec<String>), Vec<Error>> {
         let data_defs = self
             .data_types
             .iter()
@@ -11222,490 +15596,32 @@ impl<'a> TypeResolver<'a> {
             .cloned()
             .unwrap_or_default();
 
-        let mut type_names: Vec<String> = data_defs.keys().cloned().collect();
-        type_names.sort();
-        let sorted_type_names = if type_names.is_empty() {
-            type_names
-        } else {
-            let type_index: HashMap<&str, usize> = type_names
-                .iter()
-                .enumerate()
-                .map(|(index, name)| (name.as_str(), index))
-                .collect();
-            let type_count = type_names.len();
-            let mut in_degree = vec![0usize; type_count];
-            let mut dependents: Vec<Vec<usize>> = vec![Vec::new(); type_count];
-            for (child_index, type_name) in type_names.iter().enumerate() {
-                let custom_parent = match &data_defs[type_name].parent {
-                    ParentType::Ranged { inner } => match element_parent_type(inner) {
-                        ParentType::Custom { name } => Some(name.as_str()),
-                        _ => None,
-                    },
-                    ParentType::Custom { name } => Some(name.as_str()),
-                    _ => None,
-                };
-                let Some(parent_name) = custom_parent else {
-                    continue;
-                };
-                let Some(&parent_index) = type_index.get(parent_name) else {
-                    continue;
-                };
-                if parent_index == child_index {
-                    continue;
-                }
-                in_degree[child_index] += 1;
-                dependents[parent_index].push(child_index);
-            }
-            let mut queue: std::collections::VecDeque<usize> = (0..type_count)
-                .filter(|&index| in_degree[index] == 0)
-                .collect();
-            let mut sorted = Vec::with_capacity(type_count);
-            while let Some(index) = queue.pop_front() {
-                sorted.push(type_names[index].clone());
-                for &dependent_index in &dependents[index] {
-                    in_degree[dependent_index] -= 1;
-                    if in_degree[dependent_index] == 0 {
-                        queue.push_back(dependent_index);
-                    }
-                }
-            }
-            if sorted.len() != type_count {
-                let cycle_type_name = type_names
-                    .iter()
-                    .find(|name| in_degree[type_index[name.as_str()]] > 0)
-                    .expect("BUG: incomplete topo sort without cycle participant");
-                return Err(vec![Error::validation_with_context(
-                    format!(
-                        "Circular dependency detected in type resolution: {}::{}",
-                        spec.name, cycle_type_name
-                    ),
-                    Some(data_defs[cycle_type_name].source.clone()),
-                    None::<String>,
-                    Some(spec),
-                    None,
-                )]);
-            }
-            sorted
-        };
+        let (scalar_names, list_names) = partition_list_type_names(&data_defs);
+        let sorted_type_names = topo_sort_type_names(spec, &data_defs, scalar_names)?;
+        let list_type_names = topo_sort_type_names(spec, &data_defs, list_names)?;
 
         let mut resolved: HashMap<String, ResolvedTypeEntry> = HashMap::new();
-
-        fn lookup_parent_type(
-            resolver: &TypeResolver<'_>,
-            spec: &LemmaSpec,
-            parent: &ParentType,
-            source: &Source,
-            at: &EffectiveDate,
-            already_resolved: &ResolvedTypesMap,
-            resolved: &HashMap<String, ResolvedTypeEntry>,
-        ) -> Result<ParentLookupOk, Vec<Error>> {
-            match parent {
-                ParentType::Ranged { inner } => {
-                    let (element_specs, element_default, element_fill, element_type) =
-                        lookup_parent_type(
-                            resolver,
-                            spec,
-                            inner,
-                            source,
-                            at,
-                            already_resolved,
-                            resolved,
-                        )?;
-                    let range_spec = element_specs.range_from_element().ok_or_else(|| {
-                        vec![Error::validation_with_context(
-                            format!(
-                                "'{inner}' is not rangeable: only measure, number, ratio, date, and time types support ranges"
-                            ),
-                            Some(source.clone()),
-                            None::<String>,
-                            Some(spec),
-                            None,
-                        )]
-                    })?;
-                    Ok((range_spec, element_default, element_fill, element_type))
-                }
-                ParentType::Primitive { primitive: kind } => {
-                    let lemma_type = Arc::new(LemmaType::primitive(
-                        semantics::type_spec_for_primitive(*kind),
-                    ));
-                    Ok((
-                        lemma_type.as_ref().specifications.clone(),
-                        None,
-                        None,
-                        lemma_type,
-                    ))
-                }
-                ParentType::Custom { name } => {
-                    if let Some((parent_type, parent_suggestion, parent_fill)) =
-                        resolved.get(name.as_str())
-                    {
-                        return Ok((
-                            parent_type.as_ref().specifications.clone(),
-                            parent_suggestion.clone(),
-                            parent_fill.clone(),
-                            Arc::clone(parent_type),
-                        ));
-                    }
-                    let type_exists = resolver
-                        .data_types
-                        .iter()
-                        .find(|(s, _)| discovery::same_loaded_spec(s, spec))
-                        .map(|(_, type_map)| type_map.contains_key(name.as_str()))
-                        .unwrap_or(false);
-                    if !type_exists {
-                        if spec.data.iter().any(|data| {
-                            data.reference.is_local()
-                                && data.reference.name == name.as_str()
-                                && matches!(&data.value, ParsedDataValue::Import { .. })
-                        }) {
-                            return Err(vec![Error::validation_with_context(
-                                format!(
-                                    "'{name}' names a spec import alias, not a type. Use `data x: {name}.TypeName` or `data x: TypeName` (if unambiguous) after `uses`"
-                                ),
-                                Some(source.clone()),
-                                None::<String>,
-                                Some(spec),
-                                None,
-                            )]);
-                        }
-                        if spec.rules.iter().any(|rule| rule.name == name.as_str()) {
-                            return Err(vec![Error::validation_with_context(
-                                format!(
-                                    "Unknown parent '{parent}' for data definition: '{name}' is a local rule, not a type. Use a type name, or a reference expression if you meant the rule's value."
-                                ),
-                                Some(source.clone()),
-                                None::<String>,
-                                Some(spec),
-                                None,
-                            )]);
-                        }
-                        let mut imported_matches: Vec<ImportedTypeMatch<'_>> = Vec::new();
-                        for data_row in &spec.data {
-                            let ParsedDataValue::Import { spec_ref, .. } = &data_row.value else {
-                                continue;
-                            };
-                            let import_alias = &data_row.reference.name;
-                            let (_, imported_spec) = match resolver
-                                .resolve_spec_for_import(spec, spec_ref, source, at)
-                            {
-                                Ok(pair) => pair,
-                                Err(_) => continue,
-                            };
-                            let Some(imported_resolved) = already_resolved
-                                .iter()
-                                .find(|(_, s, _)| discovery::same_loaded_spec(s, imported_spec))
-                                .map(|(_, _, r)| r)
-                            else {
-                                continue;
-                            };
-                            if let Some(type_arc) = imported_resolved.resolved.get(name.as_str()) {
-                                let suggestion = imported_resolved
-                                    .source_defaults
-                                    .get(name.as_str())
-                                    .cloned();
-                                let fill = imported_resolved
-                                    .source_fill_defaults
-                                    .get(name.as_str())
-                                    .cloned();
-                                imported_matches.push((
-                                    import_alias.as_str(),
-                                    Arc::clone(type_arc),
-                                    suggestion,
-                                    fill,
-                                ));
-                            }
-                        }
-                        match imported_matches.len() {
-                            1 => {
-                                let (_, parent_type, parent_suggestion, parent_fill) =
-                                    imported_matches
-                                        .into_iter()
-                                        .next()
-                                        .expect("BUG: len checked");
-                                return Ok((
-                                    parent_type.specifications.clone(),
-                                    parent_suggestion,
-                                    parent_fill,
-                                    parent_type,
-                                ));
-                            }
-                            n if n > 1 => {
-                                let aliases: Vec<&str> =
-                                    imported_matches.iter().map(|(a, _, _, _)| *a).collect();
-                                return Err(vec![Error::validation_with_context(
-                                    format!(
-                                        "Ambiguous type '{name}': exported by imports {}. Qualify as `alias.{name}`",
-                                        aliases.join(", "),
-                                    ),
-                                    Some(source.clone()),
-                                    None::<String>,
-                                    Some(spec),
-                                    None,
-                                )]);
-                            }
-                            _ => {}
-                        }
-                        return Err(vec![Error::validation_with_context(
-                            format!(
-                                "Unknown parent '{parent}' for data definition. Parent must be defined before use. Valid primitive types are: boolean, measure, number, ratio, text, date, time"
-                            ),
-                            Some(source.clone()),
-                            None::<String>,
-                            Some(spec),
-                            None,
-                        )]);
-                    }
-                    Err(vec![Error::validation_with_context(
-                        format!(
-                            "Circular dependency detected in type resolution: {}::{}",
-                            spec.name, name
-                        ),
-                        Some(source.clone()),
-                        None::<String>,
-                        Some(spec),
-                        None,
-                    )])
-                }
-                ParentType::Qualified { spec_alias, inner } => {
-                    let spec_ref = ast::SpecRef::same_repository(spec_alias.clone());
-                    let (_, target_spec) =
-                        match resolver.resolve_spec_for_import(spec, &spec_ref, source, at) {
-                            Ok(import_pair) => import_pair,
-                            Err(error) => return Err(vec![error]),
-                        };
-                    match inner.as_ref() {
-                        ParentType::Primitive { primitive: kind } => {
-                            let lemma_type = Arc::new(LemmaType::primitive(
-                                semantics::type_spec_for_primitive(*kind),
-                            ));
-                            Ok((
-                                lemma_type.as_ref().specifications.clone(),
-                                None,
-                                None,
-                                lemma_type,
-                            ))
-                        }
-                        ParentType::Custom { name } => {
-                            let Some(resolved_spec_types) = already_resolved
-                                .iter()
-                                .find(|(_, imported, _)| {
-                                    discovery::same_loaded_spec(imported, target_spec)
-                                })
-                                .map(|(_, _, resolved_spec_types)| resolved_spec_types)
-                            else {
-                                // The import target exists but failed its own type
-                                // resolution (its errors were already collected), so
-                                // the consumer cannot resolve this qualified type.
-                                return Err(vec![Error::validation_with_context(
-                                    format!(
-                                        "Cannot resolve type '{name}' from spec '{}' (via import '{spec_alias}'): spec '{}' failed type resolution",
-                                        target_spec.name, target_spec.name
-                                    ),
-                                    Some(source.clone()),
-                                    None::<String>,
-                                    Some(spec),
-                                    None,
-                                )]);
-                            };
-                            let Some(parent_type) = resolved_spec_types.resolved.get(name.as_str())
-                            else {
-                                let type_exists = resolver
-                                    .data_types
-                                    .iter()
-                                    .find(|(s, _)| discovery::same_loaded_spec(s, target_spec))
-                                    .map(|(_, type_map)| type_map.contains_key(name.as_str()))
-                                    .unwrap_or(false);
-                                if !type_exists {
-                                    return Err(vec![Error::validation_with_context(
-                                        format!(
-                                            "Type '{name}' is not defined in spec '{}' (via import '{spec_alias}')",
-                                            target_spec.name
-                                        ),
-                                        Some(source.clone()),
-                                        None::<String>,
-                                        Some(spec),
-                                        None,
-                                    )]);
-                                }
-                                return Err(vec![Error::validation_with_context(
-                                    format!(
-                                        "Circular dependency detected in type resolution: {}::{}",
-                                        target_spec.name, name
-                                    ),
-                                    Some(source.clone()),
-                                    None::<String>,
-                                    Some(spec),
-                                    None,
-                                )]);
-                            };
-                            Ok((
-                                parent_type.as_ref().specifications.clone(),
-                                resolved_spec_types
-                                    .source_defaults
-                                    .get(name.as_str())
-                                    .cloned(),
-                                resolved_spec_types
-                                    .source_fill_defaults
-                                    .get(name.as_str())
-                                    .cloned(),
-                                Arc::clone(parent_type),
-                            ))
-                        }
-                        ParentType::Qualified { .. } => Err(vec![Error::validation_with_context(
-                            "Nested qualified parent types are invalid",
-                            Some(source.clone()),
-                            None::<String>,
-                            Some(spec),
-                            None,
-                        )]),
-                        ParentType::Ranged { .. } => Err(vec![Error::validation_with_context(
-                            "Nested ranged parent types are invalid",
-                            Some(source.clone()),
-                            None::<String>,
-                            Some(spec),
-                            None,
-                        )]),
-                    }
-                }
-            }
-        }
 
         for type_name in &sorted_type_names {
             let ftd = data_defs
                 .get(type_name.as_str())
                 .expect("BUG: topo-sorted type missing from registry");
-            let parent = ftd.parent.clone();
-            let constraints = ftd.constraints.clone();
-
-            let (parent_specs, parent_suggestion, parent_fill, parent_type) = lookup_parent_type(
-                self,
-                spec,
-                &parent,
-                &ftd.source,
-                at,
-                already_resolved,
-                &resolved,
-            )?;
-
-            let mut declared_suggestion = parent_suggestion;
-            let mut declared_fill = parent_fill;
-            let final_specs = if should_defer_ranged_constraints(&parent) {
-                parent_specs
-            } else if let Some(constraints) = &constraints {
-                let resolve_unit = |unit: &str| -> Result<String, String> {
-                    for (_, _, rts) in already_resolved {
-                        if let Ok((bare, _)) =
-                            rts.unit_index.resolve_with_named_types(unit, &rts.resolved)
-                        {
-                            return Ok(bare);
-                        }
-                    }
-                    Err(format!(
-                        "Unknown unit '{unit}'. Declare it on a measure or ratio type, or import it with uses."
-                    ))
-                };
-                apply_constraints_to_spec(
-                    spec,
-                    &constraint_application_type_name(&parent, type_name),
-                    parent_specs,
-                    constraints,
-                    &ftd.source,
-                    ConstraintSuggestionSink {
-                        suggestion: &mut declared_suggestion,
-                        fill: &mut declared_fill,
-                        resolve_unit: Some(&resolve_unit),
-                    },
-                )?
-            } else {
-                parent_specs
-            };
-
-            let is_import =
-                if let ParentType::Qualified { spec_alias, .. } = element_parent_type(&parent) {
-                    let spec_ref = ast::SpecRef::same_repository(spec_alias.clone());
-                    self.resolve_spec_for_import(spec, &spec_ref, &ftd.source, at)
-                        .map_err(|error| vec![error])?;
-                    true
-                } else {
-                    false
-                };
-
-            let family = match element_parent_type(&parent) {
-                ParentType::Primitive { .. } => type_name.clone(),
-                _ => parent_type
-                    .measure_family_name()
-                    .map(String::from)
-                    .unwrap_or_else(|| type_name.clone()),
-            };
-
-            let extends = TypeExtends::Custom {
-                parent: parent.to_string(),
-                family,
-                defining_spec: if is_import {
-                    TypeDefiningSpec::Import
-                } else {
-                    TypeDefiningSpec::Local
-                },
-            };
-
-            let declared_suggestion = match &ftd.bound_literal {
-                Some(literal) => {
-                    let resolve_unit = |unit: &str| -> Result<String, String> {
-                        for (_, _, rts) in already_resolved {
-                            if let Ok((bare, _)) =
-                                rts.unit_index.resolve_with_named_types(unit, &rts.resolved)
-                            {
-                                return Ok(bare);
-                            }
-                        }
-                        Err(format!(
-                            "Unknown unit '{unit}'. Declare it on a measure or ratio type, or import it with uses."
-                        ))
-                    };
-                    match semantics::parser_value_to_value_kind(
-                        literal,
-                        &final_specs,
-                        Some(&resolve_unit),
-                    ) {
-                        Ok(value_kind) => Some(RawSuggestion::Value(value_kind)),
-                        Err(message) => {
-                            return Err(vec![Error::validation_with_context(
-                                message,
-                                Some(ftd.source.clone()),
-                                None::<String>,
-                                Some(spec),
-                                None,
-                            )]);
-                        }
-                    }
-                }
-                None => declared_suggestion,
-            };
-
-            let lemma_type = Arc::new(LemmaType {
-                name: Some(type_name.clone()),
-                specifications: final_specs,
-                extends,
-            });
-            resolved.insert(
-                type_name.clone(),
-                (lemma_type, declared_suggestion, declared_fill),
-            );
+            let entry =
+                self.resolve_type_def(spec, type_name, ftd, at, already_resolved, &resolved)?;
+            resolved.insert(type_name.clone(), entry);
         }
 
-        let mut unit_index = UnitIndex::new();
+        let mut unit_index = PlanningUnitIndex::new();
         let mut errors = Vec::new();
-        let prim_ratio = semantics::primitive_ratio_arc().clone();
-        for unit in Self::extract_units_from_type(&prim_ratio.as_ref().specifications) {
-            unit_index.insert_owner(
-                unit,
-                UnitOwner {
-                    owning_type: Arc::clone(&prim_ratio),
-                    type_name: prim_ratio.name(),
-                    import_alias: None,
-                },
-            );
+        for unit in Self::extract_units_from_type(&semantics::primitive_ratio_arc().specifications)
+        {
+            unit_index.insert_owner(unit, PlanningOwner::PrimitiveRatio);
         }
+
+        let locals: HashMap<String, Arc<LemmaType>> = resolved
+            .iter()
+            .map(|(name, (type_arc, _, _))| (name.clone(), Arc::clone(type_arc)))
+            .collect();
 
         for type_name in &sorted_type_names {
             let (type_arc, _, _) = resolved
@@ -11731,8 +15647,9 @@ impl<'a> TypeResolver<'a> {
                             &mut unit_index,
                             type_arc,
                             data_type_def,
-                            None,
+                            &[],
                             &parent_units,
+                            &locals,
                         ),
                         Err(error) => Err(error),
                     }
@@ -11742,11 +15659,19 @@ impl<'a> TypeResolver<'a> {
                         &mut unit_index,
                         type_arc,
                         data_type_def,
-                        None,
+                        &[],
+                        &locals,
                     )
                 }
             } else if type_arc.is_ratio() {
-                Self::add_ratio_units_to_index(spec, &mut unit_index, type_arc, data_type_def, None)
+                Self::add_ratio_units_to_index(
+                    spec,
+                    &mut unit_index,
+                    type_arc,
+                    data_type_def,
+                    &[],
+                    &locals,
+                )
             } else {
                 Ok(())
             };
@@ -11756,18 +15681,26 @@ impl<'a> TypeResolver<'a> {
         }
 
         for data_row in &spec.data {
-            let ParsedDataValue::Import { spec_ref, .. } = &data_row.value else {
+            let Some(spec_ref) = data_row.value.uses_spec_ref() else {
                 continue;
             };
             let import_alias = data_row.reference.name.clone();
-            let (_, imported_spec) =
-                match self.resolve_spec_for_import(spec, spec_ref, &data_row.source_location, at) {
-                    Ok(import_pair) => import_pair,
-                    Err(error) => {
-                        errors.push(error);
-                        continue;
-                    }
-                };
+            let import_target = match &data_row.value {
+                ParsedDataValue::ImportList { .. } => {
+                    self.resolve_list_spec_for_import(spec, spec_ref, &data_row.source_location, at)
+                }
+                _ => self.resolve_spec_for_import(spec, spec_ref, &data_row.source_location, at),
+            };
+            let (_, imported_spec) = match import_target {
+                Ok(import_pair) => import_pair,
+                Err(error) => {
+                    errors.push(error);
+                    continue;
+                }
+            };
+            if discovery::same_loaded_spec(imported_spec, spec) {
+                continue;
+            }
             let Some(imported_resolved) = already_resolved
                 .iter()
                 .find(|(_, imported, _)| discovery::same_loaded_spec(imported, imported_spec))
@@ -11775,52 +15708,24 @@ impl<'a> TypeResolver<'a> {
             else {
                 continue;
             };
-            let Some(imported_defs) = self
-                .data_types
-                .iter()
-                .find(|(s, _)| discovery::same_loaded_spec(s, imported_spec))
-                .map(|(_, defs)| defs)
-            else {
-                continue;
-            };
-            for (imported_type_name, type_arc) in &imported_resolved.resolved {
-                let Some(def) = imported_defs.get(imported_type_name.as_str()) else {
-                    continue;
-                };
-                if matches!(def.parent, ParentType::Qualified { .. }) {
-                    continue;
-                }
-                let merge_result = if type_arc.is_measure() {
-                    let consumer_owns_type_locally = data_defs
-                        .get(imported_type_name.as_str())
-                        .is_some_and(|local_def| {
-                            !matches!(local_def.parent, ParentType::Qualified { .. })
-                        });
-                    if consumer_owns_type_locally {
-                        Ok(())
-                    } else {
-                        Self::add_measure_units_to_index(
-                            spec,
-                            &mut unit_index,
-                            type_arc,
-                            def,
-                            Some(import_alias.clone()),
-                        )
+            for (bare, owner) in imported_resolved.unit_index.iter_owners() {
+                let planning_owner = match owner {
+                    UnitOwner::PrimitiveRatio => PlanningOwner::PrimitiveRatio,
+                    UnitOwner::Named {
+                        import_path,
+                        type_name,
+                        lemma_type,
+                    } => {
+                        let mut path = vec![import_alias.clone()];
+                        path.extend(import_path.iter().cloned());
+                        PlanningOwner::Imported {
+                            import_path: path,
+                            type_name: type_name.clone(),
+                            lemma_type: Arc::clone(lemma_type),
+                        }
                     }
-                } else if type_arc.is_ratio() {
-                    Self::add_ratio_units_to_index(
-                        spec,
-                        &mut unit_index,
-                        type_arc,
-                        def,
-                        Some(import_alias.clone()),
-                    )
-                } else {
-                    Ok(())
                 };
-                if let Err(error) = merge_result {
-                    errors.push(error);
-                }
+                unit_index.insert_owner(bare.to_string(), planning_owner);
             }
         }
 
@@ -11829,7 +15734,7 @@ impl<'a> TypeResolver<'a> {
         }
 
         let mut raw_suggestions = Vec::new();
-        let mut raw_fills = Vec::new();
+        let mut raw_values = Vec::new();
         let mut resolved_types = IndexMap::new();
         for type_name in &sorted_type_names {
             let (lemma_type, default, fill) = resolved
@@ -11838,8 +15743,8 @@ impl<'a> TypeResolver<'a> {
             if let Some(raw_suggestion) = default {
                 raw_suggestions.push((type_name.clone(), raw_suggestion));
             }
-            if let Some(raw_fill) = fill {
-                raw_fills.push((type_name.clone(), raw_fill));
+            if let Some(raw_value) = fill {
+                raw_values.push((type_name.clone(), raw_value));
             }
             resolved_types.insert(type_name.clone(), lemma_type);
         }
@@ -11850,17 +15755,22 @@ impl<'a> TypeResolver<'a> {
             );
         }
 
-        Ok(ResolvedSpecTypes {
-            resolved: resolved_types,
-            declared_suggestions: IndexMap::new(),
-            declared_fills: IndexMap::new(),
-            raw_suggestions,
-            raw_fills,
-            source_defaults: IndexMap::new(),
-            source_fill_defaults: IndexMap::new(),
-            unit_index,
-            signature_index: crate::computation::arithmetic::SignatureIndex::new(),
-        })
+        Ok((
+            ResolvedSpecTypes {
+                resolved: resolved_types,
+                declared_suggestions: IndexMap::new(),
+                declared_values: IndexMap::new(),
+                raw_suggestions,
+                raw_values,
+                source_defaults: IndexMap::new(),
+                source_value_defaults: IndexMap::new(),
+                rule_list_types: Vec::new(),
+                unit_index: UnitIndex::new(),
+                planning_unit_index: unit_index,
+                signature_index: crate::computation::arithmetic::SignatureIndex::new(),
+            },
+            list_type_names,
+        ))
     }
 
     fn resolve_spec_for_import(
@@ -11870,16 +15780,28 @@ impl<'a> TypeResolver<'a> {
         import_site: &crate::parsing::source::Source,
         at: &EffectiveDate,
     ) -> Result<(Arc<LemmaRepository>, &'a LemmaSpec), Error> {
-        let consumer_repository = self
-            .all_registered_specs
-            .iter()
-            .find(|(_, s)| discovery::same_loaded_spec(s, spec))
-            .map(|(r, _)| Arc::clone(r))
-            .unwrap_or_else(|| self.context.workspace());
         discovery::resolve_spec_ref(
             self.context,
             from,
-            &consumer_repository,
+            &discovery::owning_repository(self.context, spec),
+            spec,
+            at,
+            Some(import_site.clone()),
+        )
+    }
+
+    /// [`Self::resolve_spec_for_import`] for `uses x: s list`, where `s` may be `spec` itself.
+    fn resolve_list_spec_for_import(
+        &self,
+        spec: &LemmaSpec,
+        from: &crate::parsing::ast::SpecRef,
+        import_site: &crate::parsing::source::Source,
+        at: &EffectiveDate,
+    ) -> Result<(Arc<LemmaRepository>, &'a LemmaSpec), Error> {
+        discovery::resolve_spec_ref_or_self(
+            self.context,
+            from,
+            &discovery::owning_repository(self.context, spec),
             spec,
             at,
             Some(import_site.clone()),
@@ -11892,10 +15814,11 @@ impl<'a> TypeResolver<'a> {
 
     fn add_measure_units_to_index(
         spec: &LemmaSpec,
-        unit_index: &mut UnitIndex,
+        unit_index: &mut PlanningUnitIndex,
         resolved_type: &Arc<LemmaType>,
         defined_by: &DataTypeDef,
-        import_alias: Option<String>,
+        import_path: &[String],
+        locals: &HashMap<String, Arc<LemmaType>>,
     ) -> Result<(), Error> {
         if matches!(defined_by.parent, ParentType::Qualified { .. }) {
             unreachable!(
@@ -11911,8 +15834,9 @@ impl<'a> TypeResolver<'a> {
                     unit,
                     resolved_type,
                     &defined_by.name,
-                    import_alias.clone(),
+                    import_path,
                     measure_family,
+                    locals,
                 )
                 .map_err(|conflict| {
                     Self::unit_merge_conflict_to_error(conflict, defined_by, spec)
@@ -11960,11 +15884,12 @@ impl<'a> TypeResolver<'a> {
     /// Register only units the Qualified extension newly declares (not inherited from parent).
     fn merge_additive_measure_units(
         spec: &LemmaSpec,
-        unit_index: &mut UnitIndex,
+        unit_index: &mut PlanningUnitIndex,
         resolved_type: &Arc<LemmaType>,
         defined_by: &DataTypeDef,
-        import_alias: Option<String>,
+        import_path: &[String],
         parent_units: &BTreeSet<String>,
+        locals: &HashMap<String, Arc<LemmaType>>,
     ) -> Result<(), Error> {
         let measure_family = resolved_type
             .measure_family_name()
@@ -11978,8 +15903,9 @@ impl<'a> TypeResolver<'a> {
                     unit,
                     resolved_type,
                     &defined_by.name,
-                    import_alias.clone(),
+                    import_path,
                     measure_family,
+                    locals,
                 )
                 .map_err(|conflict| {
                     Self::unit_merge_conflict_to_error(conflict, defined_by, spec)
@@ -11990,21 +15916,15 @@ impl<'a> TypeResolver<'a> {
 
     fn add_ratio_units_to_index(
         spec: &LemmaSpec,
-        unit_index: &mut UnitIndex,
+        unit_index: &mut PlanningUnitIndex,
         resolved_type: &Arc<LemmaType>,
         defined_by: &DataTypeDef,
-        import_alias: Option<String>,
+        import_path: &[String],
+        locals: &HashMap<String, Arc<LemmaType>>,
     ) -> Result<(), Error> {
-        let primitive_ratio = semantics::primitive_ratio_arc();
         for unit in Self::extract_units_from_type(&resolved_type.specifications) {
             unit_index
-                .merge_ratio_unit(
-                    unit,
-                    resolved_type,
-                    &defined_by.name,
-                    import_alias.clone(),
-                    primitive_ratio,
-                )
+                .merge_ratio_unit(unit, resolved_type, &defined_by.name, import_path, locals)
                 .map_err(|conflict| {
                     Self::unit_merge_conflict_to_error(conflict, defined_by, spec)
                 })?;
@@ -12018,25 +15938,9 @@ impl<'a> TypeResolver<'a> {
         spec: &LemmaSpec,
     ) -> Error {
         let message = match conflict {
-            UnitMergeConflict::Ambiguous {
-                unit,
-                existing_name,
-                new_name,
-            } => format!(
-                "Unit '{unit}' is defined on both '{existing_name}' and '{new_name}'. \
-                 Each unit name may be declared only once."
-            ),
             UnitMergeConflict::ConflictingFactors { unit, family } => format!(
                 "Unit '{unit}' has different values on related measure types in '{family}'. \
                  Use the same unit value on each type, or use different unit names."
-            ),
-            UnitMergeConflict::AmbiguousRatio {
-                unit,
-                existing_name,
-                new_name,
-            } => format!(
-                "Unit '{unit}' is defined on both '{existing_name}' and '{new_name}'. \
-                 Each unit name may be declared only once."
             ),
         };
         Error::validation_with_context(
@@ -12072,7 +15976,7 @@ impl<'a> TypeResolver<'a> {
 /// The default lives outside the type specification (on the data binding or
 /// typedef entry); callers thread it in explicitly so this function can verify
 /// consistency without owning the value. Pass `default_label` as `"suggestion"`
-/// or `"fill"` for error messages.
+/// or `"with"` for error messages.
 ///
 /// Returns a vector of errors (empty if valid).
 pub fn validate_type_specifications(
@@ -12099,18 +16003,10 @@ pub fn validate_type_specifications(
             if let (Some(min), Some(max)) = (minimum, maximum) {
                 match (
                     semantics::measure_declared_bound_to_canonical(
-                        &min.0,
-                        &min.1,
-                        units,
-                        type_name,
-                        "minimum",
+                        &min.0, &min.1, units, type_name, "minimum",
                     ),
                     semantics::measure_declared_bound_to_canonical(
-                        &max.0,
-                        &max.1,
-                        units,
-                        type_name,
-                        "maximum",
+                        &max.0, &max.1, units, type_name, "maximum",
                     ),
                 ) {
                     (Ok(min_canonical), Ok(max_canonical)) => {
@@ -12546,9 +16442,7 @@ pub fn validate_type_specifications(
         }
 
         TypeSpecification::Date {
-            minimum,
-            maximum,
-            ..
+            minimum, maximum, ..
         } => {
             // Validate range consistency
             if let (Some(min), Some(max)) = (minimum, maximum) {
@@ -12603,9 +16497,7 @@ pub fn validate_type_specifications(
         }
 
         TypeSpecification::Time {
-            minimum,
-            maximum,
-            ..
+            minimum, maximum, ..
         } => {
             // Validate range consistency
             if let (Some(min), Some(max)) = (minimum, maximum) {
@@ -12684,7 +16576,7 @@ pub fn validate_type_specifications(
         TypeSpecification::Undetermined => unreachable!(
             "BUG: validate_type_specification_constraints called with Undetermined sentinel type; this type exists only during type inference"
         ),
-        TypeSpecification::Spec { .. } => {}
+        TypeSpecification::Spec { .. } | TypeSpecification::List { .. } => {}
     }
 
     errors

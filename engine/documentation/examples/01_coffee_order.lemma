@@ -12,7 +12,7 @@ data money: measure
   -> unit gbp: 1.17
   -> minimum 0 eur
 
-data product: text
+data drink: text
   -> option "espresso"
   -> option "latte"
   -> option "cappuccino"
@@ -32,13 +32,12 @@ data number_of_cups: number
 
 data has_loyalty_card: boolean
 
-
 rule base_price:
   veto "Unknown type of coffee"
-  unless product is "espresso"   then 2.5 eur
-  unless product is "latte"      then 3.5 eur
-  unless product is "cappuccino" then 3.5 eur
-  unless product is "mocha"      then 4 eur
+  unless drink is "espresso"   then 2.5 eur
+  unless drink is "latte"      then 3.5 eur
+  unless drink is "cappuccino" then 3.5 eur
+  unless drink is "mocha"      then 4 eur
 
 rule size_multiplier:
   veto "Unknown size of coffee"

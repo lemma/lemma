@@ -11,4 +11,4 @@ State the rule in Lemma as soon as it is clear. Do not carry it in the conversat
 **Which guide to load**
 
 - **Authoring** (`guide` topic `full`, or `method` then `data`): capture rules as the user states them. See **Method**.
-- **Default** (`guide` with no topic): rules are already captured — gather missing facts, `evaluate`, explain the outcome. Do not redesign policy here.
+- **Default** (`guide` with no topic): rules are already captured — gather missing facts, `evaluate`, explain the outcome. Do not redesign policy here. User phrasing **ask Lemma** or **evaluate** means call tool `evaluate`.

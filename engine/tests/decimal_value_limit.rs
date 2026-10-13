@@ -1,6 +1,6 @@
+use indexmap::IndexMap;
 use lemma::{DateTimeValue, Engine, SourceType};
 use rust_decimal::Decimal;
-use std::collections::HashMap;
 
 fn magnitude_overflow_boundary_spec() -> String {
     let max_decimal = Decimal::MAX.normalize().to_string();
@@ -45,11 +45,11 @@ rule over_limit: max_val * two
 
     let now = DateTimeValue::now();
     let response = engine
-        .run(
+        .evaluate(
             None,
             "decimal_limit",
             Some(&now),
-            HashMap::new(),
+            IndexMap::new(),
             None,
             false,
         )
@@ -76,11 +76,11 @@ fn magnitude_overflow_intermediate_stored_exactly_explain_result_not_vetoed() {
 
     let now = DateTimeValue::now();
     let response = engine
-        .run(
+        .evaluate(
             None,
             "magnitude_overflow_boundary",
             Some(&now),
-            HashMap::new(),
+            IndexMap::new(),
             None,
             true,
         )
@@ -117,11 +117,11 @@ fn magnitude_overflow_boundary_full_eval_huge_vetoes_safe_succeeds() {
 
     let now = DateTimeValue::now();
     let response = engine
-        .run(
+        .evaluate(
             None,
             "magnitude_overflow_boundary",
             Some(&now),
-            HashMap::new(),
+            IndexMap::new(),
             None,
             false,
         )
@@ -154,11 +154,11 @@ fn magnitude_overflow_boundary_targeted_safe_succeeds() {
 
     let now = DateTimeValue::now();
     let response = engine
-        .run(
+        .evaluate(
             None,
             "magnitude_overflow_boundary",
             Some(&now),
-            HashMap::new(),
+            IndexMap::new(),
             Some(&["safe".to_string()]),
             false,
         )

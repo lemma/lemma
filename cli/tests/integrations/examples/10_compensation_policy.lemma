@@ -4,15 +4,23 @@ Corporate Base Compensation Policy
 Foundation for all employee compensation
 """
 
-data bonus_pool_percentage     : 10%
-data company_name              : "TechCorp Europe"
-data cost_of_living_adjustment : 0%
-data retirement_match_cap      : 5%
-data retirement_match_rate     : 6%
-data stock_grant_percentage    : 2%
-data base_salary_max           : number -> minimum 0 -> suggest 250_000
-data base_salary_min           : number -> minimum 0 -> suggest 45_000
-data health_premium_monthly    : number -> minimum 0 -> suggest 500
+data bonus_pool_percentage:     10%
+data company_name:              "TechCorp Europe"
+data cost_of_living_adjustment: 0%
+data retirement_match_cap:      5%
+data retirement_match_rate:     6%
+data stock_grant_percentage:    2%
+data base_salary_max: number
+  -> minimum 0
+  -> suggest 250_000
+
+data base_salary_min: number
+  -> minimum 0
+  -> suggest 45_000
+
+data health_premium_monthly: number
+  -> minimum 0
+  -> suggest 500
 
 rule annual_health_cost:
   health_premium_monthly * 12
@@ -32,15 +40,24 @@ Engineering Department Compensation Rules
 Inherits base policy with engineering-specific bindings
 """
 
-data department         : "Engineering"
-data level_multiplier   : number -> minimum 0 -> suggest 1.0
-data performance_rating : number -> minimum 0 -> maximum 5 -> suggest 0.0
-data years_of_service   : number -> minimum 0 -> suggest 0
-
 uses policy: base_policy
   -> with bonus_pool_percentage: 15%
   -> with cost_of_living_adjustment: 3%
   -> with stock_grant_percentage: 5%
+
+data department: "Engineering"
+data level_multiplier: number
+  -> minimum 0
+  -> suggest 1.0
+
+data performance_rating: number
+  -> minimum 0
+  -> maximum 5
+  -> suggest 0.0
+
+data years_of_service: number
+  -> minimum 0
+  -> suggest 0
 
 rule base_for_level:
   policy.base_salary_min * level_multiplier
@@ -53,8 +70,8 @@ rule performance_bonus_rate:
 
 rule tenure_bonus:
   0
-  unless years_of_service >= 3 then 5_000
-  unless years_of_service >= 5 then 10_000
+  unless years_of_service >= 3  then 5_000
+  unless years_of_service >= 5  then 10_000
   unless years_of_service >= 10 then 25_000
 
 rule stock_value:
@@ -96,30 +113,35 @@ Senior Engineer (Level 3) - Specific Employee
 Multiple inheritance levels testing
 """
 
-data employee_name : "Alex van der Berg"
-data location      : "Amsterdam"
-data location_cola : 15%
-
 uses eng_policy: engineering_dept
   -> with level_multiplier: 2.5
   -> with performance_rating: 4.2
   -> with years_of_service: 7
 
+data employee_name: "Alex van der Berg"
+data location:      "Amsterdam"
+data location_cola: 15%
+
 rule effective_base:
-  eng_policy.base_for_level + eng_policy.base_for_level * location_cola
+  eng_policy.base_for_level
+  + eng_policy.base_for_level * location_cola
 
 rule location_adjusted_stock:
-  eng_policy.stock_value + eng_policy.stock_value * location_cola
+  eng_policy.stock_value
+  + eng_policy.stock_value * location_cola
 
 rule location_adjusted_bonus:
-  eng_policy.performance_bonus + eng_policy.performance_bonus * location_cola
+  eng_policy.performance_bonus
+  + eng_policy.performance_bonus * location_cola
 
 rule total_location_adjusted:
-  effective_base + location_adjusted_bonus
+  effective_base
+  + location_adjusted_bonus
   + eng_policy.tenure_bonus
 
 rule final_total_comp:
-  total_location_adjusted + location_adjusted_stock
+  total_location_adjusted
+  + location_adjusted_stock
   + eng_policy.benefits_value
 
 rule monthly_take_home_estimate:
@@ -137,10 +159,12 @@ rule is_highly_compensated:
 
 rule compensation_tier:
   "Standard"
-  unless final_total_comp > 150_000 then "Above Average"
+  unless final_total_comp > 150_000
+    then "Above Average"
   unless final_total_comp > 250_000
     then "Highly Compensated"
-  unless final_total_comp > 400_000 then "Executive Level"
+  unless final_total_comp > 400_000
+    then "Executive Level"
 
 rule perf_rating:
   eng_policy.performance_rating
@@ -149,7 +173,7 @@ rule performance_category:
   "Needs Improvement"
   unless perf_rating >= 2.5 then "Meets Expectations"
   unless perf_rating >= 3.5 then "Exceeds Expectations"
-  unless perf_rating >= 4 then "Outstanding"
+  unless perf_rating >= 4   then "Outstanding"
   unless perf_rating >= 4.5 then "Exceptional"
 
 
@@ -159,14 +183,6 @@ Principal Engineer (Level 5) - Maximum complexity test
 Tests deep inheritance and complex calculations
 """
 
-data employee_name      : "Jordan Schmidt"
-data has_critical_skill : true
-data location           : "Berlin"
-data location_cola      : 20%
-data manages_team       : true
-data on_call_rotation   : true
-data team_size          : number -> minimum 0 -> suggest 15
-
 uses eng_policy: engineering_dept
   -> with level_multiplier: 4.5
   -> with performance_rating: 4.8
@@ -174,13 +190,23 @@ uses eng_policy: engineering_dept
   -> with policy.stock_grant_percentage: 8%
   -> with years_of_service: 12
 
+data employee_name:      "Jordan Schmidt"
+data has_critical_skill: true
+data location:           "Berlin"
+data location_cola:      20%
+data manages_team:       true
+data on_call_rotation:   true
+data team_size: number
+  -> minimum 0
+  -> suggest 15
+
 rule critical_skill_bonus:
   0
   unless has_critical_skill then 15_000
 
 rule management_bonus:
   0
-  unless manages_team and team_size >= 5 then 10_000
+  unless manages_team and team_size >= 5  then 10_000
   unless manages_team and team_size >= 10 then 20_000
   unless manages_team and team_size >= 20 then 35_000
 
@@ -189,10 +215,12 @@ rule on_call_stipend:
   unless on_call_rotation then 6_000
 
 rule effective_base:
-  eng_policy.base_for_level + eng_policy.base_for_level * location_cola
+  eng_policy.base_for_level
+  + eng_policy.base_for_level * location_cola
 
 rule all_bonuses:
-  eng_policy.performance_bonus + eng_policy.tenure_bonus
+  eng_policy.performance_bonus
+  + eng_policy.tenure_bonus
   + critical_skill_bonus
   + management_bonus
   + on_call_stipend
@@ -201,7 +229,8 @@ rule base_plus_bonuses:
   effective_base + all_bonuses
 
 rule adjusted_stock:
-  eng_policy.stock_value + eng_policy.stock_value * location_cola
+  eng_policy.stock_value
+  + eng_policy.stock_value * location_cola
 
 rule total_cash:
   base_plus_bonuses + adjusted_stock

@@ -27,7 +27,6 @@ data desired_servings: number
 data original_servings: number
   -> minimum 1
 
-
 rule scaling_factor:
   desired_servings / original_servings
 

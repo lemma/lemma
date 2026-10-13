@@ -2,9 +2,9 @@
 //! its `rule_ref`. Requested-rule `missing_data` is for that walk only; a full
 //! run (all local rules) may still report missing inputs on other requested rules.
 
-use lemma::{DateTimeValue, Engine, SourceType};
+use indexmap::IndexMap;
+use lemma::{DateTimeValue, Engine, EvaluateDataValue, SourceType};
 use rust_decimal::Decimal;
-use std::collections::HashMap;
 
 #[test]
 fn unless_gated_dep_flag_false_empty_missing_data() {
@@ -24,10 +24,10 @@ rule total: 0
         )])
         .expect("load");
     let now = DateTimeValue::now();
-    let mut data = HashMap::new();
+    let mut data = IndexMap::new();
     data.insert("flag".to_string(), "false".into());
     let response = engine
-        .run(
+        .evaluate(
             None,
             "gated",
             Some(&now),
@@ -35,7 +35,7 @@ rule total: 0
             Some(&["total".to_string()]),
             false,
         )
-        .expect("run");
+        .expect("evaluate");
     let total = response.results.get("total").expect("total");
     assert!(!total.vetoed);
     assert!(
@@ -71,10 +71,10 @@ rule total: 0
         )])
         .expect("load");
     let now = DateTimeValue::now();
-    let mut data = HashMap::new();
+    let mut data = IndexMap::new();
     data.insert("flag".to_string(), "true".into());
     let response = engine
-        .run(
+        .evaluate(
             None,
             "gated",
             Some(&now),
@@ -82,7 +82,7 @@ rule total: 0
             Some(&["total".to_string()]),
             false,
         )
-        .expect("run");
+        .expect("evaluate");
     let total = response.results.get("total").expect("total");
     assert!(total.vetoed);
     assert!(
@@ -117,15 +117,15 @@ rule y: a.x + 1
         .expect("load");
     let now = DateTimeValue::now();
     let response = engine
-        .run(
+        .evaluate(
             None,
             "b",
             Some(&now),
-            HashMap::new(),
+            IndexMap::new(),
             Some(&["y".to_string()]),
             false,
         )
-        .expect("run");
+        .expect("evaluate");
     assert_eq!(response.results.len(), 1);
     let y = response.results.get("y").expect("y");
     assert!(!y.vetoed);
@@ -149,24 +149,24 @@ rule pw: 0
   unless gate_rule then secret
 "#;
 
-fn run_gate(data: &[(&str, &str)], rules: Option<&[String]>) -> lemma::Response {
+fn evaluate_gate(data: &[(&str, &str)], rules: Option<&[String]>) -> lemma::Response {
     let mut engine = Engine::new();
     engine
         .load([(SourceType::Volatile, AND_LEFT_RULE_REF.to_string())])
         .expect("load");
     let now = DateTimeValue::now();
-    let bindings: HashMap<String, String> = data
+    let bindings: IndexMap<String, EvaluateDataValue> = data
         .iter()
-        .map(|(key, value)| ((*key).to_string(), (*value).to_string()))
+        .map(|(key, value)| ((*key).to_string(), (*value).into()))
         .collect();
     engine
-        .run(None, "gate", Some(&now), bindings, rules, false)
-        .expect("run")
+        .evaluate(None, "gate", Some(&now), bindings, rules, false)
+        .expect("evaluate")
 }
 
 #[test]
 fn rule_ref_and_left_true_lists_unbound_right_tip_run() {
-    let response = run_gate(&[("n", "5")], Some(&["main".to_string()]));
+    let response = evaluate_gate(&[("n", "5")], Some(&["main".to_string()]));
     let main = response.results.get("main").expect("main");
     assert!(main.is_missing_data(), "{:?}", main.veto_reason);
     assert_eq!(main.missing_data(), &["secret".to_string()][..]);
@@ -174,7 +174,7 @@ fn rule_ref_and_left_true_lists_unbound_right_tip_run() {
 
 #[test]
 fn rule_ref_and_left_true_lists_unbound_right_full_run() {
-    let response = run_gate(&[("n", "5")], None);
+    let response = evaluate_gate(&[("n", "5")], None);
     let main = response.results.get("main").expect("main");
     assert!(main.is_missing_data(), "{:?}", main.veto_reason);
     assert_eq!(main.missing_data(), &["secret".to_string()][..]);
@@ -184,16 +184,20 @@ fn rule_ref_and_left_true_lists_unbound_right_full_run() {
 }
 
 #[test]
-fn rule_ref_and_left_missing_data_lists_left_only() {
-    let response = run_gate(&[], Some(&["main".to_string()]));
+fn rule_ref_and_missing_left_lists_both_operands() {
+    let response = evaluate_gate(&[], Some(&["main".to_string()]));
     let main = response.results.get("main").expect("main");
     assert!(main.is_missing_data(), "{:?}", main.veto_reason);
-    assert_eq!(main.missing_data(), &["n".to_string()][..]);
+    // `secret > 0` can still decide the conjunction false, so it stays listed.
+    assert_eq!(
+        main.missing_data(),
+        &["n".to_string(), "secret".to_string()][..]
+    );
 }
 
 #[test]
 fn rule_ref_and_left_false_is_false_without_missing_data() {
-    let response = run_gate(&[("n", "-5")], Some(&["main".to_string()]));
+    let response = evaluate_gate(&[("n", "-5")], Some(&["main".to_string()]));
     let main = response.results.get("main").expect("main");
     assert!(!main.vetoed, "{:?}", main.veto_reason);
     assert!(main.missing_data().is_empty());
@@ -202,7 +206,7 @@ fn rule_ref_and_left_false_is_false_without_missing_data() {
 
 #[test]
 fn rule_ref_piecewise_condition_true_lists_unbound_body() {
-    let response = run_gate(&[("n", "5")], Some(&["pw".to_string()]));
+    let response = evaluate_gate(&[("n", "5")], Some(&["pw".to_string()]));
     let pw = response.results.get("pw").expect("pw");
     assert!(pw.is_missing_data(), "{:?}", pw.veto_reason);
     assert_eq!(pw.missing_data(), &["secret".to_string()][..]);
@@ -226,11 +230,11 @@ rule total: 0
         )])
         .expect("load");
     let now = DateTimeValue::now();
-    let mut data = HashMap::new();
+    let mut data = IndexMap::new();
     data.insert("flag".to_string(), "false".into());
     let response = engine
-        .run(None, "gated", Some(&now), data, None, false)
-        .expect("run");
+        .evaluate(None, "gated", Some(&now), data, None, false)
+        .expect("evaluate");
     let total = response.results.get("total").expect("total");
     assert!(!total.vetoed);
     assert!(

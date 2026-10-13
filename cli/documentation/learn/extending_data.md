@@ -31,7 +31,7 @@ data weight: 75 kilogram
 
 ## Reuse across Specs
 
-Import a Spec with Uses and reference its Data declarations as parent types. Use a qualified path (`alias.field`) or a bare name when it is unambiguous across all imports:
+Import a Spec with Uses and reference its Data declarations as parent types with the alias (`alias.field`):
 
 ```lemma
 spec base_types
@@ -41,7 +41,7 @@ data currency: text
   -> option "USD"
 
 data rate: ratio
-  -> maximum 100%
+  -> maximum 100 percent
 
 
 spec checkout
@@ -50,7 +50,7 @@ uses base: base_types
 
 data payment_currency: base.currency
 data discount_rate: base.rate
-  -> maximum 50%
+  -> maximum 50 percent
 ```
 
 The imported `data currency` declaration becomes the type for `payment_currency`; the local slot can add further constraints (`-> maximum 50%` on `discount_rate`).

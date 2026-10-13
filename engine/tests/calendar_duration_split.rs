@@ -1,6 +1,6 @@
+use indexmap::IndexMap;
 use lemma::DateTimeValue;
 use lemma::Engine;
-use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -15,7 +15,7 @@ fn eval_rule(code: &str, spec_name: &str, rule_name: &str) -> String {
         .expect("Should parse and plan");
     let now = DateTimeValue::now();
     let response = engine
-        .run(None, spec_name, Some(&now), HashMap::new(), None, false)
+        .evaluate(None, spec_name, Some(&now), IndexMap::new(), None, false)
         .expect("Should evaluate");
     response
         .results

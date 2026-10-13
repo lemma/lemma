@@ -1,7 +1,7 @@
 //! Engine binary snapshot: round-trip, determinism, idempotence, corrupt/stale bytes.
 
+use indexmap::IndexMap;
 use lemma::{api, DateTimeValue, Engine, ResourceLimits, SourceType};
-use std::collections::HashMap;
 use std::str::FromStr;
 use std::time::Duration;
 
@@ -67,16 +67,16 @@ rule bracket: qty
 #[test]
 fn snapshot_round_trip_preserves_list_show_run() {
     let engine = rich_workspace();
-    let list_before = engine.list();
+    let specs_before = engine.specs();
     let show_before = engine
         .show(None, "checkout", Some(&effective_2024()))
         .expect("show checkout");
-    let show_json_before = serde_json::to_value(api::Show::from(&show_before)).expect("show json");
-    let mut data = HashMap::new();
+    let show_json_before = api::show_document(&engine, &show_before);
+    let mut data = IndexMap::new();
     data.insert("qty".to_string(), "2".into());
     data.insert("unit_price".to_string(), "10 eur".into());
-    let run_before = engine
-        .run(
+    let evaluate_before = engine
+        .evaluate(
             None,
             "checkout",
             Some(&effective_2024()),
@@ -84,26 +84,24 @@ fn snapshot_round_trip_preserves_list_show_run() {
             None,
             false,
         )
-        .expect("run");
-    let run_json_before = serde_json::to_value(api::Response::from(&run_before)).expect("run json");
+        .expect("evaluate");
+    let evaluate_json_before =
+        serde_json::to_value(api::Response::from(&evaluate_before)).expect("evaluate json");
 
     let bytes = engine.snapshot().expect("snapshot");
     let restored = Engine::from_snapshot(&bytes).expect("from_snapshot");
 
-    assert_eq!(restored.list(), list_before);
+    assert_eq!(restored.specs(), specs_before);
     let show_after = restored
         .show(None, "checkout", Some(&effective_2024()))
         .expect("show after");
+    assert_eq!(api::show_document(&restored, &show_after), show_json_before);
+    let evaluate_after = restored
+        .evaluate(None, "checkout", Some(&effective_2024()), data, None, false)
+        .expect("evaluate after");
     assert_eq!(
-        serde_json::to_value(api::Show::from(&show_after)).expect("show json after"),
-        show_json_before
-    );
-    let run_after = restored
-        .run(None, "checkout", Some(&effective_2024()), data, None, false)
-        .expect("run after");
-    assert_eq!(
-        serde_json::to_value(api::Response::from(&run_after)).expect("run json after"),
-        run_json_before
+        serde_json::to_value(api::Response::from(&evaluate_after)).expect("evaluate json after"),
+        evaluate_json_before
     );
 }
 

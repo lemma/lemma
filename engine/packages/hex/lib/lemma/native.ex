@@ -17,9 +17,11 @@ defmodule Lemma.Native do
       aarch64-pc-windows-msvc
     )
 
+  def lemma_version, do: :erlang.nif_error(:nif_not_loaded)
+
   def lemma_new(_limits), do: :erlang.nif_error(:nif_not_loaded)
   def lemma_load(_resource, _sources), do: :erlang.nif_error(:nif_not_loaded)
-  def lemma_list(_resource), do: :erlang.nif_error(:nif_not_loaded)
+  def lemma_specs(_resource), do: :erlang.nif_error(:nif_not_loaded)
 
   def lemma_show(_resource, _repository, _spec, _effective),
     do: :erlang.nif_error(:nif_not_loaded)
@@ -55,7 +57,7 @@ defmodule Lemma.Native do
   def mcp_read_resource(_uri), do: :erlang.nif_error(:nif_not_loaded)
   def mcp_run(_resource, _args_json), do: :erlang.nif_error(:nif_not_loaded)
   def mcp_evaluate(_resource, _args_json), do: :erlang.nif_error(:nif_not_loaded)
-  def mcp_list(_resource, _args_json), do: :erlang.nif_error(:nif_not_loaded)
+  def mcp_specs(_resource, _args_json), do: :erlang.nif_error(:nif_not_loaded)
   def mcp_show(_resource, _args_json), do: :erlang.nif_error(:nif_not_loaded)
   def mcp_source(_resource, _args_json), do: :erlang.nif_error(:nif_not_loaded)
   def mcp_check(_args_json), do: :erlang.nif_error(:nif_not_loaded)

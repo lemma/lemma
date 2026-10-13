@@ -12,7 +12,7 @@ data money: measure
   -> unit gbp: 1.17
   -> minimum 0 eur
 
-data product: text
+data sku: text
   -> option "espresso"
   -> option "latte"
   -> option "cappuccino"
@@ -32,29 +32,38 @@ data number_of_cups: number
 
 data has_loyalty_card: boolean
 
-rule base_price: veto "Unknown type of coffee"
-  unless product is "espresso"   then 2.5 eur
-  unless product is "latte"      then 3.5 eur
-  unless product is "cappuccino" then 3.5 eur
-  unless product is "mocha"      then 4 eur
+rule base_price:
+  veto "Unknown type of coffee"
+  unless sku is "espresso"   then 2.5 eur
+  unless sku is "latte"      then 3.5 eur
+  unless sku is "cappuccino" then 3.5 eur
+  unless sku is "mocha"      then 4 eur
 
-rule size_multiplier: veto "Unknown size of coffee"
+rule size_multiplier:
+  veto "Unknown size of coffee"
   unless size is "small"  then 80%
   unless size is "medium" then 100%
   unless size is "large"  then 120%
 
-rule price_per_cup: base_price * size_multiplier
+rule price_per_cup:
+  base_price * size_multiplier
 
-rule subtotal: price_per_cup * number_of_cups
+rule subtotal:
+  price_per_cup * number_of_cups
 
-rule loyalty_discount: 0%
+rule loyalty_discount:
+  0%
   unless has_loyalty_card then 10%
 
-rule age_discount: 0%
+rule age_discount:
+  0%
   unless age >= 65 then 10%
 
-rule combined_discount: loyalty_discount + age_discount
+rule combined_discount:
+  loyalty_discount + age_discount
 
-rule discount_amount: subtotal * combined_discount
+rule discount_amount:
+  subtotal * combined_discount
 
-rule total: subtotal - discount_amount
+rule total:
+  subtotal - discount_amount

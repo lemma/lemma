@@ -6,8 +6,8 @@
 //! produce separate temporal slices — one per version of A that falls within
 //! B's effective range.
 
-use lemma::{DateGranularity, DateTimeValue, Engine};
-use std::collections::HashMap;
+use indexmap::IndexMap;
+use lemma::{DateGranularity, DateTimeValue, Engine, EvaluateDataValue};
 
 fn date(year: i32, month: u32, day: u32) -> DateTimeValue {
     DateTimeValue {
@@ -29,12 +29,12 @@ fn eval_with(
     effective: &DateTimeValue,
     data: Vec<(&str, &str)>,
 ) -> lemma::Response {
-    let map: HashMap<String, String> = data
+    let map: IndexMap<String, EvaluateDataValue> = data
         .into_iter()
-        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .map(|(k, v)| (k.to_string(), v.into()))
         .collect();
     engine
-        .run(None, spec_name, Some(effective), map, None, false)
+        .evaluate(None, spec_name, Some(effective), map, None, false)
         .unwrap()
 }
 
@@ -185,11 +185,11 @@ rule doubled: price * 2
     // usd must veto: pin locks to finance v1 which only has eur
     let effective = date(2025, 9, 1);
     let response = engine
-        .run(
+        .evaluate(
             None,
             "shop",
             Some(&effective),
-            HashMap::from([("price".to_string(), "10.00 usd".into())]),
+            IndexMap::from([("price".to_string(), "10.00 usd".into())]),
             None,
             false,
         )
@@ -510,11 +510,11 @@ rule doubled: price * 2
     // Evaluate after boundary with usd — must veto because pin locks to v1 (no usd).
     let effective = date(2025, 9, 1);
     let response = engine
-        .run(
+        .evaluate(
             None,
             "shop",
             Some(&effective),
-            HashMap::from([("price".to_string(), "10.00 usd".into())]),
+            IndexMap::from([("price".to_string(), "10.00 usd".into())]),
             None,
             false,
         )

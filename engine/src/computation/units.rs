@@ -6,9 +6,8 @@ use crate::computation::rational::{
 };
 use crate::parsing::ast::PrimitiveKind;
 use crate::planning::semantics::{
-    calendar_unit_factor, primitive_number_arc, primitive_text_arc, BoundValueKind, LemmaType,
-    LiteralValue, SemanticCalendarUnit, SemanticConversionTarget, TypeSpecification, TypedLiteral,
-    ValueKind,
+    calendar_unit_factor, primitive_number_arc, BoundValueKind, LemmaType, LiteralValue,
+    SemanticConversionTarget, TypeSpecification, TypedLiteral, ValueKind,
 };
 use std::sync::Arc;
 
@@ -22,12 +21,9 @@ pub fn convert_unit(
         SemanticConversionTarget::Type(PrimitiveKind::Number) => {
             cast_to_number(&value.value, value_type)
         }
-        SemanticConversionTarget::Type(PrimitiveKind::Text) => {
-            OperationResult::from_literal(LiteralValue::text_with_type(
-                value.to_literal().display_value_with_type(value_type),
-                primitive_text_arc().clone(),
-            ))
-        }
+        SemanticConversionTarget::Type(PrimitiveKind::Text) => OperationResult::from_literal(
+            LiteralValue::text(value.to_literal().display_value_with_type(value_type)),
+        ),
         SemanticConversionTarget::Type(PrimitiveKind::Boolean) => {
             if value_type.is_boolean() {
                 OperationResult::from_bound(value.clone())
@@ -166,12 +162,7 @@ fn cast_range_span_to_unit(
 ) -> OperationResult {
     if let (ValueKind::Date(left_date), ValueKind::Date(right_date)) = (&left.value, &right.value) {
         if calendar_unit_factor(unit_name).is_some() {
-            return super::datetime::compute_date_calendar_difference(
-                left_date,
-                right_date,
-                &semantic_calendar_unit(unit_name),
-                Arc::clone(owning_type),
-            );
+            return super::datetime::compute_date_calendar_difference(left_date, right_date);
         }
         let span = super::range::compute_span(left, right);
         let OperationResult::Value(span) = span else {
@@ -201,23 +192,26 @@ fn convert_span_measure_to_unit(span: &BoundValueKind, unit_name: &str) -> Opera
     cast_measure_to_unit(magnitude.clone(), unit_name)
 }
 
-fn semantic_calendar_unit(unit_name: &str) -> SemanticCalendarUnit {
-    match unit_name {
-        "month" => SemanticCalendarUnit::Month,
-        "year" => SemanticCalendarUnit::Year,
-        other => unreachable!("BUG: unknown calendar unit '{other}' after planning"),
+fn cast_to_number(value: &ValueKind, value_type: &LemmaType) -> OperationResult {
+    match value {
+        ValueKind::Range(left, right) => cast_range_span_to_number(left, right),
+        _ => cast_scalar_to_number(value, value_type),
     }
 }
 
-fn cast_to_number(value: &ValueKind, value_type: &LemmaType) -> OperationResult {
+fn cast_range_span_to_number(left: &TypedLiteral, right: &TypedLiteral) -> OperationResult {
+    let span = super::range::compute_span(left, right);
+    let OperationResult::Value(span_value) = span else {
+        return span;
+    };
+    // Span type is derived from endpoint types; use number for magnitude cast.
+    cast_scalar_to_number(&span_value.value, primitive_number_arc().as_ref())
+}
+
+fn cast_scalar_to_number(value: &ValueKind, value_type: &LemmaType) -> OperationResult {
     match value {
-        ValueKind::Range(left, right) => {
-            let span = super::range::compute_span(left, right);
-            let OperationResult::Value(span_value) = span else {
-                return span;
-            };
-            // Span type is derived from endpoint types; use number for magnitude cast.
-            cast_to_number(&span_value.value, primitive_number_arc().as_ref())
+        ValueKind::Range(_, _) => {
+            unreachable!("BUG: range cast to number is handled by cast_to_number")
         }
         ValueKind::Measure(magnitude) if value_type.is_calendar_like() => {
             let signature = value_type.measure_runtime_signature();
@@ -228,29 +222,22 @@ fn cast_to_number(value: &ValueKind, value_type: &LemmaType) -> OperationResult 
             let factor = value_type.measure_unit_factor(unit_name).clone();
             let in_unit = checked_div(magnitude, &factor)
                 .expect("BUG: calendar de-canonicalization by unit factor must not fail");
-            OperationResult::from_literal(LiteralValue::number_with_type(
-                in_unit,
-                primitive_number_arc().clone(),
-            ))
+            OperationResult::from_literal(LiteralValue::number(in_unit))
         }
-        ValueKind::Number(number) => OperationResult::from_literal(LiteralValue::number_with_type(
-            number.clone(),
-            primitive_number_arc().clone(),
-        )),
+        ValueKind::Number(number) => {
+            OperationResult::from_literal(LiteralValue::number(number.clone()))
+        }
         ValueKind::Boolean(b) => {
             let n = if *b {
                 rational_new(1, 1)
             } else {
                 rational_new(0, 1)
             };
-            OperationResult::from_literal(LiteralValue::number_with_type(
-                n,
-                primitive_number_arc().clone(),
-            ))
+            OperationResult::from_literal(LiteralValue::number(n))
         }
-        ValueKind::Ratio(rational_value) => OperationResult::from_literal(
-            LiteralValue::number_with_type(rational_value.clone(), primitive_number_arc().clone()),
-        ),
+        ValueKind::Ratio(rational_value) => {
+            OperationResult::from_literal(LiteralValue::number(rational_value.clone()))
+        }
         ValueKind::Measure(magnitude) => {
             let signature = value_type.measure_runtime_signature();
             let factor = if signature.is_empty() {
@@ -267,12 +254,13 @@ fn cast_to_number(value: &ValueKind, value_type: &LemmaType) -> OperationResult 
             };
             let in_unit = checked_div(magnitude, &factor)
                 .expect("BUG: de-canonicalization by unit factor must not fail");
-            OperationResult::from_literal(LiteralValue::number_with_type(
-                in_unit,
-                primitive_number_arc().clone(),
-            ))
+            OperationResult::from_literal(LiteralValue::number(in_unit))
         }
-        ValueKind::Text(_) | ValueKind::Date(_) | ValueKind::Time(_) | ValueKind::Spec(_) => {
+        ValueKind::Text(_)
+        | ValueKind::Date(_)
+        | ValueKind::Time(_)
+        | ValueKind::Spec(_)
+        | ValueKind::List(_) => {
             unreachable!(
                 "BUG: cast to number from {:?} should be rejected at planning",
                 value_type.name()

@@ -1,10 +1,10 @@
 //! Range endpoint (`lower`/`upper`) and width (`minimum`/`maximum`) constraints.
 
+use indexmap::IndexMap;
 use lemma::type_detail_lines;
 use lemma::DateTimeValue;
 use lemma::Engine;
 use lemma::TypeSpecification;
-use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -193,11 +193,11 @@ fn custom_measure_range_overlay_vetoes_endpoint() {
     let mut engine = Engine::new();
     load(&mut engine, cargo_mass_shipment_ok(), "cargo_veto_ep.lemma");
 
-    let mut data = HashMap::new();
+    let mut data = IndexMap::new();
     data.insert("shipment".to_string(), "50 kilogram...1 tonne".into());
     let response = engine
-        .run(None, "s", Some(&now()), data, None, false)
-        .expect("run must complete with veto, not Error");
+        .evaluate(None, "s", Some(&now()), data, None, false)
+        .expect("evaluate must complete with veto, not Error");
     let out = response.results.get("out").expect("out");
     assert!(out.vetoed, "overlay below lower must veto rule out");
     let reason = out.veto_reason.as_deref().expect("veto reason");
@@ -212,12 +212,12 @@ fn custom_measure_range_overlay_vetoes_width() {
     let mut engine = Engine::new();
     load(&mut engine, cargo_mass_shipment_ok(), "cargo_veto_w.lemma");
 
-    let mut data = HashMap::new();
+    let mut data = IndexMap::new();
     // Endpoints inside envelope but span 100kg < minimum 500kg
     data.insert("shipment".to_string(), "1 tonne...1.1 tonne".into());
     let response = engine
-        .run(None, "s", Some(&now()), data, None, false)
-        .expect("run must complete with veto, not Error");
+        .evaluate(None, "s", Some(&now()), data, None, false)
+        .expect("evaluate must complete with veto, not Error");
     let out = response.results.get("out").expect("out");
     assert!(out.vetoed, "overlay below width minimum must veto rule out");
     let reason = out.veto_reason.as_deref().expect("veto reason");
@@ -286,12 +286,13 @@ rule out: band
 }
 
 #[test]
-fn anonymous_measure_range_cross_unit_bounds() {
+fn measure_range_cross_unit_bounds_over_named_type() {
     let code = r#"
 spec s
-data band: measure range
+data mass: measure
   -> unit kilogram: 1
   -> unit tonne: 1000
+data band: mass range
   -> lower 100 kilogram
   -> upper 50 tonne
   -> minimum 500 kilogram
@@ -328,7 +329,6 @@ fn ratio_range_accepts_all_four_commands() {
     let code = r#"
 spec s
 data band: ratio range
-  -> unit percent: 100
   -> lower 0%
   -> upper 100%
   -> minimum 10%
@@ -623,11 +623,11 @@ rule out: tier
 "#;
     let mut engine = Engine::new();
     load(&mut engine, code, "number_overlay.lemma");
-    let mut data = HashMap::new();
+    let mut data = IndexMap::new();
     data.insert("tier".to_string(), "0...5".into());
     let response = engine
-        .run(None, "s", Some(&now()), data, None, false)
-        .expect("run must complete");
+        .evaluate(None, "s", Some(&now()), data, None, false)
+        .expect("evaluate must complete");
     let out = response.results.get("out").expect("out");
     assert!(
         out.vetoed,

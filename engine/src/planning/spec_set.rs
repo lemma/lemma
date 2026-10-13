@@ -10,6 +10,7 @@ use std::sync::Arc;
 /// a real memory reference instead of relying on string parsing.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct LemmaSpecSet {
+    #[serde(with = "crate::snapshot::shared::arc")]
     pub repository: Arc<LemmaRepository>,
     pub name: String,
     specs: BTreeMap<EffectiveDate, LemmaSpec>,

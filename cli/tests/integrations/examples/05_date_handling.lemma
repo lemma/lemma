@@ -22,32 +22,39 @@ data project_deadline:    2024-10-01T17:00:00Z
 data current_date:        date
 
 rule contract_duration:
-  contract_start...contract_end as day as Number
+  contract_start...contract_end as day as number
 
-rule probation_end_date: hire_date + probation_period
+rule probation_end_date:
+  hire_date + probation_period
 
 rule is_probation_complete:
   current_date > probation_end_date
 
 rule employee_age:
-  employee_birth_date...current_date as year as Number
+  employee_birth_date...current_date as year as number
 
-rule is_adult: employee_age >= 18
+rule is_adult:
+  employee_age >= 18
 
 rule days_until_deadline:
   current_date...project_deadline as day
 
-rule is_overdue: days_until_deadline < 0 day
+rule is_overdue:
+  days_until_deadline < 0 day
 
 rule is_urgent:
   days_until_deadline < 7 day and not is_overdue
 
-rule meeting_end_time: meeting_time + meeting_duration
+rule meeting_end_time:
+  meeting_time + meeting_duration
 
 rule contract_active:
-  current_date >= contract_start and current_date <= contract_end
+  current_date >= contract_start
+  and current_date <= contract_end
   unless is_overdue then false
 
-rule time_employed: hire_date...current_date
+rule time_employed:
+  hire_date...current_date
 
-rule years_employed: time_employed as year as Number
+rule years_employed:
+  time_employed as year as number

@@ -1,12 +1,13 @@
 //! End-to-end tests for strict veto semantics under normalization.
 //!
-//! Normalization may only delete a subexpression when it is total (a literal
-//! that can never veto). These tests pin the contract that the folded and
-//! unfolded forms of the same expression produce identical evaluation
+//! Normalization may only delete a subexpression whose removal cannot change the
+//! result: a total operand, or a literal `false` operand of `and`, which decides the
+//! conjunction whatever the other operands are. These tests pin the contract that the
+//! folded and unfolded forms of the same expression produce identical evaluation
 //! results for all of: value present, value missing, and operand vetoes.
 
-use lemma::{DateTimeValue, Engine};
-use std::collections::HashMap;
+use indexmap::IndexMap;
+use lemma::{DateTimeValue, Engine, EvaluateDataValue};
 use std::time::Instant;
 
 fn load(code: &str) -> Engine {
@@ -19,12 +20,12 @@ fn load(code: &str) -> Engine {
 
 fn run(engine: &Engine, spec: &str, inputs: &[(&str, &str)]) -> lemma::Response {
     let now = DateTimeValue::now();
-    let data: HashMap<String, String> = inputs
+    let data: IndexMap<String, EvaluateDataValue> = inputs
         .iter()
-        .map(|(name, value)| (name.to_string(), (*value).to_string()))
+        .map(|(name, value)| (name.to_string(), (*value).into()))
         .collect();
     engine
-        .run(None, spec, Some(&now), data, None, false)
+        .evaluate(None, spec, Some(&now), data, None, false)
         .expect("evaluation must succeed")
 }
 
@@ -126,7 +127,7 @@ rule r: blocked * 0
 }
 
 #[test]
-fn and_with_literal_false_keeps_missing_data_veto() {
+fn and_with_literal_false_is_false_without_missing_data() {
     let engine = load(
         r#"
 spec strict_and
@@ -135,14 +136,12 @@ rule r: flag and (1 > 2)
 "#,
     );
 
-    // `1 > 2` constant-folds to `false`; the conjunction must still demand
-    // `flag` so its missing-data veto propagates.
+    // `1 > 2` constant-folds to `false`, which decides the conjunction whatever
+    // `flag` is, so a missing `flag` does not veto.
     let missing = run(&engine, "strict_and", &[]);
     let result = rule_result(&missing, "r");
-    assert!(
-        result.vetoed,
-        "flag is missing: the conjunction must veto, not fold to false"
-    );
+    assert!(!result.vetoed, "flag is not needed: false decides the and");
+    assert_eq!(result.result(), Some("false"));
 
     let supplied = run(&engine, "strict_and", &[("flag", "yes")]);
     let result = rule_result(&supplied, "r");
@@ -226,4 +225,206 @@ fn self_doubling_rule_chain_shares_graph_cells() {
         "doubling n={n} load+run took {:?}; expected shared-graph path",
         started.elapsed()
     );
+}
+
+#[derive(Debug)]
+enum Outcome {
+    Result(&'static str),
+    Missing(Vec<&'static str>),
+    Veto(&'static str),
+}
+
+fn assert_outcome(result: &lemma::RuleResult, expected: &Outcome, context: &str) {
+    match expected {
+        Outcome::Result(value) => {
+            assert!(
+                !result.vetoed,
+                "{context}: expected {value}, got {result:?}"
+            );
+            assert_eq!(result.result(), Some(*value), "{context}");
+        }
+        Outcome::Missing(names) => {
+            assert!(
+                result.vetoed,
+                "{context}: expected missing data, got {result:?}"
+            );
+            let mut actual = result.missing_data().to_vec();
+            actual.sort();
+            let mut wanted: Vec<String> = names.iter().map(|name| name.to_string()).collect();
+            wanted.sort();
+            assert_eq!(actual, wanted, "{context}");
+        }
+        Outcome::Veto(reason) => {
+            assert!(result.vetoed, "{context}: expected veto, got {result:?}");
+            assert_eq!(result.veto_reason.as_deref(), Some(*reason), "{context}");
+            assert!(result.missing_data().is_empty(), "{context}");
+        }
+    }
+}
+
+const RESIDUAL_FIRST_FOLDED: &str = r#"
+spec order
+data model: text
+data extra: boolean
+data flag_c: boolean
+data amount: number
+rule r: 0
+  unless model is "b" and extra then amount
+  unless flag_c and model is "c" then 3
+"#;
+
+const RESIDUAL_FIRST_UNFOLDED: &str = r#"
+spec order
+data model: text
+data extra: boolean
+data flag_c: boolean
+data amount: number
+rule r: 0
+  unless model is "b" and extra then amount
+  unless flag_c and model is "c" then 3
+  unless model is "z" then 9
+"#;
+
+#[test]
+fn residual_first_conjunction_folded_and_unfolded_agree() {
+    let cases: [(&[(&str, &str)], Outcome); 6] = [
+        (
+            &[("model", "b"), ("extra", "true"), ("amount", "5")],
+            Outcome::Result("5"),
+        ),
+        (
+            &[("model", "b"), ("extra", "true")],
+            Outcome::Missing(vec!["amount"]),
+        ),
+        (&[("model", "b"), ("extra", "false")], Outcome::Result("0")),
+        (&[("model", "c")], Outcome::Missing(vec!["flag_c"])),
+        (&[("model", "c"), ("flag_c", "false")], Outcome::Result("0")),
+        (&[("model", "c"), ("flag_c", "true")], Outcome::Result("3")),
+    ];
+    for (form, source) in [
+        ("folded", RESIDUAL_FIRST_FOLDED),
+        ("unfolded", RESIDUAL_FIRST_UNFOLDED),
+    ] {
+        let engine = load(source);
+        for (inputs, expected) in &cases {
+            let response = run(&engine, "order", inputs);
+            let result = rule_result(&response, "r");
+            let context = format!("{form} {inputs:?}");
+            match (form, expected) {
+                // The unfolded piecewise keeps lower-priority arms live while an
+                // undecided arm is unknown, so its missing list may add data.
+                ("unfolded", Outcome::Missing(names)) => {
+                    assert!(
+                        result.vetoed,
+                        "{context}: expected missing data, got {result:?}"
+                    );
+                    for name in names {
+                        assert!(
+                            result.missing_data().iter().any(|actual| actual == name),
+                            "{context}: missing list {:?} does not include {name}",
+                            result.missing_data()
+                        );
+                    }
+                }
+                _ => assert_outcome(result, expected, &context),
+            }
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum OperandKind {
+    True,
+    False,
+    Missing,
+    Veto,
+}
+
+/// Operand text for the matrix spec. `Veto` operands are the rule `blocked`.
+fn operand_expression(kind: OperandKind, name: &'static str) -> &'static str {
+    match kind {
+        OperandKind::Veto => "blocked",
+        OperandKind::True | OperandKind::False | OperandKind::Missing => name,
+    }
+}
+
+/// Expected outcome of `first and second`, in evaluation order. A false operand
+/// decides regardless of position. Otherwise the first missing or vetoed operand in
+/// source order propagates.
+fn expected_and(
+    first: (OperandKind, &'static str),
+    second: (OperandKind, &'static str),
+) -> Outcome {
+    let operands = [first, second];
+    if operands.iter().any(|(kind, _)| *kind == OperandKind::False) {
+        return Outcome::Result("false");
+    }
+    for (kind, _) in operands {
+        match kind {
+            OperandKind::True => {}
+            OperandKind::False => unreachable!("BUG: false operand decided above"),
+            OperandKind::Missing => {
+                let names = operands
+                    .iter()
+                    .filter(|(kind, _)| *kind == OperandKind::Missing)
+                    .map(|(_, name)| *name)
+                    .collect();
+                return Outcome::Missing(names);
+            }
+            OperandKind::Veto => return Outcome::Veto("blocked"),
+        }
+    }
+    Outcome::Result("true")
+}
+
+#[test]
+fn and_is_order_independent_for_every_operand_kind_pair() {
+    let kinds = [
+        OperandKind::True,
+        OperandKind::False,
+        OperandKind::Missing,
+        OperandKind::Veto,
+    ];
+    for first_kind in kinds {
+        for second_kind in kinds {
+            let first = (first_kind, "a");
+            let second = (second_kind, "b");
+            let engine = load(&format!(
+                r#"
+spec matrix
+data a: boolean
+data b: boolean
+rule blocked: veto "blocked"
+rule forward: {} and {}
+rule backward: {} and {}
+"#,
+                operand_expression(first_kind, "a"),
+                operand_expression(second_kind, "b"),
+                operand_expression(second_kind, "b"),
+                operand_expression(first_kind, "a"),
+            ));
+            let mut inputs: Vec<(&str, &str)> = Vec::new();
+            match first_kind {
+                OperandKind::True => inputs.push(("a", "true")),
+                OperandKind::False => inputs.push(("a", "false")),
+                OperandKind::Missing | OperandKind::Veto => {}
+            }
+            match second_kind {
+                OperandKind::True => inputs.push(("b", "true")),
+                OperandKind::False => inputs.push(("b", "false")),
+                OperandKind::Missing | OperandKind::Veto => {}
+            }
+            let response = run(&engine, "matrix", &inputs);
+            assert_outcome(
+                rule_result(&response, "forward"),
+                &expected_and(first, second),
+                &format!("forward {first_kind:?} and {second_kind:?}"),
+            );
+            assert_outcome(
+                rule_result(&response, "backward"),
+                &expected_and(second, first),
+                &format!("backward {second_kind:?} and {first_kind:?}"),
+            );
+        }
+    }
 }

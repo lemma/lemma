@@ -13,16 +13,22 @@ pub fn mathematical_computation_preserves_measure_magnitude(op: &MathematicalCom
     )
 }
 
-fn apply_decimal_magnitude_op(
+pub(crate) fn apply_rational_magnitude_op(
     op: &MathematicalComputation,
-    magnitude: rust_decimal::Decimal,
-) -> rust_decimal::Decimal {
+    magnitude: &crate::computation::rational::RationalInteger,
+) -> Result<
+    crate::computation::rational::RationalInteger,
+    crate::computation::rational::NumericFailure,
+> {
+    use crate::computation::rational::{
+        rational_abs, rational_ceil, rational_floor, rational_round,
+    };
     match op {
-        MathematicalComputation::Abs => magnitude.abs(),
-        MathematicalComputation::Floor => magnitude.floor(),
-        MathematicalComputation::Ceil => magnitude.ceil(),
-        MathematicalComputation::Round => magnitude.round(),
-        _ => unreachable!("BUG: non-magnitude-preserving op passed to apply_decimal_magnitude_op"),
+        MathematicalComputation::Abs => rational_abs(magnitude),
+        MathematicalComputation::Floor => rational_floor(magnitude),
+        MathematicalComputation::Ceil => rational_ceil(magnitude),
+        MathematicalComputation::Round => rational_round(magnitude),
+        _ => unreachable!("BUG: non-magnitude-preserving op passed to apply_rational_magnitude_op"),
     }
 }
 
@@ -54,22 +60,7 @@ pub fn measure_magnitude_math(
             }
         };
 
-    let magnitude_decimal = match magnitude_in_unit.try_to_decimal() {
-        Ok(decimal) => decimal,
-        Err(crate::computation::rational::NumericFailure::Overflow) => {
-            return OperationResult::Veto(VetoType::computation(
-                "Calculated result exceeds decimal value limit",
-            ));
-        }
-        Err(failure) => {
-            return OperationResult::Veto(VetoType::computation(failure.to_string()));
-        }
-    };
-
-    let rounded_decimal = apply_decimal_magnitude_op(op, magnitude_decimal);
-
-    let rounded_rational = match crate::computation::rational::decimal_to_rational(rounded_decimal)
-    {
+    let rounded_rational = match apply_rational_magnitude_op(op, &magnitude_in_unit) {
         Ok(rational) => rational,
         Err(failure) => {
             return OperationResult::Veto(VetoType::computation(failure.to_string()));
@@ -99,8 +90,18 @@ mod tests {
     #[test]
     fn compound_signature_vetoes() {
         let mut decomp = BaseMeasureVector::new();
-        decomp.insert("meter".to_string(), 1);
-        decomp.insert("second".to_string(), -1);
+        decomp.insert(
+            crate::planning::semantics::Dimension::Family(
+                crate::planning::semantics::tests::test_type_family("meter"),
+            ),
+            1,
+        );
+        decomp.insert(
+            crate::planning::semantics::Dimension::Family(
+                crate::planning::semantics::tests::test_type_family("second"),
+            ),
+            -1,
+        );
         let lemma_type = Arc::new(LemmaType::anonymous_for_decomposition(decomp));
         let value = BoundValueKind::unbound(ValueKind::Measure(rational_new(100, 1)));
         let result = measure_magnitude_math(&MathematicalComputation::Ceil, &value, &lemma_type);

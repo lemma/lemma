@@ -47,7 +47,7 @@ pub const PROFILE_BENCH_CASES: &[BenchCase] = &[
     BenchCase {
         group: "dutch_salary",
         function: "engine_evaluate",
-        label: "Full `Engine::run`",
+        label: "Full `Engine::evaluate`",
     },
     BenchCase {
         group: "dutch_salary",
@@ -108,7 +108,7 @@ fn compose_report(
     out.push_str("## Methodology\n\n");
     out.push_str("### HTTP evaluate (`http_evaluate`)\n\n");
     out.push_str(
-        "- Spawns `lemma server --prefix engine/documentation/examples` on `127.0.0.1:19877` once per Criterion group.\n",
+        "- Spawns `lemma server --path engine/documentation/examples` on `127.0.0.1:19877` once per Criterion group.\n",
     );
     out.push_str(
         "- Each iteration: blocking `reqwest` POST with `application/x-www-form-urlencoded` body \
@@ -174,6 +174,7 @@ mod tests {
             rustc_version: "rustc test".to_string(),
             uname: "Linux test x86_64".to_string(),
             git_sha: "abc123".to_string(),
+            generated_at: "2026-01-01T00:00:00Z".to_string(),
         };
         let row = LatencyRow {
             median_ns: 1_000_000.0,

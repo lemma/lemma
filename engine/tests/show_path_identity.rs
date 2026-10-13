@@ -32,8 +32,8 @@ rule r: n
         show.rules.get("r").expect("r").path,
         Vec::<PathSegment>::new()
     );
-    let json = serde_json::to_value(lemma::api::Show::from(&show)).expect("json");
-    assert!(json.get("repository").is_none());
+    let json = lemma::api::show_document(&engine, &show);
+    assert!(json.get("x-lemma-repository").is_none());
 }
 
 #[test]
@@ -206,33 +206,20 @@ rule r: elapsed
         )])
         .expect("load");
     let show = engine.show(None, "s", None).expect("show");
-    // Nested units typedef slots appear under the uses alias with repository lemma.
-    let duration = show
-        .data
-        .get("u.duration")
-        .or_else(|| show.data.get("elapsed"))
-        .expect("duration-related slot");
-    let segment = duration
-        .path
-        .iter()
-        .find(|segment| segment.uses == "u" || segment.spec == "units")
-        .or_else(|| duration.path.first());
-    if let Some(segment) = segment {
-        assert_eq!(segment.repository.as_deref(), Some("lemma"));
-        assert_eq!(segment.spec, "units");
-    } else {
-        // Local `elapsed: u.duration` may be a type declaration with empty path;
-        // the import alias still appears on nested promptable units data.
-        let lemma_segments: Vec<_> = show
-            .data
-            .values()
-            .flat_map(|entry| entry.path.iter())
-            .filter(|segment| segment.repository.as_deref() == Some("lemma"))
-            .collect();
-        assert!(
-            !lemma_segments.is_empty(),
-            "expected PathSegment with repository lemma; keys: {:?}",
-            show.data.keys().collect::<Vec<_>>()
-        );
+    let elapsed = show
+        .types
+        .get("elapsed")
+        .expect("local elapsed is in Types");
+    let api_type = lemma::api::LemmaType::from(elapsed);
+    match &api_type.extends {
+        lemma::api::TypeExtends::Custom { parent, family, .. } => {
+            assert_eq!(parent, "u.duration");
+            assert!(
+                family.contains("lemma") && family.contains("units"),
+                "family must name lemma units: {family}"
+            );
+        }
+        other => panic!("expected custom extends from lemma units, got {other:?}"),
     }
+    assert!(show.data.contains_key("elapsed"), "elapsed is needed by r");
 }

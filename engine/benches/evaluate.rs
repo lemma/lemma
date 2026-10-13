@@ -16,18 +16,29 @@ fn bench_fixture(criterion: &mut Criterion, fixture: &common::Fixture) {
     });
 
     let engine = eval::load_engine(fixture);
-    let terminal = eval::terminal_rule(fixture.spec_name).to_string();
+    let rules = [eval::terminal_rule(fixture.spec_name).to_string()];
 
     group.bench_function("evaluate", |bencher| {
         bencher.iter(|| {
-            let response = eval::evaluate_loaded(&engine, fixture, &terminal, false);
+            let data = fixture.inputs();
+            let response = eval::evaluate_loaded(&engine, fixture.spec_name, data, &rules, false);
             std::hint::black_box(response);
+        });
+    });
+
+    group.bench_function("show", |bencher| {
+        bencher.iter(|| {
+            let show = engine
+                .show(None, fixture.spec_name, Some(&common::effective()))
+                .expect("BUG: bench fixture must show");
+            std::hint::black_box(show);
         });
     });
 
     group.bench_function("evaluate_explain", |bencher| {
         bencher.iter(|| {
-            let response = eval::evaluate_loaded(&engine, fixture, &terminal, true);
+            let data = fixture.inputs();
+            let response = eval::evaluate_loaded(&engine, fixture.spec_name, data, &rules, true);
             std::hint::black_box(response);
         });
     });

@@ -6,37 +6,26 @@
 use crate::computation::operation_result::{OperationResult, VetoType};
 use crate::computation::rational::{rational_new, RationalInteger};
 use crate::planning::semantics::{
-    ArithmeticComputation, ComparisonComputation, LiteralValue, SemanticCalendarUnit,
-    SemanticDateTime, SemanticTime, SemanticTimezone, ValueKind,
+    ArithmeticComputation, ComparisonComputation, LiteralValue, SemanticDateTime, SemanticTime,
+    SemanticTimezone, ValueKind,
 };
 use chrono::{
     DateTime, Datelike, Duration as ChronoDuration, FixedOffset, NaiveDate, NaiveDateTime,
     NaiveTime, TimeZone, Timelike,
 };
 
-const SECONDS_PER_HOUR: i32 = 3600;
-const SECONDS_PER_MINUTE: i32 = 60;
 const MICROSECONDS_PER_SECOND: i64 = 1_000_000;
 
 const EPOCH_YEAR: i32 = 1970;
 const EPOCH_MONTH: u32 = 1;
 const EPOCH_DAY: u32 = 1;
 
-fn create_semantic_timezone_offset(
-    timezone: &Option<SemanticTimezone>,
-) -> Result<FixedOffset, String> {
-    if let Some(tz) = timezone {
-        let offset_seconds = (tz.offset_hours as i32 * SECONDS_PER_HOUR)
-            + (tz.offset_minutes as i32 * SECONDS_PER_MINUTE);
-        FixedOffset::east_opt(offset_seconds).ok_or_else(|| {
-            format!(
-                "Invalid timezone offset: {}:{}",
-                tz.offset_hours, tz.offset_minutes
-            )
-        })
-    } else {
-        FixedOffset::east_opt(0).ok_or_else(|| "Failed to create UTC offset".to_string())
-    }
+fn create_semantic_timezone_offset(timezone: &Option<SemanticTimezone>) -> FixedOffset {
+    let offset_seconds = timezone
+        .as_ref()
+        .map_or(0, SemanticTimezone::offset_seconds);
+    FixedOffset::east_opt(offset_seconds)
+        .expect("BUG: SemanticTimezone offsets are bounded to ±23:59")
 }
 
 /// Perform date/datetime arithmetic, returning OperationResult (Veto on error)
@@ -64,10 +53,7 @@ pub fn datetime_arithmetic(
                 Some(d) => d,
                 None => return OperationResult::Veto(VetoType::computation("Date overflow")),
             };
-            OperationResult::from_literal(LiteralValue::date_with_type(
-                chrono_to_semantic_datetime(new_dt),
-                std::sync::Arc::clone(left_type),
-            ))
+            OperationResult::from_literal(LiteralValue::date(chrono_to_semantic_datetime(new_dt)))
         }
 
         (ValueKind::Date(date), ValueKind::Measure(_), ArithmeticComputation::Add)
@@ -83,10 +69,7 @@ pub fn datetime_arithmetic(
                 Err(msg) => return OperationResult::Veto(VetoType::computation(msg)),
             };
 
-            OperationResult::from_literal(LiteralValue::date_with_type(
-                chrono_to_semantic_datetime(new_dt),
-                std::sync::Arc::clone(left_type),
-            ))
+            OperationResult::from_literal(LiteralValue::date(chrono_to_semantic_datetime(new_dt)))
         }
 
         (
@@ -107,10 +90,7 @@ pub fn datetime_arithmetic(
                 Some(d) => d,
                 None => return OperationResult::Veto(VetoType::computation("Date overflow")),
             };
-            OperationResult::from_literal(LiteralValue::date_with_type(
-                chrono_to_semantic_datetime(new_dt),
-                std::sync::Arc::clone(left_type),
-            ))
+            OperationResult::from_literal(LiteralValue::date(chrono_to_semantic_datetime(new_dt)))
         }
 
         (
@@ -128,10 +108,7 @@ pub fn datetime_arithmetic(
                 Err(msg) => return OperationResult::Veto(VetoType::computation(msg)),
             };
 
-            OperationResult::from_literal(LiteralValue::date_with_type(
-                chrono_to_semantic_datetime(new_dt),
-                std::sync::Arc::clone(left_type),
-            ))
+            OperationResult::from_literal(LiteralValue::date(chrono_to_semantic_datetime(new_dt)))
         }
 
         (ValueKind::Measure(_), ValueKind::Date(date), ArithmeticComputation::Add)
@@ -150,10 +127,7 @@ pub fn datetime_arithmetic(
                 Some(d) => d,
                 None => return OperationResult::Veto(VetoType::computation("Date overflow")),
             };
-            OperationResult::from_literal(LiteralValue::date_with_type(
-                chrono_to_semantic_datetime(new_dt),
-                std::sync::Arc::clone(right_type),
-            ))
+            OperationResult::from_literal(LiteralValue::date(chrono_to_semantic_datetime(new_dt)))
         }
 
         (ValueKind::Measure(_), ValueKind::Date(date), ArithmeticComputation::Add)
@@ -169,10 +143,7 @@ pub fn datetime_arithmetic(
                 Err(msg) => return OperationResult::Veto(VetoType::computation(msg)),
             };
 
-            OperationResult::from_literal(LiteralValue::date_with_type(
-                chrono_to_semantic_datetime(new_dt),
-                std::sync::Arc::clone(right_type),
-            ))
+            OperationResult::from_literal(LiteralValue::date(chrono_to_semantic_datetime(new_dt)))
         }
 
         (ValueKind::Date(date), ValueKind::Time(time), ArithmeticComputation::Subtract) => {
@@ -210,10 +181,7 @@ pub fn datetime_arithmetic(
             let naive_dt = NaiveDateTime::new(naive_date, naive_time);
 
             // Use the date's timezone, or UTC if not specified
-            let offset = match create_semantic_timezone_offset(&date.timezone) {
-                Ok(o) => o,
-                Err(msg) => return OperationResult::Veto(VetoType::computation(msg)),
-            };
+            let offset = create_semantic_timezone_offset(&date.timezone);
             let time_dt = match offset.from_local_datetime(&naive_dt).single() {
                 Some(dt) => dt,
                 None => {
@@ -257,18 +225,20 @@ pub(crate) fn semantic_datetime_to_chrono(
 
     let naive_dt = NaiveDateTime::new(naive_date, naive_time);
 
-    let offset = create_semantic_timezone_offset(&date.timezone)?;
+    let offset = create_semantic_timezone_offset(&date.timezone);
     offset
         .from_local_datetime(&naive_dt)
         .single()
         .ok_or_else(|| "Ambiguous or invalid datetime for timezone".to_string())
 }
 
-fn chrono_to_semantic_datetime(dt: DateTime<FixedOffset>) -> SemanticDateTime {
-    let offset_seconds = dt.offset().local_minus_utc();
-    let offset_hours = (offset_seconds / SECONDS_PER_HOUR) as i8;
-    let offset_minutes = ((offset_seconds.abs() % SECONDS_PER_HOUR) / SECONDS_PER_MINUTE) as u8;
+fn semantic_timezone_of(dt: &DateTime<FixedOffset>) -> SemanticTimezone {
+    SemanticTimezone::from_offset_seconds(dt.offset().local_minus_utc())
+        .expect("BUG: chrono offsets here are built from SemanticTimezone whole minutes")
+}
 
+fn chrono_to_semantic_datetime(dt: DateTime<FixedOffset>) -> SemanticDateTime {
+    let timezone = semantic_timezone_of(&dt);
     SemanticDateTime {
         year: dt.year(),
         month: dt.month(),
@@ -277,10 +247,7 @@ fn chrono_to_semantic_datetime(dt: DateTime<FixedOffset>) -> SemanticDateTime {
         minute: dt.minute(),
         second: dt.second(),
         microsecond: dt.nanosecond() / 1000 % 1_000_000,
-        timezone: Some(SemanticTimezone {
-            offset_hours,
-            offset_minutes,
-        }),
+        timezone: Some(timezone),
     }
 }
 
@@ -380,8 +347,6 @@ fn days_in_month(year: i32, month: u32) -> u32 {
 pub fn compute_date_calendar_difference(
     left: &SemanticDateTime,
     right: &SemanticDateTime,
-    unit: &SemanticCalendarUnit,
-    lemma_type: std::sync::Arc<crate::planning::semantics::LemmaType>,
 ) -> OperationResult {
     let left_datetime = match semantic_datetime_to_chrono(left) {
         Ok(value) => value,
@@ -396,9 +361,8 @@ pub fn compute_date_calendar_difference(
     let abs_months = signed_full_months.unsigned_abs();
     // Calendar quantities store canonical month counts; year/month signature selects display unit.
     let value = rational_new(i64::from(abs_months), 1);
-    let _ = unit;
 
-    OperationResult::from_literal(LiteralValue::calendar(value, unit.clone(), lemma_type))
+    OperationResult::from_literal(LiteralValue::measure(value))
 }
 
 fn signed_full_months_between(left: &DateTime<FixedOffset>, right: &DateTime<FixedOffset>) -> i32 {
@@ -585,10 +549,7 @@ pub fn time_arithmetic(
                 Some(d) => d,
                 None => return OperationResult::Veto(VetoType::computation("Time overflow")),
             };
-            OperationResult::from_literal(LiteralValue::time_with_type(
-                chrono_datetime_to_semantic_time(result_dt),
-                std::sync::Arc::clone(left_type),
-            ))
+            OperationResult::from_literal(LiteralValue::time(chrono_datetime_to_semantic_time(result_dt)))
         }
 
         (
@@ -609,10 +570,7 @@ pub fn time_arithmetic(
                 Some(d) => d,
                 None => return OperationResult::Veto(VetoType::computation("Time overflow")),
             };
-            OperationResult::from_literal(LiteralValue::time_with_type(
-                chrono_datetime_to_semantic_time(result_dt),
-                std::sync::Arc::clone(left_type),
-            ))
+            OperationResult::from_literal(LiteralValue::time(chrono_datetime_to_semantic_time(result_dt)))
         }
 
         (ValueKind::Measure(_), ValueKind::Time(time), ArithmeticComputation::Add)
@@ -631,10 +589,7 @@ pub fn time_arithmetic(
                 Some(d) => d,
                 None => return OperationResult::Veto(VetoType::computation("Time overflow")),
             };
-            OperationResult::from_literal(LiteralValue::time_with_type(
-                chrono_datetime_to_semantic_time(result_dt),
-                std::sync::Arc::clone(right_type),
-            ))
+            OperationResult::from_literal(LiteralValue::time(chrono_datetime_to_semantic_time(result_dt)))
         }
 
         (ValueKind::Time(time), ValueKind::Date(date), ArithmeticComputation::Subtract) => {
@@ -672,10 +627,7 @@ pub fn time_arithmetic(
             let naive_dt = NaiveDateTime::new(naive_date, naive_time);
 
             // Use the time's timezone, or UTC if not specified
-            let offset = match create_semantic_timezone_offset(&time.timezone) {
-                Ok(o) => o,
-                Err(msg) => return OperationResult::Veto(VetoType::computation(msg)),
-            };
+            let offset = create_semantic_timezone_offset(&time.timezone);
             let date_dt = match offset.from_local_datetime(&naive_dt).single() {
                 Some(dt) => dt,
                 None => {
@@ -722,7 +674,7 @@ pub(crate) fn semantic_time_to_chrono_datetime(
 
     let naive_dt = NaiveDateTime::new(naive_date, naive_time);
 
-    let offset = create_semantic_timezone_offset(&time.timezone)?;
+    let offset = create_semantic_timezone_offset(&time.timezone);
     offset
         .from_local_datetime(&naive_dt)
         .single()
@@ -730,19 +682,13 @@ pub(crate) fn semantic_time_to_chrono_datetime(
 }
 
 fn chrono_datetime_to_semantic_time(dt: DateTime<FixedOffset>) -> SemanticTime {
-    let offset_seconds = dt.offset().local_minus_utc();
-    let offset_hours = (offset_seconds / SECONDS_PER_HOUR) as i8;
-    let offset_minutes = ((offset_seconds.abs() % SECONDS_PER_HOUR) / SECONDS_PER_MINUTE) as u8;
-
+    let timezone = semantic_timezone_of(&dt);
     SemanticTime {
         hour: dt.hour(),
         minute: dt.minute(),
         second: dt.second(),
         microsecond: dt.nanosecond() / 1000 % 1_000_000,
-        timezone: Some(SemanticTimezone {
-            offset_hours,
-            offset_minutes,
-        }),
+        timezone: Some(timezone),
     }
 }
 
@@ -925,16 +871,13 @@ mod tests {
             minute: min,
             second: s,
             microsecond: 0,
-            timezone: Some(SemanticTimezone {
-                offset_hours: 0,
-                offset_minutes: 0,
-            }),
+            timezone: Some(SemanticTimezone { offset_minutes: 0 }),
         }
     }
 
     fn tz_datetime(
         (y, m, d, h, min, s, us): (i32, u32, u32, u32, u32, u32, u32),
-        (tz_h, tz_m): (i8, u8),
+        offset_minutes: i16,
     ) -> SemanticDateTime {
         SemanticDateTime {
             year: y,
@@ -944,10 +887,7 @@ mod tests {
             minute: min,
             second: s,
             microsecond: us,
-            timezone: Some(SemanticTimezone {
-                offset_hours: tz_h,
-                offset_minutes: tz_m,
-            }),
+            timezone: Some(SemanticTimezone { offset_minutes }),
         }
     }
 
@@ -1349,7 +1289,7 @@ mod tests {
     #[test]
     fn in_past_respects_timezone_offset() {
         // now is 2026-03-07 01:00 +02:00 = 2026-03-06 23:00 UTC
-        let now = tz_datetime((2026, 3, 7, 1, 0, 0, 0), (2, 0));
+        let now = tz_datetime((2026, 3, 7, 1, 0, 0, 0), 120);
         // date is 2026-03-07 00:00 UTC = 2026-03-07 00:00 +00:00
         let date = utc_datetime(2026, 3, 7, 0, 0, 0);
         // date (UTC midnight Mar 7) is AFTER now (UTC 23:00 Mar 6)
@@ -1366,7 +1306,7 @@ mod tests {
         // = 2026-12-31T18:59:59.999999 UTC
         // date is 2026-12-31T23:59:59 UTC which is 2027-01-01T04:59:59 +05:00
         // so date is OUTSIDE the calendar year in now's timezone
-        let now = tz_datetime((2026, 6, 15, 12, 0, 0, 0), (5, 0));
+        let now = tz_datetime((2026, 6, 15, 12, 0, 0, 0), 300);
         let date = utc_datetime(2026, 12, 31, 23, 59, 59);
         assert_false(&compute_date_calendar(
             &DateCalendarKind::Current,
@@ -1379,7 +1319,7 @@ mod tests {
     #[test]
     fn in_calendar_year_timezone_boundary_inside() {
         // now is +05:00; date is 2026-12-31T18:00 UTC = 2026-12-31T23:00 +05:00 → inside year
-        let now = tz_datetime((2026, 6, 15, 12, 0, 0, 0), (5, 0));
+        let now = tz_datetime((2026, 6, 15, 12, 0, 0, 0), 300);
         let date = utc_datetime(2026, 12, 31, 18, 0, 0);
         assert_true(&compute_date_calendar(
             &DateCalendarKind::Current,
@@ -1393,8 +1333,8 @@ mod tests {
 
     #[test]
     fn in_past_microsecond_precision_boundary() {
-        let now = tz_datetime((2026, 3, 7, 12, 0, 0, 500_000), (0, 0));
-        let date = tz_datetime((2026, 3, 7, 12, 0, 0, 499_999), (0, 0));
+        let now = tz_datetime((2026, 3, 7, 12, 0, 0, 500_000), 0);
+        let date = tz_datetime((2026, 3, 7, 12, 0, 0, 499_999), 0);
         // date is 1 microsecond before now
         assert_true(&compute_date_relative(
             &DateRelativeKind::InPast,

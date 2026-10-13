@@ -1,6 +1,7 @@
 //! `lower` / `upper` read the ordered endpoints of a range.
 
-use lemma::{DateTimeValue, Engine};
+use indexmap::IndexMap;
+use lemma::{DateTimeValue, Engine, EvaluateDataValue};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -12,14 +13,14 @@ fn source() -> lemma::SourceType {
 fn eval_rules(
     code: &str,
     rules: &[&str],
-    data: HashMap<String, String>,
+    data: IndexMap<String, EvaluateDataValue>,
 ) -> HashMap<String, String> {
     let mut engine = Engine::new();
     engine
         .load([(source(), code.to_string())])
         .expect("Should parse and plan");
     let response = engine
-        .run(
+        .evaluate(
             None,
             "test",
             Some(&DateTimeValue::now()),
@@ -54,7 +55,7 @@ fn eval_rules(
 }
 
 fn eval_one(code: &str, rule: &str) -> String {
-    eval_rules(code, &[rule], HashMap::new())
+    eval_rules(code, &[rule], IndexMap::new())
         .remove(rule)
         .expect("rule")
 }
@@ -100,7 +101,7 @@ rule lo: lower (2024-01-01...2024-06-15)
 rule hi: upper (2024-01-01...2024-06-15)
 rule start: 2024-01-01
 rule end: 2024-06-15"#;
-    let values = eval_rules(code, &["lo", "hi", "start", "end"], HashMap::new());
+    let values = eval_rules(code, &["lo", "hi", "start", "end"], IndexMap::new());
     assert_eq!(values["lo"], values["start"]);
     assert_eq!(values["hi"], values["end"]);
 }
@@ -112,7 +113,7 @@ rule lo: lower (09:00...17:00)
 rule hi: upper (09:00...17:00)
 rule start: 09:00
 rule end: 17:00"#;
-    let values = eval_rules(code, &["lo", "hi", "start", "end"], HashMap::new());
+    let values = eval_rules(code, &["lo", "hi", "start", "end"], IndexMap::new());
     assert_eq!(values["lo"], values["start"]);
     assert_eq!(values["hi"], values["end"]);
 }
@@ -125,7 +126,7 @@ rule lo: lower (30 kilogram...35 kilogram)
 rule hi: upper (30 kilogram...35 kilogram)
 rule start: 30 kilogram
 rule end: 35 kilogram"#;
-    let values = eval_rules(code, &["lo", "hi", "start", "end"], HashMap::new());
+    let values = eval_rules(code, &["lo", "hi", "start", "end"], IndexMap::new());
     assert_eq!(values["lo"], values["start"]);
     assert_eq!(values["hi"], values["end"]);
 }
@@ -141,10 +142,10 @@ rule start: lower band"#;
     engine
         .load([(source(), code.to_string())])
         .expect("Should parse and plan");
-    let mut data = HashMap::new();
-    data.insert("band".to_string(), "10 eur...40 eur".to_string());
+    let mut data = IndexMap::new();
+    data.insert("band".to_string(), "10 eur...40 eur".into());
     let response = engine
-        .run(
+        .evaluate(
             None,
             "test",
             Some(&DateTimeValue::now()),
@@ -166,7 +167,7 @@ rule lo: lower (10%...50%)
 rule hi: upper (10%...50%)
 rule start: 10%
 rule end: 50%"#;
-    let values = eval_rules(code, &["lo", "hi", "start", "end"], HashMap::new());
+    let values = eval_rules(code, &["lo", "hi", "start", "end"], IndexMap::new());
     assert_eq!(values["lo"], values["start"]);
     assert_eq!(values["hi"], values["end"]);
 }
@@ -179,7 +180,7 @@ rule lo: lower (18 year...67 year)
 rule hi: upper (18 year...67 year)
 rule start: 18 year
 rule end: 67 year"#;
-    let values = eval_rules(code, &["lo", "hi", "start", "end"], HashMap::new());
+    let values = eval_rules(code, &["lo", "hi", "start", "end"], IndexMap::new());
     assert_eq!(values["lo"], values["start"]);
     assert_eq!(values["hi"], values["end"]);
 }
@@ -192,7 +193,11 @@ rule start: lower (past 7 day)
 rule from_now: now - 7 day
 rule end: upper (past 7 day)
 rule today: now"#;
-    let values = eval_rules(code, &["start", "from_now", "end", "today"], HashMap::new());
+    let values = eval_rules(
+        code,
+        &["start", "from_now", "end", "today"],
+        IndexMap::new(),
+    );
     assert_eq!(values["start"], values["from_now"]);
     assert_eq!(values["end"], values["today"]);
 }
@@ -203,8 +208,8 @@ fn data_range_endpoints() {
 data tier: number range
 rule lo: lower tier
 rule hi: upper tier"#;
-    let mut data = HashMap::new();
-    data.insert("tier".to_string(), "3...9".to_string());
+    let mut data = IndexMap::new();
+    data.insert("tier".to_string(), "3...9".into());
     let values = eval_rules(code, &["lo", "hi"], data);
     assert_eq!(values["lo"], "3");
     assert_eq!(values["hi"], "9");
@@ -222,10 +227,10 @@ rule start: lower band"#;
     engine
         .load([(source(), code.to_string())])
         .expect("Should parse and plan");
-    let mut data = HashMap::new();
-    data.insert("closed".to_string(), "true".to_string());
+    let mut data = IndexMap::new();
+    data.insert("closed".to_string(), "true".into());
     let response = engine
-        .run(
+        .evaluate(
             None,
             "test",
             Some(&DateTimeValue::now()),

@@ -2,10 +2,10 @@
 //!
 //! Ensures all example files in cli/tests/integrations/examples/ are valid and can be evaluated
 
+use indexmap::IndexMap;
 use lemma::DateTimeValue;
 use lemma::Engine;
 use rust_decimal::Decimal;
-use std::collections::HashMap;
 use std::str::FromStr;
 
 fn decimal_lit(d: &str) -> Decimal {
@@ -57,13 +57,13 @@ fn test_02_rules_and_unless() {
     let engine = load_examples();
     let now = DateTimeValue::now();
 
-    let mut data = std::collections::HashMap::new();
+    let mut data = IndexMap::new();
     data.insert("base_price".to_string(), "100.00".into());
     data.insert("quantity".to_string(), "10".into());
     data.insert("is_premium".to_string(), "true".into());
     data.insert("customer_age".to_string(), "17".into());
     let response = engine
-        .run(None, "rules_and_unless", Some(&now), data, None, true)
+        .evaluate(None, "rules_and_unless", Some(&now), data, None, true)
         .expect("Evaluation failed");
 
     assert_eq!(response.spec_name, "rules_and_unless");
@@ -102,11 +102,11 @@ fn test_03_spec_references() {
 
     // specific_employee (references base_employee)
     let response = engine
-        .run(
+        .evaluate(
             None,
             "specific_employee",
             Some(&now),
-            HashMap::new(),
+            IndexMap::new(),
             None,
             true,
         )
@@ -151,11 +151,11 @@ fn test_04_unit_conversions() {
 
     // Spec has all data defined, no type annotations needed
     let response = engine
-        .run(
+        .evaluate(
             None,
             "unit_conversions",
             Some(&now),
-            HashMap::new(),
+            IndexMap::new(),
             None,
             true,
         )
@@ -199,10 +199,10 @@ fn test_05_date_handling() {
     let engine = load_examples();
     let now = DateTimeValue::now();
 
-    let mut data = std::collections::HashMap::new();
+    let mut data = IndexMap::new();
     data.insert("current_date".to_string(), "2024-06-15".into());
     let response = engine
-        .run(None, "date_handling", Some(&now), data, None, true)
+        .evaluate(None, "date_handling", Some(&now), data, None, true)
         .expect("Evaluation failed");
 
     // Spec evaluates successfully
@@ -234,11 +234,11 @@ fn test_08_rule_references() {
 
     // Test examples/rule_references spec
     let response = engine
-        .run(
+        .evaluate(
             None,
             "rule_references",
             Some(&now),
-            HashMap::new(),
+            IndexMap::new(),
             None,
             true,
         )
@@ -270,11 +270,11 @@ fn test_08_rule_references() {
 
     // Test examples/eligibility_check spec (also in the same file)
     let response = engine
-        .run(
+        .evaluate(
             None,
             "eligibility_check",
             Some(&now),
-            HashMap::new(),
+            IndexMap::new(),
             None,
             true,
         )

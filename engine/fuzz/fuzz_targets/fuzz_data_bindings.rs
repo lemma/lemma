@@ -3,7 +3,6 @@
 use lemma::DateTimeValue;
 use lemma::Engine;
 use libfuzzer_sys::fuzz_target;
-use std::collections::HashMap;
 
 fuzz_target!(|data: &[u8]| {
     if let Ok(s) = std::str::from_utf8(data) {
@@ -16,15 +15,23 @@ rule doubled: x * 2
 "#;
 
         engine
-            .load([(lemma::SourceType::Path(std::sync::Arc::new(std::path::PathBuf::from(
+            .load([(
+                lemma::SourceType::Path(std::sync::Arc::new(std::path::PathBuf::from(
                     "fuzz_binding",
-                ))), code.to_string())])
+                ))),
+                code.to_string(),
+            )])
             .expect("BUG: static fuzz spec must load");
 
         // Property: valid spec loaded => arbitrary data input must not panic.
-        let mut data = HashMap::new();
-        data.insert("x".to_string(), s.to_string());
+        let data = lemma::evaluate_data_from_entries(vec![(
+            "x".to_string(),
+            lemma::EvaluateDataValue::Literal(s.to_string()),
+        )])
+        .expect("BUG: single fuzz key is unique");
         let now = DateTimeValue::now();
-        let _ = engine.run(None, "fuzz_test", Some(&now), data, None, false);
+        if let Err(error) = engine.evaluate(None, "fuzz_test", Some(&now), data, None, false) {
+            std::hint::black_box(error);
+        }
     }
 });

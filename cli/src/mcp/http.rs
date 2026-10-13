@@ -302,7 +302,11 @@ fn check_accept(headers: &HeaderMap) -> Option<Response> {
         None => Some(StatusCode::NOT_ACCEPTABLE.into_response()),
         Some(accept) => {
             let accepts_json = accept.split(',').any(|part| {
-                let media = part.split(';').next().unwrap_or("").trim();
+                let media = part
+                    .split(';')
+                    .next()
+                    .expect("BUG: str::split yields at least one item")
+                    .trim();
                 media == "application/json" || media == "*/*"
             });
             if accepts_json {
@@ -458,6 +462,6 @@ mod tests {
 
     #[test]
     fn decode_plain_mcp_name() {
-        assert_eq!(decode_mcp_name("list").unwrap(), "list");
+        assert_eq!(decode_mcp_name("specs").unwrap(), "specs");
     }
 }

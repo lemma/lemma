@@ -6,16 +6,18 @@ mod mcp;
 pub(crate) mod server;
 
 use anyhow::Result;
-use clap::{CommandFactory, Parser, Subcommand};
-use formatter::{Formatter, RepositorySpecGroup};
+use clap::{Args, CommandFactory, Parser, Subcommand};
+use formatter::Formatter;
+use indexmap::IndexMap;
 use lemma::DateTimeValue;
 use lemma::Engine;
+use lemma::EvaluateDataValue;
 use lemma_cli::install;
 use std::collections::HashMap;
 use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use walkdir::WalkDir;
 
 #[derive(Parser)]
 #[command(name = "lemma")]
@@ -29,23 +31,51 @@ struct Cli {
     command: Commands,
 }
 
+#[derive(Args)]
+pub(crate) struct ServerArgs {
+    /// Workspace directory or `.lemma` file (default: current directory)
+    #[arg(long, value_name = "PATH")]
+    pub(crate) path: Option<PathBuf>,
+    /// Host address to bind to
+    #[arg(long, default_value = "127.0.0.1")]
+    pub(crate) host: String,
+    /// Port number to listen on
+    #[arg(short, long, default_value = "8012")]
+    pub(crate) port: u16,
+    /// Watch workspace for .lemma file changes and reload automatically
+    #[arg(short, long)]
+    pub(crate) watch: bool,
+    /// Enable explanation generation
+    #[arg(long)]
+    pub(crate) explain: bool,
+    /// Wall-clock timeout for a single evaluation request, in second
+    #[arg(long, default_value = "10", value_name = "SECONDS")]
+    pub(crate) eval_timeout: u64,
+    /// Allow cross-origin browser requests from any origin (permissive CORS).
+    /// Off by default: cross-origin requests are denied.
+    #[arg(long)]
+    pub(crate) cors: bool,
+}
+
 #[derive(Subcommand)]
 enum Commands {
     /// Evaluate rules and display results
     ///
-    /// Load a workspace (see `--prefix`), evaluate the specified spec, and display results.
+    /// Load a workspace (see `--path`), evaluate the specified spec, and display results.
     ///
     /// Examples:
-    ///   lemma run calculator income=85000
-    ///   lemma run --prefix tax.lemma calculator income=85000
-    ///   lemma run --prefix ./project calculator income=85000
-    ///   lemma run @iso/countries alpha2
-    Run {
-        /// [repo] [spec] [name=value ...] — optional repository qualifier (e.g. `@org/pkg`), then spec name
+    ///   lemma evaluate calculator income=85000
+    ///   lemma evaluate --path tax.lemma calculator income=85000
+    ///   lemma evaluate --path ./project calculator income=85000
+    ///   lemma evaluate @iso/countries alpha2
+    ///   cat order.json | lemma evaluate pricing -
+    #[command(name = "evaluate", alias = "run", verbatim_doc_comment)]
+    Evaluate {
+        /// [repo] [spec] [-] [name=value ...] — optional repository qualifier (e.g. `@org/pkg`), then spec name; `-` reads JSON data from stdin
         args: Vec<String>,
         /// Workspace directory or `.lemma` file (default: current directory)
         #[arg(long, value_name = "PATH")]
-        prefix: Option<PathBuf>,
+        path: Option<PathBuf>,
         /// Rules to evaluate (comma-separated); omit to evaluate all rules
         #[arg(long, value_name = "RULES")]
         rules: Option<String>,
@@ -65,9 +95,10 @@ enum Commands {
     /// Spec interface (data types, constraints, and rules)
     ///
     /// Examples:
-    ///   lemma show --prefix tax.lemma
+    ///   lemma show --path tax.lemma
     ///   lemma show calculator
     ///   lemma show '@iso/countries' alpha2
+    #[command(verbatim_doc_comment)]
     Show {
         /// Repository qualifier (e.g. `@iso/countries`)
         repo: Option<String>,
@@ -75,7 +106,7 @@ enum Commands {
         spec: Option<String>,
         /// Workspace directory or `.lemma` file (default: current directory)
         #[arg(long, value_name = "PATH")]
-        prefix: Option<PathBuf>,
+        path: Option<PathBuf>,
         /// Effective datetime (e.g. 2026, 2026-03-04)
         #[arg(long)]
         effective: Option<String>,
@@ -83,18 +114,49 @@ enum Commands {
         #[arg(long)]
         json: bool,
     },
-    /// List loaded specs grouped by repository.
+    /// Loaded spec versions grouped by repository
     ///
     /// Examples:
-    ///   lemma list
-    ///   lemma list --prefix ./project
-    List {
+    ///   lemma specs
+    ///   lemma specs --path ./project
+    ///   lemma specs --all
+    #[command(verbatim_doc_comment)]
+    Specs {
         /// Workspace directory or `.lemma` file (default: current directory)
         #[arg(long, value_name = "PATH")]
-        prefix: Option<PathBuf>,
-        /// Output listing as JSON
+        path: Option<PathBuf>,
+        /// Output specs as JSON
         #[arg(long)]
         json: bool,
+        /// Every loaded repository (lemma stdlib, lemma_deps), without nested uses
+        #[arg(short = 'a', long)]
+        all: bool,
+    },
+    /// Install repositories from LemmaBase into lemma_deps/
+    Install {
+        /// Repository to install (e.g. `@user/repo`)
+        repository: Option<String>,
+        /// Workspace directory or `.lemma` file (default: current directory)
+        #[arg(long, value_name = "PATH")]
+        path: Option<PathBuf>,
+        /// Install all @... references in the workspace
+        #[arg(short = 'a', long)]
+        all: bool,
+        /// Overwrite existing LemmaBase repositories when content has changed
+        #[arg(short = 'f', long)]
+        force: bool,
+    },
+    /// Format .lemma files and ```lemma fences in .md / .txt
+    Format {
+        /// Files or directories to format (default: current directory)
+        #[arg(default_value = ".")]
+        paths: Vec<PathBuf>,
+        /// Check formatting without modifying files (exit 1 if any file would change)
+        #[arg(long)]
+        check: bool,
+        /// Write formatted output to stdout instead of modifying files
+        #[arg(long)]
+        stdout: bool,
     },
     /// Start HTTP REST API server with auto-generated typed endpoints (default: localhost:8012)
     ///
@@ -102,49 +164,24 @@ enum Commands {
     /// up to `--eval-timeout`, then exit 0.
     ///
     /// Routes:
-    ///   GET  /{spec}              — show spec interface (data, rules, versions)
+    ///   GET  /{spec}              — show spec interface (data, rules, this version's window)
     ///   POST /{spec}              — evaluate all rules (data as JSON or form body)
     ///   GET  /{spec}/{rules}      — evaluate specific rules (comma-separated)
     ///   POST /{spec}/{rules}      — evaluate specific rules (JSON or form body)
-    ///   GET  /                   — list all specs
-    ///   GET  /docs               — interactive API documentation
-    ///   GET  /openapi.json       — OpenAPI 3.1 specification
-    ///   GET  /health             — health check
+    ///   GET  /                    — all loaded specs (as `lemma specs --all --json`)
+    ///   GET  /docs                — interactive API documentation
+    ///   GET  /openapi.json        — OpenAPI 3.1 specification
+    ///   GET  /health              — health check
+    #[command(verbatim_doc_comment)]
     Server {
-        /// Workspace directory or `.lemma` file (default: current directory)
-        #[arg(long, value_name = "PATH")]
-        prefix: Option<PathBuf>,
-        /// Host address to bind to
-        #[arg(long, default_value = "127.0.0.1")]
-        host: String,
-        /// Port number to listen on
-        #[arg(short, long, default_value = "8012")]
-        port: u16,
-        /// Watch workspace for .lemma file changes and reload automatically
-        #[arg(short, long)]
-        watch: bool,
-        /// Enable explanation generation
-        #[arg(long)]
-        explain: bool,
-        /// Wall-clock timeout for a single evaluation request, in second
-        #[arg(long, default_value = "10", value_name = "SECONDS")]
-        eval_timeout: u64,
-        /// Allow cross-origin browser requests from any origin (permissive CORS).
-        /// Off by default: cross-origin requests are denied.
-        #[arg(long)]
-        cors: bool,
-    },
-    /// Start Language Server Protocol server (stdio)
-    Lsp {
-        /// Accepted for vscode-languageclient compatibility (stdio is the only transport)
-        #[arg(long, hide = true)]
-        stdio: bool,
+        #[command(flatten)]
+        args: ServerArgs,
     },
     /// Start MCP server for AI assistant integration (stdio by default; `--http` for Streamable HTTP)
     Mcp {
         /// Workspace directory or `.lemma` file (default: current directory)
         #[arg(long, value_name = "PATH")]
-        prefix: Option<PathBuf>,
+        path: Option<PathBuf>,
         /// Enable write tools: add_spec, update_spec, remove_spec, clear, install (read-only by default)
         #[arg(long)]
         write: bool,
@@ -164,76 +201,56 @@ enum Commands {
         #[arg(long, requires = "http")]
         cors: bool,
     },
-    /// Install repositories from LemmaBase into lemma_deps/
-    Install {
-        /// Repository to install (e.g. `@user/repo`)
-        repository: Option<String>,
-        /// Workspace directory or `.lemma` file (default: current directory)
-        #[arg(long, value_name = "PATH")]
-        prefix: Option<PathBuf>,
-        /// Install all @... references in the workspace
-        #[arg(short = 'a', long)]
-        all: bool,
-        /// Overwrite existing LemmaBase repositories when content has changed
-        #[arg(short = 'f', long)]
-        force: bool,
-    },
-    /// Format .lemma files to canonical style
-    Format {
-        /// Files or directories to format (default: current directory)
-        #[arg(default_value = ".")]
-        paths: Vec<PathBuf>,
-        /// Check formatting without modifying files (exit 1 if any file would change)
-        #[arg(long)]
-        check: bool,
-        /// Write formatted output to stdout instead of modifying files
-        #[arg(long)]
-        stdout: bool,
-    },
+    /// Start Language Server Protocol server (stdio)
+    Lsp,
 }
 
-/// Positional args for `lemma run`: optional `[repo]`, optional `[spec]`, then `name=value` data.
-/// Workspace root is always `--prefix` (default `.`), never a positional path.
-struct RunArgs {
+/// Positional args for `lemma evaluate`: optional `[repo]`, optional `[spec]`, optional `-` (stdin JSON), then `name=value` data.
+/// Workspace root is always `--path` (default `.`), never a positional path.
+struct EvaluateArgs {
     positionals: Vec<String>,
     data: Vec<String>,
+    stdin_data: bool,
 }
 
-fn parse_run_args(arguments: &[String]) -> Result<RunArgs> {
+fn parse_evaluate_args(arguments: &[String]) -> Result<EvaluateArgs> {
     let mut data = Vec::new();
     let mut positionals = Vec::new();
+    let mut stdin_data = false;
     for argument in arguments {
         if argument.contains('=') {
             data.push(argument.clone());
-        } else {
-            if argument == "-" {
-                anyhow::bail!(
-                    "`-` is not a valid path (stdin is not supported); use `--prefix` for workspace files"
-                );
+        } else if argument == "-" {
+            if stdin_data {
+                anyhow::bail!("`-` given more than once");
             }
+            stdin_data = true;
+        } else {
             positionals.push(argument.to_string());
         }
     }
     if positionals.len() > 2 {
         anyhow::bail!(
-            "Too many positional arguments; expected [repo] [spec], [spec], or [repo] with --interactive (use `--prefix` for workspace path)"
+            "Too many positional arguments; expected [repo] [spec], [spec], or [repo] with --interactive (use `--path` for workspace path)"
         );
     }
     for pos in &positionals {
         if Path::new(pos).exists() {
             anyhow::bail!(
-                "Workspace path must be passed with --prefix {}, not as a bare positional",
+                "Workspace path must be passed with --path {}, not as a bare positional",
                 pos
             );
         }
     }
-    Ok(RunArgs { positionals, data })
+    Ok(EvaluateArgs {
+        positionals,
+        data,
+        stdin_data,
+    })
 }
 
-fn workspace_dir(prefix: Option<&PathBuf>) -> &Path {
-    prefix
-        .map(|p| p.as_path())
-        .unwrap_or_else(|| Path::new("."))
+fn workspace_dir(path: Option<&PathBuf>) -> &Path {
+    path.map(|p| p.as_path()).unwrap_or_else(|| Path::new("."))
 }
 
 /// Resolve spec name: explicit name wins; single-spec workspaces auto-resolve;
@@ -243,7 +260,7 @@ fn resolve_spec(engine: &Engine, spec: Option<&str>, interactive: bool) -> Resul
         return Ok(name.to_string());
     }
     let workspace = engine
-        .list()
+        .specs()
         .into_iter()
         .find(|repository_group| repository_group.repository.is_none())
         .expect("BUG: default repository must exist after Engine::new")
@@ -261,7 +278,7 @@ fn resolve_spec(engine: &Engine, spec: Option<&str>, interactive: bool) -> Resul
         _ => {
             let names: Vec<&str> = unique_names.into_iter().collect();
             anyhow::bail!(
-                "Workspace contains multiple specs: {}\n\nUsage: lemma run [repo] <spec> [--prefix PATH] [name=value ...]",
+                "Workspace contains multiple specs: {}\n\nUsage: lemma evaluate [repo] <spec> [--path PATH] [name=value ...]",
                 names.join(", ")
             );
         }
@@ -274,25 +291,30 @@ fn resolve_effective(cli_effective: Option<&String>) -> Result<DateTimeValue> {
 }
 
 fn main() {
+    std::panic::set_hook(Box::new(|info| {
+        eprintln!("lemma aborted: {info}");
+        std::process::abort();
+    }));
     let cli = Cli::parse();
 
     let result: Result<()> = (|| match &cli.command {
-        Commands::Run {
+        Commands::Evaluate {
             args,
-            prefix,
+            path,
             rules,
             explain,
             interactive,
             effective,
             json,
         } => {
-            let parsed_run = parse_run_args(args)?;
-            let workdir = prefix.as_deref().unwrap_or_else(|| Path::new("."));
-            run_command(RunOptions {
+            let parsed = parse_evaluate_args(args)?;
+            let workdir = path.as_deref().unwrap_or_else(|| Path::new("."));
+            evaluate_command(EvaluateOptions {
                 source: workdir,
-                positionals: &parsed_run.positionals,
+                positionals: &parsed.positionals,
                 rules: rules.as_ref(),
-                data: &parsed_run.data,
+                data: &parsed.data,
+                stdin_data: parsed.stdin_data,
                 explain: *explain,
                 interactive: *interactive,
                 effective: effective.as_ref(),
@@ -302,37 +324,23 @@ fn main() {
         Commands::Show {
             repo,
             spec,
-            prefix,
+            path,
             effective,
             json,
         } => show_command(
-            workspace_dir(prefix.as_ref()),
+            workspace_dir(path.as_ref()),
             repo.as_deref(),
             spec.as_deref(),
             effective.as_ref(),
             *json,
         ),
-        Commands::List { prefix, json } => list_command(workspace_dir(prefix.as_ref()), *json),
-        Commands::Server {
-            prefix,
-            host,
-            port,
-            watch,
-            explain,
-            eval_timeout,
-            cors,
-        } => server_command(
-            workspace_dir(prefix.as_ref()),
-            host,
-            *port,
-            *watch,
-            *explain,
-            *eval_timeout,
-            *cors,
-        ),
-        Commands::Lsp { stdio: _ } => lsp_command(),
+        Commands::Specs { path, json, all } => {
+            specs_command(workspace_dir(path.as_ref()), *json, *all)
+        }
+        Commands::Server { args } => server_command(args),
+        Commands::Lsp => lsp_command(),
         Commands::Mcp {
-            prefix,
+            path,
             write,
             request_timeout,
             http,
@@ -340,7 +348,7 @@ fn main() {
             port,
             cors,
         } => mcp_command(
-            workspace_dir(prefix.as_ref()),
+            workspace_dir(path.as_ref()),
             *write,
             *request_timeout,
             *http,
@@ -350,7 +358,7 @@ fn main() {
         ),
         Commands::Install {
             repository,
-            prefix,
+            path,
             all,
             force,
         } => {
@@ -363,14 +371,10 @@ fn main() {
                 let install_cmd = cmd
                     .find_subcommand_mut("install")
                     .expect("BUG: Cli must define install subcommand");
-                let _ = install_cmd.print_help();
+                install_cmd.print_help()?;
                 std::process::exit(1);
             }
-            install_command(
-                workspace_dir(prefix.as_ref()),
-                repository.as_deref(),
-                *force,
-            )
+            install_command(workspace_dir(path.as_ref()), repository.as_deref(), *force)
         }
         Commands::Format {
             paths,
@@ -385,18 +389,19 @@ fn main() {
     }
 }
 
-struct RunOptions<'a> {
+struct EvaluateOptions<'a> {
     source: &'a Path,
     positionals: &'a [String],
     rules: Option<&'a String>,
     data: &'a [String],
+    stdin_data: bool,
     explain: bool,
     interactive: bool,
     effective: Option<&'a String>,
     json: bool,
 }
 
-fn run_command(options: RunOptions<'_>) -> Result<()> {
+fn evaluate_command(options: EvaluateOptions<'_>) -> Result<()> {
     let now = resolve_effective(options.effective)?;
     let mut engine = Engine::new();
     load_workspace(&mut engine, options.source)?;
@@ -406,7 +411,7 @@ fn run_command(options: RunOptions<'_>) -> Result<()> {
         [one] => {
             let is_repo = interactive::repository_loaded(&engine, one);
             let is_spec = engine
-                .list()
+                .specs()
                 .into_iter()
                 .find(|repository_group| repository_group.repository.is_none())
                 .expect("BUG: default repository must exist after Engine::new")
@@ -447,6 +452,7 @@ fn run_command(options: RunOptions<'_>) -> Result<()> {
     let resolved_spec_name =
         resolve_spec(&engine, spec_name_optional.as_deref(), options.interactive)?;
 
+    let provided_inputs = evaluate_data_inputs(options.data, options.stdin_data)?;
     let (repository_qualifier_for_run, spec_set_identifier, rule_names, evaluation_inputs) =
         if options.interactive {
             let (interactive_spec_preset, interactive_rules_preset) =
@@ -463,13 +469,11 @@ fn run_command(options: RunOptions<'_>) -> Result<()> {
                     )
                 };
 
-            let command_line_data: HashMap<String, String> = parse_data_strings(options.data);
-
-            let interactive_outcome = interactive::run_interactive(
+            let interactive_outcome = interactive::evaluate_interactive(
                 &engine,
                 interactive_spec_preset,
                 interactive_rules_preset,
-                &command_line_data,
+                &provided_inputs,
                 &now,
                 repository_qualifier_optional.as_deref(),
             )?;
@@ -483,15 +487,15 @@ fn run_command(options: RunOptions<'_>) -> Result<()> {
 
             println!();
 
-            let mut merged_inputs = command_line_data;
-            merged_inputs.extend(prompted_data);
+            let mut evaluation_inputs = provided_inputs;
+            evaluation_inputs.extend(prompted_data);
             let interactive_spec_id = lemma::parse_spec_set_id(&chosen_specification_name)
                 .map_err(|e| anyhow::anyhow!("{}", e))?;
             (
                 chosen_repository_qualifier,
                 interactive_spec_id,
                 interactive_rules_selection.unwrap_or_default(),
-                merged_inputs,
+                evaluation_inputs,
             )
         } else {
             let non_interactive_spec_id = lemma::parse_spec_set_id(&resolved_spec_name)
@@ -500,12 +504,11 @@ fn run_command(options: RunOptions<'_>) -> Result<()> {
                 .rules
                 .map(|rules_fragment| parse_rule_names(rules_fragment.as_str()))
                 .unwrap_or_default();
-            let evaluation_inputs = parse_data_strings(options.data);
             (
                 repository_qualifier_optional,
                 non_interactive_spec_id,
                 rule_names,
-                evaluation_inputs,
+                provided_inputs,
             )
         };
 
@@ -515,7 +518,7 @@ fn run_command(options: RunOptions<'_>) -> Result<()> {
         Some(rule_names.as_slice())
     };
     let response = engine
-        .run(
+        .evaluate(
             repository_qualifier_for_run.as_deref(),
             &spec_set_identifier,
             Some(&now),
@@ -541,14 +544,39 @@ fn run_command(options: RunOptions<'_>) -> Result<()> {
     Ok(())
 }
 
-/// Parse data value strings in "key=value" format into a HashMap
-fn parse_data_strings(data: &[String]) -> HashMap<String, String> {
-    data.iter()
-        .filter_map(|s| {
-            s.split_once('=')
-                .map(|(k, v)| (k.to_string(), v.to_string()))
-        })
-        .collect()
+/// Stdin JSON object (when `-` is given) plus `name=value` literals. A key given twice (case-insensitive): Error.
+fn evaluate_data_inputs(
+    pairs: &[String],
+    stdin_data: bool,
+) -> Result<IndexMap<String, EvaluateDataValue>> {
+    let mut entries: Vec<(String, EvaluateDataValue)> = Vec::new();
+    if stdin_data {
+        let mut text = String::new();
+        std::io::stdin()
+            .read_to_string(&mut text)
+            .map_err(|e| anyhow::anyhow!("failed to read stdin: {e}"))?;
+        if text.trim().is_empty() {
+            anyhow::bail!("stdin is empty");
+        }
+        let value: serde_json::Value = serde_json::from_str(&text)
+            .map_err(|e| anyhow::anyhow!("invalid JSON on stdin: {e}"))?;
+        if !value.is_object() {
+            anyhow::bail!("stdin must contain a JSON object");
+        }
+        let parsed =
+            lemma::parse_evaluate_data_object(&Some(value)).map_err(|e| anyhow::anyhow!("{e}"))?;
+        entries.extend(parsed);
+    }
+    entries.extend(pairs.iter().map(|pair| {
+        let (key, value) = pair
+            .split_once('=')
+            .expect("BUG: parse_evaluate_args routes only name=value arguments to data");
+        (
+            key.to_string(),
+            EvaluateDataValue::Literal(value.to_string()),
+        )
+    }));
+    lemma::evaluate_data_from_entries(entries).map_err(|e| anyhow::anyhow!("{e}"))
 }
 
 fn resolve_show_target(
@@ -562,7 +590,7 @@ fn resolve_show_target(
         (Some(one), None) => {
             let is_repository = interactive::repository_loaded(engine, one);
             let is_spec = engine
-                .list()
+                .specs()
                 .into_iter()
                 .find(|repository_group| repository_group.repository.is_none())
                 .expect("BUG: default repository must exist after Engine::new")
@@ -606,79 +634,45 @@ fn show_command(
         .map_err(|e| anyhow::anyhow!("{e}"))?;
 
     if json {
-        let json_document = serde_json::to_string_pretty(&lemma::api::Show::from(&show))
-            .expect("BUG: failed to serialize show JSON");
+        let json_document =
+            serde_json::to_string_pretty(&lemma::api::show_document(&engine, &show))
+                .expect("BUG: failed to serialize show JSON");
         println!("{}", json_document);
     } else {
-        print!("{show}");
+        println!("{show}");
     }
     Ok(())
 }
 
-fn spec_set_names_in_repository(repo: &lemma::ResolvedRepository) -> Vec<String> {
-    let unique_names: std::collections::BTreeSet<String> =
-        repo.specs.iter().map(|ls| ls.name.clone()).collect();
-    unique_names.into_iter().collect()
-}
-
-fn repository_spec_groups(engine: &Engine) -> Vec<(Option<String>, Vec<String>)> {
-    let mut groups: Vec<(Option<String>, Vec<String>)> = Vec::new();
-    for resolved in engine.list() {
-        let names = spec_set_names_in_repository(&resolved);
-        if names.is_empty() {
-            continue;
-        }
-        match resolved.repository.as_deref() {
-            None => groups.push((None, names)),
-            Some(repository) => groups.push((Some(repository.to_string()), names)),
-        }
-    }
-    groups
-}
-
-fn list_command(source_path: &Path, json: bool) -> Result<()> {
+fn specs_command(source_path: &Path, json: bool, all: bool) -> Result<()> {
     let mut engine = Engine::new();
     load_workspace(&mut engine, source_path)?;
+    let mut payload = engine.specs();
+    if !all {
+        payload.retain(|repository| !repository.from_dependency);
+    }
 
     if json {
-        let payload = engine.list();
         let json_document =
-            serde_json::to_string_pretty(&payload).expect("BUG: failed to serialize list JSON");
+            serde_json::to_string_pretty(&payload).expect("BUG: failed to serialize specs JSON");
         print!("{}", json_document);
         return Ok(());
     }
 
-    let groups = repository_spec_groups(&engine);
-    let formatter = Formatter;
-    let view_groups: Vec<RepositorySpecGroup<'_>> = groups
-        .iter()
-        .map(|(repository, specs)| RepositorySpecGroup {
-            repository: repository.as_deref(),
-            specs: specs.as_slice(),
-        })
-        .collect();
-    print!("{}", formatter.format_repository_spec_list(&view_groups));
+    print!("{}", lemma::format_repositories(&payload, all));
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
-fn server_command(
-    source: &Path,
-    host: &str,
-    port: u16,
-    watch: bool,
-    explain: bool,
-    eval_timeout_secs: u64,
-    cors: bool,
-) -> Result<()> {
+fn server_command(args: &ServerArgs) -> Result<()> {
     use tokio::runtime::Runtime;
+    let source = workspace_dir(args.path.as_ref());
     let rt = Runtime::new()?;
     rt.block_on(async {
         let mut engine = Engine::new();
         load_workspace(&mut engine, source)?;
 
         let workspace = engine
-            .list()
+            .specs()
             .into_iter()
             .find(|repository_group| repository_group.repository.is_none())
             .expect("BUG: default repository must exist after Engine::new")
@@ -689,17 +683,7 @@ fn server_command(
             "Starting HTTP server with {} spec(s) loaded...",
             unique_specs.len()
         );
-        server::http::start_server(
-            engine,
-            host,
-            port,
-            watch,
-            explain,
-            source.to_path_buf(),
-            eval_timeout_secs,
-            cors,
-        )
-        .await
+        server::http::start_server(engine, args, source.to_path_buf()).await
     })?;
     Ok(())
 }
@@ -728,7 +712,7 @@ fn mcp_command(
     };
 
     let workspace_specs = engine
-        .list()
+        .specs()
         .into_iter()
         .find(|repository_group| repository_group.repository.is_none())
         .expect("BUG: default repository must exist after Engine::new")
@@ -948,21 +932,40 @@ fn parse_rule_names(comma_separated_rules: &str) -> Vec<String> {
         .collect()
 }
 
-/// Collect all .lemma file paths from the given paths (each may be a file or directory).
 /// Collect every `.lemma` filesystem path rooted at the given files or directories.
 fn collect_lemma_paths(paths: &[PathBuf]) -> Result<Vec<PathBuf>, std::io::Error> {
+    collect_format_paths(paths, &["lemma"])
+}
+
+/// Collect `.md` / `.txt` paths that may contain `` ```lemma `` fences.
+fn collect_doc_paths(paths: &[PathBuf]) -> Result<Vec<PathBuf>, std::io::Error> {
+    collect_format_paths(paths, &["md", "txt"])
+}
+
+fn collect_format_paths(
+    paths: &[PathBuf],
+    extensions: &[&str],
+) -> Result<Vec<PathBuf>, std::io::Error> {
     let mut seen = std::collections::HashSet::new();
     let mut result = Vec::new();
     for path in paths {
         if path.is_file() {
-            if path.extension().and_then(|e| e.to_str()) == Some("lemma") {
-                let canonical = path.canonicalize().unwrap_or_else(|_| path.clone());
+            let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+            if extensions.contains(&ext) {
+                let canonical = path.canonicalize()?;
                 if seen.insert(canonical.clone()) {
                     result.push(path.clone());
                 }
             }
         } else if path.is_dir() {
-            for entry_result in WalkDir::new(path) {
+            for entry_result in ignore::WalkBuilder::new(path)
+                .hidden(true)
+                .git_ignore(true)
+                .git_global(false)
+                .git_exclude(false)
+                .require_git(false)
+                .build()
+            {
                 let entry = match entry_result {
                     Ok(e) => e,
                     Err(e) => {
@@ -971,7 +974,8 @@ fn collect_lemma_paths(paths: &[PathBuf]) -> Result<Vec<PathBuf>, std::io::Error
                     }
                 };
                 let p = entry.path();
-                if p.is_file() && p.extension().and_then(|e| e.to_str()) == Some("lemma") {
+                let ext = p.extension().and_then(|e| e.to_str()).unwrap_or("");
+                if p.is_file() && extensions.contains(&ext) {
                     if let Ok(canonical) = p.canonicalize() {
                         if seen.insert(canonical) {
                             result.push(p.to_path_buf());
@@ -983,15 +987,44 @@ fn collect_lemma_paths(paths: &[PathBuf]) -> Result<Vec<PathBuf>, std::io::Error
             }
         }
     }
+    result.sort();
     Ok(result)
 }
 
+fn apply_formatted_file(
+    file_path: &Path,
+    source: &str,
+    formatted: &str,
+    check: bool,
+    stdout: bool,
+    any_changed: &mut bool,
+    parse_errors: &mut u32,
+) {
+    if stdout {
+        print!("{}", formatted);
+        return;
+    }
+    if source == formatted {
+        return;
+    }
+    *any_changed = true;
+    if check {
+        eprintln!("Would reformat: {}", file_path.display());
+    } else if let Err(e) = fs::write(file_path, formatted) {
+        eprintln!("Error writing {}: {}", file_path.display(), e);
+        *parse_errors += 1;
+    } else {
+        eprintln!("Formatted: {}", file_path.display());
+    }
+}
+
 fn format_command(paths: &[PathBuf], check: bool, stdout: bool) -> Result<()> {
-    let files = collect_lemma_paths(paths)?;
+    let lemma_files = collect_lemma_paths(paths)?;
+    let doc_files = collect_doc_paths(paths)?;
     let mut any_changed = false;
     let mut parse_errors = 0u32;
 
-    for file_path in &files {
+    for file_path in &lemma_files {
         let source = match fs::read_to_string(file_path) {
             Ok(s) => s,
             Err(e) => {
@@ -1016,25 +1049,51 @@ fn format_command(paths: &[PathBuf], check: bool, stdout: bool) -> Result<()> {
                 continue;
             }
         };
+        apply_formatted_file(
+            file_path,
+            &source,
+            &formatted,
+            check,
+            stdout,
+            &mut any_changed,
+            &mut parse_errors,
+        );
+    }
 
-        if stdout {
-            print!("{}", formatted);
-            continue;
-        }
-
-        if source == formatted {
-            continue;
-        }
-        any_changed = true;
-
-        if check {
-            eprintln!("Would reformat: {}", file_path.display());
-        } else if let Err(e) = fs::write(file_path, &formatted) {
-            eprintln!("Error writing {}: {}", file_path.display(), e);
-            parse_errors += 1;
-        } else {
-            eprintln!("Formatted: {}", file_path.display());
-        }
+    for file_path in &doc_files {
+        let source = match fs::read_to_string(file_path) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("Error reading {}: {}", file_path.display(), e);
+                parse_errors += 1;
+                continue;
+            }
+        };
+        let formatted = match lemma_cli::doc_fences::format_lemma_fences_in_text(&source) {
+            Ok(s) => s,
+            Err(failure) => {
+                let mut m = std::collections::HashMap::new();
+                let fence_source = lemma::SourceType::Path(std::sync::Arc::new(file_path.clone()));
+                m.insert(fence_source, failure.fence_source.clone());
+                eprintln!(
+                    "{}:{}: ```lemma fence format failed",
+                    file_path.display(),
+                    failure.fence_line
+                );
+                eprintln!("{}", error_formatter::format_error(&failure.error, &m));
+                parse_errors += 1;
+                continue;
+            }
+        };
+        apply_formatted_file(
+            file_path,
+            &source,
+            &formatted,
+            check,
+            stdout,
+            &mut any_changed,
+            &mut parse_errors,
+        );
     }
 
     if parse_errors > 0 {

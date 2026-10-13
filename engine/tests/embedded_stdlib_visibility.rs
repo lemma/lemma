@@ -4,7 +4,7 @@ use lemma::{Engine, ErrorKind};
 #[test]
 fn list_includes_embedded_lemma_repository_with_units() {
     let engine = Engine::new();
-    let repos = engine.list();
+    let repos = engine.specs();
     let lemma = repos
         .iter()
         .find(|r| r.repository.as_deref() == Some(EMBEDDED_STDLIB_REPOSITORY))

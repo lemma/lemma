@@ -4,10 +4,10 @@
 //! reintroduces per-request HashMaps / Arc-per-result / measure signature Vecs
 //! will raise this count.
 
-use lemma::{DateGranularity, DateTimeValue, Engine, SourceType};
+use indexmap::IndexMap;
+use lemma::{DateGranularity, DateTimeValue, Engine, EvaluateDataValue, SourceType};
 use stats_alloc::{Region, StatsAlloc, INSTRUMENTED_SYSTEM};
 use std::alloc::System;
-use std::collections::HashMap;
 use std::sync::Arc;
 
 #[global_allocator]
@@ -15,14 +15,12 @@ static GLOBAL: &StatsAlloc<System> = &INSTRUMENTED_SYSTEM;
 
 const SHIPPING: &str = include_str!("../benches/specs/shipping.lemma");
 
-/// Exact allocations for one `Engine::run` of `bench_shipping` / `total`
+/// Exact allocations for one `Engine::evaluate` of `bench_shipping` / `total`
 /// after warmup, on this machine's allocator accounting. Update deliberately
 /// when the eval path's allocation shape changes.
 ///
-/// Measured 52: public `Engine::run` takes `HashMap<String, String>` and maps
-/// each overlay to `RunDataValue::string` before resolve; display binding on
-/// values is still `Option<Arc<str>>`.
-const SHIPPING_EVAL_ALLOCATIONS: usize = 52;
+/// Measured 50 on the current tree (HEAD measures 53).
+const SHIPPING_EVAL_ALLOCATIONS: usize = 50;
 
 fn shipping_effective() -> DateTimeValue {
     DateTimeValue {
@@ -38,17 +36,17 @@ fn shipping_effective() -> DateTimeValue {
     }
 }
 
-fn shipping_inputs() -> HashMap<String, String> {
-    HashMap::from([
+fn shipping_inputs() -> IndexMap<String, EvaluateDataValue> {
+    IndexMap::from([
         ("weight".into(), "3".into()),
         ("destination".into(), "domestic".into()),
         ("is_member".into(), "false".into()),
     ])
 }
 
-fn run_once(engine: &Engine) -> lemma::Response {
+fn evaluate_once(engine: &Engine) -> lemma::Response {
     engine
-        .run(
+        .evaluate(
             None,
             "bench_shipping",
             Some(&shipping_effective()),
@@ -70,14 +68,14 @@ fn shipping_evaluate_allocation_count() {
         .expect("shipping fixture must load");
 
     for _ in 0..100 {
-        std::hint::black_box(run_once(&engine));
+        std::hint::black_box(evaluate_once(&engine));
     }
 
     let mut total = 0usize;
     const N: usize = 200;
     for _ in 0..N {
         let region = Region::new(GLOBAL);
-        std::hint::black_box(run_once(&engine));
+        std::hint::black_box(evaluate_once(&engine));
         total += region.change().allocations;
     }
     let avg = total / N;

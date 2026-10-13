@@ -292,6 +292,13 @@ fn parse_validate_dependency(id: &str, source: &str, limits: &ResourceLimits) ->
     Ok(())
 }
 
+fn respond_without_fetch_error() -> Error {
+    Error::request(
+        "Registry response supplied but no fetch is pending",
+        Some("Respond exactly once to each Fetch step; stop after Finished"),
+    )
+}
+
 // ---------------------------------------------------------------------------
 // Install step machine
 // ---------------------------------------------------------------------------
@@ -382,12 +389,12 @@ impl<'r> Install<'r> {
         }
     }
 
+    /// A response when no fetch is pending (the install already finished) yields
+    /// `Finished(Err)`: callers drive this machine from host code across SDK boundaries.
     pub fn respond(&mut self, response: Result<HttpResponse, TransportFailure>) -> InstallStep {
         let repository = match &self.state {
             InstallState::Awaiting { repository } => repository.clone(),
-            InstallState::Done => {
-                panic!("BUG: Install::respond called when not awaiting a response")
-            }
+            InstallState::Done => return InstallStep::Finished(Err(respond_without_fetch_error())),
         };
         let qualifier = RepositoryQualifier::new(repository.clone());
         let registry = self.registries.registry_for(&qualifier);
@@ -473,15 +480,16 @@ impl<'a> Resolve<'a> {
             awaiting: None,
             round_errors: Vec::new(),
         };
-        let step = resolve.begin_round_or_finish();
+        let step = resolve.next_fetch_or_advance();
         (resolve, step)
     }
 
+    /// A response when no fetch is pending (resolution already finished) yields
+    /// `Finished(Err)`: callers drive this machine from host code across SDK boundaries.
     pub fn respond(&mut self, response: Result<HttpResponse, TransportFailure>) -> ResolveStep {
-        let reference = self
-            .awaiting
-            .take()
-            .expect("BUG: Resolve::respond called when not awaiting a response");
+        let Some(reference) = self.awaiting.take() else {
+            return ResolveStep::Finished(Err(vec![respond_without_fetch_error()]));
+        };
 
         let registry = self.registries.registry_for(&reference.repository);
         match registry.bundle_from(&reference.repository.name, response) {
@@ -578,41 +586,36 @@ impl<'a> Resolve<'a> {
         }
     }
 
-    fn begin_round_or_finish(&mut self) -> ResolveStep {
-        let unresolved = find_missing_repositories(self.ctx, &self.already_requested);
-        if unresolved.is_empty() {
-            if self.round_errors.is_empty() {
+    fn next_fetch_or_advance(&mut self) -> ResolveStep {
+        loop {
+            while let Some(reference) = self.pending.pop_front() {
+                if self.already_requested.contains(&reference.repository.name) {
+                    continue;
+                }
+                self.already_requested
+                    .insert(reference.repository.name.clone());
+                let registry = self.registries.registry_for(&reference.repository);
+                match registry.fetch_for(&reference.repository) {
+                    Ok(fetch) => {
+                        self.awaiting = Some(reference);
+                        return ResolveStep::Fetch(fetch);
+                    }
+                    Err(e) => {
+                        self.round_errors.push(e);
+                    }
+                }
+            }
+
+            if !self.round_errors.is_empty() {
+                return ResolveStep::Finished(Err(std::mem::take(&mut self.round_errors)));
+            }
+
+            let unresolved = find_missing_repositories(self.ctx, &self.already_requested);
+            if unresolved.is_empty() {
                 return ResolveStep::Finished(Ok(()));
             }
-            return ResolveStep::Finished(Err(std::mem::take(&mut self.round_errors)));
+            self.pending = unresolved.into();
         }
-        self.pending = unresolved.into();
-        self.next_fetch_or_advance()
-    }
-
-    fn next_fetch_or_advance(&mut self) -> ResolveStep {
-        while let Some(reference) = self.pending.pop_front() {
-            if self.already_requested.contains(&reference.repository.name) {
-                continue;
-            }
-            self.already_requested
-                .insert(reference.repository.name.clone());
-            let registry = self.registries.registry_for(&reference.repository);
-            match registry.fetch_for(&reference.repository) {
-                Ok(fetch) => {
-                    self.awaiting = Some(reference);
-                    return ResolveStep::Fetch(fetch);
-                }
-                Err(e) => {
-                    self.round_errors.push(e);
-                }
-            }
-        }
-
-        if !self.round_errors.is_empty() {
-            return ResolveStep::Finished(Err(std::mem::take(&mut self.round_errors)));
-        }
-        self.begin_round_or_finish()
     }
 }
 
@@ -935,6 +938,56 @@ mod tests {
         );
     }
 
+    fn ok_response(body: &str) -> Result<HttpResponse, TransportFailure> {
+        Ok(HttpResponse {
+            status: 200,
+            headers: Vec::new(),
+            body: body.to_string(),
+        })
+    }
+
+    #[test]
+    fn install_respond_after_finished_is_error() {
+        let registries = Registries::default();
+        let (mut install, step) =
+            Install::start(&registries, "@iso/countries", ResourceLimits::default());
+        assert!(matches!(step, InstallStep::Fetch(_)));
+        let body = "repo @iso/countries\nspec alpha2\ndata code: text\n";
+        assert!(matches!(
+            install.respond(ok_response(body)),
+            InstallStep::Finished(Ok(_))
+        ));
+        match install.respond(ok_response(body)) {
+            InstallStep::Finished(Err(error)) => {
+                assert_eq!(error.kind(), crate::ErrorKind::Request);
+                assert!(error.message().contains("no fetch is pending"));
+            }
+            InstallStep::Finished(Ok(_)) | InstallStep::Fetch(_) => {
+                panic!("second respond must be an error")
+            }
+        }
+    }
+
+    #[test]
+    fn resolve_respond_without_pending_fetch_is_error() {
+        let mut store = context_with_embedded_stdlib();
+        let mut sources: HashMap<SourceType, String> = HashMap::new();
+        let registries = Registries::default();
+        let limits = ResourceLimits::default();
+        let (mut resolve, step) = Resolve::start(&registries, &mut store, &mut sources, &limits);
+        assert!(matches!(step, ResolveStep::Finished(Ok(()))));
+        match resolve.respond(ok_response("spec s\n")) {
+            ResolveStep::Finished(Err(errors)) => {
+                assert_eq!(errors.len(), 1);
+                assert_eq!(errors[0].kind(), crate::ErrorKind::Request);
+                assert!(errors[0].message().contains("no fetch is pending"));
+            }
+            ResolveStep::Finished(Ok(())) | ResolveStep::Fetch(_) => {
+                panic!("respond without a pending fetch must be an error")
+            }
+        }
+    }
+
     #[test]
     fn install_rejects_empty_id() {
         let transport = MapTransport::new(HashMap::new());
@@ -1222,7 +1275,7 @@ rule value: a.x"#;
     #[test]
     fn resolve_handles_bundle_with_multiple_specs() {
         let local_source = r#"spec main_spec
-uses a: @org/multi first
+uses a: @org/multi alpha
 rule value: a.x"#;
         let local_specs = crate::parse(
             local_source,
@@ -1244,7 +1297,7 @@ rule value: a.x"#;
         let mut bodies = HashMap::new();
         bodies.insert(
             "@org/multi".to_string(),
-            "repo @org/multi\nspec first\ndata x: 1\nspec second\ndata y: 2".to_string(),
+            "repo @org/multi\nspec alpha\ndata x: 1\nspec second\ndata y: 2".to_string(),
         );
         let transport = MapTransport::new(bodies);
         let registries = Registries::default();
@@ -1259,7 +1312,7 @@ rule value: a.x"#;
         .unwrap();
 
         let names: Vec<String> = store.iter().map(|a| a.name.clone()).collect();
-        assert!(names.iter().any(|n| n == "first"));
+        assert!(names.iter().any(|n| n == "alpha"));
         assert!(names.iter().any(|n| n == "second"));
     }
 

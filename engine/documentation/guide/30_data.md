@@ -24,7 +24,6 @@ data due_date: date
 data return_date: date
   -> help "When was the book returned?"
 
-
 rule overdue:
   due_date...return_date as day
 ```
@@ -48,7 +47,6 @@ data money: measure
 data order_total: money
   -> help "What is the order total?"
 
-
 rule free_shipping:
   order_total >= 50 eur
 ```
@@ -63,6 +61,7 @@ Declare a **named measure parent** once, then extend it on input slots:
 
 ```lemma
 spec invoice
+
 data money: measure
   -> unit eur: 1.00
   -> decimals 2
@@ -90,14 +89,14 @@ Primitives: `boolean`, `number`, `text`, `measure`, `ratio`, `date`, `time`, and
 
 | Type | `->` commands |
 |------|----------------|
-| `boolean` | `help`, `fill`, `suggest` |
-| `number` | `decimals`, `minimum`, `maximum`, `help`, `fill`, `suggest` |
-| `measure` | `unit`, `decimals`, `minimum`, `maximum`, `help`, `fill`, `suggest` (see **Measure**, **Units**) |
-| `ratio` | `unit`, `minimum`, `maximum`, `help`, `fill`, `suggest` |
-| `text` | `option`, `options`, `length`, `help`, `fill`, `suggest` |
-| `date`, `time` | `minimum`, `maximum`, `help`, `fill`, `suggest` |
-| `number range`, `date range`, `time range`, `ratio range` | `lower`, `upper`, `minimum`, `maximum`, `help`, `fill`, `suggest` |
-| `measure range` | above + `unit` |
+| `boolean` | `help`, `with`, `suggest` |
+| `number` | `decimals`, `minimum`, `maximum`, `help`, `with`, `suggest` |
+| `measure` | `unit`, `decimals`, `minimum`, `maximum`, `help`, `with`, `suggest` (see **Measure**, **Units**) |
+| `ratio` | `unit`, `minimum`, `maximum`, `help`, `with`, `suggest` |
+| `text` | `option`, `options`, `length`, `help`, `with`, `suggest` |
+| `date`, `time` | `minimum`, `maximum`, `help`, `with`, `suggest` |
+| `number range`, `date range`, `time range`, `ratio range` | `lower`, `upper`, `minimum`, `maximum`, `help`, `with`, `suggest` |
+| `measure range` | above |
 
 On range types, `lower` / `upper` bound endpoints; `minimum` / `maximum` bound **span width**, not endpoints.
 
@@ -105,9 +104,49 @@ On range types, `lower` / `upper` bound endpoints; `minimum` / `maximum` bound *
 
 - Chain `->` rows on `data` only (rules have no constraints; see **Syntax**).
 - `-> help` = spoken question (CS ask string).
-- `-> fill` = commit a value on a typed slot (callers may override); cannot combine with `suggest` on the same declaration.
+- `-> with` = commit a value on a typed slot (callers may override); cannot combine with `suggest` on the same declaration.
 - `-> suggest` = UI hint; does not fill or commit.
 - Prefer `-> option` for closed text sets.
 - Bounded domain on constraints (`-> minimum 0`), not veto (see **Veto**).
 - Examples: type catalog [01_coffee_order.lemma](https://raw.githubusercontent.com/lemma/lemma/main/engine/documentation/examples/01_coffee_order.lemma); fee policy [02_library_fees.lemma](https://raw.githubusercontent.com/lemma/lemma/main/engine/documentation/examples/02_library_fees.lemma).
 - Edge cases (compound units, qualifying units, calendar ranges): **Units** and [Reference](https://lemma.run/reference#data-commands).
+
+**Lists**
+
+A list is ordered rows of one type. `data fares: money list` holds values; `uses staff: employee list` holds instances of spec `employee`, whose `data` are the columns and whose rules are computed per row. No list literals: each `-> with` adds rows, comma-separated. A list without rows is empty, never missing data. Evaluation data replaces a whole list with one JSON array (strings for values, objects keyed by row data names for instances). Do not name data, rules, specs, aliases, or units after list keywords (see **Syntax**).
+
+Use a list when rows are uniform and combined (summed, searched, filtered, counted, or their number varies). Use named `uses` instances when each has its own role (`buyer`, `seller`).
+
+```lemma
+spec menu_item
+
+data drink: text
+  -> options "espresso", "latte"
+
+data price: measure
+  -> unit eur: 1.00
+  -> decimals 2
+
+
+spec coffee_order
+
+uses menu: menu_item list
+  -> key drink
+  -> with drink: "espresso", price: 2.50 eur
+  -> with drink: "latte",    price: 3.50 eur
+
+data ordered:  menu.drink
+data quantity: number
+
+rule selected_drink:
+  menu -> find ordered
+
+rule total:
+  selected_drink.price * quantity
+```
+
+- `-> key drink` identifies rows by field; without it rows are numbered `1` to `n`. Duplicate source keys are planning errors; a row key must be an allowed option when the field has options; `find` with no row vetoes.
+- `menu.drink` in a type position reuses the row spec's type.
+- A row reads only its own data. A value the row needs from the enclosing spec is supplied per row (`-> with band: 0 eur...38000 eur, rate: 36%, income: income`).
+- A spec may hold a list of its own rows (`uses components: part list` inside `spec part`); rows come from evaluation data only.
+- List commands (`find`, `sum`, `where`, ...) are rule expressions, never `data` commands (see **Rules**).

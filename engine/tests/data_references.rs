@@ -1,7 +1,7 @@
+use indexmap::IndexMap;
 /// Integration tests for `with` bindings (import-path LHS) and local-with rejection.
 use lemma::DateTimeValue;
 use lemma::Engine;
-use std::collections::HashMap;
 
 fn rule_value(result: &lemma::Response, rule_name: &str) -> String {
     let rr = result
@@ -74,7 +74,7 @@ spec inner
 uses l: law
 data slot: number
 
-spec top
+spec root_spec
 uses lic: inner
   -> with slot: lw.other
 uses lw: law
@@ -92,10 +92,10 @@ rule answer: lic.slot
         .unwrap();
 
     let now = DateTimeValue::now();
-    let mut data = HashMap::new();
+    let mut data = IndexMap::new();
     data.insert("lw.other".to_string(), "99".into());
     let result = engine
-        .run(None, "top", Some(&now), data, None, false)
+        .evaluate(None, "root_spec", Some(&now), data, None, false)
         .expect("should run");
 
     assert_eq!(rule_value(&result, "answer"), "99");
@@ -266,11 +266,11 @@ rule r: i.limited
         .expect("plan must succeed; constraint failure is a runtime veto");
 
     let now = DateTimeValue::now();
-    let mut data = HashMap::new();
+    let mut data = IndexMap::new();
     data.insert("src.v".to_string(), "10".into());
     let resp = engine
-        .run(None, "outer", Some(&now), data, None, false)
-        .expect("run must complete with veto, not Error");
+        .evaluate(None, "outer", Some(&now), data, None, false)
+        .expect("evaluate must complete with veto, not Error");
     let rr = resp.results.get("r").expect("rule 'r'");
     assert!(
         rr.vetoed,
@@ -304,10 +304,10 @@ rule r: person
         .expect("loads: `data person: age` is a typedef reference, not a value-copy reference");
 
     let now = DateTimeValue::now();
-    let mut data = HashMap::new();
+    let mut data = IndexMap::new();
     data.insert("person".to_string(), "30".into());
     let result = engine
-        .run(None, "s", Some(&now), data, None, false)
+        .evaluate(None, "s", Some(&now), data, None, false)
         .expect("evaluates; `person` is typed 'age' and uses supplied value");
 
     assert_eq!(rule_value(&result, "r"), "30");
@@ -337,10 +337,10 @@ rule r: i.slot
         .expect("non-dotted RHS in binding context must resolve in the enclosing spec");
 
     let now = DateTimeValue::now();
-    let mut data = HashMap::new();
+    let mut data = IndexMap::new();
     data.insert("src".to_string(), "123".into());
     let result = engine
-        .run(None, "outer", Some(&now), data, None, false)
+        .evaluate(None, "outer", Some(&now), data, None, false)
         .expect("evaluates");
     assert_eq!(rule_value(&result, "r"), "123");
 }

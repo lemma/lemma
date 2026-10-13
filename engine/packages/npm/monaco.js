@@ -146,6 +146,47 @@ export function registerLspProviders(monaco, lspClient) {
     releaseDocumentSemanticTokens() {},
   });
 
+  monaco.languages.registerCompletionItemProvider('lemma', {
+    triggerCharacters: ['.', '>', ':', ' '],
+    async provideCompletionItems(model, position) {
+      const uri = model.uri.toString();
+      const result = await lspClient.completion(
+        uri,
+        position.lineNumber - 1,
+        position.column - 1,
+      );
+      const items = Array.isArray(result) ? result : (result && result.items) ? result.items : [];
+      return {
+        suggestions: items.map(function (item) {
+          const range = item.textEdit && item.textEdit.range
+            ? new monaco.Range(
+                item.textEdit.range.start.line + 1,
+                item.textEdit.range.start.character + 1,
+                item.textEdit.range.end.line + 1,
+                item.textEdit.range.end.character + 1,
+              )
+            : new monaco.Range(
+                position.lineNumber,
+                position.column,
+                position.lineNumber,
+                position.column,
+              );
+          const insert = (item.textEdit && item.textEdit.newText) || item.insertText || item.label;
+          return {
+            label: item.label,
+            kind: monaco.languages.CompletionItemKind.Keyword,
+            insertText: insert,
+            detail: item.detail,
+            documentation: item.documentation && item.documentation.value
+              ? item.documentation.value
+              : item.documentation,
+            range: range,
+          };
+        }),
+      };
+    },
+  });
+
   monaco.languages.registerDocumentFormattingEditProvider('lemma', {
     async provideDocumentFormattingEdits(model) {
       const uri = model.uri.toString();

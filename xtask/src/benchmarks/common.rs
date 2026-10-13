@@ -30,6 +30,7 @@ pub struct EnvironmentInfo {
     pub rustc_version: String,
     pub uname: String,
     pub git_sha: String,
+    pub generated_at: String,
 }
 
 pub fn capture_environment(root: &Path) -> Result<EnvironmentInfo, String> {
@@ -37,6 +38,7 @@ pub fn capture_environment(root: &Path) -> Result<EnvironmentInfo, String> {
         rustc_version: capture_stdout("rustc", &["-Vv"], None)?,
         uname: capture_stdout("uname", &["-srm"], None)?,
         git_sha: capture_stdout("git", &["rev-parse", "HEAD"], Some(root))?,
+        generated_at: capture_stdout("date", &["-u", "+%Y-%m-%dT%H:%M:%SZ"], None)?,
     })
 }
 
@@ -171,6 +173,7 @@ pub fn push_environment_block(
     out.push_str("## Environment\n\n");
     out.push_str(&format!("- Host: `{}`\n", env.uname));
     out.push_str(&format!("- Lemma git SHA: `{}`\n", env.git_sha));
+    out.push_str(&format!("- Generated (UTC): `{}`\n", env.generated_at));
     if let Some(version) = python_version {
         out.push_str(&format!("- Python: `{version}`\n"));
     }
@@ -228,7 +231,23 @@ mod tests {
         let row = read_latency_estimate(&base, "bench_shipping", "evaluate").expect("read");
         assert_eq!(row.median_ns, 20853.0);
         assert_eq!(row.std_dev_ns, 3834.0);
-        let _ = fs::remove_dir_all(&base);
+        fs::remove_dir_all(&base).expect("BUG: remove bench test dir");
+    }
+
+    #[test]
+    fn push_environment_block_lists_generation_time() {
+        let env = EnvironmentInfo {
+            rustc_version: "rustc test".to_string(),
+            uname: "Linux test x86_64".to_string(),
+            git_sha: "abc123".to_string(),
+            generated_at: "2026-01-01T00:00:00Z".to_string(),
+        };
+        let mut out = String::new();
+        push_environment_block(&mut out, &env, None);
+        assert!(
+            out.contains("- Generated (UTC): `2026-01-01T00:00:00Z`\n"),
+            "{out}"
+        );
     }
 
     #[test]

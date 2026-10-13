@@ -1,23 +1,23 @@
+use indexmap::IndexMap;
 use lemma::DateTimeValue;
 use lemma::__test_support::{checked_div, checked_mul, decimal_to_rational, rational_new};
-use lemma::{Engine, ValueKind};
+use lemma::{Engine, EvaluateDataValue, ValueKind};
 use rust_decimal::Decimal;
-use std::collections::HashMap;
 use std::str::FromStr;
 
 fn decimal_lit(d: &str) -> Decimal {
     Decimal::from_str(d).unwrap()
 }
 
-fn run_override_veto_message(
+fn evaluate_override_veto_message(
     engine: &Engine,
     spec: &str,
-    data: HashMap<String, String>,
+    data: IndexMap<String, EvaluateDataValue>,
     rule_name: &str,
 ) -> String {
     let now = DateTimeValue::now();
     let resp = engine
-        .run(None, spec, Some(&now), data, None, true)
+        .evaluate(None, spec, Some(&now), data, None, true)
         .unwrap_or_else(|err| panic!("run must complete with veto, not Error: {err}"));
     let rr = resp
         .results
@@ -54,11 +54,11 @@ rule check: true
 
     let now = DateTimeValue::now();
     let response = engine
-        .run(
+        .evaluate(
             None,
             "pricing",
             Some(&now),
-            HashMap::from([("price".to_string(), "150 eur".into())]),
+            IndexMap::from([("price".to_string(), "150 eur".into())]),
             None,
             true,
         )
@@ -95,10 +95,10 @@ rule check: price
         .load([(lemma::SourceType::Volatile, code.to_string())])
         .unwrap();
 
-    let msg = run_override_veto_message(
+    let msg = evaluate_override_veto_message(
         &engine,
         "pricing",
-        HashMap::from([("price".to_string(), "100 btc".into())]),
+        IndexMap::from([("price".to_string(), "100 btc".into())]),
         "check",
     );
     assert!(msg.contains("btc"), "actual veto: {msg}");
@@ -124,7 +124,7 @@ rule price_eur: amount as eur
 
     let now = DateTimeValue::now();
     let response = engine
-        .run(None, "pricing", Some(&now), HashMap::new(), None, true)
+        .evaluate(None, "pricing", Some(&now), IndexMap::new(), None, true)
         .unwrap();
     let rule_result = response
         .results
@@ -174,7 +174,7 @@ rule taxable: gross - pension
 
     let now = DateTimeValue::now();
     let response = engine
-        .run(None, "t", Some(&now), HashMap::new(), None, true)
+        .evaluate(None, "t", Some(&now), IndexMap::new(), None, true)
         .unwrap();
 
     let rule_result = response
@@ -245,7 +245,7 @@ rule base_shipping: 5.99
 
     let now = DateTimeValue::now();
     let response = engine
-        .run(None, "shipping", Some(&now), HashMap::new(), None, true)
+        .evaluate(None, "shipping", Some(&now), IndexMap::new(), None, true)
         .unwrap();
 
     let rule_result = response
@@ -298,7 +298,7 @@ rule total: base_fee + surcharge
 
     let now = DateTimeValue::now();
     let response = engine
-        .run(None, "shipping", Some(&now), HashMap::new(), None, true)
+        .evaluate(None, "shipping", Some(&now), IndexMap::new(), None, true)
         .unwrap();
 
     let rule_result = response
@@ -351,10 +351,10 @@ rule result: mass as gram as number
         .unwrap();
 
     let now = DateTimeValue::now();
-    let mut data = HashMap::new();
+    let mut data = IndexMap::new();
     data.insert("mass".to_string(), "2 kilogram".into());
     let response = engine
-        .run(None, "physics", Some(&now), data, None, true)
+        .evaluate(None, "physics", Some(&now), data, None, true)
         .unwrap();
     let rule = response
         .results
@@ -402,10 +402,10 @@ rule result: mass as kilogram as number
         .unwrap();
 
     let now = DateTimeValue::now();
-    let mut data = HashMap::new();
+    let mut data = IndexMap::new();
     data.insert("mass".to_string(), "500 gram".into());
     let response = engine
-        .run(None, "physics", Some(&now), data, None, true)
+        .evaluate(None, "physics", Some(&now), data, None, true)
         .unwrap();
     let rule = response
         .results
@@ -454,10 +454,10 @@ rule result: mass as gram as number
         .unwrap();
 
     let now = DateTimeValue::now();
-    let mut data = HashMap::new();
+    let mut data = IndexMap::new();
     data.insert("mass".to_string(), "1 pound".into());
     let response = engine
-        .run(None, "physics", Some(&now), data, None, true)
+        .evaluate(None, "physics", Some(&now), data, None, true)
         .unwrap();
     let rule = response
         .results
@@ -508,7 +508,7 @@ rule total: a + b
 
     let now = DateTimeValue::now();
     let response = engine
-        .run(None, "physics", Some(&now), HashMap::new(), None, true)
+        .evaluate(None, "physics", Some(&now), IndexMap::new(), None, true)
         .unwrap();
     let rule = response
         .results
@@ -550,7 +550,7 @@ rule heavy: package > 1 kilogram
 
     let now = DateTimeValue::now();
     let response = engine
-        .run(None, "physics", Some(&now), HashMap::new(), None, true)
+        .evaluate(None, "physics", Some(&now), IndexMap::new(), None, true)
         .unwrap();
     let rule = response
         .results
@@ -592,11 +592,11 @@ rule result: weight
 
     let now = DateTimeValue::now();
     // 1500 gram = 1.5 kg, which is under the 2 kg maximum
-    let response = engine.run(
+    let response = engine.evaluate(
         None,
         "physics",
         Some(&now),
-        HashMap::from([("weight".to_string(), "1500 gram".into())]),
+        IndexMap::from([("weight".to_string(), "1500 gram".into())]),
         None,
         true,
     );
@@ -606,7 +606,7 @@ rule result: weight
         "1500 gram (= 1.5 kg) should pass maximum 2 kg, got: {:?}",
         response.as_ref().err()
     );
-    let response = response.expect("run Ok");
+    let response = response.expect("evaluate Ok");
     let rule = response.results.get("result").expect("result");
     assert!(
         !rule.vetoed,
@@ -653,11 +653,11 @@ rule result: weight
 
     let now = DateTimeValue::now();
     // 1500 gram = 1.5 kg, which is above the 1 kg minimum
-    let response = engine.run(
+    let response = engine.evaluate(
         None,
         "physics",
         Some(&now),
-        HashMap::from([("weight".to_string(), "1500 gram".into())]),
+        IndexMap::from([("weight".to_string(), "1500 gram".into())]),
         None,
         true,
     );
@@ -667,7 +667,7 @@ rule result: weight
         "1500 gram (= 1.5 kg) should pass minimum 1 kg, got: {:?}",
         response.as_ref().err()
     );
-    let response = response.expect("run Ok");
+    let response = response.expect("evaluate Ok");
     let rule = response.results.get("result").expect("result");
     assert!(
         !rule.vetoed,
@@ -713,10 +713,10 @@ rule result: weight
         .unwrap();
 
     // 3000 gram = 3 kg, which exceeds the 2 kg maximum
-    let message = run_override_veto_message(
+    let message = evaluate_override_veto_message(
         &engine,
         "physics",
-        HashMap::from([("weight".to_string(), "3000 gram".into())]),
+        IndexMap::from([("weight".to_string(), "3000 gram".into())]),
         "result",
     );
     assert!(
@@ -746,10 +746,10 @@ rule out: cost_per_unit
         .load([(lemma::SourceType::Volatile, code.to_string())])
         .unwrap();
 
-    let message = run_override_veto_message(
+    let message = evaluate_override_veto_message(
         &engine,
         "s",
-        HashMap::from([("cost_per_unit".to_string(), "1 eur_per_kilo".into())]),
+        IndexMap::from([("cost_per_unit".to_string(), "1 eur_per_kilo".into())]),
         "out",
     );
     assert!(
@@ -789,13 +789,10 @@ rule out: cost_per_unit
         .load([(lemma::SourceType::Volatile, code.to_string())])
         .unwrap();
 
-    let message = run_override_veto_message(
+    let message = evaluate_override_veto_message(
         &engine,
         "s",
-        HashMap::from([(
-            "cost_per_unit".to_string(),
-            "2.01 usd_per_tonne".to_string(),
-        )]),
+        IndexMap::from([("cost_per_unit".to_string(), "2.01 usd_per_tonne".into())]),
         "out",
     );
     assert!(
@@ -838,14 +835,11 @@ fn compound_measure_below_maximum_in_other_unit_passes() {
         .unwrap();
 
     let now = DateTimeValue::now();
-    let response = engine.run(
+    let response = engine.evaluate(
         None,
         "s",
         Some(&now),
-        HashMap::from([(
-            "cost_per_unit".to_string(),
-            "2.01 usd_per_tonne".to_string(),
-        )]),
+        IndexMap::from([("cost_per_unit".to_string(), "2.01 usd_per_tonne".into())]),
         None,
         true,
     );
@@ -855,7 +849,7 @@ fn compound_measure_below_maximum_in_other_unit_passes() {
         "2.01 usd_per_tonne is below converted maximum of 2.00 eur_per_kilo, got: {:?}",
         response.as_ref().err()
     );
-    let response = response.expect("run Ok");
+    let response = response.expect("evaluate Ok");
     let rule = response.results.get("out").expect("out");
     assert!(
         !rule.vetoed,
@@ -891,13 +885,10 @@ fn compound_measure_above_maximum_shows_converted_bound_in_user_unit() {
         )])
         .unwrap();
 
-    let message = run_override_veto_message(
+    let message = evaluate_override_veto_message(
         &engine,
         "s",
-        HashMap::from([(
-            "cost_per_unit".to_string(),
-            "5000 usd_per_tonne".to_string(),
-        )]),
+        IndexMap::from([("cost_per_unit".to_string(), "5000 usd_per_tonne".into())]),
         "out",
     );
     assert!(
@@ -922,10 +913,6 @@ data money: measure
   -> unit eur: 1
   -> unit usd: 0.91
 
-data mass: measure
-  -> unit kilogram: 1
-  -> unit tonne: 1000
-
 data storage_cost: measure
   -> unit eur_per_kilo_hour: eur/kilogram/hour
   -> unit usd_per_ton_hour: usd/tonne/hour
@@ -945,14 +932,11 @@ fn tri_compound_measure_below_maximum_in_other_unit_passes() {
         .unwrap();
 
     let now = DateTimeValue::now();
-    let response = engine.run(
+    let response = engine.evaluate(
         None,
         "s",
         Some(&now),
-        HashMap::from([(
-            "storage_cost".to_string(),
-            "2.01 usd_per_ton_hour".to_string(),
-        )]),
+        IndexMap::from([("storage_cost".to_string(), "2.01 usd_per_ton_hour".into())]),
         None,
         true,
     );
@@ -962,7 +946,7 @@ fn tri_compound_measure_below_maximum_in_other_unit_passes() {
         "2.01 usd_per_ton_hour is below converted maximum of 2.00 eur_per_kilo_hour, got: {:?}",
         response.as_ref().err()
     );
-    let response = response.expect("run Ok");
+    let response = response.expect("evaluate Ok");
     let rule = response.results.get("out").expect("out");
     assert!(
         !rule.vetoed,
@@ -998,13 +982,10 @@ fn tri_compound_measure_above_maximum_shows_converted_bound_in_user_unit() {
         )])
         .unwrap();
 
-    let message = run_override_veto_message(
+    let message = evaluate_override_veto_message(
         &engine,
         "s",
-        HashMap::from([(
-            "storage_cost".to_string(),
-            "5000 usd_per_ton_hour".to_string(),
-        )]),
+        IndexMap::from([("storage_cost".to_string(), "5000 usd_per_ton_hour".into())]),
         "out",
     );
     assert!(
@@ -1040,10 +1021,10 @@ rule result: weight
         .load([(lemma::SourceType::Volatile, code.to_string())])
         .unwrap();
 
-    let message = run_override_veto_message(
+    let message = evaluate_override_veto_message(
         &engine,
         "physics",
-        HashMap::from([("weight".to_string(), "500 gram".into())]),
+        IndexMap::from([("weight".to_string(), "500 gram".into())]),
         "result",
     );
     assert!(
@@ -1080,7 +1061,7 @@ fn eval_rule_measure_magnitude(
 ) -> (Decimal, String) {
     let now = DateTimeValue::now();
     let response = engine
-        .run(None, spec_name, Some(&now), HashMap::new(), None, true)
+        .evaluate(None, spec_name, Some(&now), IndexMap::new(), None, true)
         .expect("precision stress evaluation must complete");
     let rule = response
         .results
@@ -1258,7 +1239,7 @@ fn prime_cycles_lemma(cycle_count: usize) -> String {
     code.push_str("data anchor: 37 base\nrule step0: anchor\n");
     let mut previous = String::from("step0");
     let mut step_number = 0;
-    for _cycle_index in 0..cycle_count {
+    for _ in 0..cycle_count {
         for prime in cycle {
             step_number += 1;
             let rule = format!("step{step_number}");
@@ -1294,11 +1275,11 @@ fn precision_many_prime_cycles_explain_tip_only() {
     let now = DateTimeValue::now();
     let rules = ["final_step".to_string()];
     let response = engine
-        .run(
+        .evaluate(
             None,
             "prime_cycles",
             Some(&now),
-            HashMap::new(),
+            IndexMap::new(),
             Some(&rules),
             true,
         )
@@ -1312,11 +1293,11 @@ fn precision_many_prime_cycles_explain_tip_only() {
         "tip-only run with explain must attach explanation"
     );
     let again = engine
-        .run(
+        .evaluate(
             None,
             "prime_cycles",
             Some(&now),
-            HashMap::new(),
+            IndexMap::new(),
             Some(&rules),
             true,
         )
@@ -1462,7 +1443,14 @@ rule quotient: ten / zero
         .unwrap();
     let now = DateTimeValue::now();
     let response = engine
-        .run(None, "div0_control", Some(&now), HashMap::new(), None, true)
+        .evaluate(
+            None,
+            "div0_control",
+            Some(&now),
+            IndexMap::new(),
+            None,
+            true,
+        )
         .expect("evaluation must complete");
     let rule = response
         .results
@@ -1513,10 +1501,10 @@ rule r: x as minute
         .load([(lemma::SourceType::Volatile, code.to_string())])
         .unwrap();
     let now = DateTimeValue::now();
-    let mut data = HashMap::new();
+    let mut data = IndexMap::new();
     data.insert("x".to_string(), "5".into());
     let response = engine
-        .run(None, "t", Some(&now), data, None, true)
+        .evaluate(None, "t", Some(&now), data, None, true)
         .expect("stdlib duration with minute must run");
     let display = response
         .results
@@ -1547,7 +1535,7 @@ rule out: 5 eur as kg
         .unwrap();
     let now = DateTimeValue::now();
     let response = engine
-        .run(None, "t", Some(&now), HashMap::new(), None, true)
+        .evaluate(None, "t", Some(&now), IndexMap::new(), None, true)
         .unwrap();
     let out = response.results.get("out").unwrap();
     let lit = out
@@ -1600,7 +1588,7 @@ rule out: amount as eur as kg
         .unwrap();
     let now = DateTimeValue::now();
     let response = engine
-        .run(None, "t", Some(&now), HashMap::new(), None, true)
+        .evaluate(None, "t", Some(&now), IndexMap::new(), None, true)
         .unwrap();
     let out = response.results.get("out").unwrap();
     let lit = out
@@ -1643,7 +1631,7 @@ rule out: amount as eur as number as kg
         .unwrap();
     let now = DateTimeValue::now();
     let response = engine
-        .run(None, "t", Some(&now), HashMap::new(), None, true)
+        .evaluate(None, "t", Some(&now), IndexMap::new(), None, true)
         .unwrap();
     let out = response.results.get("out").unwrap();
     let lit = out

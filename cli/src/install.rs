@@ -271,7 +271,7 @@ pub fn persist_registry_dependency(
     })();
 
     if let Err(error) = probe_result {
-        let _ = fs::remove_file(&tmp);
+        remove_tmp_after_failure(&tmp);
         return Err(error);
     }
 
@@ -376,8 +376,16 @@ pub fn write_tmp(path: &Path, contents: &str) -> io::Result<PathBuf> {
     })() {
         Ok(()) => Ok(tmp),
         Err(e) => {
-            let _ = fs::remove_file(&tmp);
+            remove_tmp_after_failure(&tmp);
             Err(e)
+        }
+    }
+}
+
+fn remove_tmp_after_failure(tmp: &Path) {
+    if let Err(error) = fs::remove_file(tmp) {
+        if error.kind() != io::ErrorKind::NotFound {
+            tracing::warn!("failed to remove temp file {}: {error}", tmp.display());
         }
     }
 }
@@ -393,7 +401,7 @@ pub fn atomic_write(path: &Path, contents: &str) -> io::Result<()> {
     match rename_tmp(&tmp, path) {
         Ok(()) => Ok(()),
         Err(e) => {
-            let _ = fs::remove_file(&tmp);
+            remove_tmp_after_failure(&tmp);
             Err(e)
         }
     }

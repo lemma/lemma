@@ -1,5 +1,5 @@
-use lemma::{DateGranularity, DateTimeValue, Engine, TimezoneValue};
-use std::collections::HashMap;
+use indexmap::IndexMap;
+use lemma::{DateGranularity, DateTimeValue, Engine, EvaluateDataValue, TimezoneValue};
 
 fn effective_utc(y: i32, m: u32, d: u32) -> DateTimeValue {
     DateTimeValue {
@@ -10,10 +10,7 @@ fn effective_utc(y: i32, m: u32, d: u32) -> DateTimeValue {
         minute: 0,
         second: 0,
         microsecond: 0,
-        timezone: Some(TimezoneValue {
-            offset_hours: 0,
-            offset_minutes: 0,
-        }),
+        timezone: Some(TimezoneValue { offset_minutes: 0 }),
         granularity: DateGranularity::DateTime,
     }
 }
@@ -28,8 +25,8 @@ data charlie: text
 data delta: number
 data echo: boolean
 
-rule sum: alpha + bravo + delta
-rule over: sum > 100
+rule added: alpha + bravo + delta
+rule over: added > 100
 rule active: echo AND over
 rule label: charlie
 "#;
@@ -37,7 +34,7 @@ rule label: charlie
 #[test]
 fn repeated_load_produces_identical_json_responses() {
     let eff = effective_utc(2026, 6, 15);
-    let data: HashMap<String, String> = [
+    let data: IndexMap<String, EvaluateDataValue> = [
         ("alpha", "30"),
         ("bravo", "40"),
         ("charlie", "hello"),
@@ -45,7 +42,7 @@ fn repeated_load_produces_identical_json_responses() {
         ("echo", "true"),
     ]
     .into_iter()
-    .map(|(k, v)| (k.to_string(), v.to_string()))
+    .map(|(k, v)| (k.to_string(), v.into()))
     .collect();
 
     let mut jsons = Vec::new();
@@ -55,7 +52,7 @@ fn repeated_load_produces_identical_json_responses() {
             .load([(lemma::SourceType::Volatile, SPEC.to_string())])
             .unwrap();
         let response = engine
-            .run(
+            .evaluate(
                 None,
                 "determinism_test",
                 Some(&eff),
@@ -87,7 +84,8 @@ fn repeated_show_is_identical() {
             .load([(lemma::SourceType::Volatile, SPEC.to_string())])
             .unwrap();
         let show = engine.show(None, "determinism_test", Some(&eff)).unwrap();
-        let json = serde_json::to_string_pretty(&lemma::api::Show::from(&show)).unwrap();
+        let json =
+            serde_json::to_string_pretty(&lemma::api::show_document(&engine, &show)).unwrap();
         shows.push(json);
     }
 

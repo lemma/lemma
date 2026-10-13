@@ -6,7 +6,7 @@
 //! transport (streams) and entry point differ from native (stdio).
 
 use futures::stream::TryStreamExt;
-use tower_lsp::{LspService, Server};
+use tower_lsp_server::{LspService, Server};
 use wasm_bindgen::{prelude::*, JsCast};
 use wasm_bindgen_futures::stream::JsStream;
 

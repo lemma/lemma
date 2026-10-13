@@ -1,7 +1,7 @@
 //! Decomposition promotion with cross-repo `units` basename collision (bugs.md §1–§3).
 
+use indexmap::IndexMap;
 use lemma::Engine;
-use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -24,7 +24,7 @@ fn eval_display(code: &str, repository: Option<&str>, spec_name: &str, rule_name
         .load([(source(), code.to_string())])
         .expect("spec must load");
     let response = engine
-        .run(repository, spec_name, None, HashMap::new(), None, true)
+        .evaluate(repository, spec_name, None, IndexMap::new(), None, true)
         .expect("spec must evaluate");
     response
         .results

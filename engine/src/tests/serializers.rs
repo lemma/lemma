@@ -50,6 +50,7 @@ fn test_response_serialization() {
         spec_effective_from: None,
         spec_effective_to: None,
         results,
+        rows: Vec::new(),
     };
 
     let json = serde_json::to_string(&crate::api::Response::from(&response)).unwrap();
@@ -77,6 +78,7 @@ fn response_number_json_is_scalar() {
         spec_effective_from: None,
         spec_effective_to: None,
         results,
+        rows: Vec::new(),
     };
     let json: serde_json::Value = serde_json::from_str(
         &serde_json::to_string(&crate::api::Response::from(&response)).unwrap(),

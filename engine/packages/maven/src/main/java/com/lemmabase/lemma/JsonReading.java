@@ -201,6 +201,50 @@ public final class JsonReading {
   }
 
   /**
+   * Writes a generic Java JSON value ({@link Map}, {@link List}, string, {@link BigDecimal},
+   * boolean, or {@code null}) as JSON text.
+   *
+   * @param value value to write
+   * @return JSON text
+   * @throws IOException if JSON IO fails
+   */
+  public static String writeJson(@Nullable Object value) throws IOException {
+    StringWriter sw = new StringWriter();
+    try (JsonGenerator g = FACTORY.createGenerator(sw)) {
+      writeJsonValue(g, value);
+    }
+    return sw.toString();
+  }
+
+  private static void writeJsonValue(JsonGenerator g, @Nullable Object value) throws IOException {
+    switch (value) {
+      case null -> g.writeNull();
+      case Map<?, ?> map -> {
+        g.writeStartObject();
+        for (Map.Entry<?, ?> entry : map.entrySet()) {
+          if (!(entry.getKey() instanceof String key)) {
+            throw new LemmaBugError("BUG: JSON object key must be a string");
+          }
+          g.writeFieldName(key);
+          writeJsonValue(g, entry.getValue());
+        }
+        g.writeEndObject();
+      }
+      case List<?> list -> {
+        g.writeStartArray();
+        for (Object item : list) {
+          writeJsonValue(g, item);
+        }
+        g.writeEndArray();
+      }
+      case String text -> g.writeString(text);
+      case BigDecimal number -> g.writeNumber(number);
+      case Boolean bool -> g.writeBoolean(bool);
+      default -> throw new LemmaBugError("BUG: not a JSON value: " + value.getClass());
+    }
+  }
+
+  /**
    * Creates a parser for a JSON document.
    *
    * @param json JSON text

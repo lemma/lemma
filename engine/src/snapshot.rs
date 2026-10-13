@@ -2,6 +2,8 @@
 
 use crate::engine::Engine;
 use crate::error::Error;
+
+pub(crate) mod shared;
 use serde::{Deserialize, Serialize};
 
 const MAGIC: [u8; 4] = *b"LEMS";
@@ -35,12 +37,14 @@ fn map_postcard_de(err: postcard::Error) -> Error {
 
 /// Encode `engine` as header + body + little-endian CRC32 of the body.
 pub(crate) fn encode(engine: &Engine) -> Result<Vec<u8>, Error> {
+    let identity_scope = shared::EncodeScope::enter();
     let header = SnapshotHeader {
         magic: MAGIC,
         engine_version: env!("CARGO_PKG_VERSION").to_string(),
     };
     let mut bytes = postcard::to_allocvec(&header).map_err(map_postcard_ser)?;
     let body = postcard::to_allocvec(engine).map_err(map_postcard_ser)?;
+    drop(identity_scope);
     let checksum = body_checksum(&body);
     bytes.reserve(body.len() + CRC_LEN);
     bytes.extend_from_slice(&body);
@@ -49,7 +53,7 @@ pub(crate) fn encode(engine: &Engine) -> Result<Vec<u8>, Error> {
 }
 
 /// Decode snapshot bytes into an [`Engine`]. Stale version, bad magic, CRC mismatch,
-/// or corrupt body → [`Error`]. Committed-store invariant violations panic.
+/// corrupt body, or a spec set without plans → [`Error`].
 pub(crate) fn decode(bytes: &[u8]) -> Result<Engine, Error> {
     let (header, rest) =
         postcard::take_from_bytes::<SnapshotHeader>(bytes).map_err(map_postcard_de)?;
@@ -84,41 +88,37 @@ pub(crate) fn decode(bytes: &[u8]) -> Result<Engine, Error> {
             "engine snapshot checksum mismatch: stored {stored:#010x}, computed {computed:#010x}"
         )));
     }
+    let identity_scope = shared::DecodeScope::enter();
     let engine: Engine = postcard::from_bytes(body).map_err(map_postcard_de)?;
-    assert_committed_store_invariant(&engine);
+    drop(identity_scope);
+    check_committed_store(&engine)?;
     Ok(engine)
 }
 
 /// Every non-empty spec set in `context` must have plans. Plan effectives may be a
 /// finer temporal split than AST rows (unpinned dependency boundaries).
-fn assert_committed_store_invariant(engine: &Engine) {
+fn check_committed_store(engine: &Engine) -> Result<(), Error> {
     for (repository, by_name) in engine.context.repositories() {
         for (spec_name, spec_set) in by_name {
             if spec_set.is_empty() {
                 continue;
             }
-            let plans = engine
+            let has_plans = engine
                 .plans
                 .get_plans(repository.name.as_deref(), spec_name)
-                .unwrap_or_else(|| {
-                    panic!(
-                        "BUG: snapshot restored engine missing plans for spec set '{}'",
-                        SpecSetLabel {
-                            repository: repository.name.as_deref(),
-                            spec: spec_name,
-                        }
-                    )
-                });
-            assert!(
-                !plans.is_empty(),
-                "BUG: snapshot restored engine has empty plans for non-empty spec set '{}'",
-                SpecSetLabel {
-                    repository: repository.name.as_deref(),
-                    spec: spec_name,
-                }
-            );
+                .is_some_and(|plans| !plans.is_empty());
+            if !has_plans {
+                return Err(snapshot_error(format!(
+                    "engine snapshot has no plans for spec set '{}'",
+                    SpecSetLabel {
+                        repository: repository.name.as_deref(),
+                        spec: spec_name,
+                    }
+                )));
+            }
         }
     }
+    Ok(())
 }
 
 struct SpecSetLabel<'a> {
@@ -129,7 +129,7 @@ struct SpecSetLabel<'a> {
 impl std::fmt::Display for SpecSetLabel<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self.repository {
-            Some(repository) => write!(f, "{repository}/{}", self.spec),
+            Some(repository) => write!(f, "{repository} {}", self.spec),
             None => write!(f, "{}", self.spec),
         }
     }
@@ -139,7 +139,10 @@ impl std::fmt::Display for SpecSetLabel<'_> {
 mod tests {
     use super::*;
     use crate::limits::ResourceLimits;
+    use crate::parsing::ast::PrimitiveKind;
     use crate::parsing::source::SourceType;
+    use crate::planning::semantics::lemma_type_for_primitive;
+    use std::sync::Arc;
 
     fn load_simple() -> Engine {
         let mut engine = Engine::with_limits(ResourceLimits::default());
@@ -246,6 +249,22 @@ rule y: x + 1
     }
 
     #[test]
+    fn spec_set_without_plans_is_error() {
+        let mut engine = load_simple();
+        engine.plans = crate::planning::PlanStore::new();
+        let bytes = encode(&engine).expect("encode");
+        match decode(&bytes) {
+            Ok(_) => panic!("spec set without plans must fail"),
+            Err(err) => assert!(
+                err.message()
+                    .contains("no plans for spec set 'snapshot_demo'"),
+                "unexpected: {}",
+                err.message()
+            ),
+        }
+    }
+
+    #[test]
     fn header_only_is_error() {
         let header = postcard::to_allocvec(&SnapshotHeader {
             magic: MAGIC,
@@ -285,5 +304,76 @@ rule y: x + 1
                 err.message()
             ),
         }
+    }
+
+    fn workspace_is_repository_key(engine: &Engine) -> bool {
+        let workspace = engine.context.workspace();
+        engine
+            .context
+            .repositories()
+            .keys()
+            .any(|repository| Arc::ptr_eq(repository, &workspace))
+    }
+
+    #[test]
+    fn restored_workspace_is_repository_key() {
+        let engine = load_simple();
+        assert!(
+            workspace_is_repository_key(&engine),
+            "precondition: workspace Arc is a repositories key"
+        );
+        let restored = decode(&encode(&engine).expect("encode")).expect("decode");
+        assert!(
+            workspace_is_repository_key(&restored),
+            "restored workspace must be the same Arc as its repositories key"
+        );
+    }
+
+    fn primitive_singleton_hits(engine: &Engine) -> Vec<usize> {
+        let slices = engine
+            .plans
+            .get_plans(None, "snapshot_demo")
+            .expect("plans for snapshot_demo");
+        let plan = slices.values().next().expect("one temporal slice");
+        [
+            PrimitiveKind::Boolean,
+            PrimitiveKind::Number,
+            PrimitiveKind::Text,
+            PrimitiveKind::Date,
+            PrimitiveKind::Ratio,
+            PrimitiveKind::Time,
+        ]
+        .into_iter()
+        .map(|kind| {
+            let singleton = lemma_type_for_primitive(kind);
+            let in_normal_forms = plan
+                .normal_forms
+                .iter()
+                .filter(|node| Arc::ptr_eq(&node.result_type, singleton))
+                .count();
+            let in_rules = plan
+                .rules
+                .values()
+                .filter(|rule| Arc::ptr_eq(&rule.rule_type, singleton))
+                .count();
+            in_normal_forms + in_rules
+        })
+        .collect()
+    }
+
+    #[test]
+    fn restored_primitive_types_are_process_singletons() {
+        let engine = load_simple();
+        let original = primitive_singleton_hits(&engine);
+        assert!(
+            original.iter().sum::<usize>() > 0,
+            "precondition: plan holds primitive singleton types"
+        );
+        let restored = decode(&encode(&engine).expect("encode")).expect("decode");
+        assert_eq!(
+            primitive_singleton_hits(&restored),
+            original,
+            "restored plan must reference the same primitive singletons"
+        );
     }
 }

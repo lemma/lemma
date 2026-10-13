@@ -5,10 +5,10 @@ mod eval_rule_bool;
 
 use effective::{make_effective, make_effective_tz};
 use eval_rule_bool::eval_rule_bool;
+use indexmap::IndexMap;
 use lemma::DateTimeValue;
-use lemma::{Engine, ValueKind};
+use lemma::{Engine, EvaluateDataValue, ValueKind};
 use rust_decimal::Decimal;
-use std::collections::HashMap;
 use std::str::FromStr;
 
 fn decimal_lit(s: &str) -> Decimal {
@@ -20,10 +20,10 @@ fn eval_rule_date(
     spec_name: &str,
     rule: &str,
     effective: &DateTimeValue,
-    data: HashMap<String, String>,
+    data: IndexMap<String, EvaluateDataValue>,
 ) -> lemma::LiteralValue {
     let response = engine
-        .run(None, spec_name, Some(effective), data, None, true)
+        .evaluate(None, spec_name, Some(effective), data, None, true)
         .unwrap();
     response
         .results
@@ -55,7 +55,7 @@ rule current: now
         .load([(lemma::SourceType::Volatile, code.to_string())])
         .unwrap();
     let effective = make_effective(2026, 3, 7, 14, 30, 0);
-    let lit = eval_rule_date(&engine, "test", "current", &effective, HashMap::new());
+    let lit = eval_rule_date(&engine, "test", "current", &effective, IndexMap::new());
     if let ValueKind::Date(dt) = &lit.value {
         assert_eq!(dt.year, 2026);
         assert_eq!(dt.month, 3);
@@ -80,7 +80,7 @@ rule age_duration: birth_date...now as second as number
         .load([(lemma::SourceType::Volatile, code.to_string())])
         .unwrap();
     let effective = make_effective(2026, 1, 1, 0, 0, 0);
-    let lit = eval_rule_date(&engine, "test", "age_duration", &effective, HashMap::new());
+    let lit = eval_rule_date(&engine, "test", "age_duration", &effective, IndexMap::new());
     if let ValueKind::Number(second) = &lit.value {
         let day = lemma::ValueKind::Number(second.clone())
             .as_decimal_magnitude()
@@ -110,7 +110,7 @@ rule is_before_deadline: now < deadline
         "test",
         "is_before_deadline",
         &effective,
-        HashMap::new()
+        IndexMap::new()
     ));
 }
 
@@ -132,7 +132,7 @@ rule is_before_deadline: now < deadline
         "test",
         "is_before_deadline",
         &effective,
-        HashMap::new()
+        IndexMap::new()
     ));
 }
 
@@ -155,7 +155,7 @@ rule is_past_threshold: now > threshold
         "test",
         "is_past_threshold",
         &before,
-        HashMap::new()
+        IndexMap::new()
     ));
 
     let after = make_effective(2026, 7, 1, 0, 0, 0);
@@ -164,7 +164,7 @@ rule is_past_threshold: now > threshold
         "test",
         "is_past_threshold",
         &after,
-        HashMap::new()
+        IndexMap::new()
     ));
 }
 
@@ -190,7 +190,7 @@ rule was_in_past: event_date in past
         "test",
         "was_in_past",
         &effective,
-        HashMap::new()
+        IndexMap::new()
     ));
 }
 
@@ -212,7 +212,7 @@ rule was_in_past: event_date in past
         "test",
         "was_in_past",
         &effective,
-        HashMap::new()
+        IndexMap::new()
     ));
 }
 
@@ -234,7 +234,7 @@ rule is_upcoming: launch_date in future
         "test",
         "is_upcoming",
         &effective,
-        HashMap::new()
+        IndexMap::new()
     ));
 }
 
@@ -256,7 +256,7 @@ rule is_upcoming: launch_date in future
         "test",
         "is_upcoming",
         &effective,
-        HashMap::new()
+        IndexMap::new()
     ));
 }
 
@@ -278,7 +278,7 @@ rule check: event_date in past
         "test",
         "check",
         &effective,
-        HashMap::new()
+        IndexMap::new()
     ));
 }
 
@@ -300,7 +300,7 @@ rule check: event_date in future
         "test",
         "check",
         &effective,
-        HashMap::new()
+        IndexMap::new()
     ));
 }
 
@@ -326,7 +326,7 @@ rule recent_delivery: delivered in past 7 day
         "test",
         "recent_delivery",
         &effective,
-        HashMap::new()
+        IndexMap::new()
     ));
 }
 
@@ -348,7 +348,7 @@ rule recent_delivery: delivered in past 7 day
         "test",
         "recent_delivery",
         &effective,
-        HashMap::new()
+        IndexMap::new()
     ));
 }
 
@@ -370,7 +370,7 @@ rule upcoming_renewal: renewal_date in future 30 day
         "test",
         "upcoming_renewal",
         &effective,
-        HashMap::new()
+        IndexMap::new()
     ));
 }
 
@@ -392,7 +392,7 @@ rule upcoming_renewal: renewal_date in future 30 day
         "test",
         "upcoming_renewal",
         &effective,
-        HashMap::new()
+        IndexMap::new()
     ));
 }
 
@@ -415,7 +415,7 @@ rule check: event in past 7 day
         "test",
         "check",
         &effective,
-        HashMap::new()
+        IndexMap::new()
     ));
 }
 
@@ -437,7 +437,7 @@ rule check: event in past 4 hour
         "test",
         "check",
         &effective,
-        HashMap::new()
+        IndexMap::new()
     ));
 }
 
@@ -459,7 +459,7 @@ rule check: event in past 4 hour
         "test",
         "check",
         &effective,
-        HashMap::new()
+        IndexMap::new()
     ));
 }
 
@@ -485,7 +485,7 @@ rule current_year_invoice: invoice_date in calendar year
         "test",
         "current_year_invoice",
         &effective,
-        HashMap::new()
+        IndexMap::new()
     ));
 }
 
@@ -507,7 +507,7 @@ rule current_year_invoice: invoice_date in calendar year
         "test",
         "current_year_invoice",
         &effective,
-        HashMap::new()
+        IndexMap::new()
     ));
 }
 
@@ -529,7 +529,7 @@ rule last_year_invoice: invoice_date in past calendar year
         "test",
         "last_year_invoice",
         &effective,
-        HashMap::new()
+        IndexMap::new()
     ));
 }
 
@@ -551,7 +551,7 @@ rule last_year_invoice: invoice_date in past calendar year
         "test",
         "last_year_invoice",
         &effective,
-        HashMap::new()
+        IndexMap::new()
     ));
 }
 
@@ -573,7 +573,7 @@ rule next_year: target_date in future calendar year
         "test",
         "next_year",
         &effective,
-        HashMap::new()
+        IndexMap::new()
     ));
 }
 
@@ -595,7 +595,7 @@ rule is_not_this_year: old_date not in calendar year
         "test",
         "is_not_this_year",
         &effective,
-        HashMap::new()
+        IndexMap::new()
     ));
 }
 
@@ -617,7 +617,7 @@ rule is_not_this_year: today_date not in calendar year
         "test",
         "is_not_this_year",
         &effective,
-        HashMap::new()
+        IndexMap::new()
     ));
 }
 
@@ -639,7 +639,7 @@ rule this_month_payment: payment_date in calendar month
         "test",
         "this_month_payment",
         &effective,
-        HashMap::new()
+        IndexMap::new()
     ));
 }
 
@@ -661,7 +661,7 @@ rule this_month_payment: payment_date in calendar month
         "test",
         "this_month_payment",
         &effective,
-        HashMap::new()
+        IndexMap::new()
     ));
 }
 
@@ -683,7 +683,7 @@ rule last_month_payment: payment_date in past calendar month
         "test",
         "last_month_payment",
         &effective,
-        HashMap::new()
+        IndexMap::new()
     ));
 }
 
@@ -705,7 +705,7 @@ rule last_month_payment: payment_date in past calendar month
         "test",
         "last_month_payment",
         &effective,
-        HashMap::new()
+        IndexMap::new()
     ));
 }
 
@@ -727,7 +727,7 @@ rule next_month_due: due_date in future calendar month
         "test",
         "next_month_due",
         &effective,
-        HashMap::new()
+        IndexMap::new()
     ));
 }
 
@@ -750,7 +750,7 @@ rule this_week_meeting: meeting_date in calendar week
         "test",
         "this_week_meeting",
         &effective,
-        HashMap::new()
+        IndexMap::new()
     ));
 }
 
@@ -772,7 +772,7 @@ rule this_week_meeting: meeting_date in calendar week
         "test",
         "this_week_meeting",
         &effective,
-        HashMap::new()
+        IndexMap::new()
     ));
 }
 
@@ -794,7 +794,7 @@ rule shipping_fee: 15
         .load([(lemma::SourceType::Volatile, code.to_string())])
         .unwrap();
     let effective = make_effective(2026, 3, 7, 12, 0, 0);
-    let lit = eval_rule_date(&engine, "test", "shipping_fee", &effective, HashMap::new());
+    let lit = eval_rule_date(&engine, "test", "shipping_fee", &effective, IndexMap::new());
     if let ValueKind::Number(n) = &lit.value {
         assert_eq!(
             lemma::ValueKind::Number(n.clone())
@@ -821,7 +821,7 @@ rule shipping_fee: 15
         .load([(lemma::SourceType::Volatile, code.to_string())])
         .unwrap();
     let effective = make_effective(2026, 3, 7, 12, 0, 0);
-    let lit = eval_rule_date(&engine, "test", "shipping_fee", &effective, HashMap::new());
+    let lit = eval_rule_date(&engine, "test", "shipping_fee", &effective, IndexMap::new());
     if let ValueKind::Number(n) = &lit.value {
         assert_eq!(
             lemma::ValueKind::Number(n.clone())
@@ -853,7 +853,7 @@ rule is_new_hire: false
         "test",
         "is_new_hire",
         &effective,
-        HashMap::new()
+        IndexMap::new()
     ));
 }
 
@@ -876,7 +876,7 @@ rule needs_recertification: false
         "test",
         "needs_recertification",
         &effective,
-        HashMap::new()
+        IndexMap::new()
     ));
 }
 
@@ -903,7 +903,7 @@ rule qualifies: order_date in past 7 day and is_premium
         "test",
         "qualifies",
         &effective,
-        HashMap::new()
+        IndexMap::new()
     ));
 }
 
@@ -926,7 +926,7 @@ rule qualifies: order_date in past 7 day and is_premium
         "test",
         "qualifies",
         &effective,
-        HashMap::new()
+        IndexMap::new()
     ));
 }
 
@@ -946,7 +946,7 @@ rule status: "unknown"
         .load([(lemma::SourceType::Volatile, code.to_string())])
         .unwrap();
     let effective = make_effective(2026, 3, 7, 12, 0, 0);
-    let lit = eval_rule_date(&engine, "test", "status", &effective, HashMap::new());
+    let lit = eval_rule_date(&engine, "test", "status", &effective, IndexMap::new());
     if let ValueKind::Text(s) = &lit.value {
         assert_eq!(s, "recently_completed");
     } else {
@@ -971,7 +971,7 @@ rule was_recent: event_date in past 7 day
         .load([(lemma::SourceType::Volatile, code.to_string())])
         .unwrap();
     let effective = make_effective(2026, 3, 7, 12, 0, 0);
-    let mut data = HashMap::new();
+    let mut data = IndexMap::new();
     data.insert("event_date".to_string(), "2026-03-05".into());
     assert!(eval_rule_bool(
         &engine,
@@ -995,7 +995,7 @@ rule was_recent: event_date in past 7 day
         .load([(lemma::SourceType::Volatile, code.to_string())])
         .unwrap();
     let effective = make_effective(2026, 3, 7, 12, 0, 0);
-    let mut data = HashMap::new();
+    let mut data = IndexMap::new();
     data.insert("event_date".to_string(), "2026-01-01".into());
     assert!(!eval_rule_bool(
         &engine,
@@ -1024,13 +1024,13 @@ rule check: event_date in past
         .unwrap();
     // effective is 2026-03-07T01:00:00+02:00 = 2026-03-06T23:00:00Z
     // event (UTC midnight Mar 7) is AFTER effective (UTC 23:00 Mar 6)
-    let effective = make_effective_tz((2026, 3, 7, 1, 0, 0), (2, 0));
+    let effective = make_effective_tz((2026, 3, 7, 1, 0, 0), 120);
     assert!(!eval_rule_bool(
         &engine,
         "test",
         "check",
         &effective,
-        HashMap::new()
+        IndexMap::new()
     ));
 }
 
@@ -1049,13 +1049,13 @@ rule check: event_date in calendar year
     // effective timezone is +05:00; year boundary ends at 2026-12-31T23:59:59.999999+05:00
     // = 2026-12-31T18:59:59.999999 UTC
     // event is 2026-12-31T23:00:00 UTC which is past the boundary
-    let effective = make_effective_tz((2026, 6, 15, 12, 0, 0), (5, 0));
+    let effective = make_effective_tz((2026, 6, 15, 12, 0, 0), 300);
     assert!(!eval_rule_bool(
         &engine,
         "test",
         "check",
         &effective,
-        HashMap::new()
+        IndexMap::new()
     ));
 }
 
@@ -1129,7 +1129,7 @@ rule this_month: payment_date in calendar month
         "test",
         "this_month",
         &effective,
-        HashMap::new()
+        IndexMap::new()
     ));
 }
 
@@ -1151,7 +1151,7 @@ rule check: event_date in calendar month
         "test",
         "check",
         &effective,
-        HashMap::new()
+        IndexMap::new()
     ));
 }
 
@@ -1173,7 +1173,7 @@ rule check: event_date in calendar month
         "test",
         "check",
         &effective,
-        HashMap::new()
+        IndexMap::new()
     ));
 }
 
@@ -1200,7 +1200,7 @@ rule check: event_date in calendar week
         "test",
         "check",
         &effective,
-        HashMap::new()
+        IndexMap::new()
     ));
 }
 
@@ -1222,7 +1222,7 @@ rule check: event_date in calendar week
         "test",
         "check",
         &effective,
-        HashMap::new()
+        IndexMap::new()
     ));
 }
 
@@ -1244,7 +1244,7 @@ rule check: event_date in calendar week
         "test",
         "check",
         &effective,
-        HashMap::new()
+        IndexMap::new()
     ));
 }
 
@@ -1270,7 +1270,7 @@ rule check: event_date in calendar year
         "test",
         "check",
         &effective,
-        HashMap::new()
+        IndexMap::new()
     ));
 }
 
@@ -1292,7 +1292,7 @@ rule check: event_date in past calendar year
         "test",
         "check",
         &effective,
-        HashMap::new()
+        IndexMap::new()
     ));
 }
 
@@ -1314,6 +1314,6 @@ rule check: event_date in past calendar year
         "test",
         "check",
         &effective,
-        HashMap::new()
+        IndexMap::new()
     ));
 }

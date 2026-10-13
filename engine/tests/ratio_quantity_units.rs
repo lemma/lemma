@@ -3,11 +3,11 @@
 //! Covers: "as percent" / "as permille" ratio conversion; comparison with percent literals;
 //! unknown unit error; measure conversion unchanged; ratio display with no unit.
 
+use indexmap::IndexMap;
 use lemma::DateTimeValue;
 use lemma::ValueKind;
 use lemma::{Engine, LiteralValue};
 use rust_decimal::Decimal;
-use std::collections::HashMap;
 use std::str::FromStr;
 
 fn decimal_lit(s: &str) -> Decimal {
@@ -43,7 +43,7 @@ rule is_above_30: savings_ratio > 30%
 
     let now = DateTimeValue::now();
     let response = engine
-        .run(None, "savings", Some(&now), HashMap::new(), None, true)
+        .evaluate(None, "savings", Some(&now), IndexMap::new(), None, true)
         .unwrap();
 
     let ratio_result = response
@@ -101,7 +101,7 @@ rule tier: "low"
 
     let now = DateTimeValue::now();
     let response = engine
-        .run(None, "summary", Some(&now), HashMap::new(), None, true)
+        .evaluate(None, "summary", Some(&now), IndexMap::new(), None, true)
         .unwrap();
     let tier = response.results.get("tier").expect("tier");
     assert_eq!(
@@ -131,11 +131,11 @@ rule above_20_permille: as_permille > 20 permille
 
     let now = DateTimeValue::now();
     let response = engine
-        .run(
+        .evaluate(
             None,
             "permille_spec",
             Some(&now),
-            HashMap::new(),
+            IndexMap::new(),
             None,
             true,
         )
@@ -224,10 +224,9 @@ fn ratio_display_with_none_unit_shows_number_only() {
     );
 
     // Binding unit lives on LemmaType; LiteralValue::ratio_with_bound_unit no longer stores it.
-    let ValueKind::Ratio(r) = &lit.value else {
+    let ValueKind::Ratio(_) = &lit.value else {
         panic!("expected ratio, got {:?}", lit.value);
     };
-    let _ = r;
     let display_bare = lit.display_value();
     assert!(
         display_bare.contains("0.5"),
@@ -255,7 +254,7 @@ rule compared: plus_five > 25%
 
     let now = DateTimeValue::now();
     let response = engine
-        .run(None, "chained", Some(&now), HashMap::new(), None, true)
+        .evaluate(None, "chained", Some(&now), IndexMap::new(), None, true)
         .unwrap();
     let pct = response.results.get("pct").expect("pct");
     let plus_five = response.results.get("plus_five").expect("plus_five");
@@ -309,7 +308,7 @@ rule share_above_20: share_pct > 20%
 
     let now = DateTimeValue::now();
     let response = engine
-        .run(None, "mixed", Some(&now), HashMap::new(), None, true)
+        .evaluate(None, "mixed", Some(&now), IndexMap::new(), None, true)
         .unwrap();
     let as_eur = response.results.get("as_eur").expect("as_eur");
     let share_pct = response.results.get("share_pct").expect("share_pct");

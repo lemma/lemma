@@ -4,8 +4,8 @@
 //! explanation_display parenthesizes by shared precedence and associativity
 //! (same rule as Expression Display).
 
-use lemma::{format_explanation, DateTimeValue, Engine, Explanation};
-use std::collections::HashMap;
+use indexmap::IndexMap;
+use lemma::{format_explanation, DateTimeValue, Engine, EvaluateDataValue, Explanation};
 
 fn load(code: &str) -> Engine {
     let mut engine = Engine::new();
@@ -15,10 +15,10 @@ fn load(code: &str) -> Engine {
     engine
 }
 
-fn run_out(engine: &Engine, data: HashMap<String, String>) -> lemma::Response {
+fn evaluate_out(engine: &Engine, data: IndexMap<String, EvaluateDataValue>) -> lemma::Response {
     let now = DateTimeValue::now();
     engine
-        .run(
+        .evaluate(
             None,
             "t",
             Some(&now),
@@ -41,7 +41,7 @@ fn out_explanation(response: &lemma::Response) -> &Explanation {
 
 fn assert_out_body(code: &str, expected_body: &str) -> Explanation {
     let engine = load(code);
-    let response = run_out(&engine, HashMap::new());
+    let response = evaluate_out(&engine, IndexMap::new());
     let explanation = out_explanation(&response).clone();
     assert_eq!(
         explanation.body, expected_body,
@@ -73,7 +73,7 @@ data tput: 12
 rule out: q * (p + l / tput)
 "#,
     );
-    let response = run_out(&engine, HashMap::new());
+    let response = evaluate_out(&engine, IndexMap::new());
     assert_eq!(
         response.results.get("out").expect("out").result(),
         Some("695.8")
@@ -182,11 +182,11 @@ fn modulo_wraps_right_modulo() {
     assert_out_body(
         &format!(
             r#"{}
-rule out: a % (b % c)
+rule out: a mod (b mod c)
 "#,
             numbers_abc()
         ),
-        "a % (b % c)",
+        "a mod (b mod c)",
     );
 }
 
@@ -297,9 +297,9 @@ data b: false
 rule out: not (a and b)
 "#,
     );
-    let response = run_out(&engine, HashMap::new());
+    let response = evaluate_out(&engine, IndexMap::new());
     let explanation = out_explanation(&response);
-    assert_eq!(explanation.body, "not (a and b)");
+    assert_eq!(explanation.body, "not(a and b)");
 }
 
 #[test]
@@ -312,7 +312,7 @@ data b: 3
 rule out: a > 0 and b > 0
 "#,
     );
-    let response = run_out(&engine, HashMap::new());
+    let response = evaluate_out(&engine, IndexMap::new());
     let explanation = out_explanation(&response);
     assert_eq!(explanation.body, "a > 0 and b > 0");
 }
@@ -326,7 +326,7 @@ data n: 100
 rule out: n / 2 as number
 "#,
     );
-    let response = run_out(&engine, HashMap::new());
+    let response = evaluate_out(&engine, IndexMap::new());
     let explanation = out_explanation(&response);
     // `as` binds tighter than `/`, so this is n / (2 as number) with no extra parens.
     assert_eq!(explanation.body, "n / 2 as number");

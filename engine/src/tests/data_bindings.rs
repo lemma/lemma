@@ -122,3 +122,57 @@ data contract: spec employment_contract"#;
         "`data ... : spec ...` must be rejected; use `uses` to import specs"
     );
 }
+
+#[test]
+fn test_parse_uses_with_missing_colon_is_rejected() {
+    let input = r#"spec inner
+data slot: number
+
+spec outer
+uses i: inner
+  -> with slot
+rule r: i.slot"#;
+    let result = parse(
+        input,
+        crate::parsing::source::SourceType::Volatile,
+        &crate::ResourceLimits::default(),
+    );
+    assert!(
+        result.is_err(),
+        "uses block `-> with path` without colon must not parse"
+    );
+}
+
+#[test]
+fn test_parse_uses_with_colon_binding() {
+    let input = r#"spec inner
+data tax_rate: number
+
+spec outer
+uses i: inner
+  -> with tax_rate: 0.21
+rule total: i.tax_rate"#;
+    let result = parse(
+        input,
+        crate::parsing::source::SourceType::Volatile,
+        &crate::ResourceLimits::default(),
+    )
+    .unwrap()
+    .into_flattened_specs();
+    let outer = result
+        .iter()
+        .find(|spec| spec.name == "outer")
+        .expect("outer spec");
+    if let DataValue::Import { bindings, .. } = &outer.data[0].value {
+        assert_eq!(bindings.len(), 1);
+        assert_eq!(bindings[0].path.name, "tax_rate");
+        match &bindings[0].rhs {
+            WithRhs::Literal(crate::parsing::ast::Value::Number(n)) => {
+                assert_eq!(*n, rust_decimal::Decimal::new(21, 2));
+            }
+            other => panic!("Expected numeric literal rhs, got {:?}", other),
+        }
+    } else {
+        panic!("Expected Import");
+    }
+}

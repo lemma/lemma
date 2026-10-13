@@ -1,6 +1,6 @@
+use indexmap::IndexMap;
 use lemma::DateTimeValue;
 use lemma::Engine;
-use std::collections::HashMap;
 
 #[test]
 fn test_equal_operator_numbers() {
@@ -24,11 +24,11 @@ rule equal_false: a is c
 
     let now = DateTimeValue::now();
     let response = engine
-        .run(
+        .evaluate(
             None,
             "test_equal_numbers",
             Some(&now),
-            HashMap::new(),
+            IndexMap::new(),
             None,
             false,
         )
@@ -62,11 +62,11 @@ rule different_greeting: greeting is other
 
     let now = DateTimeValue::now();
     let response = engine
-        .run(
+        .evaluate(
             None,
             "test_equal_text",
             Some(&now),
-            HashMap::new(),
+            IndexMap::new(),
             None,
             false,
         )
@@ -101,11 +101,11 @@ rule mixed: flag_a is flag_c
 
     let now = DateTimeValue::now();
     let response = engine
-        .run(
+        .evaluate(
             None,
             "test_equal_booleans",
             Some(&now),
-            HashMap::new(),
+            IndexMap::new(),
             None,
             false,
         )
@@ -128,11 +128,11 @@ fn test_equal_operator_in_conditions() {
 spec test_equal_conditions
 
 data status: "active"
-data count: 10
+data item_count: 10
 
 rule message: "inactive"
   unless status is "active" then "active"
-  unless count is 10 then "count is 10"
+  unless item_count is 10 then "item_count is 10"
 "#
             .to_string(),
         )])
@@ -140,16 +140,19 @@ rule message: "inactive"
 
     let now = DateTimeValue::now();
     let response = engine
-        .run(
+        .evaluate(
             None,
             "test_equal_conditions",
             Some(&now),
-            HashMap::new(),
+            IndexMap::new(),
             None,
             false,
         )
         .unwrap();
 
     let message = response.results.get("message").unwrap();
-    assert_eq!(message.result().expect("result").to_string(), "count is 10");
+    assert_eq!(
+        message.result().expect("result").to_string(),
+        "item_count is 10"
+    );
 }

@@ -20,7 +20,6 @@ data wind_speed: number
 
 data is_raining: boolean
 
-
 rule clothing_layer:
   "light"
   unless temperature < 10 celsius then "warm"

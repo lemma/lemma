@@ -1,7 +1,7 @@
 //! Binding aliases sharing a measure family must not block decomposition promotion.
 
+use indexmap::IndexMap;
 use lemma::Engine;
-use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -24,7 +24,7 @@ fn eval_display(code: &str, spec_name: &str, rule_name: &str) -> String {
         .load([(source(), code.to_string())])
         .expect("spec must load");
     let response = engine
-        .run(None, spec_name, None, HashMap::new(), None, true)
+        .evaluate(None, spec_name, None, IndexMap::new(), None, true)
         .expect("spec must evaluate");
     response
         .results

@@ -1,6 +1,6 @@
+use indexmap::IndexMap;
 use lemma::DateTimeValue;
 use lemma::{ValueKind, *};
-use std::collections::HashMap;
 
 #[test]
 fn test_percentage_subtract_rejected() {
@@ -45,7 +45,7 @@ rule double_meeting: meeting_length * 2
 
     let now = DateTimeValue::now();
     let response = engine
-        .run(None, "scheduling", Some(&now), HashMap::new(), None, true)
+        .evaluate(None, "scheduling", Some(&now), IndexMap::new(), None, true)
         .unwrap();
     let rule = response.results.get("double_meeting").unwrap();
     let measure = rule
@@ -78,7 +78,7 @@ rule end: start + 7 day
 
     let now = DateTimeValue::now();
     let response = engine
-        .run(None, "dates", Some(&now), HashMap::new(), None, true)
+        .evaluate(None, "dates", Some(&now), IndexMap::new(), None, true)
         .unwrap();
     let result = response
         .results
@@ -120,7 +120,7 @@ rule can_access: is_active and not is_premium
 
     let now = DateTimeValue::now();
     let response = engine
-        .run(None, "logic", Some(&now), HashMap::new(), None, true)
+        .evaluate(None, "logic", Some(&now), IndexMap::new(), None, true)
         .unwrap();
     let result = response
         .results

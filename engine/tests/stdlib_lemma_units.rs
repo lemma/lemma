@@ -1,6 +1,6 @@
+use indexmap::IndexMap;
 use lemma::DateTimeValue;
 use lemma::{Engine, SourceType};
-use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -15,8 +15,8 @@ fn eval_rule(code: &str, spec_name: &str, rule_name: &str) -> String {
         .expect("load");
     let now = DateTimeValue::now();
     let response = engine
-        .run(None, spec_name, Some(&now), HashMap::new(), None, false)
-        .expect("run");
+        .evaluate(None, spec_name, Some(&now), IndexMap::new(), None, false)
+        .expect("evaluate");
     response
         .results
         .get(rule_name)
@@ -48,11 +48,11 @@ rule hour: age as hour"#;
         .load([(path_source("consumer.lemma"), code.to_string())])
         .expect("plan");
     let now = DateTimeValue::now();
-    let mut data = HashMap::new();
+    let mut data = IndexMap::new();
     data.insert("age".to_string(), "90 minute".into());
     let response = engine
-        .run(None, "consumer", Some(&now), data, None, false)
-        .expect("run");
+        .evaluate(None, "consumer", Some(&now), data, None, false)
+        .expect("evaluate");
     assert_eq!(
         response
             .results
@@ -260,7 +260,7 @@ rule x: 1 mebibyte as byte"#,
 }
 
 #[test]
-fn show_lists_stdlib_typedefs_with_empty_needed_by_rules() {
+fn show_lists_stdlib_typedefs_in_types() {
     let engine = Engine::new();
     let show = engine
         .show(Some("lemma"), "units", None)
@@ -269,6 +269,11 @@ fn show_lists_stdlib_typedefs_with_empty_needed_by_rules() {
         show.rules.is_empty(),
         "units has no rules; rules: {:?}",
         show.rules.keys().collect::<Vec<_>>()
+    );
+    assert!(
+        show.data.is_empty(),
+        "stdlib units has no rules so Data is empty; keys: {:?}",
+        show.data.keys().collect::<Vec<_>>()
     );
     let expected = [
         "duration",
@@ -293,15 +298,10 @@ fn show_lists_stdlib_typedefs_with_empty_needed_by_rules() {
         "calendar",
     ];
     for name in expected {
-        let entry = show.data.get(name).unwrap_or_else(|| {
-            panic!(
-                "expected typedef {name} in show.data; keys: {:?}",
-                show.data.keys().collect::<Vec<_>>()
-            )
-        });
         assert!(
-            entry.needed_by_rules.is_empty(),
-            "{name} must have empty needed_by_rules"
+            show.types.contains_key(name),
+            "expected typedef {name} in show.types; keys: {:?}",
+            show.types.keys().collect::<Vec<_>>()
         );
     }
     let source = engine

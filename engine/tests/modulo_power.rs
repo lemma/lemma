@@ -1,6 +1,6 @@
+use indexmap::IndexMap;
 use lemma::DateTimeValue;
 use lemma::*;
-use std::collections::HashMap;
 
 fn assert_rule_number(rule: &lemma::RuleResult, expected: rust_decimal::Decimal) {
     assert!(!rule.vetoed, "unexpected veto: {:?}", rule.veto_reason);
@@ -33,14 +33,14 @@ fn test_modulo_simple() {
 spec test
 data a: 10
 data b: 3
-rule remainder: a % b
+rule remainder: a mod b
 "#
             .to_string(),
         )])
         .unwrap();
     let now = DateTimeValue::now();
     let response = engine
-        .run(None, "test", Some(&now), HashMap::new(), None, true)
+        .evaluate(None, "test", Some(&now), IndexMap::new(), None, true)
         .unwrap();
     let result = response.results.get("remainder").unwrap();
     assert_rule_number(result, rust_decimal::Decimal::ONE);
@@ -63,7 +63,7 @@ rule result: base ^ exponent
         .unwrap();
     let now = DateTimeValue::now();
     let response = engine
-        .run(None, "test", Some(&now), HashMap::new(), None, true)
+        .evaluate(None, "test", Some(&now), IndexMap::new(), None, true)
         .unwrap();
     let result = response.results.get("result").unwrap();
     assert_rule_number(result, rust_decimal::Decimal::from(8));
@@ -78,15 +78,15 @@ fn test_modulo_in_expression() {
             r#"
 spec test
 data value: 17
-rule is_even: (value % 2) is 0
-rule is_odd: (value % 2) is 1
+rule is_even: (value mod 2) is 0
+rule is_odd: (value mod 2) is 1
 "#
             .to_string(),
         )])
         .unwrap();
     let now = DateTimeValue::now();
     let response = engine
-        .run(None, "test", Some(&now), HashMap::new(), None, true)
+        .evaluate(None, "test", Some(&now), IndexMap::new(), None, true)
         .unwrap();
 
     let is_even = response.results.get("is_even").unwrap();
@@ -118,7 +118,7 @@ rule square_root: base ^ 0.5
         .unwrap();
     let now = DateTimeValue::now();
     let response = engine
-        .run(None, "test", Some(&now), HashMap::new(), None, true)
+        .evaluate(None, "test", Some(&now), IndexMap::new(), None, true)
         .unwrap();
     let result = response.results.get("square_root").unwrap();
     assert_rule_number(result, rust_decimal::Decimal::from(2));
@@ -134,21 +134,21 @@ fn test_combined_operations() {
 spec test
 data x: 10
 data y: 3
-rule calculation: (x % y) + (2 ^ 3)
+rule calculation: (x mod y) + (2 ^ 3)
 "#
             .to_string(),
         )])
         .unwrap();
     let now = DateTimeValue::now();
     let response = engine
-        .run(None, "test", Some(&now), HashMap::new(), None, true)
+        .evaluate(None, "test", Some(&now), IndexMap::new(), None, true)
         .unwrap();
     let result = response.results.get("calculation").unwrap();
     assert_rule_number(result, rust_decimal::Decimal::from(9));
 }
 
 #[test]
-fn test_modulo_negative_dividend() {
+fn test_modulo_negative_dividend_is_floored() {
     let mut engine = Engine::new();
     engine
         .load([(
@@ -157,21 +157,21 @@ fn test_modulo_negative_dividend() {
 spec test
 data a: -7
 data b: 3
-rule remainder: a % b
+rule remainder: a mod b
 "#
             .to_string(),
         )])
         .unwrap();
     let now = DateTimeValue::now();
     let response = engine
-        .run(None, "test", Some(&now), HashMap::new(), None, true)
+        .evaluate(None, "test", Some(&now), IndexMap::new(), None, true)
         .unwrap();
     let result = response.results.get("remainder").unwrap();
-    assert_rule_number(result, rust_decimal::Decimal::from(-1));
+    assert_rule_number(result, rust_decimal::Decimal::from(2));
 }
 
 #[test]
-fn test_modulo_negative_divisor() {
+fn test_modulo_negative_divisor_is_floored() {
     let mut engine = Engine::new();
     engine
         .load([(
@@ -180,22 +180,22 @@ fn test_modulo_negative_divisor() {
 spec test
 data a: 7
 data b: -3
-rule remainder: a % b
+rule remainder: a mod b
 "#
             .to_string(),
         )])
         .unwrap();
     let now = DateTimeValue::now();
     let response = engine
-        .run(None, "test", Some(&now), HashMap::new(), None, true)
+        .evaluate(None, "test", Some(&now), IndexMap::new(), None, true)
         .unwrap();
     let result = response.results.get("remainder").unwrap();
-    assert_rule_number(result, rust_decimal::Decimal::from(1));
+    assert_rule_number(result, rust_decimal::Decimal::from(-2));
 }
 
 #[test]
-fn test_modulo_truncation_identity() {
-    // a == trunc(a/b)*b + (a%b) for both sign combinations in the reference.
+fn test_modulo_floored_identity() {
+    // a == floor(a/b)*b + (a mod b) for both sign combinations.
     let mut engine = Engine::new();
     engine
         .load([(
@@ -206,22 +206,22 @@ data a: -7
 data b: 3
 data c: 7
 data d: -3
-rule rem_neg_dividend: a % b
-rule rem_neg_divisor: c % d
+rule rem_neg_dividend: a mod b
+rule rem_neg_divisor: c mod d
 "#
             .to_string(),
         )])
         .unwrap();
     let now = DateTimeValue::now();
     let response = engine
-        .run(None, "test", Some(&now), HashMap::new(), None, true)
+        .evaluate(None, "test", Some(&now), IndexMap::new(), None, true)
         .unwrap();
     assert_rule_number(
         response.results.get("rem_neg_dividend").unwrap(),
-        rust_decimal::Decimal::from(-1),
+        rust_decimal::Decimal::from(2),
     );
     assert_rule_number(
         response.results.get("rem_neg_divisor").unwrap(),
-        rust_decimal::Decimal::from(1),
+        rust_decimal::Decimal::from(-2),
     );
 }

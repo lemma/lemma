@@ -1,8 +1,8 @@
 //! `run` missing-data discovery must mirror last-match-wins unless semantics
 //! (`compile_piecewise_rule` evaluates unless arms in reverse source order).
 
-use lemma::{DateGranularity, DateTimeValue, Engine, TimezoneValue};
-use std::collections::HashMap;
+use indexmap::IndexMap;
+use lemma::{DateGranularity, DateTimeValue, Engine, EvaluateDataValue, TimezoneValue};
 
 const FILM_ACCESS: &str = r#"
 spec premium_membership
@@ -35,10 +35,7 @@ fn effective_2027() -> DateTimeValue {
         minute: 0,
         second: 0,
         microsecond: 0,
-        timezone: Some(TimezoneValue {
-            offset_hours: 0,
-            offset_minutes: 0,
-        }),
+        timezone: Some(TimezoneValue { offset_minutes: 0 }),
         granularity: DateGranularity::DateTime,
     }
 }
@@ -56,10 +53,13 @@ fn missing_data_union(response: &lemma::Response) -> Vec<String> {
     names
 }
 
-fn run_can_view(engine: &Engine, inputs: HashMap<String, String>) -> lemma::Response {
+fn evaluate_can_view(
+    engine: &Engine,
+    inputs: IndexMap<String, EvaluateDataValue>,
+) -> lemma::Response {
     let effective = effective_2027();
     engine
-        .run(
+        .evaluate(
             None,
             "film_access",
             Some(&effective),
@@ -71,15 +71,15 @@ fn run_can_view(engine: &Engine, inputs: HashMap<String, String>) -> lemma::Resp
 }
 
 #[test]
-fn run_omits_membership_dates_when_premium_member_true() {
+fn evaluate_omits_membership_dates_when_premium_member_true() {
     let mut engine = Engine::new();
     engine
         .load([(lemma::SourceType::Volatile, FILM_ACCESS.to_string())])
         .expect("film_access spec must load");
 
-    let names = missing_data_union(&run_can_view(
+    let names = missing_data_union(&evaluate_can_view(
         &engine,
-        HashMap::from([
+        IndexMap::from([
             ("type".to_string(), "rental".into()),
             ("views_consumed".to_string(), "6".into()),
             ("premium_member".to_string(), "true".into()),
@@ -97,56 +97,49 @@ fn run_omits_membership_dates_when_premium_member_true() {
 }
 
 #[test]
-fn run_includes_membership_dates_when_premium_member_false() {
+fn evaluate_includes_membership_dates_when_premium_member_false() {
     let mut engine = Engine::new();
     engine
         .load([(lemma::SourceType::Volatile, FILM_ACCESS.to_string())])
         .expect("film_access spec must load");
 
-    let names = missing_data_union(&run_can_view(
-        &engine,
-        HashMap::from([
-            ("type".to_string(), "rental".into()),
-            ("views_consumed".to_string(), "6".into()),
-            ("premium_member".to_string(), "false".into()),
-        ]),
-    ));
-
-    assert!(
-        names.contains(&"premium_membership.start".to_string()),
-        "start must appear when premium_member is false and valid unless may win"
-    );
-    assert!(
-        names.contains(&"premium_membership.length".to_string()),
-        "length must appear when premium_member is false and valid unless may win"
+    assert_eq!(
+        missing_data_union(&evaluate_can_view(
+            &engine,
+            IndexMap::from([
+                ("type".to_string(), "rental".into()),
+                ("views_consumed".to_string(), "6".into()),
+                ("premium_member".to_string(), "false".into()),
+            ]),
+        )),
+        vec![
+            "premium_membership.start".to_string(),
+            "premium_membership.length".to_string(),
+        ],
+        "membership dates when premium_member is false"
     );
 }
 
 #[test]
-fn run_includes_membership_dates_when_premium_member_unknown() {
+fn evaluate_includes_membership_dates_when_premium_member_unknown() {
     let mut engine = Engine::new();
     engine
         .load([(lemma::SourceType::Volatile, FILM_ACCESS.to_string())])
         .expect("film_access spec must load");
 
-    let names = missing_data_union(&run_can_view(
-        &engine,
-        HashMap::from([
-            ("type".to_string(), "rental".into()),
-            ("views_consumed".to_string(), "6".into()),
-        ]),
-    ));
-
-    assert!(
-        names.contains(&"premium_member".to_string()),
-        "premium_member must appear when last unless outcome is unknown"
-    );
-    assert!(
-        names.contains(&"premium_membership.start".to_string()),
-        "start must appear when premium_member is unknown"
-    );
-    assert!(
-        names.contains(&"premium_membership.length".to_string()),
-        "length must appear when premium_member is unknown"
+    assert_eq!(
+        missing_data_union(&evaluate_can_view(
+            &engine,
+            IndexMap::from([
+                ("type".to_string(), "rental".into()),
+                ("views_consumed".to_string(), "6".into()),
+            ]),
+        )),
+        vec![
+            "premium_member".to_string(),
+            "premium_membership.start".to_string(),
+            "premium_membership.length".to_string(),
+        ],
+        "premium_member plus membership dates when unknown"
     );
 }

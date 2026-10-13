@@ -5,7 +5,8 @@
 use std::sync::Arc;
 
 use crate::computation::measure_math::{
-    mathematical_computation_preserves_measure_magnitude, measure_magnitude_math,
+    apply_rational_magnitude_op, mathematical_computation_preserves_measure_magnitude,
+    measure_magnitude_math,
 };
 use crate::computation::{OperationResult, VetoType};
 use crate::planning::semantics::{
@@ -17,7 +18,7 @@ pub(crate) fn evaluate_mathematical_operator(
     value: &BoundValueKind,
     lemma_type: &Arc<LemmaType>,
 ) -> OperationResult {
-    use crate::computation::decimal_math::{decimal_acos, decimal_asin, decimal_atan};
+    use crate::computation::decimal_math::{decimal_acos, decimal_asin, decimal_atan, decimal_tan};
     use rust_decimal::MathematicalOps;
 
     if matches!(&value.value, ValueKind::Measure(_))
@@ -29,6 +30,12 @@ pub(crate) fn evaluate_mathematical_operator(
     match &value.value {
         ValueKind::Number(stored_rational) => {
             use crate::computation::rational::decimal_to_rational;
+            if mathematical_computation_preserves_measure_magnitude(op) {
+                return match apply_rational_magnitude_op(op, stored_rational) {
+                    Ok(rounded) => OperationResult::from_literal(LiteralValue::number(rounded)),
+                    Err(failure) => OperationResult::Veto(VetoType::computation(failure.to_string())),
+                };
+            }
             let stored_decimal = match stored_rational.try_to_decimal() {
                 Ok(decimal) => decimal,
                 Err(crate::computation::rational::NumericFailure::Overflow) => {
@@ -41,19 +48,21 @@ pub(crate) fn evaluate_mathematical_operator(
                 }
             };
             let decimal_result: Option<rust_decimal::Decimal> = match op {
-                MathematicalComputation::Abs => Some(stored_decimal.abs()),
-                MathematicalComputation::Floor => Some(stored_decimal.floor()),
-                MathematicalComputation::Ceil => Some(stored_decimal.ceil()),
-                MathematicalComputation::Round => Some(stored_decimal.round()),
+                MathematicalComputation::Abs
+                | MathematicalComputation::Floor
+                | MathematicalComputation::Ceil
+                | MathematicalComputation::Round => {
+                    unreachable!("BUG: exact rational operators return before the Decimal path")
+                }
                 MathematicalComputation::Sqrt => stored_decimal.sqrt(),
                 MathematicalComputation::Sin => stored_decimal.checked_sin(),
                 MathematicalComputation::Cos => stored_decimal.checked_cos(),
-                MathematicalComputation::Tan => stored_decimal.checked_tan(),
+                MathematicalComputation::Tan => decimal_tan(stored_decimal),
                 MathematicalComputation::Log => stored_decimal.checked_ln(),
                 MathematicalComputation::Exp => stored_decimal.checked_exp(),
                 MathematicalComputation::Asin => decimal_asin(stored_decimal),
                 MathematicalComputation::Acos => decimal_acos(stored_decimal),
-                MathematicalComputation::Atan => decimal_atan(stored_decimal),
+                MathematicalComputation::Atan => Some(decimal_atan(stored_decimal)),
             };
 
             let rounded_decimal = match decimal_result {
@@ -67,8 +76,7 @@ pub(crate) fn evaluate_mathematical_operator(
 
             let result_rational = decimal_to_rational(rounded_decimal)
                 .expect("BUG: transcendental result must lift back to stored rational");
-            let result_value =
-                LiteralValue::number_with_type(result_rational, Arc::clone(lemma_type));
+            let result_value = LiteralValue::number(result_rational);
             OperationResult::from_literal(result_value)
         }
         _ => unreachable!(

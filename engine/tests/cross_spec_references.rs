@@ -1,6 +1,6 @@
+use indexmap::IndexMap;
 use lemma::DateTimeValue;
 use lemma::Engine;
-use std::collections::HashMap;
 
 /// Test cross-spec data references (should work)
 #[test]
@@ -28,7 +28,7 @@ rule total: base_data.price * base_data.quantity
 
     let now = DateTimeValue::now();
     let response = engine
-        .run(None, "derived", Some(&now), HashMap::new(), None, false)
+        .evaluate(None, "derived", Some(&now), IndexMap::new(), None, false)
         .unwrap();
     let total = response
         .results
@@ -65,7 +65,7 @@ rule derived_value: base_data.doubled + 10
 
     let now = DateTimeValue::now();
     let response = engine
-        .run(None, "derived", Some(&now), HashMap::new(), None, false)
+        .evaluate(None, "derived", Some(&now), IndexMap::new(), None, false)
         .unwrap();
     let derived_value = response
         .results
@@ -103,7 +103,7 @@ rule manager_bonus: employee.annual_salary * 0.15
 
     let now = DateTimeValue::now();
     let response = engine
-        .run(None, "manager", Some(&now), HashMap::new(), None, false)
+        .evaluate(None, "manager", Some(&now), IndexMap::new(), None, false)
         .unwrap();
     let bonus = response
         .results
@@ -143,7 +143,7 @@ rule derived_total: config.total
 
     let now = DateTimeValue::now();
     let response = engine
-        .run(None, "derived", Some(&now), HashMap::new(), None, false)
+        .evaluate(None, "derived", Some(&now), IndexMap::new(), None, false)
         .unwrap();
     let total = response
         .results
@@ -191,7 +191,7 @@ rule total_days: settings.standard_processing_days + order_info.processing_days
 
     let now = DateTimeValue::now();
     let response = engine
-        .run(None, "derived", Some(&now), HashMap::new(), None, false)
+        .evaluate(None, "derived", Some(&now), IndexMap::new(), None, false)
         .unwrap();
     let total = response
         .results
@@ -230,7 +230,7 @@ rule status: "invalid"
 
     let now = DateTimeValue::now();
     let response = engine
-        .run(None, "derived", Some(&now), HashMap::new(), None, false)
+        .evaluate(None, "derived", Some(&now), IndexMap::new(), None, false)
         .unwrap();
     let status = response
         .results
@@ -267,7 +267,7 @@ rule combined: base_data.input + base_data.calculated
 
     let now = DateTimeValue::now();
     let response = engine
-        .run(None, "derived", Some(&now), HashMap::new(), None, false)
+        .evaluate(None, "derived", Some(&now), IndexMap::new(), None, false)
         .unwrap();
     let combined = response
         .results
@@ -295,7 +295,7 @@ spec derived
 uses b: base
   -> with x: 100
   -> with y: 200
-rule sum: b.x + b.y + b.z
+rule added: b.x + b.y + b.z
 "#;
 
     engine
@@ -307,12 +307,12 @@ rule sum: b.x + b.y + b.z
 
     let now = DateTimeValue::now();
     let response = engine
-        .run(None, "derived", Some(&now), HashMap::new(), None, false)
+        .evaluate(None, "derived", Some(&now), IndexMap::new(), None, false)
         .unwrap();
     let sum = response
         .results
         .values()
-        .find(|r| r.rule.name == "sum")
+        .find(|r| r.rule.name == "added")
         .unwrap();
 
     // x=100 (overridden), y=200 (overridden), z=30 (original)
@@ -348,7 +348,7 @@ rule total: config.price * config.quantity
 
     let now = DateTimeValue::now();
     let response = engine
-        .run(None, "derived", Some(&now), HashMap::new(), None, false)
+        .evaluate(None, "derived", Some(&now), IndexMap::new(), None, false)
         .unwrap();
     let total = response
         .results
@@ -399,7 +399,7 @@ rule total2: base2.base.total
 
     let now = DateTimeValue::now();
     let response = engine
-        .run(None, "example3", Some(&now), HashMap::new(), None, false)
+        .evaluate(None, "example3", Some(&now), IndexMap::new(), None, false)
         .unwrap();
 
     let total1 = response
@@ -440,7 +440,7 @@ rule total: p.base_price
 
     let now = DateTimeValue::now();
     let response = engine
-        .run(None, "order", Some(&now), HashMap::new(), None, false)
+        .evaluate(None, "order", Some(&now), IndexMap::new(), None, false)
         .unwrap();
     let total = response
         .results
@@ -486,11 +486,11 @@ rule employee_summary: employee.monthly_salary
 
     let now = DateTimeValue::now();
     let response = engine
-        .run(
+        .evaluate(
             None,
             "specific_employee",
             Some(&now),
-            HashMap::new(),
+            IndexMap::new(),
             None,
             false,
         )
@@ -530,7 +530,7 @@ rule total: p.base_price
 
     let now = DateTimeValue::now();
     let response = engine
-        .run(None, "order", Some(&now), HashMap::new(), None, false)
+        .evaluate(None, "order", Some(&now), IndexMap::new(), None, false)
         .unwrap();
     let total = response
         .results
@@ -559,10 +559,10 @@ rule short: yes
         .load([(lemma::SourceType::Volatile, code.to_string())])
         .expect("spec must load");
     let now = DateTimeValue::now();
-    let mut data = HashMap::new();
+    let mut data = IndexMap::new();
     data.insert("units.duration".to_string(), "1 hour".into());
     let resp = engine
-        .run(None, "t", Some(&now), data, None, false)
+        .evaluate(None, "t", Some(&now), data, None, false)
         .expect("evaluation must run");
 
     let short = resp
@@ -596,10 +596,10 @@ rule short: yes
         .load([(lemma::SourceType::Volatile, code.to_string())])
         .expect("spec must load");
     let now = DateTimeValue::now();
-    let mut data = HashMap::new();
+    let mut data = IndexMap::new();
     data.insert("units.duration".to_string(), "3 hour".into());
     let resp = engine
-        .run(None, "t", Some(&now), data, None, false)
+        .evaluate(None, "t", Some(&now), data, None, false)
         .expect("evaluation must run");
 
     let short = resp

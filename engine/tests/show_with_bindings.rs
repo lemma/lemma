@@ -2,12 +2,12 @@
 //!
 //! - Rule / data references (`with bag.x: local_rule`): omitted from `missing_data`
 //!   (not promptable). Show still documents reachable typed slots.
-//! - Literal `with` (`with i.v: 42`): show may list as `fill`; never promptable
+//! - Literal `with` (`with i.v: 42`): show may list as `value`; never promptable
 //!   required input. Run resolves without overlay.
 
+use indexmap::IndexMap;
 use lemma::DateTimeValue;
 use lemma::Engine;
-use std::collections::HashMap;
 
 fn missing_data_union(response: &lemma::Response) -> Vec<String> {
     let mut seen = std::collections::HashSet::new();
@@ -32,7 +32,7 @@ fn missing_data_for_rule(response: &lemma::Response, rule: &str) -> Vec<String> 
 }
 
 #[test]
-fn run_omits_with_bound_rule_references_for_total_price() {
+fn evaluate_omits_with_bound_rule_references_for_total_price() {
     let code = r#"
 spec bag
 uses lemma units
@@ -57,7 +57,7 @@ uses bag
   -> with item_cost: item_cost
   -> with roasting: roasting
 
-data type_of_nut: text -> options "peanut" "cashew"
+data type_of_nut: text -> options "peanut", "cashew"
 
 rule price_peanut: 1.5 eur_per_kg
 rule price_peanut_roasting: 0.45 eur_per_kg
@@ -88,15 +88,15 @@ rule total_price: bag.total_price
 
     let now = DateTimeValue::now();
     let response = engine
-        .run(
+        .evaluate(
             None,
             "calc",
             Some(&now),
-            HashMap::new(),
+            IndexMap::new(),
             Some(&["total_price".to_string()]),
             false,
         )
-        .expect("run must succeed");
+        .expect("evaluate must succeed");
 
     let names = missing_data_union(&response);
     assert!(
@@ -159,13 +159,13 @@ rule r: i.v
         .expect("literal with still surfaces in show for documentation");
 
     assert!(
-        entry.fill.is_some(),
-        "literal with is fill; CLI skips, not a free input"
+        entry.value.is_some(),
+        "literal with is value; CLI skips, not a free input"
     );
 }
 
 #[test]
-fn run_omits_with_bound_data_reference_for_rule_r() {
+fn evaluate_omits_with_bound_data_reference_for_rule_r() {
     let code = r#"
 spec inner
 data a: number -> suggest 1
@@ -184,24 +184,25 @@ rule r: i.a + input
         .unwrap();
     let now = DateTimeValue::now();
     let response = engine
-        .run(
+        .evaluate(
             None,
             "outer",
             Some(&now),
-            HashMap::new(),
+            IndexMap::new(),
             Some(&["r".to_string()]),
             false,
         )
-        .expect("run must succeed");
+        .expect("evaluate must succeed");
 
-    let names = missing_data_union(&response);
-    assert!(!names.contains(&"i.a".to_string()));
-    assert!(names.contains(&"i.b".to_string()));
-    assert!(names.contains(&"input".to_string()));
+    assert_eq!(
+        missing_data_union(&response),
+        vec!["i.b".to_string(), "input".to_string()],
+        "with-bound i.a omitted; unbound i.b and input remain"
+    );
 }
 
 #[test]
-fn run_still_resolves_with_bound_fields_without_show_inputs() {
+fn evaluate_still_resolves_with_bound_fields_without_show_inputs() {
     let code = r#"
 spec inner
 data v: number
@@ -218,7 +219,7 @@ rule r: i.v
         .unwrap();
     let now = DateTimeValue::now();
     let resp = engine
-        .run(None, "outer", Some(&now), HashMap::new(), None, false)
+        .evaluate(None, "outer", Some(&now), IndexMap::new(), None, false)
         .unwrap();
     let r = resp.results.values().find(|x| x.rule.name == "r").unwrap();
     assert_eq!(r.result(), Some("10"));
@@ -229,7 +230,7 @@ rule r: i.v
 const CHOOSER_LEMMA: &str = r#"
 spec chooser
 
-data mode: text -> options "simple" "complex"
+data mode: text -> options "simple", "complex"
 data simple_input: number
 data complex_input_a: number
 data complex_input_b: number
@@ -240,22 +241,22 @@ rule result: veto "pick mode"
 "#;
 
 #[test]
-fn run_returns_all_data_on_fresh_plan() {
+fn evaluate_returns_all_data_on_fresh_plan() {
     let mut engine = Engine::new();
     engine
         .load([(lemma::SourceType::Volatile, CHOOSER_LEMMA.to_string())])
         .unwrap();
     let now = DateTimeValue::now();
     let response = engine
-        .run(
+        .evaluate(
             None,
             "chooser",
             Some(&now),
-            HashMap::new(),
+            IndexMap::new(),
             Some(&["result".to_string()]),
             false,
         )
-        .expect("run must succeed");
+        .expect("evaluate must succeed");
 
     let names = missing_data_for_rule(&response, "result");
     assert_eq!(
@@ -271,16 +272,16 @@ fn run_returns_all_data_on_fresh_plan() {
 }
 
 #[test]
-fn run_prunes_simple_branch_when_mode_is_complex() {
+fn evaluate_prunes_simple_branch_when_mode_is_complex() {
     let mut engine = Engine::new();
     engine
         .load([(lemma::SourceType::Volatile, CHOOSER_LEMMA.to_string())])
         .unwrap();
     let now = DateTimeValue::now();
-    let mut inputs = HashMap::new();
+    let mut inputs = IndexMap::new();
     inputs.insert("mode".to_string(), "complex".into());
     let response = engine
-        .run(
+        .evaluate(
             None,
             "chooser",
             Some(&now),
@@ -288,7 +289,7 @@ fn run_prunes_simple_branch_when_mode_is_complex() {
             Some(&["result".to_string()]),
             false,
         )
-        .expect("run must succeed");
+        .expect("evaluate must succeed");
 
     let names = missing_data_for_rule(&response, "result");
     assert!(
@@ -308,7 +309,7 @@ fn run_prunes_simple_branch_when_mode_is_complex() {
 }
 
 #[test]
-fn run_prunes_inactive_nut_branches_when_type_of_nut_supplied() {
+fn evaluate_prunes_inactive_nut_branches_when_type_of_nut_supplied() {
     let code = r#"
 spec bag
 uses lemma units
@@ -333,7 +334,7 @@ uses bag
   -> with item_cost: item_cost
   -> with roasting: roasting
 
-data type_of_nut: text -> options "peanut" "cashew"
+data type_of_nut: text -> options "peanut", "cashew"
 
 rule price_peanut: 1.5 eur_per_kg
 rule price_peanut_roasting: 0.45 eur_per_kg
@@ -363,10 +364,10 @@ rule total_price: bag.total_price
         .unwrap();
 
     let now = DateTimeValue::now();
-    let mut inputs = HashMap::new();
+    let mut inputs = IndexMap::new();
     inputs.insert("type_of_nut".to_string(), "peanut".into());
     let response = engine
-        .run(
+        .evaluate(
             None,
             "calc",
             Some(&now),
@@ -374,21 +375,11 @@ rule total_price: bag.total_price
             Some(&["total_price".to_string()]),
             false,
         )
-        .expect("run must succeed");
+        .expect("evaluate must succeed");
 
-    let names = missing_data_union(&response);
-    assert!(
-        !names.contains(&"type_of_nut".to_string()),
-        "supplied type_of_nut is bound and must not appear in missing_data: {names:?}"
-    );
-    assert!(names.contains(&"bag.weight".to_string()));
-    assert!(names.contains(&"bag.chocolatizing".to_string()));
-    assert!(
-        !names.contains(&"bag.item_cost".to_string()),
-        "with-bound item_cost must stay omitted: {names:?}"
-    );
-    assert!(
-        !names.contains(&"bag.roasting".to_string()),
-        "with-bound roasting must stay omitted: {names:?}"
+    assert_eq!(
+        missing_data_union(&response),
+        vec!["bag.weight".to_string(), "bag.chocolatizing".to_string(),],
+        "supplied type_of_nut and with-bound roasting/item_cost omitted"
     );
 }

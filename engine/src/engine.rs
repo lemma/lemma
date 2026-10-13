@@ -1,15 +1,15 @@
 use crate::evaluation::Evaluator;
-use crate::evaluation::{RunData, RunDataValue};
+use crate::evaluation::{EvaluateData, EvaluateDataValue};
 use crate::parsing::ast::{DateTimeValue, LemmaRepository, LemmaSpec};
 use crate::parsing::source::SourceType;
 use crate::parsing::{parse, EffectiveDate};
-use crate::planning::execution_plan::{Show, ShowData};
-use crate::planning::semantics::DataDefinition;
+use crate::planning::execution_plan::{ExecutionPlan, Show, ShowData};
+use crate::planning::semantics::{DataDefinition, SpecIdentity};
 use crate::planning::{LemmaSpecSet, PlanStore};
 use crate::{Error, ResourceLimits, Response};
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::Arc;
 
 /// Load failure: errors plus the source texts we attempted to load.
@@ -49,24 +49,136 @@ pub fn resolve_effective(raw: Option<&str>) -> Result<DateTimeValue, Error> {
 /// User [`Engine::load`] must not target this name via [`SourceType::Dependency`].
 pub const EMBEDDED_STDLIB_REPOSITORY: &str = "lemma";
 
-/// Listed spec row from [`Engine::list`].
+/// One `uses` target from a spec version's source.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct ListedSpec {
+pub struct SpecDependency {
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub repository: Option<String>,
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub effective: Option<DateTimeValue>,
+}
+
+impl std::fmt::Display for SpecDependency {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if let Some(repository) = &self.repository {
+            write!(f, "{repository} ")?;
+        }
+        write!(f, "{}", self.name)?;
+        if let Some(effective) = &self.effective {
+            write!(f, " {effective}")?;
+        }
+        Ok(())
+    }
+}
+
+/// One temporal spec version from [`Engine::specs`].
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct SpecVersion {
     pub name: String,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub effective_from: Option<DateTimeValue>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub effective_to: Option<DateTimeValue>,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub dependencies: Vec<SpecDependency>,
 }
 
-/// Repository group from [`Engine::list`].
+/// Half-open window as `lemma specs` / `lemma show` print it, same `lo...hi`
+/// notation as range values. Open start is `...to`; open end is the start date
+/// alone (matches `spec name date`); both absent prints nothing.
+pub(crate) fn write_effective_window(
+    f: &mut impl std::fmt::Write,
+    from: Option<&DateTimeValue>,
+    to: Option<&DateTimeValue>,
+) -> std::fmt::Result {
+    match (from, to) {
+        (Some(from), Some(to)) => write!(f, " {from}...{to}"),
+        (Some(from), None) => write!(f, " {from}"),
+        (None, Some(to)) => write!(f, " ...{to}"),
+        (None, None) => Ok(()),
+    }
+}
+
+impl std::fmt::Display for SpecVersion {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.name)?;
+        write_effective_window(f, self.effective_from.as_ref(), self.effective_to.as_ref())
+    }
+}
+
+/// Repository group from [`Engine::specs`].
 ///
 /// [`Self::repository`] is absent for the default unnamed repository.
+/// [`Self::from_dependency`] is true for lemma_deps and the embedded stdlib;
+/// it is omitted from JSON.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct ResolvedRepository {
+pub struct Repository {
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub repository: Option<String>,
-    pub specs: Vec<ListedSpec>,
+    pub specs: Vec<SpecVersion>,
+    #[serde(skip)]
+    pub from_dependency: bool,
+}
+
+/// Text view of [`Engine::specs`], as `lemma specs` prints it.
+///
+/// `all == false` (`lemma specs`): local repositories only (not lemma_deps / embedded
+/// stdlib). Each temporal version is followed by its `uses` targets, indented.
+/// `all == true` (`lemma specs --all`): every loaded repository; names and windows only.
+///
+/// Version lines are `name` plus ` from...to`, ` from`, ` ...to`, or the name alone,
+/// sorted by name then `effective_from`. The unnamed repository's rows are unindented;
+/// a named repository is a header with indented rows. Repositories without specs are
+/// left out; groups are separated by a blank line.
+#[must_use]
+pub fn format_repositories(repositories: &[Repository], all: bool) -> String {
+    let mut output = String::new();
+    let groups = repositories
+        .iter()
+        .filter(|resolved| !resolved.specs.is_empty() && (all || !resolved.from_dependency));
+    for (index, resolved) in groups.enumerate() {
+        if index > 0 {
+            output.push('\n');
+        }
+        let mut versions: Vec<&SpecVersion> = resolved.specs.iter().collect();
+        versions.sort_by(|a, b| (&a.name, &a.effective_from).cmp(&(&b.name, &b.effective_from)));
+        let indent = match resolved.repository.as_deref() {
+            None => "",
+            Some(repository) => {
+                output.push_str(repository);
+                output.push('\n');
+                "  "
+            }
+        };
+        for version in versions {
+            output.push_str(indent);
+            output.push_str(&version.to_string());
+            output.push('\n');
+            if !all {
+                for dependency in &version.dependencies {
+                    output.push_str(indent);
+                    output.push_str("  ");
+                    output.push_str(&dependency.to_string());
+                    output.push('\n');
+                }
+            }
+        }
+    }
+    output
+}
+
+fn uses_dependencies(spec: &LemmaSpec) -> Vec<SpecDependency> {
+    spec.data
+        .iter()
+        .filter_map(|data| {
+            data.value.uses_spec_ref().map(|spec_ref| SpecDependency {
+                repository: spec_ref.repository.as_ref().map(|q| q.name.clone()),
+                name: spec_ref.name.clone(),
+                effective: spec_ref.effective.clone(),
+            })
+        })
+        .collect()
 }
 
 // ─── Spec store with temporal resolution ──────────────────────────────
@@ -82,7 +194,9 @@ pub struct ResolvedRepository {
 /// in a repository must share the same `dependency` provenance ID.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Context {
+    #[serde(with = "crate::snapshot::shared::arc_key_index_map")]
     repositories: IndexMap<Arc<LemmaRepository>, IndexMap<String, LemmaSpecSet>>,
+    #[serde(with = "crate::snapshot::shared::arc")]
     workspace: Arc<LemmaRepository>,
 }
 
@@ -365,6 +479,88 @@ impl Engine {
         &self.limits
     }
 
+    /// Instance-list source row counts and Arc pointers by path for `spec`.
+    ///
+    /// Each entry is `(path, row_count, Arc::as_ptr as usize)`. Diagnostic for
+    /// Load-cost investigation. Not a supported consumer API.
+    #[doc(hidden)]
+    pub fn debug_instance_list_row_counts(
+        &self,
+        repository: Option<&str>,
+        spec: &str,
+    ) -> Vec<(String, usize, usize)> {
+        let Some(plan) = self.plans.get_plan(
+            repository,
+            spec,
+            &EffectiveDate::DateTimeValue(DateTimeValue::now()),
+        ) else {
+            return Vec::new();
+        };
+        let mut rows: Vec<(String, usize, usize)> = plan
+            .instance_lists
+            .iter()
+            .map(|(path, source)| {
+                let label = if path.segments.is_empty() {
+                    path.data.clone()
+                } else {
+                    let mut parts: Vec<&str> = path
+                        .segments
+                        .iter()
+                        .map(|segment| segment.uses.as_str())
+                        .collect();
+                    parts.push(path.data.as_str());
+                    parts.join(".")
+                };
+                (
+                    label,
+                    source.rows.len(),
+                    std::sync::Arc::as_ptr(&source.rows) as usize,
+                )
+            })
+            .collect();
+        rows.sort_by(|left, right| left.0.cmp(&right.0));
+        rows
+    }
+
+    /// Named-`uses` / list row-template Arc pointers for `spec`.
+    ///
+    /// Each entry is `(holder, identity, Arc::as_ptr as usize)`. `holder` is empty
+    /// for templates on `spec`'s plan; otherwise it is the template identity that
+    /// owns the nested entry (one level). Diagnostic for Load-cost investigation.
+    /// Not a supported consumer API.
+    #[doc(hidden)]
+    pub fn debug_row_template_arc_ptrs(
+        &self,
+        repository: Option<&str>,
+        spec: &str,
+    ) -> Vec<(String, String, usize)> {
+        let Some(plan) = self.plans.get_plan(
+            repository,
+            spec,
+            &EffectiveDate::DateTimeValue(DateTimeValue::now()),
+        ) else {
+            return Vec::new();
+        };
+        let mut rows = Vec::new();
+        for (identity, template) in &plan.row_templates {
+            let identity_label = identity.to_string();
+            rows.push((
+                String::new(),
+                identity_label.clone(),
+                std::sync::Arc::as_ptr(template) as usize,
+            ));
+            for (nested_id, nested) in &template.row_templates {
+                rows.push((
+                    identity_label.clone(),
+                    nested_id.to_string(),
+                    std::sync::Arc::as_ptr(nested) as usize,
+                ));
+            }
+        }
+        rows.sort_by(|left, right| left.0.cmp(&right.0).then(left.1.cmp(&right.1)));
+        rows
+    }
+
     /// Serialize this engine (parsed specs + execution plans + limits) to bytes.
     ///
     /// Format: postcard header (`LEMS` magic + crate version) then a CRC32-protected
@@ -380,7 +576,7 @@ impl Engine {
     ///
     /// Rejects wrong magic, engine version mismatch, CRC failure, or corrupt body
     /// with [`Error`]. Does not re-load the embedded stdlib (it is inside the snapshot).
-    /// After restore, `run` / `show` / `list` / `update` / `remove` work as on a live engine.
+    /// After restore, `run` / `show` / `specs` / `update` / `remove` work as on a live engine.
     pub fn from_snapshot(bytes: &[u8]) -> Result<Self, Error> {
         crate::snapshot::decode(bytes)
     }
@@ -459,9 +655,9 @@ impl Engine {
 
     /// Every loaded repository in insertion order (default unnamed repository, embedded stdlib [`EMBEDDED_STDLIB_REPOSITORY`], dependencies).
     ///
-    /// Returns listed spec rows (metadata only, no AST, no source text).
+    /// Returns spec version rows (metadata only, no AST, no source text).
     #[must_use]
-    pub fn list(&self) -> Vec<ResolvedRepository> {
+    pub fn specs(&self) -> Vec<Repository> {
         self.context
             .repositories()
             .iter()
@@ -471,16 +667,18 @@ impl Engine {
                     .flat_map(|spec_set| {
                         spec_set
                             .iter_with_ranges()
-                            .map(|(spec, from, to)| ListedSpec {
+                            .map(|(spec, from, to)| SpecVersion {
                                 name: spec.name.clone(),
                                 effective_from: from,
                                 effective_to: to,
+                                dependencies: uses_dependencies(spec),
                             })
                     })
                     .collect();
-                ResolvedRepository {
+                Repository {
                     repository: repo.name.clone(),
                     specs,
+                    from_dependency: repo.dependency.is_some(),
                 }
             })
             .collect()
@@ -506,17 +704,7 @@ impl Engine {
             None => {
                 // Preserve attributed not-found errors (repository vs spec) without
                 // paying for SpecSet lookup on the common success path.
-                let repository_arc = match repository {
-                    Some(q) => self.context.find_repository(q).ok_or_else(|| {
-                        Error::request_not_found(
-                            format!("Repository '{q}' not loaded"),
-                            Some(
-                                "List repositories with `lemma list` after loading your workspace",
-                            ),
-                        )
-                    })?,
-                    None => self.context.workspace(),
-                };
+                let repository_arc = self.repository_for_lookup(repository)?;
                 let canonical_name =
                     crate::parsing::ast::ascii_lowercase_logical_name(spec.to_string());
                 let spec_set = self.context.spec_set(&repository_arc, &canonical_name);
@@ -535,73 +723,151 @@ impl Engine {
                 };
             }
         };
+        Ok(self.show_plan(plan, repository))
+    }
 
-        let mut data_entries: Vec<(usize, usize, String, ShowData)> = plan
-            .data
-            .iter()
-            .enumerate()
-            .filter(|(_, (_, data))| {
-                data.schema_type().is_some() && !matches!(data, DataDefinition::Reference { .. })
-            })
-            .map(|(position, (path, data))| {
-                let input_key = path.input_key();
-                let used_by = plan.needed_by_rules.get(position).map_or_else(
-                    || {
-                        panic!(
-                            "BUG: needed_by_rules len {} < data position {position}",
-                            plan.needed_by_rules.len()
-                        )
-                    },
-                    |ids| {
-                        ids.iter()
-                            .map(|&rule_position| {
-                                plan.rules
-                                    .get_index(rule_position as usize)
-                                    .expect("BUG: needed_by_rules position out of plan.rules range")
-                                    .1
-                                    .path
-                                    .input_key()
-                            })
-                            .collect()
-                    },
-                );
-                let lemma_type = data
-                    .schema_type()
-                    .expect("BUG: filter above ensured lemma_type is Some")
-                    .clone();
-                let display = plan.data_display.get(path);
-                (
-                    path.segments.len(),
-                    data.source().span.start,
-                    input_key.clone(),
-                    ShowData {
-                        lemma_type: lemma_type.clone(),
-                        path: path.segments.clone(),
-                        fill: display.and_then(|d| {
-                            d.fill.as_ref().map(|bound| {
-                                crate::planning::execution_plan::show_bound_result_value(
-                                    bound,
-                                    &lemma_type,
-                                    &input_key,
-                                    crate::planning::execution_plan::ShowBoundRole::Fill,
-                                )
-                            })
-                        }),
-                        suggestion: display.and_then(|d| {
-                            d.suggestion.as_ref().map(|bound| {
-                                crate::planning::execution_plan::show_bound_result_value(
-                                    bound,
-                                    &lemma_type,
-                                    &input_key,
-                                    crate::planning::execution_plan::ShowBoundRole::Suggestion,
-                                )
-                            })
-                        }),
-                        needed_by_rules: used_by,
-                    },
+    /// Declarations of `spec` at `effective` as loaded from source, including data and
+    /// rules that no other rule needs. Unlike [`Self::show`], nothing is filtered by use.
+    pub fn spec_declaration(
+        &self,
+        repository: Option<&str>,
+        spec: &str,
+        effective: Option<&DateTimeValue>,
+    ) -> Result<&LemmaSpec, Error> {
+        let effective_dt = self.effective_or_now(effective);
+        let instant = EffectiveDate::DateTimeValue(effective_dt.clone());
+        let repository_arc = self.repository_for_lookup(repository)?;
+        let canonical_name = crate::parsing::ast::ascii_lowercase_logical_name(spec.to_string());
+        match self
+            .context
+            .spec_set(&repository_arc, &canonical_name)
+            .and_then(|spec_set| spec_set.spec_at(&instant))
+        {
+            Some(found) => Ok(found),
+            None => {
+                Err(self.spec_not_found_in_repository_error(&repository_arc, spec, &effective_dt))
+            }
+        }
+    }
+
+    /// Interface of the resolved spec `identity` names, e.g. the row spec of a list type.
+    /// Identities come from loaded plans, so the plan exists.
+    pub fn show_spec(&self, identity: &SpecIdentity) -> Show {
+        let plan = self
+            .plans
+            .get_plan(
+                identity.repository.as_deref(),
+                &identity.spec,
+                &identity.effective,
+            )
+            .unwrap_or_else(|| panic!("BUG: no plan for resolved spec '{identity}'"));
+        self.show_plan(plan, identity.repository.as_deref())
+    }
+
+    /// Plan that produced `show` (repo + spec + start line + slice effective).
+    /// `None` when no plans are loaded for that spec (synthetic Show in tests).
+    pub(crate) fn plan_matching_show(
+        &self,
+        show: &crate::planning::execution_plan::Show,
+    ) -> Option<&crate::planning::execution_plan::ExecutionPlan> {
+        let plans = self
+            .plans
+            .get_plans(show.repository.as_deref(), &show.spec)?;
+        let mut matches = plans.values().filter(|plan| {
+            plan.spec_name == show.spec
+                && plan.start_line == show.start_line
+                && plan.effective_from == show.effective_from
+                && plan.effective_to == show.effective_to
+                && plan.effective == show.plan_effective
+        });
+        let first = matches.next()?;
+        if matches.next().is_some() {
+            panic!(
+                "BUG: multiple plans match Show '{}' (start_line {}, effective window, plan_effective)",
+                show.spec, show.start_line
+            );
+        }
+        Some(first)
+    }
+
+    fn show_plan(&self, plan: &ExecutionPlan, repository: Option<&str>) -> Show {
+        let mut type_entries: Vec<(usize, String, crate::planning::semantics::LemmaType)> =
+            Vec::new();
+        let mut data_entries: Vec<(usize, usize, String, ShowData)> = Vec::new();
+
+        for (path, definition) in plan.nested_input_keys() {
+            let Some(lemma_type) = definition.schema_type().cloned() else {
+                continue;
+            };
+            if matches!(definition, DataDefinition::Reference { .. }) {
+                continue;
+            }
+            let input_key = path.input_key();
+            if path.segments.is_empty()
+                && matches!(
+                    definition,
+                    DataDefinition::Value { .. } | DataDefinition::TypeDeclaration { .. }
                 )
-            })
-            .collect();
+            {
+                type_entries.push((
+                    definition.source().span.start,
+                    input_key.clone(),
+                    lemma_type.clone(),
+                ));
+            }
+            let rule_positions = plan.data_needed_by(&path);
+            if rule_positions.is_empty() {
+                continue;
+            }
+            let used_by: Vec<String> = rule_positions
+                .iter()
+                .map(|&rule_position| {
+                    plan.rules
+                        .get_index(rule_position as usize)
+                        .expect("BUG: needed_by_rules position out of plan.rules range")
+                        .1
+                        .path
+                        .input_key()
+                })
+                .collect();
+            let display = plan.data_display.get(&path);
+            data_entries.push((
+                path.segments.len(),
+                definition.source().span.start,
+                input_key.clone(),
+                ShowData {
+                    lemma_type: lemma_type.clone(),
+                    path: path.segments.clone(),
+                    value: match definition {
+                        DataDefinition::InstanceList { .. } => {
+                            crate::planning::execution_plan::show_instance_list_value(plan, &path)
+                        }
+                        _ => display.and_then(|d| {
+                            d.value.as_ref().map(|bound| {
+                                crate::planning::execution_plan::show_bound_result_value(
+                                    bound,
+                                    &lemma_type,
+                                    &input_key,
+                                    crate::planning::execution_plan::ShowBoundRole::Value,
+                                )
+                            })
+                        }),
+                    },
+                    suggestion: display.and_then(|d| {
+                        d.suggestion.as_ref().map(|bound| {
+                            crate::planning::execution_plan::show_bound_result_value(
+                                bound,
+                                &lemma_type,
+                                &input_key,
+                                crate::planning::execution_plan::ShowBoundRole::Suggestion,
+                            )
+                        })
+                    }),
+                    needed_by_rules: used_by,
+                },
+            ));
+        }
+        type_entries.sort_by_key(|(pos, _, _)| *pos);
         data_entries.sort_by_key(|(depth, pos, _, _)| (*depth, *pos));
 
         let rule_entries: Vec<(String, crate::planning::show_expression::ShowRule)> = plan
@@ -625,22 +891,26 @@ impl Engine {
             }
         };
 
-        Ok(Show {
+        Show {
             repository: show_repository,
             spec: plan.spec_name.clone(),
             commentary: plan.commentary.clone(),
             effective_from: plan.effective_from.clone(),
             effective_to: plan.effective_to.clone(),
-            versions: plan.versions.to_vec(),
+            plan_effective: plan.effective.clone(),
             start_line: plan.start_line,
             source_type: plan.source_type.clone(),
+            types: type_entries
+                .into_iter()
+                .map(|(_, name, lemma_type)| (name, lemma_type))
+                .collect(),
             data: data_entries
                 .into_iter()
                 .map(|(_, _, name, entry)| (name, entry))
                 .collect(),
             rules: rule_entries.into_iter().collect(),
             meta: plan.meta.clone(),
-        })
+        }
     }
 
     /// Formatted canonical Lemma source for a repository or one spec slice.
@@ -664,12 +934,12 @@ impl Engine {
     }
 
     /// Evaluate a spec.
-    pub fn run(
+    pub fn evaluate(
         &self,
         repository: Option<&str>,
         spec: &str,
         effective: Option<&DateTimeValue>,
-        data: HashMap<String, String>,
+        data: IndexMap<String, EvaluateDataValue>,
         rules: Option<&[String]>,
         explain: bool,
     ) -> Result<Response, Error> {
@@ -687,21 +957,31 @@ impl Engine {
             })?;
 
         let response_rules = plan.validated_response_rule_paths(rules)?;
-        let data_values: HashMap<String, RunDataValue> = data
-            .into_iter()
-            .map(|(key, value)| (key, RunDataValue::string(value)))
-            .collect();
-        let run_data = RunData::resolve(plan, data_values, &self.limits)?;
+        let evaluate_data = EvaluateData::resolve(plan, data, &self.limits)?;
         let now_semantic = crate::planning::semantics::date_time_to_semantic(&effective);
         let now_literal = crate::planning::semantics::LiteralValue::date(now_semantic);
         let evaluator = Evaluator;
         let mut response =
-            evaluator.evaluate(plan, &run_data, now_literal, &response_rules, explain);
+            evaluator.evaluate(plan, &evaluate_data, now_literal, &response_rules, explain);
 
         response.spec_effective_from = plan.effective_from.clone();
         response.spec_effective_to = plan.effective_to.clone();
 
         Ok(response)
+    }
+
+    /// Deprecated alias of [`Engine::evaluate`].
+    #[deprecated(note = "use evaluate")]
+    pub fn run(
+        &self,
+        repository: Option<&str>,
+        spec: &str,
+        effective: Option<&DateTimeValue>,
+        data: IndexMap<String, EvaluateDataValue>,
+        rules: Option<&[String]>,
+        explain: bool,
+    ) -> Result<Response, Error> {
+        self.evaluate(repository, spec, effective, data, rules, explain)
     }
 
     fn format_repository_source(&self, repository: Option<&str>) -> Result<String, Error> {
@@ -743,7 +1023,7 @@ impl Engine {
                         format!("Repository '{qualifier}' not loaded"),
                         Some(format!(
                             "List repositories with `{}` after loading your workspace",
-                            "lemma list"
+                            "lemma specs"
                         )),
                     )
                 })
@@ -763,7 +1043,22 @@ impl Engine {
             }
             None => format!("Spec '{spec_name}' not found at effective {effective}"),
         };
-        Error::request_not_found(message, Some("Try `lemma list`"))
+        Error::request_not_found(message, Some("Try `lemma specs`"))
+    }
+
+    fn repository_for_lookup(
+        &self,
+        repository: Option<&str>,
+    ) -> Result<Arc<LemmaRepository>, Error> {
+        match repository {
+            Some(q) => self.context.find_repository(q).ok_or_else(|| {
+                Error::request_not_found(
+                    format!("Repository '{q}' not loaded"),
+                    Some("List repositories with `lemma specs` after loading your workspace"),
+                )
+            }),
+            None => Ok(self.context.workspace()),
+        }
     }
 
     /// Effective datetime for a request: `explicit` or now.
@@ -815,6 +1110,7 @@ impl Engine {
         let mut to_restore: Vec<(Arc<LemmaRepository>, LemmaSpec)> = Vec::new();
         let mut replace: Option<(Option<String>, SourceType, String)> = None;
         let mut saw_load = false;
+        let mut saw_remove = false;
 
         for mutation in mutations {
             match mutation {
@@ -838,6 +1134,7 @@ impl Engine {
                                 "BUG: Mutation::Remove target '{spec}' must exist after public remove validated it"
                             )
                         });
+                    saw_remove = true;
                     to_restore.push((Arc::clone(&repository_arc), spec_to_remove.clone()));
                 }
                 Mutation::Load { source_type, code } => {
@@ -871,12 +1168,15 @@ impl Engine {
             }
         }
 
+        if saw_remove && (saw_load || replace.is_some()) {
+            panic!("BUG: Remove mixed with Load or Replace in one apply");
+        }
+
         if let Some((repo_constraint, source_type, code)) = replace {
             return self.apply_replace(
                 repo_constraint.as_deref(),
                 source_type,
                 code,
-                to_restore,
                 embedded_stdlib,
             );
         }
@@ -1041,7 +1341,6 @@ impl Engine {
         repository_constraint: Option<&str>,
         source_type: SourceType,
         code: String,
-        mut to_restore: Vec<(Arc<LemmaRepository>, LemmaSpec)>,
         embedded_stdlib: bool,
     ) -> Result<(), Errors> {
         let mut sources: IndexMap<SourceType, String> = IndexMap::new();
@@ -1117,60 +1416,28 @@ impl Engine {
             ));
         }
 
-        if prune {
-            for (repository, by_name) in self.context.repositories() {
-                for spec_set in by_name.values() {
-                    for spec in spec_set.iter_specs() {
-                        if spec.source_type.as_ref() != Some(&source_type) {
-                            continue;
-                        }
-                        let key = (
-                            repository.name.clone(),
-                            spec.name.clone(),
-                            spec.effective_from.clone(),
-                        );
-                        if !staged_keys.contains(&key) {
-                            to_restore.push((Arc::clone(repository), spec.clone()));
-                        }
+        let mut to_restore: Vec<(Arc<LemmaRepository>, LemmaSpec)> = Vec::new();
+        for (repository, by_name) in self.context.repositories() {
+            for spec_set in by_name.values() {
+                for spec in spec_set.iter_specs() {
+                    if spec.source_type.as_ref() != Some(&source_type) {
+                        continue;
+                    }
+                    let key = (
+                        repository.name.clone(),
+                        spec.name.clone(),
+                        spec.effective_from.clone(),
+                    );
+                    if prune || staged_keys.contains(&key) {
+                        to_restore.push((Arc::clone(repository), spec.clone()));
                     }
                 }
             }
         }
 
-        let mut to_insert: Vec<(Arc<LemmaRepository>, LemmaSpec)> = Vec::new();
-        let mut cross_source_errors: Vec<Error> = Vec::new();
-        for (_, repository_arc, staged_spec) in staged {
-            match self
-                .context
-                .spec_set(&repository_arc, &staged_spec.name)
-                .and_then(|ss| ss.get_exact(staged_spec.effective_from.as_ref()))
-            {
-                None => to_insert.push((repository_arc, staged_spec)),
-                Some(old) if old == &staged_spec => {}
-                Some(old) if old.source_type.as_ref() != Some(&source_type) => {
-                    cross_source_errors.extend(Context::duplicate_spec_errors(
-                        &staged_spec.name,
-                        &staged_spec,
-                        old,
-                    ));
-                }
-                Some(old) => {
-                    to_restore.push((Arc::clone(&repository_arc), old.clone()));
-                    to_insert.push((repository_arc, staged_spec));
-                }
-            }
-        }
-
-        if !cross_source_errors.is_empty() {
-            return Err(Errors {
-                errors: cross_source_errors,
-                sources: sources.into_iter().collect(),
-            });
-        }
-
-        let staged_for_commit: Vec<StagedSpec> = to_insert
+        let staged_for_commit: Vec<StagedSpec> = staged
             .into_iter()
-            .map(|(repo, spec)| (source_type.clone(), repo, spec))
+            .map(|(_, repo, spec)| (source_type.clone(), repo, spec))
             .collect();
 
         self.commit_staged(to_restore, staged_for_commit, sources.into_iter().collect())
@@ -1182,69 +1449,28 @@ impl Engine {
         staged: Vec<StagedSpec>,
         sources: HashMap<SourceType, String>,
     ) -> Result<(), Errors> {
-        let mut errors: Vec<Error> = Vec::new();
-
         for (repo, spec) in &to_restore {
-            self.context.remove_spec(repo, spec);
+            if !self.context.remove_spec(repo, spec) {
+                panic!("BUG: to_restore row must be live in context");
+            }
         }
 
         let mut inserted: Vec<(Arc<LemmaRepository>, String, EffectiveDate)> = Vec::new();
+        let mut errors: Vec<Error> = Vec::new();
         for (_, repository_arc, spec) in staged {
             let name = spec.name.clone();
             let effective_from = spec.effective_from.clone();
             match self.context.insert_spec(Arc::clone(&repository_arc), spec) {
                 Ok(()) => inserted.push((repository_arc, name, effective_from)),
-                Err(es) => {
-                    errors.extend(es);
-                    self.rollback_apply(&inserted, &to_restore);
-                    return Err(Errors { errors, sources });
-                }
+                Err(es) => errors.extend(es),
             }
         }
-
-        let mut changed: Vec<(Arc<LemmaRepository>, String, EffectiveDate)> =
-            Vec::with_capacity(to_restore.len() + inserted.len());
-        let mut restored_by_key: HashMap<crate::planning::SpecSetKey, HashSet<EffectiveDate>> =
-            HashMap::new();
-        let mut inserted_by_key: HashMap<crate::planning::SpecSetKey, HashSet<EffectiveDate>> =
-            HashMap::new();
-
-        for (repository, spec) in &to_restore {
-            let key = crate::planning::SpecSetKey::new(repository.name.as_deref(), &spec.name);
-            restored_by_key
-                .entry(key)
-                .or_default()
-                .insert(spec.effective_from.clone());
-            changed.push((
-                Arc::clone(repository),
-                spec.name.clone(),
-                spec.effective_from.clone(),
-            ));
-        }
-        for (repository, name, effective_from) in &inserted {
-            let key = crate::planning::SpecSetKey::new(repository.name.as_deref(), name);
-            inserted_by_key
-                .entry(key)
-                .or_default()
-                .insert(effective_from.clone());
-            changed.push((Arc::clone(repository), name.clone(), effective_from.clone()));
+        if !errors.is_empty() {
+            self.rollback_apply(&inserted, &to_restore);
+            return Err(Errors { errors, sources });
         }
 
-        let mut whole_set: HashSet<crate::planning::SpecSetKey> = HashSet::new();
-        let mut all_keys: HashSet<crate::planning::SpecSetKey> = HashSet::new();
-        all_keys.extend(restored_by_key.keys().cloned());
-        all_keys.extend(inserted_by_key.keys().cloned());
-        for key in all_keys {
-            let restored = restored_by_key.get(&key).cloned().unwrap_or_default();
-            let inserted_effs = inserted_by_key.get(&key).cloned().unwrap_or_default();
-            if restored != inserted_effs {
-                whole_set.insert(key);
-            }
-        }
-
-        let scope = crate::planning::ReplanScope::from_changed(&self.context, changed, whole_set);
-
-        let result = crate::planning::plan(&self.context, &self.limits, &scope, &self.plans);
+        let result = crate::planning::plan(&self.context, &self.limits, &self.plans);
         if !result.errors.is_empty() {
             self.rollback_apply(&inserted, &to_restore);
             return Err(Errors {
@@ -1253,7 +1479,7 @@ impl Engine {
             });
         }
 
-        self.plans.commit(&self.context, &scope, result.plans);
+        self.plans = result.plans;
         Ok(())
     }
 
@@ -1263,8 +1489,13 @@ impl Engine {
         removed: &[(Arc<LemmaRepository>, LemmaSpec)],
     ) {
         for (repo, inserted_name, inserted_effective) in inserted.iter().rev() {
-            self.context
-                .remove_spec_by_identity(repo, inserted_name, inserted_effective.as_ref());
+            if !self.context.remove_spec_by_identity(
+                repo,
+                inserted_name,
+                inserted_effective.as_ref(),
+            ) {
+                panic!("BUG: inserted spec must be removable on rollback");
+            }
         }
         for (repo, spec) in removed.iter().rev() {
             self.context
@@ -1288,7 +1519,7 @@ impl Engine {
             Some(q) => self.context.find_repository(q).ok_or_else(|| {
                 Error::request_not_found(
                     format!("Repository '{q}' not loaded"),
-                    Some("List repositories with `lemma list` after loading your workspace"),
+                    Some("List repositories with `lemma specs` after loading your workspace"),
                 )
             })?,
             None => self.context.workspace(),
@@ -1320,6 +1551,193 @@ mod tests {
             timezone: None,
             granularity: crate::literals::DateGranularity::Full,
         }
+    }
+
+    #[test]
+    fn format_repositories_prints_each_temporal_version() {
+        let text = format_repositories(
+            &[
+                Repository {
+                    repository: None,
+                    from_dependency: false,
+                    specs: vec![
+                        SpecVersion {
+                            name: "legacy".into(),
+                            effective_from: None,
+                            effective_to: Some(date(2026, 1, 1)),
+                            dependencies: Vec::new(),
+                        },
+                        SpecVersion {
+                            name: "taxes".into(),
+                            effective_from: None,
+                            effective_to: None,
+                            dependencies: Vec::new(),
+                        },
+                        SpecVersion {
+                            name: "pricing".into(),
+                            effective_from: Some(date(2026, 1, 1)),
+                            effective_to: None,
+                            dependencies: Vec::new(),
+                        },
+                        SpecVersion {
+                            name: "pricing".into(),
+                            effective_from: Some(date(2025, 1, 1)),
+                            effective_to: Some(date(2026, 1, 1)),
+                            dependencies: Vec::new(),
+                        },
+                    ],
+                },
+                Repository {
+                    repository: Some("@iso/countries".into()),
+                    from_dependency: true,
+                    specs: vec![SpecVersion {
+                        name: "alpha2".into(),
+                        effective_from: Some(date(2011, 8, 9)),
+                        effective_to: None,
+                        dependencies: Vec::new(),
+                    }],
+                },
+            ],
+            true,
+        );
+        assert_eq!(
+            text,
+            "legacy ...2026-01-01\npricing 2025-01-01...2026-01-01\npricing 2026-01-01\ntaxes\n\n@iso/countries\n  alpha2 2011-08-09\n"
+        );
+    }
+
+    #[test]
+    fn spec_version_display_omits_arrow_without_an_end() {
+        assert_eq!(
+            SpecVersion {
+                name: "pricing".into(),
+                effective_from: Some(date(2025, 1, 1)),
+                effective_to: Some(date(2026, 1, 1)),
+                dependencies: Vec::new(),
+            }
+            .to_string(),
+            "pricing 2025-01-01...2026-01-01"
+        );
+        assert_eq!(
+            SpecVersion {
+                name: "pricing".into(),
+                effective_from: Some(date(2026, 1, 1)),
+                effective_to: None,
+                dependencies: Vec::new(),
+            }
+            .to_string(),
+            "pricing 2026-01-01"
+        );
+        assert_eq!(
+            SpecVersion {
+                name: "pricing".into(),
+                effective_from: None,
+                effective_to: Some(date(2026, 1, 1)),
+                dependencies: Vec::new(),
+            }
+            .to_string(),
+            "pricing ...2026-01-01"
+        );
+        assert_eq!(
+            SpecVersion {
+                name: "taxes".into(),
+                effective_from: None,
+                effective_to: None,
+                dependencies: Vec::new(),
+            }
+            .to_string(),
+            "taxes"
+        );
+    }
+
+    #[test]
+    fn format_local_specs_prints_uses_and_omits_dependency_repositories() {
+        let text = format_repositories(
+            &[
+                Repository {
+                    repository: None,
+                    from_dependency: false,
+                    specs: vec![SpecVersion {
+                        name: "outer".into(),
+                        effective_from: None,
+                        effective_to: None,
+                        dependencies: vec![
+                            SpecDependency {
+                                repository: None,
+                                name: "inner".into(),
+                                effective: None,
+                            },
+                            SpecDependency {
+                                repository: Some("lemma".into()),
+                                name: "units".into(),
+                                effective: None,
+                            },
+                        ],
+                    }],
+                },
+                Repository {
+                    repository: Some("lemma".into()),
+                    from_dependency: true,
+                    specs: vec![SpecVersion {
+                        name: "units".into(),
+                        effective_from: None,
+                        effective_to: None,
+                        dependencies: Vec::new(),
+                    }],
+                },
+            ],
+            false,
+        );
+        assert_eq!(text, "outer\n  inner\n  lemma units\n");
+    }
+
+    #[test]
+    fn specs_rows_carry_uses_targets() {
+        let mut engine = Engine::new();
+        engine
+            .load([(
+                SourceType::Path(Arc::new(std::path::PathBuf::from("main.lemma"))),
+                r#"
+spec inner 2024-01-01
+data x: 1
+
+spec outer
+uses inner 2024-01-01
+uses u: lemma units
+rule r: inner.x
+"#
+                .to_string(),
+            )])
+            .expect("load");
+        let workspace = engine
+            .specs()
+            .into_iter()
+            .find(|repo| repo.repository.is_none())
+            .expect("workspace");
+        let outer = workspace
+            .specs
+            .iter()
+            .find(|version| version.name == "outer")
+            .expect("outer");
+        assert_eq!(
+            outer.dependencies,
+            vec![
+                SpecDependency {
+                    repository: None,
+                    name: "inner".into(),
+                    effective: Some(date(2024, 1, 1)),
+                },
+                SpecDependency {
+                    repository: Some("lemma".into()),
+                    name: "units".into(),
+                    effective: None,
+                },
+            ]
+        );
+        assert!(engine
+            .specs()
+            .iter()
+            .any(|repo| repo.repository.as_deref() == Some("lemma") && repo.from_dependency));
     }
 
     fn make_spec_with_range(name: &str, effective_from: Option<DateTimeValue>) -> LemmaSpec {
@@ -1464,7 +1882,7 @@ mod tests {
         let june = date(2025, 6, 1);
 
         let workspace = engine
-            .list()
+            .specs()
             .into_iter()
             .find(|r| r.repository.is_none())
             .expect("workspace");
@@ -1494,7 +1912,7 @@ mod tests {
 
         assert!(
             !engine
-                .list()
+                .specs()
                 .into_iter()
                 .find(|r| r.repository.is_none())
                 .expect("workspace")
@@ -1505,8 +1923,8 @@ mod tests {
         );
     }
 
-    /// `Engine::list()` provides spec sets grouped by repository.
-    /// Each listed row exposes half-open `[effective_from, effective_to)` ranges.
+    /// `Engine::specs()` provides spec sets grouped by repository.
+    /// Each spec version row exposes half-open `[effective_from, effective_to)` ranges.
     #[test]
     fn get_workspace_specs_with_half_open_ranges() {
         let mut engine = Engine::new();
@@ -1545,7 +1963,7 @@ mod tests {
             .unwrap();
 
         let workspace = engine
-            .list()
+            .specs()
             .into_iter()
             .find(|r| r.repository.is_none())
             .expect("workspace");
@@ -1601,8 +2019,8 @@ mod tests {
         spec test
         data x: 10
         data y: 5
-        rule sum: x + y
-        rule product: x * y
+        rule added: x + y
+        rule multiplied: x * y
     "#
                 .to_string(),
             )])
@@ -1610,21 +2028,21 @@ mod tests {
 
         let now = DateTimeValue::now();
         let response = engine
-            .run(None, "test", Some(&now), HashMap::new(), None, false)
+            .evaluate(None, "test", Some(&now), IndexMap::new(), None, false)
             .unwrap();
         assert_eq!(response.results.len(), 2);
 
         let sum_result = response
             .results
             .values()
-            .find(|r| r.rule.name == "sum")
+            .find(|r| r.rule.name == "added")
             .unwrap();
         assert_eq!(sum_result.result().expect("result").to_string(), "15");
 
         let product_result = response
             .results
             .values()
-            .find(|r| r.rule.name == "product")
+            .find(|r| r.rule.name == "multiplied")
             .unwrap();
         assert_eq!(product_result.result().expect("result").to_string(), "50");
     }
@@ -1646,7 +2064,7 @@ mod tests {
 
         let now = DateTimeValue::now();
         let response = engine
-            .run(None, "test", Some(&now), HashMap::new(), None, false)
+            .evaluate(None, "test", Some(&now), IndexMap::new(), None, false)
             .unwrap();
         assert_eq!(response.results.len(), 1);
         assert_eq!(
@@ -1678,7 +2096,7 @@ mod tests {
 
         let now = DateTimeValue::now();
         let response = engine
-            .run(None, "test", Some(&now), HashMap::new(), None, false)
+            .evaluate(None, "test", Some(&now), IndexMap::new(), None, false)
             .unwrap();
         assert_eq!(
             response
@@ -1712,7 +2130,7 @@ mod tests {
 
         let now = DateTimeValue::now();
         let response = engine
-            .run(None, "test", Some(&now), HashMap::new(), None, false)
+            .evaluate(None, "test", Some(&now), IndexMap::new(), None, false)
             .unwrap();
         assert_eq!(
             response
@@ -1730,7 +2148,14 @@ mod tests {
     fn test_spec_not_found() {
         let engine = Engine::new();
         let now = DateTimeValue::now();
-        let result = engine.run(None, "nonexistent", Some(&now), HashMap::new(), None, false);
+        let result = engine.evaluate(
+            None,
+            "nonexistent",
+            Some(&now),
+            IndexMap::new(),
+            None,
+            false,
+        );
         assert!(result.is_err());
         let msg = result.unwrap_err().to_string();
         assert!(
@@ -1768,14 +2193,14 @@ mod tests {
 
         let now = DateTimeValue::now();
         let response1 = engine
-            .run(None, "spec1", Some(&now), HashMap::new(), None, false)
+            .evaluate(None, "spec1", Some(&now), IndexMap::new(), None, false)
             .unwrap();
         assert_eq!(
             response1.results[0].result().expect("result").to_string(),
             "20"
         );
         let response2 = engine
-            .run(None, "spec2", Some(&now), HashMap::new(), None, false)
+            .evaluate(None, "spec2", Some(&now), IndexMap::new(), None, false)
             .unwrap();
         assert_eq!(
             response2.results[0].result().expect("result").to_string(),
@@ -1800,7 +2225,7 @@ mod tests {
             .unwrap();
 
         let now = DateTimeValue::now();
-        let result = engine.run(None, "test", Some(&now), HashMap::new(), None, false);
+        let result = engine.evaluate(None, "test", Some(&now), IndexMap::new(), None, false);
         // Division by zero returns a Veto (not an error)
         assert!(result.is_ok(), "Evaluation should succeed");
         let response = result.unwrap();
@@ -1845,7 +2270,7 @@ mod tests {
 
         let now = DateTimeValue::now();
         let response = engine
-            .run(None, "test", Some(&now), HashMap::new(), None, false)
+            .evaluate(None, "test", Some(&now), IndexMap::new(), None, false)
             .unwrap();
         assert_eq!(response.results.len(), 3);
 
@@ -1901,11 +2326,11 @@ mod tests {
 
         let now = DateTimeValue::now();
         let response = engine
-            .run(
+            .evaluate(
                 None,
                 "test",
                 Some(&now),
-                HashMap::new(),
+                IndexMap::new(),
                 Some(&["total".to_string()]),
                 false,
             )
@@ -1948,7 +2373,7 @@ rule value: external.quantity"#
 
         let now = DateTimeValue::now();
         let response = engine
-            .run(None, "main_spec", Some(&now), HashMap::new(), None, false)
+            .evaluate(None, "main_spec", Some(&now), IndexMap::new(), None, false)
             .expect("evaluate should succeed");
 
         let value_result = response
@@ -2001,7 +2426,7 @@ rule doubled: price * 2"#
 
         let now = DateTimeValue::now();
         let response = engine
-            .run(None, "local_only", Some(&now), HashMap::new(), None, false)
+            .evaluate(None, "local_only", Some(&now), IndexMap::new(), None, false)
             .expect("evaluate should succeed");
 
         let doubled = response.results.get("doubled").expect("doubled rule");
@@ -2064,11 +2489,11 @@ rule formatted: helper_value + 0"#
 
         let now = DateTimeValue::now();
         let response = engine
-            .run(
+            .evaluate(
                 None,
                 "registry_demo",
                 Some(&now),
-                HashMap::new(),
+                IndexMap::new(),
                 None,
                 false,
             )
@@ -2306,10 +2731,14 @@ rule total: helper.value + price"#
         assert!(shared_specs.contains_key("b"));
 
         // Loading a dependency with the same repo name should be rejected.
-        let _result = engine.load([(
+        let dependency_result = engine.load([(
             SourceType::Dependency("@some/dep".to_string()),
             "repo shared\nspec c\ndata z: 3".to_string(),
         )]);
+        assert!(
+            dependency_result.is_err(),
+            "dependency with an existing repo name must be rejected"
+        );
 
         let result = engine.load([(
             SourceType::Path(Arc::new(std::path::PathBuf::from("file2.lemma"))),
@@ -2367,7 +2796,7 @@ rule total: helper.value + price"#
             )])
             .expect("file should load");
 
-        let repos = engine.list();
+        let repos = engine.specs();
         let shared_repo = repos
             .iter()
             .find(|r| r.repository.as_deref() == Some("shared"))
@@ -2394,7 +2823,7 @@ rule total: helper.value + price"#
             .remove(None, "t", None)
             .expect("remove active-at now (origin while before 2099)");
         let workspace = engine
-            .list()
+            .specs()
             .into_iter()
             .find(|r| r.repository.is_none())
             .expect("workspace");
@@ -2447,15 +2876,15 @@ rule total: helper.value + price"#
             )
             .expect("update origin body while keeping later version in buffer");
         let workspace = engine
-            .list()
+            .specs()
             .into_iter()
             .find(|r| r.repository.is_none())
             .expect("workspace");
         assert_eq!(workspace.specs.iter().filter(|s| s.name == "t").count(), 2);
         let now = DateTimeValue::now();
         let response = engine
-            .run(None, "t", Some(&now), HashMap::new(), None, false)
-            .expect("run origin");
+            .evaluate(None, "t", Some(&now), IndexMap::new(), None, false)
+            .expect("evaluate origin");
         assert_eq!(
             response.results.get("r").and_then(|r| r.result()),
             Some("9")
@@ -2477,7 +2906,7 @@ rule total: helper.value + price"#
             .update(None, "spec t\ndata v: 1\nrule r: v\n".to_string(), st)
             .expect("prune second version");
         let workspace = engine
-            .list()
+            .specs()
             .into_iter()
             .find(|r| r.repository.is_none())
             .expect("workspace");
@@ -2505,7 +2934,7 @@ rule total: helper.value + price"#
             )
             .expect("update a");
         let workspace = engine
-            .list()
+            .specs()
             .into_iter()
             .find(|r| r.repository.is_none())
             .expect("workspace");
@@ -2528,7 +2957,7 @@ rule total: helper.value + price"#
             )
             .expect("upsert b");
         let workspace = engine
-            .list()
+            .specs()
             .into_iter()
             .find(|r| r.repository.is_none())
             .expect("workspace");
@@ -2582,7 +3011,7 @@ rule total: helper.value + price"#
         engine
             .update(None, "   \n".to_string(), st)
             .expect("empty dependency update prunes");
-        let listed = engine.list();
+        let listed = engine.specs();
         assert!(
             !listed.iter().any(|r| {
                 r.repository.as_deref() == Some("@org/dep")
@@ -2601,43 +3030,43 @@ rule total: helper.value + price"#
                 "spec price\ndata amount: number\nrule total: amount\n".to_string(),
             )])
             .expect("load");
-        let before_list = engine.list();
+        let before_repositories = engine.specs();
         let before_source = engine.source(None, Some("price"), None).expect("source");
         let now = DateTimeValue::now();
         let before = engine
-            .run(
+            .evaluate(
                 None,
                 "price",
                 Some(&now),
-                [("amount".to_string(), "4".to_string())]
+                [("amount".to_string(), EvaluateDataValue::from("4"))]
                     .into_iter()
                     .collect(),
                 None,
                 false,
             )
-            .expect("run");
+            .expect("evaluate");
         let failed = engine.load([(
             SourceType::Volatile,
             "spec price\ndata amount: number\nrule total: amount +\n".to_string(),
         )]);
         assert!(failed.is_err(), "invalid spec must fail planning");
-        assert_eq!(engine.list(), before_list);
+        assert_eq!(engine.specs(), before_repositories);
         assert_eq!(
             engine.source(None, Some("price"), None).expect("source"),
             before_source
         );
         let after = engine
-            .run(
+            .evaluate(
                 None,
                 "price",
                 Some(&now),
-                [("amount".to_string(), "4".to_string())]
+                [("amount".to_string(), EvaluateDataValue::from("4"))]
                     .into_iter()
                     .collect(),
                 None,
                 false,
             )
-            .expect("run after failed load");
+            .expect("evaluate after failed load");
         assert_eq!(
             after.results.get("total").expect("total").result,
             before.results.get("total").expect("total").result
@@ -2658,7 +3087,7 @@ rule total: helper.value + price"#
             .update(None, "   \n".to_string(), st)
             .expect("empty path update prunes");
         let workspace = engine
-            .list()
+            .specs()
             .into_iter()
             .find(|r| r.repository.is_none())
             .expect("workspace");
@@ -2740,7 +3169,7 @@ rule total: helper.value + price"#
                 ),
             ])
             .expect("load");
-        let before = engine.list();
+        let before = engine.specs();
         let err = engine
             .update(
                 None,
@@ -2749,7 +3178,7 @@ rule total: helper.value + price"#
             )
             .expect_err("consumer must break");
         assert!(!err.errors.is_empty());
-        let after = engine.list();
+        let after = engine.specs();
         assert_eq!(after.len(), before.len(), "repository count must match");
         for (before_repo, after_repo) in before.iter().zip(after.iter()) {
             assert_eq!(before_repo.repository, after_repo.repository);
@@ -2761,17 +3190,128 @@ rule total: helper.value + price"#
                 .sort_by(|a, b| (&a.name, &a.effective_from).cmp(&(&b.name, &b.effective_from)));
             assert_eq!(
                 before_specs, after_specs,
-                "failed update must restore listed specs for {:?}",
+                "failed update must restore spec versions for {:?}",
                 before_repo.repository
             );
         }
         let now = DateTimeValue::now();
         engine
-            .run(None, "consumer", Some(&now), HashMap::new(), None, false)
+            .evaluate(None, "consumer", Some(&now), IndexMap::new(), None, false)
             .expect("consumer still runs after rollback");
         assert!(
             engine.show(None, "dep", Some(&date(2025, 6, 1))).is_ok(),
             "pruned later dep version must be restored"
+        );
+    }
+
+    fn finance_result(engine: &Engine) -> String {
+        let now = DateTimeValue::now();
+        engine
+            .evaluate(None, "finance", Some(&now), IndexMap::new(), None, false)
+            .expect("finance evaluates")
+            .results
+            .values()
+            .next()
+            .expect("one result")
+            .result()
+            .expect("result")
+            .to_string()
+    }
+
+    #[test]
+    fn update_pasted_duplicate_identity_is_error() {
+        let mut engine = Engine::new();
+        let st = path_st("finance.lemma");
+        engine
+            .load([(
+                st.clone(),
+                "spec finance\ndata v: 1\nrule r: 1\n".to_string(),
+            )])
+            .expect("load");
+        let err = engine
+            .update(
+                None,
+                "spec finance\ndata v: 1\nrule r: 1\n\nspec finance\ndata v: 2\nrule r: 2\n"
+                    .to_string(),
+                st,
+            )
+            .expect_err("pasted duplicate identity must be rejected");
+        let joined: String = err
+            .errors
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            joined.contains("Duplicate spec 'finance'"),
+            "expected duplicate error, got: {joined}"
+        );
+        assert_eq!(
+            finance_result(&engine),
+            "1",
+            "original spec must stay active"
+        );
+    }
+
+    #[test]
+    fn update_duplicate_identity_both_changed_is_error_not_panic() {
+        let mut engine = Engine::new();
+        let st = path_st("finance.lemma");
+        engine
+            .load([(
+                st.clone(),
+                "spec finance\ndata v: 1\nrule r: 1\n".to_string(),
+            )])
+            .expect("load");
+        let err = engine
+            .update(
+                None,
+                "spec finance\ndata v: 2\nrule r: 2\n\nspec finance\ndata v: 3\nrule r: 3\n"
+                    .to_string(),
+                st,
+            )
+            .expect_err("duplicate identity must be rejected");
+        let joined: String = err
+            .errors
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            joined.contains("Duplicate spec 'finance'"),
+            "expected duplicate error, got: {joined}"
+        );
+        assert_eq!(
+            finance_result(&engine),
+            "1",
+            "original spec must stay active"
+        );
+    }
+
+    #[test]
+    fn update_reports_every_duplicate_identity() {
+        let mut engine = Engine::new();
+        let err = engine
+            .update(
+                None,
+                "spec finance\ndata v: 1\nrule r: 1\n\nspec finance\ndata v: 2\nrule r: 2\n\nspec policies\ndata v: 1\nrule r: 1\n\nspec policies\ndata v: 2\nrule r: 2\n"
+                    .to_string(),
+                path_st("policies.lemma"),
+            )
+            .expect_err("duplicate identities must be rejected");
+        let joined: String = err
+            .errors
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            joined.contains("Duplicate spec 'finance'"),
+            "expected finance duplicate, got: {joined}"
+        );
+        assert!(
+            joined.contains("Duplicate spec 'policies'"),
+            "expected policies duplicate, got: {joined}"
         );
     }
 
@@ -2822,11 +3362,11 @@ rule total: helper.value + price"#
             .expect("body-only edit of later dep version must keep consumers valid");
         let before_breakpoint = date(2025, 1, 15);
         let response = engine
-            .run(
+            .evaluate(
                 None,
                 "consumer",
                 Some(&before_breakpoint),
-                HashMap::new(),
+                IndexMap::new(),
                 None,
                 false,
             )
@@ -2837,11 +3377,11 @@ rule total: helper.value + price"#
         );
         let after_breakpoint = date(2025, 7, 1);
         let response = engine
-            .run(
+            .evaluate(
                 None,
                 "consumer",
                 Some(&after_breakpoint),
-                HashMap::new(),
+                IndexMap::new(),
                 None,
                 false,
             )
@@ -2944,7 +3484,7 @@ rule total: helper.value + price"#
         assert!(!err.errors.is_empty());
         let now = DateTimeValue::now();
         engine
-            .run(None, "consumer", Some(&now), HashMap::new(), None, false)
+            .evaluate(None, "consumer", Some(&now), IndexMap::new(), None, false)
             .expect("failed update must leave previous engine state intact");
     }
 }

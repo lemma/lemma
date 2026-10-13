@@ -2,6 +2,7 @@
 mod get_rule_value;
 
 use get_rule_value::get_rule_value;
+use indexmap::IndexMap;
 use lemma::Engine;
 
 #[test]
@@ -509,14 +510,14 @@ fn test_add_large_duration_days() {
 spec test
 uses lemma units
 data start_date: 2024-01-01
-rule future: start_date + 1000 day
+rule later_date: start_date + 1000 day
     "#;
 
     engine
         .load([(lemma::SourceType::Volatile, code.to_string())])
         .expect("Failed to parse");
 
-    let lit = get_rule_value(&engine, "test", "future");
+    let lit = get_rule_value(&engine, "test", "later_date");
     if let lemma::ValueKind::Date(date) = &lit.value {
         assert_eq!(date.year, 2026);
         assert_eq!(date.month, 9);
@@ -611,15 +612,15 @@ rule result: t + 9999999999999 second
         .expect("parse");
     let now = lemma::DateTimeValue::now();
     let response = engine
-        .run(
+        .evaluate(
             None,
             "test",
             Some(&now),
-            std::collections::HashMap::new(),
+            IndexMap::new(),
             Some(&["result".to_string()]),
             false,
         )
-        .expect("run");
+        .expect("evaluate");
     let rule_result = response.get("result").expect("rule exists");
     assert!(rule_result.vetoed, "extreme duration must veto, not panic");
     assert!(
@@ -646,15 +647,15 @@ rule result: t - 9999999999999 second
         .expect("parse");
     let now = lemma::DateTimeValue::now();
     let response = engine
-        .run(
+        .evaluate(
             None,
             "test",
             Some(&now),
-            std::collections::HashMap::new(),
+            IndexMap::new(),
             Some(&["result".to_string()]),
             false,
         )
-        .expect("run");
+        .expect("evaluate");
     let rule_result = response.get("result").expect("rule exists");
     assert!(
         rule_result.vetoed,
@@ -685,15 +686,15 @@ rule result: t + 9223372036854 second
         .expect("parse");
     let now = lemma::DateTimeValue::now();
     let response = engine
-        .run(
+        .evaluate(
             None,
             "test",
             Some(&now),
-            std::collections::HashMap::new(),
+            IndexMap::new(),
             Some(&["result".to_string()]),
             false,
         )
-        .expect("run");
+        .expect("evaluate");
     let rule_result = response.get("result").expect("rule exists");
     assert!(rule_result.vetoed, "must veto, not panic");
     assert_eq!(
@@ -718,15 +719,15 @@ rule result: t - 9223372036854 second
         .expect("parse");
     let now = lemma::DateTimeValue::now();
     let response = engine
-        .run(
+        .evaluate(
             None,
             "test",
             Some(&now),
-            std::collections::HashMap::new(),
+            IndexMap::new(),
             Some(&["result".to_string()]),
             false,
         )
-        .expect("run");
+        .expect("evaluate");
     let rule_result = response.get("result").expect("rule exists");
     assert!(rule_result.vetoed, "must veto, not panic");
     assert_eq!(
@@ -751,15 +752,15 @@ rule result: d + 9999999999999 second
         .expect("parse");
     let now = lemma::DateTimeValue::now();
     let response = engine
-        .run(
+        .evaluate(
             None,
             "test",
             Some(&now),
-            std::collections::HashMap::new(),
+            IndexMap::new(),
             Some(&["result".to_string()]),
             false,
         )
-        .expect("run");
+        .expect("evaluate");
     let rule_result = response.get("result").expect("rule exists");
     assert!(rule_result.vetoed, "extreme duration must veto, not panic");
     assert!(
@@ -786,15 +787,15 @@ rule result: d - 9999999999999 second
         .expect("parse");
     let now = lemma::DateTimeValue::now();
     let response = engine
-        .run(
+        .evaluate(
             None,
             "test",
             Some(&now),
-            std::collections::HashMap::new(),
+            IndexMap::new(),
             Some(&["result".to_string()]),
             false,
         )
-        .expect("run");
+        .expect("evaluate");
     let rule_result = response.get("result").expect("rule exists");
     assert!(
         rule_result.vetoed,
@@ -825,15 +826,15 @@ rule result: d + 9223372036854 second
         .expect("parse");
     let now = lemma::DateTimeValue::now();
     let response = engine
-        .run(
+        .evaluate(
             None,
             "test",
             Some(&now),
-            std::collections::HashMap::new(),
+            IndexMap::new(),
             Some(&["result".to_string()]),
             false,
         )
-        .expect("run");
+        .expect("evaluate");
     let rule_result = response.get("result").expect("rule exists");
     assert!(rule_result.vetoed, "must veto, not panic");
     assert_eq!(
@@ -858,15 +859,15 @@ rule result: d - 9223372036854 second
         .expect("parse");
     let now = lemma::DateTimeValue::now();
     let response = engine
-        .run(
+        .evaluate(
             None,
             "test",
             Some(&now),
-            std::collections::HashMap::new(),
+            IndexMap::new(),
             Some(&["result".to_string()]),
             false,
         )
-        .expect("run");
+        .expect("evaluate");
     let rule_result = response.get("result").expect("rule exists");
     assert!(rule_result.vetoed, "must veto, not panic");
     assert_eq!(
@@ -892,15 +893,15 @@ rule result: d + 2147483647 month
         .expect("parse");
     let now = lemma::DateTimeValue::now();
     let response = engine
-        .run(
+        .evaluate(
             None,
             "test",
             Some(&now),
-            std::collections::HashMap::new(),
+            IndexMap::new(),
             Some(&["result".to_string()]),
             false,
         )
-        .expect("run");
+        .expect("evaluate");
     let rule_result = response.get("result").expect("rule exists");
     assert!(rule_result.vetoed, "must veto, not panic");
     assert_eq!(
@@ -926,15 +927,15 @@ rule result: d - 2147483648 month
         .expect("parse");
     let now = lemma::DateTimeValue::now();
     let response = engine
-        .run(
+        .evaluate(
             None,
             "test",
             Some(&now),
-            std::collections::HashMap::new(),
+            IndexMap::new(),
             Some(&["result".to_string()]),
             false,
         )
-        .expect("run");
+        .expect("evaluate");
     let rule_result = response.get("result").expect("rule exists");
     assert!(rule_result.vetoed, "must veto, not panic");
     assert_eq!(
@@ -959,15 +960,15 @@ rule result: d + 999999999 year
         .expect("parse");
     let now = lemma::DateTimeValue::now();
     let response = engine
-        .run(
+        .evaluate(
             None,
             "test",
             Some(&now),
-            std::collections::HashMap::new(),
+            IndexMap::new(),
             Some(&["result".to_string()]),
             false,
         )
-        .expect("run");
+        .expect("evaluate");
     let rule_result = response.get("result").expect("rule exists");
     assert!(rule_result.vetoed, "must veto, not panic");
     assert_eq!(

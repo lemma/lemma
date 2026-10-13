@@ -1,119 +1,49 @@
-//! Load and run every ```lemma fence in repo markdown and text files.
+//! Load, run, and format-check every ```lemma fence in repo markdown and text files.
 //!
 //! Consecutive ```lemma fences separated only by whitespace load as one
 //! workspace source (so multi-spec examples may stay in separate visual blocks).
+//! Format checks each visual fence on its own via `lemma format` / `format_lemma_fences_in_text`.
 
+use indexmap::IndexMap;
 use lemma::{
     parse, Context, DateTimeValue, Engine, Registries, Resolve, ResourceLimits, SourceType,
     EMBEDDED_STDLIB_REPOSITORY,
+};
+use lemma_cli::doc_fences::{
+    extract_lemma_fences, format_lemma_fences_in_text, group_whitespace_adjacent_fences, LemmaFence,
 };
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-const SKIP_DIRS: &[&str] = &["target", ".git", "node_modules"];
-
 fn workspace_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..")
 }
 
-fn should_skip_dir(name: &str) -> bool {
-    SKIP_DIRS.contains(&name)
-}
-
 fn collect_markdown_and_text_files(root: &Path) -> Vec<PathBuf> {
     let mut files = Vec::new();
-    let mut stack = vec![root.to_path_buf()];
-    while let Some(dir) = stack.pop() {
-        for entry in std::fs::read_dir(&dir).unwrap_or_else(|e| {
-            panic!("read_dir {}: {e}", dir.display());
-        }) {
-            let entry = entry.unwrap_or_else(|e| panic!("dir entry in {}: {e}", dir.display()));
-            let path = entry.path();
-            if path.is_dir() {
-                let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-                if should_skip_dir(name) {
-                    continue;
-                }
-                stack.push(path);
-                continue;
-            }
-            let is_md = path.extension().is_some_and(|e| e == "md");
-            let is_txt = path.extension().is_some_and(|e| e == "txt");
-            if is_md || is_txt {
-                files.push(path);
-            }
+    for entry in ignore::WalkBuilder::new(root)
+        .hidden(true)
+        .git_ignore(true)
+        .git_global(false)
+        .git_exclude(false)
+        .require_git(false)
+        .build()
+    {
+        let entry = entry.unwrap_or_else(|e| panic!("walk {}: {e}", root.display()));
+        let path = entry.path();
+        let is_md = path.extension().is_some_and(|e| e == "md");
+        let is_txt = path.extension().is_some_and(|e| e == "txt");
+        if path.is_file() && (is_md || is_txt) {
+            files.push(path.to_path_buf());
         }
     }
     files.sort();
     files
 }
 
-struct LemmaFence {
-    /// 1-based line number of the opening `` ```lemma `` marker in the source file.
-    line: usize,
-    /// Inclusive 1-based line of the closing `` ``` ``.
-    end_line: usize,
-    content: String,
-}
-
-fn extract_lemma_fences(content: &str) -> Vec<LemmaFence> {
-    let mut blocks = Vec::new();
-    let mut in_fence = false;
-    let mut fence_line = 0usize;
-    let mut current = String::new();
-    for (line_index, line) in content.lines().enumerate() {
-        let line_number = line_index + 1;
-        let trimmed = line.trim();
-        if trimmed == "```lemma" {
-            in_fence = true;
-            fence_line = line_number;
-            current.clear();
-            continue;
-        }
-        if in_fence && trimmed == "```" {
-            in_fence = false;
-            let block = current.trim().to_string();
-            if !block.is_empty() {
-                blocks.push(LemmaFence {
-                    line: fence_line,
-                    end_line: line_number,
-                    content: block,
-                });
-            }
-            continue;
-        }
-        if in_fence {
-            current.push_str(line);
-            current.push('\n');
-        }
-    }
-    group_whitespace_adjacent_fences(content, blocks)
-}
-
-/// Merge fences that have only blank/whitespace lines between them into one load unit.
-fn group_whitespace_adjacent_fences(file: &str, fences: Vec<LemmaFence>) -> Vec<LemmaFence> {
-    let lines: Vec<&str> = file.lines().collect();
-    let mut groups: Vec<LemmaFence> = Vec::new();
-    for fence in fences {
-        if let Some(prev) = groups.last_mut() {
-            let between_start = prev.end_line; // 1-based closing ``` line
-            let between_end = fence.line.saturating_sub(1);
-            let only_whitespace = (between_start..between_end).all(|idx| {
-                lines
-                    .get(idx)
-                    .is_none_or(|line| line.chars().all(char::is_whitespace))
-            });
-            if only_whitespace {
-                prev.content.push_str("\n\n");
-                prev.content.push_str(&fence.content);
-                prev.end_line = fence.end_line;
-                continue;
-            }
-        }
-        groups.push(fence);
-    }
-    groups
+fn load_fences(content: &str) -> Vec<LemmaFence> {
+    group_whitespace_adjacent_fences(content, extract_lemma_fences(content))
 }
 
 fn fence_label(path: &Path, line: usize) -> String {
@@ -223,7 +153,7 @@ fn load_fence_engine(
     engine
 }
 
-fn run_fence(
+fn evaluate_fence(
     path: &Path,
     fence: &LemmaFence,
     registries: &Registries,
@@ -239,11 +169,11 @@ fn run_fence(
             continue;
         }
         engine
-            .run(
+            .evaluate(
                 repo.as_deref(),
                 &spec_name,
                 Some(&now),
-                HashMap::new(),
+                IndexMap::new(),
                 None,
                 false,
             )
@@ -263,12 +193,42 @@ fn all_lemma_fences_load_and_run() {
     for path in files {
         let content = std::fs::read_to_string(&path)
             .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
-        for fence in extract_lemma_fences(&content) {
-            run_fence(&path, &fence, &registries, &transport);
+        for fence in load_fences(&content) {
+            evaluate_fence(&path, &fence, &registries, &transport);
             ran += 1;
         }
     }
     assert!(ran > 0, "must run at least one ```lemma fence");
+}
+
+#[test]
+fn all_lemma_fences_are_formatted() {
+    let root = workspace_root();
+    let files = collect_markdown_and_text_files(&root);
+    let mut checked = 0usize;
+    for path in files {
+        let content = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+        if !content.contains("```lemma") {
+            continue;
+        }
+        let formatted = format_lemma_fences_in_text(&content).unwrap_or_else(|e| {
+            panic!(
+                "{}:{}: format ```lemma fence failed: {}",
+                path.display(),
+                e.fence_line,
+                e.error
+            )
+        });
+        assert_eq!(
+            content,
+            formatted,
+            "{} has unformatted ```lemma fences; run `lemma format`",
+            path.display()
+        );
+        checked += extract_lemma_fences(&content).len();
+    }
+    assert!(checked > 0, "must format-check at least one ```lemma fence");
 }
 
 #[test]
@@ -292,7 +252,7 @@ spec c
 data y: 2
 ```
 ";
-    let groups = extract_lemma_fences(file);
+    let groups = load_fences(file);
     assert_eq!(groups.len(), 2, "got {} groups", groups.len());
     assert!(groups[0].content.contains("spec a") && groups[0].content.contains("spec b"));
     assert!(groups[1].content.contains("spec c"));

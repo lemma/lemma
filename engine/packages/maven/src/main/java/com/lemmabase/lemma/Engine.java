@@ -36,6 +36,15 @@ public final class Engine implements AutoCloseable {
   }
 
   /**
+   * Returns the native engine version (e.g. {@code "0.9.12"}).
+   *
+   * @return semver string
+   */
+  public static String version() {
+    return Native.version();
+  }
+
+  /**
    * Creates an engine with default resource limits.
    *
    * @return new engine instance
@@ -189,19 +198,19 @@ public final class Engine implements AutoCloseable {
   }
 
   /**
-   * Lists specs currently loaded in the engine.
+   * Specs currently loaded in the engine, grouped by repository.
    *
-   * @return listed repositories and specs
+   * @return loaded repositories and their spec versions
    */
-  public List<ResolvedRepository> list() {
+  public List<Repository> specs() {
     String json;
     state.lock.lock();
     try {
-      json = Native.list(state.requireHandle());
+      json = Native.specs(state.requireHandle());
     } finally {
       state.lock.unlock();
     }
-    return JsonSupport.parseList(json);
+    return JsonSupport.parseRepositories(json);
   }
 
   /**
@@ -245,17 +254,11 @@ public final class Engine implements AutoCloseable {
   /**
    * Evaluates rules for one spec slice.
    *
-   * @param request run parameters and input data
+   * @param request evaluate parameters and input data
    * @return evaluation response
    */
-  public Response run(RunRequest request) {
+  public Response evaluate(EvaluateRequest request) {
     Objects.requireNonNull(request, "request");
-    Map<String, String> data = RunDataValues.toEngineStrings(request.data());
-    String[] keys = data.keySet().toArray(String[]::new);
-    String[] values = new String[keys.length];
-    for (int i = 0; i < keys.length; i++) {
-      values[i] = data.get(keys[i]);
-    }
     String[] rules =
         request.rules() == null ? null : request.rules().toArray(String[]::new);
     String json;
@@ -267,14 +270,25 @@ public final class Engine implements AutoCloseable {
               request.repository(),
               request.spec(),
               request.effective(),
-              keys,
-              values,
+              request.data(),
               rules,
               request.explain());
     } finally {
       state.lock.unlock();
     }
     return JsonSupport.parseResponse(json);
+  }
+
+  /**
+   * Deprecated alias of {@link #evaluate(EvaluateRequest)}.
+   *
+   * @param request evaluate parameters and input data
+   * @return evaluation response
+   * @deprecated Use {@link #evaluate(EvaluateRequest)}
+   */
+  @Deprecated
+  public Response run(EvaluateRequest request) {
+    return evaluate(request);
   }
 
   /**

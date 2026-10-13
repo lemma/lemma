@@ -4,25 +4,33 @@ import com.fasterxml.jackson.core.JsonParser;
 import com.fasterxml.jackson.core.JsonToken;
 import com.lemmabase.lemma.schema.LemmaType;
 import com.lemmabase.lemma.schema.LiteralValue;
+import com.lemmabase.lemma.schema.ShowPropertyType;
 import java.io.IOException;
+import java.util.Collections;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import org.jspecify.annotations.Nullable;
 
 /**
- * Show.
+ * Show: the engine's Draft 2020-12 JSON Schema for a spec's evaluation-data inputs, read into typed
+ * accessors. {@link #json()} is the document itself, for JSON Schema tooling.
  *
- * @param repository interned repository name; null for the unnamed workspace
- * @param spec spec
- * @param commentary commentary
- * @param effectiveFrom effectiveFrom
- * @param effectiveTo effectiveTo
- * @param versions versions
- * @param startLine startLine
- * @param sourceType sourceType
- * @param data data
- * @param rules this spec's rule graph (local plus reachable imports)
- * @param meta meta
+ * @param repository interned repository name ({@code x-lemma-repository}); null for the unnamed
+ *     workspace
+ * @param spec spec name ({@code title})
+ * @param commentary commentary ({@code description})
+ * @param effectiveFrom effectiveFrom ({@code x-lemma-effective-from})
+ * @param effectiveTo effectiveTo ({@code x-lemma-effective-to})
+ * @param startLine startLine ({@code x-lemma-start-line})
+ * @param sourceType sourceType ({@code x-lemma-source-type})
+ * @param types local data declarations by name ({@code x-lemma-types})
+ * @param data inputs rules need by evaluation-data key ({@code properties})
+ * @param required inputs a rule needs that have no committed value, sorted
+ * @param rows instance-list row schemas by {@code $defs} name
+ * @param rules this spec's rule graph, local plus reachable imports ({@code x-lemma-rules})
+ * @param meta meta ({@code x-lemma-meta})
+ * @param json the Show document
  */
 public record Show(
     @Nullable String repository,
@@ -30,12 +38,17 @@ public record Show(
     @Nullable String commentary,
     @Nullable String effectiveFrom,
     @Nullable String effectiveTo,
-    @Nullable List<ShowVersion> versions,
     int startLine,
     @Nullable SourceType sourceType,
+    Map<String, LemmaType> types,
     Map<String, ShowData> data,
+    List<String> required,
+    Map<String, ShowRow> rows,
     Map<String, ShowRule> rules,
-    Map<String, LiteralValue> meta) {
+    Map<String, LiteralValue> meta,
+    String json) {
+  private static final String DIALECT = "https://json-schema.org/draft/2020-12/schema";
+
   /**
    * One uses hop on a Show data or rule path.
    *
@@ -77,20 +90,24 @@ public record Show(
   }
 
   /**
-   * One declared data slot.
+   * One evaluation-data input: a property of the Show document.
    *
-   * @param type type
+   * @param type {@code x-lemma-type}: Lemma type without help or text options/length, which the
+   *     property states as {@code description}, {@code enum} and {@code minLength}
    * @param path import hops to this slot; empty means this spec
-   * @param fill spec literal or literal {@code with} binding
-   * @param suggestion suggestion
-   * @param neededByRules Show.rules keys that need this slot; empty = reuse-only
+   * @param value spec literal or literal {@code with} binding ({@code x-lemma-value})
+   * @param suggestion suggestion ({@code x-lemma-suggestion})
+   * @param neededByRules rules keys that need this slot; empty = reuse-only
+   * @param schema the property's standard JSON Schema keywords ({@code type}, {@code pattern},
+   *     {@code enum}, {@code default}, {@code examples}, {@code items}, ...)
    */
   public record ShowData(
-      LemmaType type,
+      ShowPropertyType type,
       List<PathSegment> path,
-      @Nullable RuleResultValue fill,
+      @Nullable RuleResultValue value,
       @Nullable RuleResultValue suggestion,
-      List<String> neededByRules) {
+      List<String> neededByRules,
+      Map<String, @Nullable Object> schema) {
     /**
      * Parses JSON.
      *
@@ -99,44 +116,63 @@ public record Show(
      * @throws IOException if JSON IO fails
      */
     static ShowData read(JsonParser p) throws IOException {
-      JsonReading.expectStartObject(p, "ShowData");
-      LemmaType type = null;
+      JsonReading.expectStartObject(p, "ShowProperty");
+      Map<String, @Nullable Object> schema = new LinkedHashMap<>();
+      ShowPropertyType inputType = null;
       List<PathSegment> path = null;
-      RuleResultValue fill = null;
+      RuleResultValue value = null;
       RuleResultValue suggestion = null;
       List<String> neededByRules = null;
       while (p.nextToken() != JsonToken.END_OBJECT) {
         String field = p.currentName();
         p.nextToken();
         switch (field) {
-          case "type" -> type = LemmaType.read(p);
-          case "path" -> path = JsonReading.readList(p, PathSegment::read);
-          case "fill" -> fill = RuleResultValue.read(p);
-          case "suggestion" -> suggestion = RuleResultValue.read(p);
-          case "needed_by_rules" -> neededByRules = JsonReading.readList(p, JsonReading::readString);
-          default -> JsonReading.unknownField(field, "ShowData");
+          case "type",
+              "oneOf",
+              "pattern",
+              "enum",
+              "minLength",
+              "maxLength",
+              "description",
+              "default",
+              "examples",
+              "items",
+              "maxItems" ->
+              schema.put(field, JsonReading.readJsonValue(p));
+          case "x-lemma-type" -> inputType = ShowPropertyType.read(p);
+          case "x-lemma-path" -> path = JsonReading.readList(p, PathSegment::read);
+          case "x-lemma-needed-by-rules" ->
+              neededByRules = JsonReading.readList(p, JsonReading::readString);
+          case "x-lemma-value" -> value = RuleResultValue.read(p);
+          case "x-lemma-suggestion" -> suggestion = RuleResultValue.read(p);
+          default -> JsonReading.unknownField(field, "ShowProperty");
         }
       }
-      if (type == null) {
-        JsonReading.missingRequired("type", "ShowData");
+      if (!schema.containsKey("type") && !schema.containsKey("oneOf")) {
+        JsonReading.missingRequired("type or oneOf", "ShowProperty");
+      }
+      if (inputType == null) {
+        JsonReading.missingRequired("x-lemma-type", "ShowProperty");
       }
       if (path == null) {
-        JsonReading.missingRequired("path", "ShowData");
+        JsonReading.missingRequired("x-lemma-path", "ShowProperty");
       }
       if (neededByRules == null) {
-        JsonReading.missingRequired("needed_by_rules", "ShowData");
+        JsonReading.missingRequired("x-lemma-needed-by-rules", "ShowProperty");
       }
-      return new ShowData(type, path, fill, suggestion, neededByRules);
+      return new ShowData(
+          inputType, path, value, suggestion, neededByRules, Collections.unmodifiableMap(schema));
     }
   }
 
   /**
-   * ShowVersion.
+   * Row object schema of an instance list: one {@code $defs} entry per row spec.
    *
-   * @param effectiveFrom effectiveFrom
-   * @param effectiveTo effectiveTo
+   * @param title row schema title
+   * @param data row fields by key relative to the row spec
+   * @param required row fields a row rule needs that have no committed value, sorted
    */
-  public record ShowVersion(@Nullable String effectiveFrom, @Nullable String effectiveTo) {
+  public record ShowRow(String title, Map<String, ShowData> data, List<String> required) {
     /**
      * Parses JSON.
      *
@@ -144,20 +180,30 @@ public record Show(
      * @return parsed value
      * @throws IOException if JSON IO fails
      */
-    static ShowVersion read(JsonParser p) throws IOException {
-      JsonReading.expectStartObject(p, "ShowVersion");
-      String effectiveFrom = null;
-      String effectiveTo = null;
+    static ShowRow read(JsonParser p) throws IOException {
+      JsonReading.expectStartObject(p, "ShowRowSchema");
+      String title = null;
+      Map<String, ShowData> data = null;
+      List<String> required = List.of();
       while (p.nextToken() != JsonToken.END_OBJECT) {
         String field = p.currentName();
         p.nextToken();
         switch (field) {
-          case "effective_from" -> effectiveFrom = JsonReading.readString(p);
-          case "effective_to" -> effectiveTo = JsonReading.readString(p);
-          default -> JsonReading.unknownField(field, "ShowVersion");
+          case "title" -> title = JsonReading.readString(p);
+          case "type" -> expectValue(p, "object", "ShowRowSchema.type");
+          case "additionalProperties" -> expectTrue(p, "ShowRowSchema.additionalProperties");
+          case "properties" -> data = JsonReading.readMap(p, ShowData::read);
+          case "required" -> required = JsonReading.readList(p, JsonReading::readString);
+          default -> JsonReading.unknownField(field, "ShowRowSchema");
         }
       }
-      return new ShowVersion(effectiveFrom, effectiveTo);
+      if (title == null) {
+        JsonReading.missingRequired("title", "ShowRowSchema");
+      }
+      if (data == null) {
+        JsonReading.missingRequired("properties", "ShowRowSchema");
+      }
+      return new ShowRow(title, data, required);
     }
   }
 
@@ -256,58 +302,82 @@ public record Show(
     }
   }
 
+  private static void expectValue(JsonParser p, String expected, String label) throws IOException {
+    String actual = JsonReading.readString(p);
+    if (!expected.equals(actual)) {
+      throw new LemmaBugError("BUG: " + label + " must be " + expected + ", got " + actual);
+    }
+  }
+
+  private static void expectTrue(JsonParser p, String label) throws IOException {
+    if (!JsonReading.readBoolean(p)) {
+      throw new LemmaBugError("BUG: " + label + " must be true");
+    }
+  }
+
   /**
    * Parses JSON.
    *
    * @param p parser at value start
+   * @param json the document text, kept as {@link #json()}
    * @return parsed value
    * @throws IOException if JSON IO fails
    */
-  static Show read(JsonParser p) throws IOException {
+  static Show read(JsonParser p, String json) throws IOException {
     JsonReading.expectStartObject(p, "Show");
     String repository = null;
     String spec = null;
     String commentary = null;
     String effectiveFrom = null;
     String effectiveTo = null;
-    List<ShowVersion> versions = null;
     Integer startLine = null;
     SourceType sourceType = null;
+    Map<String, LemmaType> types = null;
     Map<String, ShowData> data = null;
+    List<String> required = List.of();
+    Map<String, ShowRow> rows = Map.of();
     Map<String, ShowRule> rules = null;
     Map<String, LiteralValue> meta = null;
     while (p.nextToken() != JsonToken.END_OBJECT) {
       String field = p.currentName();
       p.nextToken();
       switch (field) {
-        case "repository" -> repository = JsonReading.readString(p);
-        case "spec" -> spec = JsonReading.readString(p);
-        case "commentary" -> commentary = JsonReading.readString(p);
-        case "effective_from" -> effectiveFrom = JsonReading.readString(p);
-        case "effective_to" -> effectiveTo = JsonReading.readString(p);
-        case "versions" -> versions = JsonReading.readList(p, ShowVersion::read);
-        case "start_line" -> startLine = JsonReading.readInt(p);
-        case "source_type" -> sourceType = SourceType.read(p);
-        case "data" -> data = JsonReading.readMap(p, ShowData::read);
-        case "rules" -> rules = JsonReading.readMap(p, ShowRule::read);
-        case "meta" -> meta = JsonReading.readMap(p, LiteralValue::read);
+        case "$schema" -> expectValue(p, DIALECT, "Show.$schema");
+        case "title" -> spec = JsonReading.readString(p);
+        case "description" -> commentary = JsonReading.readString(p);
+        case "type" -> expectValue(p, "object", "Show.type");
+        case "additionalProperties" -> expectTrue(p, "Show.additionalProperties");
+        case "properties" -> data = JsonReading.readMap(p, ShowData::read);
+        case "required" -> required = JsonReading.readList(p, JsonReading::readString);
+        case "$defs" -> rows = JsonReading.readMap(p, ShowRow::read);
+        case "x-lemma-repository" -> repository = JsonReading.readString(p);
+        case "x-lemma-effective-from" -> effectiveFrom = JsonReading.readString(p);
+        case "x-lemma-effective-to" -> effectiveTo = JsonReading.readString(p);
+        case "x-lemma-start-line" -> startLine = JsonReading.readInt(p);
+        case "x-lemma-source-type" -> sourceType = SourceType.read(p);
+        case "x-lemma-meta" -> meta = JsonReading.readMap(p, LiteralValue::read);
+        case "x-lemma-types" -> types = JsonReading.readMap(p, LemmaType::read);
+        case "x-lemma-rules" -> rules = JsonReading.readMap(p, ShowRule::read);
         default -> JsonReading.unknownField(field, "Show");
       }
     }
     if (spec == null) {
-      JsonReading.missingRequired("spec", "Show");
+      JsonReading.missingRequired("title", "Show");
     }
     if (startLine == null) {
-      JsonReading.missingRequired("start_line", "Show");
+      JsonReading.missingRequired("x-lemma-start-line", "Show");
     }
     if (data == null) {
-      JsonReading.missingRequired("data", "Show");
+      JsonReading.missingRequired("properties", "Show");
+    }
+    if (types == null) {
+      JsonReading.missingRequired("x-lemma-types", "Show");
     }
     if (rules == null) {
-      JsonReading.missingRequired("rules", "Show");
+      JsonReading.missingRequired("x-lemma-rules", "Show");
     }
     if (meta == null) {
-      JsonReading.missingRequired("meta", "Show");
+      JsonReading.missingRequired("x-lemma-meta", "Show");
     }
     return new Show(
         repository,
@@ -315,11 +385,14 @@ public record Show(
         commentary,
         effectiveFrom,
         effectiveTo,
-        versions,
         startLine,
         sourceType,
+        types,
         data,
+        required,
+        rows,
         rules,
-        meta);
+        meta,
+        json);
   }
 }

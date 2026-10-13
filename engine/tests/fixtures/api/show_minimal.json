@@ -1,41 +1,112 @@
 {
-  "spec": "sample",
-  "effective_from": "2024-01-01",
-  "versions": [
-    {
-      "effective_from": "2024-01-01"
-    }
-  ],
-  "start_line": 1,
-  "source_type": "volatile",
-  "data": {
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "sample",
+  "type": "object",
+  "additionalProperties": true,
+  "properties": {
     "amount": {
-      "type": {
+      "type": "string",
+      "pattern": "^\\s*[+-]?(?:[0-9](?:_?[0-9]){0,27}(?:\\.(?:[0-9](?:_?[0-9]){0,27})?)?|\\.[0-9](?:_?[0-9]){0,27})(?:[eE][+-]?[0-9]{1,2})?\\s*$",
+      "description": "A dimensionless number.",
+      "examples": [
+        "1"
+      ],
+      "x-lemma-type": {
         "name": "amount",
         "kind": "number",
         "minimum": null,
         "maximum": null,
         "decimals": null,
-        "help": "A dimensionless number.",
         "extends": {
           "kind": "custom",
           "parent": "number",
-          "family": "amount",
+          "family": "sample 2024-01-01.amount",
           "defining_spec": {
             "kind": "local"
           }
         }
       },
-      "path": [],
-      "suggestion": {
-        "number": "1"
-      },
-      "needed_by_rules": [
+      "x-lemma-path": [],
+      "x-lemma-needed-by-rules": [
         "ok"
-      ]
+      ],
+      "x-lemma-suggestion": {
+        "result": "1",
+        "number": "1"
+      }
     }
   },
-  "rules": {
+  "required": [
+    "amount"
+  ],
+  "x-lemma-effective-from": "2024-01-01",
+  "x-lemma-start-line": 2,
+  "x-lemma-source-type": {
+    "path": "sample.lemma"
+  },
+  "x-lemma-meta": {
+    "title": {
+      "text": "t"
+    }
+  },
+  "x-lemma-types": {
+    "amount": {
+      "name": "amount",
+      "kind": "number",
+      "minimum": null,
+      "maximum": null,
+      "decimals": null,
+      "help": "A dimensionless number.",
+      "extends": {
+        "kind": "custom",
+        "parent": "number",
+        "family": "sample 2024-01-01.amount",
+        "defining_spec": {
+          "kind": "local"
+        }
+      }
+    },
+    "money": {
+      "name": "money",
+      "kind": "measure",
+      "minimum": null,
+      "maximum": null,
+      "decimals": null,
+      "units": [
+        {
+          "name": "eur",
+          "factor": {
+            "numer": "1",
+            "denom": "1"
+          },
+          "derived_measure_factors": [
+            [
+              "eur",
+              1
+            ]
+          ],
+          "decomposition": {
+            "sample 2024-01-01.money": 1
+          },
+          "suggestion": "10"
+        }
+      ],
+      "traits": [],
+      "decomposition": {
+        "sample 2024-01-01.money": 1
+      },
+      "help": "A numeric amount in one of this type's units.",
+      "extends": {
+        "kind": "custom",
+        "parent": "measure",
+        "family": "sample 2024-01-01.money",
+        "defining_spec": {
+          "kind": "local"
+        }
+      }
+    }
+  },
+  "x-lemma-rules": {
     "ok": {
       "type": {
         "name": "amount",
@@ -47,7 +118,7 @@
         "extends": {
           "kind": "custom",
           "parent": "number",
-          "family": "amount",
+          "family": "sample 2024-01-01.amount",
           "defining_spec": {
             "kind": "local"
           }
@@ -57,21 +128,12 @@
       "branches": [
         {
           "result": {
-            "type": "literal",
-            "number": "1",
-            "result": "1"
+            "type": "data",
+            "name": "amount"
           }
         }
       ],
       "depends_on_rules": []
-    }
-  },
-  "meta": {
-    "title": {
-      "text": "t"
-    },
-    "author": {
-      "text": "alice"
     }
   }
 }

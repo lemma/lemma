@@ -46,7 +46,11 @@
           "name": "storage.type.lemma"
         },
         {
-          "match": "\\b(option|minimum|maximum|lower|upper|minimal|decimals|unit|units|options|length|suggest|help)\\b",
+          "match": "\\b(option|minimum|maximum|lower|upper|minimal|decimals|unit|units|options|length|suggest|help|with)\\b",
+          "name": "keyword.operator.constraint.lemma"
+        },
+        {
+          "match": "\\b(list|key|find|first|last|sum|avg|product|count|min|max|any|all|where|sort|top|asc|desc)\\b",
           "name": "keyword.operator.constraint.lemma"
         }
       ]
@@ -66,23 +70,23 @@
           "name": "constant.numeric.time.lemma"
         },
         {
-          "match": "\\b\\d+([_,]\\d+)*(\\.\\d+)?([eE][+-]?\\d+)?%%",
+          "match": "\\b\\d+(_\\d+)*(\\.\\d+)?([eE][+-]?\\d+)?%%",
           "name": "constant.numeric.promille.lemma"
         },
         {
-          "match": "\\b\\d+([_,]\\d+)*(\\.\\d+)?([eE][+-]?\\d+)?%",
+          "match": "\\b\\d+(_\\d+)*(\\.\\d+)?([eE][+-]?\\d+)?%",
           "name": "constant.numeric.percent.lemma"
         },
         {
-          "match": "\\b\\d+([_,]\\d+)*(\\.\\d+)?([eE][+-]?\\d+)?\\s+(percent|permille)\\b",
+          "match": "\\b\\d+(_\\d+)*(\\.\\d+)?([eE][+-]?\\d+)?\\s+(percent|permille)\\b",
           "name": "constant.numeric.percent.lemma"
         },
         {
-          "match": "\\b\\d+([_,]\\d+)*(\\.\\d+)?([eE][+-]?\\d+)?\\s+[a-zA-Z_][a-zA-Z0-9_]*\\b",
+          "match": "\\b\\d+(_\\d+)*(\\.\\d+)?([eE][+-]?\\d+)?\\s+[a-zA-Z_][a-zA-Z0-9_]*\\b",
           "name": "constant.numeric.unit.lemma"
         },
         {
-          "match": "\\b\\d+([_,]\\d+)*(\\.\\d+)?([eE][+-]?\\d+)?\\b",
+          "match": "\\b\\d+(_\\d+)*(\\.\\d+)?([eE][+-]?\\d+)?\\b",
           "name": "constant.numeric.lemma"
         },
         {

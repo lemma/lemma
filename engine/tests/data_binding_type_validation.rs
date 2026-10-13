@@ -1,3 +1,4 @@
+use indexmap::IndexMap;
 /// Comprehensive tests for data binding validation at runtime.
 ///
 /// After planning succeeds, invalid overrides complete evaluation with Veto on
@@ -5,7 +6,6 @@
 /// are ignored.
 use lemma::DateTimeValue;
 use lemma::Engine;
-use std::collections::HashMap;
 
 fn assert_run_completes_with_veto_on_rule(
     result: Result<lemma::Response, lemma::Error>,
@@ -46,11 +46,11 @@ rule doubled: age * 2
         .load([(lemma::SourceType::Volatile, code.to_string())])
         .unwrap();
 
-    let mut data = HashMap::new();
+    let mut data = IndexMap::new();
     data.insert("age".to_string(), "twenty".into());
 
     let now = DateTimeValue::now();
-    let result = engine.run(None, "test", Some(&now), data, None, true);
+    let result = engine.evaluate(None, "test", Some(&now), data, None, true);
 
     assert_run_completes_with_veto_on_rule(result, "doubled", "number");
 }
@@ -71,46 +71,46 @@ rule flagged: active
         .load([(lemma::SourceType::Volatile, code.to_string())])
         .unwrap();
 
-    let mut data = HashMap::new();
+    let mut data = IndexMap::new();
     data.insert("price".to_string(), "expensive".into());
     data.insert("quantity".to_string(), "5".into());
     data.insert("active".to_string(), "true".into());
 
     let now = DateTimeValue::now();
     assert_run_completes_with_veto_on_rule(
-        engine.run(None, "test", Some(&now), data, None, true),
+        engine.evaluate(None, "test", Some(&now), data, None, true),
         "total",
         "number",
     );
 
-    let mut data = HashMap::new();
+    let mut data = IndexMap::new();
     data.insert("price".to_string(), "100".into());
     data.insert("quantity".to_string(), "five".into());
     data.insert("active".to_string(), "true".into());
 
     assert_run_completes_with_veto_on_rule(
-        engine.run(None, "test", Some(&now), data, None, true),
+        engine.evaluate(None, "test", Some(&now), data, None, true),
         "total",
         "number",
     );
 
-    let mut data = HashMap::new();
+    let mut data = IndexMap::new();
     data.insert("price".to_string(), "100".into());
     data.insert("quantity".to_string(), "5".into());
     data.insert("active".to_string(), "maybe".into());
 
     assert_run_completes_with_veto_on_rule(
-        engine.run(None, "test", Some(&now), data, None, true),
+        engine.evaluate(None, "test", Some(&now), data, None, true),
         "flagged",
         "boolean",
     );
 
-    let mut data = HashMap::new();
+    let mut data = IndexMap::new();
     data.insert("price".to_string(), "100".into());
     data.insert("quantity".to_string(), "5".into());
     data.insert("active".to_string(), "true".into());
     let response = engine
-        .run(None, "test", Some(&now), data, None, true)
+        .evaluate(None, "test", Some(&now), data, None, true)
         .expect("valid data must evaluate");
     let total = response.results.get("total").expect("total rule");
     assert_eq!(total.result(), Some("500"));
@@ -129,20 +129,20 @@ rule total: base_price * 1.2
         .load([(lemma::SourceType::Volatile, code.to_string())])
         .unwrap();
 
-    let mut data = HashMap::new();
+    let mut data = IndexMap::new();
     data.insert("base_price".to_string(), "sixty".into());
 
     let now = DateTimeValue::now();
     assert_run_completes_with_veto_on_rule(
-        engine.run(None, "test", Some(&now), data, None, true),
+        engine.evaluate(None, "test", Some(&now), data, None, true),
         "total",
         "number",
     );
 
-    let mut data = HashMap::new();
+    let mut data = IndexMap::new();
     data.insert("base_price".to_string(), "60".into());
     let response = engine
-        .run(None, "test", Some(&now), data, None, true)
+        .evaluate(None, "test", Some(&now), data, None, true)
         .expect("valid base_price must evaluate");
     let total = response.results.get("total").expect("total rule");
     let display = total.result().expect("result");
@@ -162,13 +162,13 @@ rule total: price * 1.1
         .load([(lemma::SourceType::Volatile, code.to_string())])
         .unwrap();
 
-    let mut data = HashMap::new();
+    let mut data = IndexMap::new();
     data.insert("price".to_string(), "100".into());
     data.insert("unknown_data".to_string(), "42".into());
 
     let now = DateTimeValue::now();
     let response = engine
-        .run(None, "test", Some(&now), data, None, true)
+        .evaluate(None, "test", Some(&now), data, None, true)
         .expect("unknown keys must not abort evaluation");
     let total = response.results.get("total").expect("total rule");
     assert_eq!(total.result(), Some("110"));
@@ -197,12 +197,12 @@ rule r: p
         )])
         .unwrap();
 
-    let mut data = HashMap::new();
+    let mut data = IndexMap::new();
     data.insert("p".to_string(), "5%".into());
 
     let now = DateTimeValue::now();
     assert_run_completes_with_veto_on_rule(
-        engine.run(None, "s", Some(&now), data, None, true),
+        engine.evaluate(None, "s", Some(&now), data, None, true),
         "r",
         "minimum",
     );
@@ -233,12 +233,12 @@ rule r: p
         )])
         .unwrap();
 
-    let mut data = HashMap::new();
+    let mut data = IndexMap::new();
     data.insert("p".to_string(), "5%".into());
 
     let now = DateTimeValue::now();
     let resp = engine
-        .run(None, "s", Some(&now), data, None, true)
+        .evaluate(None, "s", Some(&now), data, None, true)
         .expect("'5%' must parse on a percent type without constraints");
     let rr = resp.results.get("r").expect("rule 'r' not found");
     assert!(!rr.vetoed, "unexpected veto: {:?}", rr.veto_reason);
@@ -282,12 +282,12 @@ rule r: p
         )])
         .unwrap();
 
-    let mut data = HashMap::new();
+    let mut data = IndexMap::new();
     data.insert("p".to_string(), "90%".into());
 
     let now = DateTimeValue::now();
     assert_run_completes_with_veto_on_rule(
-        engine.run(None, "s", Some(&now), data, None, true),
+        engine.evaluate(None, "s", Some(&now), data, None, true),
         "r",
         "maximum",
     );
@@ -319,12 +319,12 @@ rule r: d
         );
     }
 
-    let mut data = HashMap::new();
+    let mut data = IndexMap::new();
     data.insert("d".to_string(), "12 hour".into());
 
     let now = DateTimeValue::now();
     assert_run_completes_with_veto_on_rule(
-        engine.run(None, "s", Some(&now), data, None, true),
+        engine.evaluate(None, "s", Some(&now), data, None, true),
         "r",
         "minimum",
     );
@@ -353,12 +353,12 @@ rule r: when
         );
     }
 
-    let mut data = HashMap::new();
+    let mut data = IndexMap::new();
     data.insert("when".to_string(), "2023-06-15".into());
 
     let now = DateTimeValue::now();
     assert_run_completes_with_veto_on_rule(
-        engine.run(None, "s", Some(&now), data, None, true),
+        engine.evaluate(None, "s", Some(&now), data, None, true),
         "r",
         "minimum",
     );
@@ -380,12 +380,12 @@ rule r: n
         )])
         .unwrap();
 
-    let mut data = HashMap::new();
+    let mut data = IndexMap::new();
     data.insert("n".to_string(), "3.14159".into());
 
     let now = DateTimeValue::now();
     assert_run_completes_with_veto_on_rule(
-        engine.run(None, "s", Some(&now), data, None, true),
+        engine.evaluate(None, "s", Some(&now), data, None, true),
         "r",
         "decimals",
     );
@@ -406,12 +406,12 @@ rule r: msg
         )])
         .unwrap();
 
-    let mut data = HashMap::new();
+    let mut data = IndexMap::new();
     data.insert("msg".to_string(), "exact".into());
 
     let now = DateTimeValue::now();
     let resp = engine
-        .run(None, "s", Some(&now), data, None, true)
+        .evaluate(None, "s", Some(&now), data, None, true)
         .expect("5-char string must be accepted");
     let rr = resp.results.get("r").expect("rule 'r'");
     assert!(!rr.vetoed, "expected value, got veto: {:?}", rr.veto_reason);
@@ -483,13 +483,13 @@ rule r: price
         )])
         .unwrap();
 
-    let mut data = HashMap::new();
+    let mut data = IndexMap::new();
     // `meter` is not a unit of `money`.
     data.insert("price".to_string(), "100 meter".into());
 
     let now = DateTimeValue::now();
     assert_run_completes_with_veto_on_rule(
-        engine.run(None, "s", Some(&now), data, None, true),
+        engine.evaluate(None, "s", Some(&now), data, None, true),
         "r",
         "unit",
     );
@@ -513,12 +513,12 @@ rule span: bridge_height
         )])
         .unwrap();
 
-    let mut data = HashMap::new();
+    let mut data = IndexMap::new();
     data.insert("bridge_height".to_string(), "4 mete".into());
 
     let now = DateTimeValue::now();
     assert_run_completes_with_veto_on_rule(
-        engine.run(None, "bridge", Some(&now), data, None, true),
+        engine.evaluate(None, "bridge", Some(&now), data, None, true),
         "span",
         "Unknown unit",
     );

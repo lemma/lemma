@@ -1,8 +1,8 @@
-//! Cross-spec plans must execute dependency unit conversions without widening
-//! the consumer spec's expression-scope unit index.
+//! Cross-spec plans execute dependency unit conversions. Consumer bare unit
+//! scope includes each direct import's full unit_index (path-prefixed).
 
-use lemma::{DateTimeValue, Engine, SourceType};
-use std::collections::HashMap;
+use indexmap::IndexMap;
+use lemma::{DateTimeValue, Engine, EvaluateDataValue, SourceType};
 
 const UNITS_SPEC: &str = r#"
 spec units
@@ -66,10 +66,11 @@ uses wh: warehousing
 rule total: wh.total_logistics_per_ce
 "#;
 
-const QUOTATION_BAD_SPEC: &str = r#"
-spec quotation_bad
+const QUOTATION_MINUTE_SPEC: &str = r#"
+spec quotation_minute
 uses wh: warehousing
-rule bad: 5 minute
+rule via_alias: 5 wh.minute
+rule bare: 5 minute
 "#;
 
 fn load_specs(engine: &mut Engine) {
@@ -81,7 +82,7 @@ fn load_specs(engine: &mut Engine) {
         .expect("warehousing spec must load");
 }
 
-fn warehousing_default_inputs(prefix: &str) -> HashMap<String, String> {
+fn warehousing_default_inputs(prefix: &str) -> IndexMap<String, EvaluateDataValue> {
     let key = |name: &str| {
         if prefix.is_empty() {
             name.to_string()
@@ -89,7 +90,7 @@ fn warehousing_default_inputs(prefix: &str) -> HashMap<String, String> {
             format!("{prefix}.{name}")
         }
     };
-    HashMap::from([
+    IndexMap::from([
         (key("units_per_pallet"), "1".into()),
         (key("storage_duration"), "10 day".into()),
         (key("interbranch_transport_per_pallet"), "0 eur".into()),
@@ -109,7 +110,7 @@ fn warehousing_plans_alone() {
         .show(None, "warehousing", Some(&now))
         .expect("warehousing must plan alone");
     let response = engine
-        .run(
+        .evaluate(
             None,
             "warehousing",
             Some(&now),
@@ -140,7 +141,7 @@ fn quotation_evaluates_cross_spec_duration_conversion() {
         .expect("quotation must load");
     let now = DateTimeValue::now();
     let response = engine
-        .run(
+        .evaluate(
             None,
             "quotation",
             Some(&now),
@@ -163,19 +164,41 @@ fn quotation_evaluates_cross_spec_duration_conversion() {
 }
 
 #[test]
-fn quotation_rejects_minutes_in_local_rule() {
+fn quotation_local_rule_can_use_minutes_via_import_scope() {
     let mut engine = Engine::new();
     load_specs(&mut engine);
-    let err = engine
-        .load([(SourceType::Volatile, QUOTATION_BAD_SPEC.to_string())])
-        .expect_err("5 minute in consumer must fail at load");
-    let minutes_err = err
-        .errors
-        .iter()
-        .find(|error| error.message().contains("minute"))
-        .expect("load must report minute out of scope");
+    engine
+        .load([(SourceType::Volatile, QUOTATION_MINUTE_SPEC.to_string())])
+        .expect("minute reaches quotation via wh unit scope");
+    let now = DateTimeValue::now();
+    let response = engine
+        .evaluate(
+            None,
+            "quotation_minute",
+            Some(&now),
+            IndexMap::new(),
+            None,
+            false,
+        )
+        .expect("evaluate");
     assert_eq!(
-        minutes_err.message(),
-        "Unknown unit 'minute'. Declare it on a measure or ratio type, or import it with uses."
+        response
+            .results
+            .get("via_alias")
+            .expect("via_alias")
+            .result()
+            .expect("display")
+            .to_string(),
+        "5 minute"
+    );
+    assert_eq!(
+        response
+            .results
+            .get("bare")
+            .expect("bare")
+            .result()
+            .expect("display")
+            .to_string(),
+        "5 minute"
     );
 }

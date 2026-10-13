@@ -1,6 +1,9 @@
+#[path = "support/explanation_json.rs"]
+mod explanation_support;
+
+use indexmap::IndexMap;
 use lemma::{format_explanation, Engine, SourceType};
 use serde_json::Value;
-use std::collections::HashMap;
 use std::path::PathBuf;
 
 fn explanation_json(response: &lemma::Response, rule: &str) -> Value {
@@ -70,13 +73,13 @@ fn assert_rule_binary_right_veto_children(explanation: &Value, body_needle: &str
         "left settled operand must be compose child: {explanation}"
     );
     assert_eq!(
-        operands[1]["type"], "rule",
+        operands[1]["type"], "rule_ref",
         "right veto embed must remain second operand: {explanation}"
     );
     assert_eq!(operands[1]["name"], "base");
 }
 
-fn run_settled_left_right_veto(
+fn evaluate_settled_left_right_veto(
     engine: &mut Engine,
     spec: &str,
     rule_body: &str,
@@ -95,10 +98,10 @@ rule main: {rule_body}
             ),
         )])
         .expect("load");
-    let mut data = HashMap::new();
+    let mut data = IndexMap::new();
     data.insert("age".to_string(), "80".into());
     engine
-        .run(None, spec, None, data, Some(&["main".to_string()]), true)
+        .evaluate(None, spec, None, data, Some(&["main".to_string()]), true)
         .expect("evaluation must succeed")
 }
 
@@ -126,17 +129,17 @@ fn assert_formatted_omits_literal_lines(formatted: &str, literals: &[&str]) {
     }
 }
 
-fn run_explained(source: &str, spec: &str, rule: &str) -> (Value, String) {
+fn evaluate_explained(source: &str, spec: &str, rule: &str) -> (Value, String) {
     let mut engine = Engine::new();
     engine
         .load([(SourceType::Volatile, source.to_string())])
         .unwrap();
     let response = engine
-        .run(
+        .evaluate(
             None,
             spec,
             None,
-            HashMap::new(),
+            IndexMap::new(),
             Some(&[rule.to_string()]),
             true,
         )
@@ -156,7 +159,7 @@ fn run_explained(source: &str, spec: &str, rule: &str) -> (Value, String) {
 
 #[test]
 fn explanation_pure_literal_divide_keeps_json_omits_ascii() {
-    let (json, formatted) = run_explained(
+    let (json, formatted) = evaluate_explained(
         r#"
 spec t
 rule dep: 5 / 2
@@ -181,7 +184,7 @@ dep: 2.5
 
 #[test]
 fn explanation_mixed_divide_keeps_data_and_literal_json_omits_literal_ascii() {
-    let (json, formatted) = run_explained(
+    let (json, formatted) = evaluate_explained(
         r#"
 spec t
 data n: 10
@@ -208,7 +211,7 @@ out: 5
 
 #[test]
 fn explanation_product_literal_kept_in_json_omitted_in_ascii() {
-    let (json, formatted) = run_explained(
+    let (json, formatted) = evaluate_explained(
         r#"
 spec t
 data labor: 100
@@ -236,7 +239,7 @@ surcharge: 25
 #[test]
 fn explanation_comparison_right_veto_compose() {
     let mut engine = Engine::new();
-    let response = run_settled_left_right_veto(&mut engine, "demo", "100 > base");
+    let response = evaluate_settled_left_right_veto(&mut engine, "demo", "100 > base");
     let explanation = explanation_json(&response, "main");
     assert_rule_binary_right_veto_children(&explanation, ">");
     assert_eq!(explanation["body"], "100 > base");
@@ -257,7 +260,7 @@ fn explanation_comparison_right_veto_compose() {
 #[test]
 fn explanation_range_literal_right_veto_compose() {
     let mut engine = Engine::new();
-    let response = run_settled_left_right_veto(&mut engine, "demo", "0...base");
+    let response = evaluate_settled_left_right_veto(&mut engine, "demo", "0...base");
     let explanation = explanation_json(&response, "main");
     assert_rule_binary_right_veto_children(&explanation, "base");
     assert!(
@@ -281,7 +284,7 @@ fn explanation_range_literal_right_veto_compose() {
 #[test]
 fn explanation_range_containment_right_veto_compose() {
     let mut engine = Engine::new();
-    let response = run_settled_left_right_veto(&mut engine, "demo", "50 in 0...base");
+    let response = evaluate_settled_left_right_veto(&mut engine, "demo", "50 in 0...base");
     let explanation = explanation_json(&response, "main");
     assert!(
         explanation["body"]
@@ -310,7 +313,8 @@ fn explanation_range_containment_right_veto_compose() {
     assert_eq!(operands[0]["type"], "compose");
     assert_eq!(operands[0]["expression"], "50");
     assert_eq!(operands[1]["type"], "compose");
-    let range = compose_nodes_matching(&operands[1], "to");
+    assert_eq!(operands[1]["expression"], "0...base");
+    let range = compose_nodes_matching(&operands[1], "...");
     assert!(
         !range.is_empty(),
         "range operand must remain a compose subtree: {explanation}"
@@ -318,7 +322,7 @@ fn explanation_range_containment_right_veto_compose() {
     fn has_rule_named_base(value: &Value) -> bool {
         match value {
             Value::Object(obj) => {
-                if obj.get("type").and_then(|t| t.as_str()) == Some("rule")
+                if obj.get("type").and_then(|t| t.as_str()) == Some("rule_ref")
                     && obj.get("name").and_then(|n| n.as_str()) == Some("base")
                 {
                     return true;
@@ -357,10 +361,10 @@ rule out: 1 unless x is "b" then 2
             .to_string(),
         )])
         .unwrap();
-    let mut data = HashMap::new();
+    let mut data = IndexMap::new();
     data.insert("x".into(), "a".into());
     let response = engine
-        .run(None, "t", None, data, Some(&["out".to_string()]), true)
+        .evaluate(None, "t", None, data, Some(&["out".to_string()]), true)
         .unwrap();
     let explanation = explanation_json(&response, "out");
 
@@ -401,11 +405,11 @@ rule total: price * q
         )])
         .unwrap();
     let response = engine
-        .run(
+        .evaluate(
             None,
             "t",
             None,
-            HashMap::new(),
+            IndexMap::new(),
             Some(&["total".to_string()]),
             true,
         )
@@ -439,11 +443,11 @@ rule b: a + base
         )])
         .unwrap();
     let response = engine
-        .run(
+        .evaluate(
             None,
             "t",
             None,
-            HashMap::new(),
+            IndexMap::new(),
             Some(&["b".to_string()]),
             true,
         )
@@ -455,9 +459,9 @@ rule b: a + base
     assert_eq!(children.len(), 1);
     let operands = assert_operation_compose(&children[0], "add", "a + base");
     assert_eq!(operands.len(), 2);
-    assert_eq!(operands[0]["type"], "rule");
+    assert_eq!(operands[0]["type"], "rule_ref");
     assert_eq!(operands[0]["name"], "a");
-    assert_eq!(operands[1]["type"], "rule");
+    assert_eq!(operands[1]["type"], "rule_ref");
     assert_eq!(operands[1]["name"], "base");
 }
 
@@ -476,11 +480,11 @@ rule out: n * 2
         )])
         .unwrap();
     let response = engine
-        .run(
+        .evaluate(
             None,
             "t",
             None,
-            HashMap::new(),
+            IndexMap::new(),
             Some(&["out".to_string()]),
             true,
         )
@@ -530,11 +534,11 @@ rule out: x + 1
         )])
         .unwrap();
     let response = engine
-        .run(
+        .evaluate(
             None,
             "t",
             None,
-            HashMap::new(),
+            IndexMap::new(),
             Some(&["out".to_string()]),
             true,
         )
@@ -553,11 +557,11 @@ fn explanation_json_compact_for_net_salary() {
     engine
         .load([(SourceType::Volatile, &source.to_string())])
         .unwrap();
-    let mut data = HashMap::new();
+    let mut data = IndexMap::new();
     data.insert("gross_salary".into(), "5000 eur".into());
     data.insert("pay_period".into(), "month".into());
     let response = engine
-        .run(
+        .evaluate(
             None,
             "net_salary",
             None,
@@ -600,11 +604,11 @@ rule active: current_date >= contract_start and current_date <= contract_end
         )])
         .unwrap();
     let response = engine
-        .run(
+        .evaluate(
             None,
             "t",
             None,
-            HashMap::new(),
+            IndexMap::new(),
             Some(&["active".to_string()]),
             true,
         )
@@ -635,11 +639,11 @@ rule in_grams: w as gram
         )])
         .unwrap();
     let response = engine
-        .run(
+        .evaluate(
             None,
             "t",
             None,
-            HashMap::new(),
+            IndexMap::new(),
             Some(&["in_grams".to_string()]),
             true,
         )
@@ -651,9 +655,9 @@ rule in_grams: w as gram
     let steps = children[0]["steps"].as_array().unwrap();
     assert!(steps.iter().any(|s| s["role"] == "outcome"));
     assert!(steps.iter().all(|s| s["role"] != "source"));
-    assert!(steps
-        .iter()
-        .any(|s| s["role"] == "rule" && s["text"].as_str().unwrap().contains("1000")));
+    assert!(steps.iter().any(|s| {
+        s["role"] == "rule" && s["text"].as_str().unwrap().contains("1 gram is 0.001 kg")
+    }));
 }
 
 #[test]
@@ -676,10 +680,10 @@ rule cost_in_cny: cost_delivered as cny
             .to_string(),
         )])
         .unwrap();
-    let mut data = HashMap::new();
+    let mut data = IndexMap::new();
     data.insert("cost_delivered".into(), "553.21 cny".into());
     let response = engine
-        .run(
+        .evaluate(
             None,
             "sales",
             None,
@@ -766,10 +770,10 @@ rule final_sales_price: cost_delivered * (100% + total_markup_pct)
             .to_string(),
         )])
         .unwrap();
-    let mut data = HashMap::new();
+    let mut data = IndexMap::new();
     data.insert("cost_delivered".into(), "71.92 eur".into());
     let response = engine
-        .run(
+        .evaluate(
             None,
             "sales",
             None,
@@ -811,14 +815,14 @@ rule out: 1 unless x is "b" then 2
             .to_string(),
         )])
         .unwrap();
-    let mut data = HashMap::new();
+    let mut data = IndexMap::new();
     data.insert("x".into(), "a".into());
     let without = engine
-        .run(None, "t", None, data.clone(), None, false)
+        .evaluate(None, "t", None, data.clone(), None, false)
         .unwrap();
     assert!(without.results["out"].explanation.is_none());
     let with = engine
-        .run(None, "t", None, data, Some(&["out".to_string()]), true)
+        .evaluate(None, "t", None, data, Some(&["out".to_string()]), true)
         .unwrap();
     assert!(with.results["out"].explanation.is_some());
 }
@@ -850,7 +854,7 @@ fn assert_operation_compose<'a>(node: &'a Value, operator: &str, expression: &st
 
 #[test]
 fn explanation_nary_sum_is_compose_add_with_sibling_operands() {
-    let (json, formatted) = run_explained(
+    let (json, formatted) = evaluate_explained(
         r#"
 spec t
 data a: 1
@@ -886,7 +890,7 @@ out: 6
 
 #[test]
 fn explanation_nary_product_is_compose_multiply_with_sibling_operands() {
-    let (json, formatted) = run_explained(
+    let (json, formatted) = evaluate_explained(
         r#"
 spec t
 data a: 2
@@ -922,7 +926,7 @@ out: 30
 
 #[test]
 fn explanation_sum_keeps_product_operand_as_multiply_compose() {
-    let (json, formatted) = run_explained(
+    let (json, formatted) = evaluate_explained(
         r#"
 spec t
 data a: 1
@@ -964,7 +968,7 @@ out: 11
 
 #[test]
 fn explanation_subtract_keeps_binary_compose_with_add_left_operand() {
-    let (json, formatted) = run_explained(
+    let (json, formatted) = evaluate_explained(
         r#"
 spec t
 data a: 1
@@ -1003,7 +1007,7 @@ out: 0
 
 #[test]
 fn explanation_right_grouped_sum_matches_flat_add_compose() {
-    let (json, formatted) = run_explained(
+    let (json, formatted) = evaluate_explained(
         r#"
 spec t
 data a: 1
@@ -1065,7 +1069,7 @@ fn assert_literal_nary_add(
 
 #[test]
 fn explanation_right_grouped_literal_sum_flattens() {
-    let (json, formatted) = run_explained(
+    let (json, formatted) = evaluate_explained(
         r#"
 spec t
 rule out: 2 + (3 + 5)
@@ -1078,7 +1082,7 @@ rule out: 2 + (3 + 5)
 
 #[test]
 fn explanation_left_chain_literal_sum_flattens() {
-    let (json, formatted) = run_explained(
+    let (json, formatted) = evaluate_explained(
         r#"
 spec t
 rule out: 2 + 3 + 5
@@ -1091,7 +1095,7 @@ rule out: 2 + 3 + 5
 
 #[test]
 fn explanation_literal_sum_canonical_order() {
-    let (json, formatted) = run_explained(
+    let (json, formatted) = evaluate_explained(
         r#"
 spec t
 rule out: 5 + (1 + 3)
@@ -1104,7 +1108,7 @@ rule out: 5 + (1 + 3)
 
 #[test]
 fn explanation_deep_literal_sum_flattens() {
-    let (json, formatted) = run_explained(
+    let (json, formatted) = evaluate_explained(
         r#"
 spec t
 rule out: 2 + (3 + (4 + 5))
@@ -1123,7 +1127,7 @@ rule out: 2 + (3 + (4 + 5))
 
 #[test]
 fn explanation_right_grouped_literal_product_keeps_source_order() {
-    let (json, formatted) = run_explained(
+    let (json, formatted) = evaluate_explained(
         r#"
 spec t
 rule out: 5 * (1 * 3)
@@ -1153,7 +1157,7 @@ out: 15
 
 #[test]
 fn explanation_literal_sum_with_data_keeps_sibling_operands() {
-    let (json, formatted) = run_explained(
+    let (json, formatted) = evaluate_explained(
         r#"
 spec t
 data x: 7
@@ -1185,7 +1189,7 @@ out: 12
 
 #[test]
 fn explanation_literal_sum_keeps_identity_zero() {
-    let (json, formatted) = run_explained(
+    let (json, formatted) = evaluate_explained(
         r#"
 spec t
 rule out: (2 + 3) + 0
@@ -1198,7 +1202,7 @@ rule out: (2 + 3) + 0
 
 #[test]
 fn explanation_literal_product_keeps_identity_one() {
-    let (json, formatted) = run_explained(
+    let (json, formatted) = evaluate_explained(
         r#"
 spec t
 rule out: (2 * 3) * 1
@@ -1228,7 +1232,7 @@ out: 6
 
 #[test]
 fn explanation_sum_of_folded_add_and_subtract_flattens() {
-    let (json, formatted) = run_explained(
+    let (json, formatted) = evaluate_explained(
         r#"
 spec t
 rule out: 1 + (2 + (3 - 5))
@@ -1262,7 +1266,7 @@ out: 1
 
 #[test]
 fn explanation_product_of_folded_multiply_and_divide_flattens() {
-    let (json, formatted) = run_explained(
+    let (json, formatted) = evaluate_explained(
         r#"
 spec t
 rule out: 2 * (3 * (4 / 5))
@@ -1296,7 +1300,7 @@ out: 4.8
 
 #[test]
 fn explanation_sum_with_subtract_keeps_subtract_as_one_summand() {
-    let (json, formatted) = run_explained(
+    let (json, formatted) = evaluate_explained(
         r#"
 spec t
 rule out: 2 + (3 - 5)
@@ -1331,7 +1335,7 @@ out: 0
 
 #[test]
 fn explanation_sum_with_rule_ref_stays_binary() {
-    let (json, formatted) = run_explained(
+    let (json, formatted) = evaluate_explained(
         r#"
 spec t
 rule inner: 3 + 5
@@ -1350,11 +1354,12 @@ rule out: 2 + inner
     let operands = assert_operation_compose(&children[0], "add", "2 + inner");
     assert_eq!(operands.len(), 2, "literal + rule ref, got: {json}");
     assert_empty_operand_compose(&operands[0], "2");
-    assert_eq!(operands[1]["type"], "rule");
+    assert_eq!(operands[1]["type"], "rule_ref");
     assert_eq!(operands[1]["name"], "inner");
     assert_eq!(operands[1]["result"], "8");
-    assert_eq!(operands[1]["body"], "3 + 5");
-    let inner_children = operands[1]["children"].as_array().expect("inner children");
+    let inner = explanation_support::json_resolve_ref(&json, &operands[1]);
+    assert_eq!(inner["body"], "3 + 5");
+    let inner_children = inner["children"].as_array().expect("inner children");
     assert_eq!(inner_children.len(), 1);
     let inner_ops = assert_operation_compose(&inner_children[0], "add", "3 + 5");
     assert_eq!(inner_ops.len(), 2);
@@ -1388,10 +1393,10 @@ rule out: money
             .to_string(),
         )])
         .unwrap();
-    let mut data = HashMap::new();
+    let mut data = IndexMap::new();
     data.insert("money".into(), "1.84 eur".into());
     let response = engine
-        .run(None, "pricing", None, data, Some(&["out".into()]), true)
+        .evaluate(None, "pricing", None, data, Some(&["out".into()]), true)
         .unwrap();
     let out = response.results.get("out").expect("out");
     assert!(!out.vetoed, "got {:?}", out.veto_reason);
@@ -1420,18 +1425,18 @@ data money: measure
   -> unit eur: 1
   -> unit inr: 0.0092
   -> decimals 2
-  -> fill 100 inr
+  -> with 100 inr
 rule out: money
 "#
             .to_string(),
         )])
         .unwrap();
     let response = engine
-        .run(
+        .evaluate(
             None,
             "pricing",
             None,
-            HashMap::new(),
+            IndexMap::new(),
             Some(&["out".into()]),
             true,
         )
@@ -1455,16 +1460,16 @@ data money: measure
   -> unit eur: 1
   -> unit inr: 0.0092
   -> decimals 2
-  -> fill 100 inr
+  -> with 100 inr
 rule out: money
 "#
             .to_string(),
         )])
         .unwrap();
-    let mut data = HashMap::new();
+    let mut data = IndexMap::new();
     data.insert("money".into(), "200 eur".into());
     let response = engine
-        .run(None, "pricing", None, data, Some(&["out".into()]), true)
+        .evaluate(None, "pricing", None, data, Some(&["out".into()]), true)
         .unwrap();
     let out = response.results.get("out").expect("out");
     assert!(!out.vetoed, "got {:?}", out.veto_reason);
@@ -1491,10 +1496,10 @@ rule out: money as eur
             .to_string(),
         )])
         .unwrap();
-    let mut data = HashMap::new();
+    let mut data = IndexMap::new();
     data.insert("money".into(), "100 inr".into());
     let response = engine
-        .run(None, "pricing", None, data, Some(&["out".into()]), true)
+        .evaluate(None, "pricing", None, data, Some(&["out".into()]), true)
         .unwrap();
     let out = response.results.get("out").expect("out");
     assert!(!out.vetoed, "got {:?}", out.veto_reason);
@@ -1520,11 +1525,11 @@ rule total: price1 + price2
             .to_string(),
         )])
         .unwrap();
-    let mut data = HashMap::new();
+    let mut data = IndexMap::new();
     data.insert("price1".into(), "10 eur".into());
     data.insert("price2".into(), "20 cny".into());
     let response = engine
-        .run(None, "wallets", None, data, Some(&["total".into()]), true)
+        .evaluate(None, "wallets", None, data, Some(&["total".into()]), true)
         .unwrap();
     let total = response.results.get("total").expect("total");
     assert!(!total.vetoed, "got {:?}", total.veto_reason);
@@ -1561,11 +1566,11 @@ rule total: price2 + price1
             .to_string(),
         )])
         .unwrap();
-    let mut data = HashMap::new();
+    let mut data = IndexMap::new();
     data.insert("price1".into(), "10 eur".into());
     data.insert("price2".into(), "20 cny".into());
     let response = engine
-        .run(None, "wallets", None, data, Some(&["total".into()]), true)
+        .evaluate(None, "wallets", None, data, Some(&["total".into()]), true)
         .unwrap();
     let total = response.results.get("total").expect("total");
     assert!(!total.vetoed, "got {:?}", total.veto_reason);
@@ -1598,10 +1603,10 @@ rule out: r
             .to_string(),
         )])
         .unwrap();
-    let mut data = HashMap::new();
+    let mut data = IndexMap::new();
     data.insert("r".into(), "25 permille".into());
     let response = engine
-        .run(None, "rates", None, data, Some(&["out".into()]), true)
+        .evaluate(None, "rates", None, data, Some(&["out".into()]), true)
         .unwrap();
     let out = response.results.get("out").expect("out");
     assert!(!out.vetoed, "got {:?}", out.veto_reason);

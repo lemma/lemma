@@ -4,9 +4,9 @@
 //! real-world business rules (volume discounts, MOQ, shelf life),
 //! and cross-spec composition (ingredient → batch → order pipeline).
 
-use lemma::{DateTimeValue, Engine, SourceType};
+use indexmap::IndexMap;
+use lemma::{DateTimeValue, Engine, EvaluateDataValue, SourceType};
 use rust_decimal::Decimal;
-use std::collections::HashMap;
 use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -17,23 +17,28 @@ fn src(name: &str) -> SourceType {
 
 fn run(engine: &Engine, spec: &str, data: &[(&str, &str)]) -> lemma::Response {
     let now = DateTimeValue::now();
-    let data_map: HashMap<String, String> = data
+    let data_map: IndexMap<String, EvaluateDataValue> = data
         .iter()
-        .map(|(k, v)| (k.to_string(), (*v).to_string()))
+        .map(|(k, v)| (k.to_string(), (*v).into()))
         .collect();
     engine
-        .run(None, spec, Some(&now), data_map, None, false)
+        .evaluate(None, spec, Some(&now), data_map, None, false)
         .unwrap()
 }
 
-fn run_at(engine: &Engine, spec: &str, data: &[(&str, &str)], effective: &str) -> lemma::Response {
+fn evaluate_at(
+    engine: &Engine,
+    spec: &str,
+    data: &[(&str, &str)],
+    effective: &str,
+) -> lemma::Response {
     let dt = DateTimeValue::from_str(effective).unwrap();
-    let data_map: HashMap<String, String> = data
+    let data_map: IndexMap<String, EvaluateDataValue> = data
         .iter()
-        .map(|(k, v)| (k.to_string(), (*v).to_string()))
+        .map(|(k, v)| (k.to_string(), (*v).into()))
         .collect();
     engine
-        .run(None, spec, Some(&dt), data_map, None, false)
+        .evaluate(None, spec, Some(&dt), data_map, None, false)
         .unwrap()
 }
 
@@ -157,7 +162,7 @@ data cookies_per_box: 12
 
 rule good_cookies: batch_size - reject_rate * batch_size
 rule full_boxes: floor(good_cookies / cookies_per_box)
-rule leftover_cookies: good_cookies % cookies_per_box
+rule leftover_cookies: good_cookies mod cookies_per_box
 "#
             .to_string(),
         )])
@@ -487,12 +492,12 @@ rule uk_retail: price_gbp + uk_markup_amount
     // EUR → USD: 24.50 / 0.91 = 26.923...  (eur=1.00, usd=0.91 → 1 eur = 1/0.91 usd)
     // Actually: the unit factor for usd is 0.91 relative to eur=1.00
     // So 24.50 eur in canonical = 24.50. Converting to usd: 24.50 / 0.91 = 26.92...
-    let _usd = display(&resp, "price_usd");
+    display(&resp, "price_usd");
     // Let's just check it's not vetoed and has a value
     assert!(!vetoed(&resp, "price_usd"), "USD conversion should work");
 
     // EUR → GBP: 24.50 / 1.17 = 20.94...
-    let _gbp = display(&resp, "price_gbp");
+    display(&resp, "price_gbp");
     assert!(!vetoed(&resp, "price_gbp"), "GBP conversion should work");
 
     // US retail = usd_price + 8%
@@ -764,14 +769,14 @@ rule menu_line_total: dessert_cost * servings
         .unwrap();
 
     // Winter pricing (before June)
-    let resp = run_at(&engine, "summer_menu", &[("servings", "100")], "2025-03-15");
+    let resp = evaluate_at(&engine, "summer_menu", &[("servings", "100")], "2025-03-15");
     let cream = display(&resp, "cream_per_serving");
     assert_eq!(cream, "0.8", "winter cream: 3.20 / 4 = 0.80");
     let berry = display(&resp, "berry_per_serving");
     assert_eq!(berry, "1.0625", "winter berry: 8.50 / 8 = 1.0625");
 
     // Summer pricing (after June 1)
-    let resp = run_at(&engine, "summer_menu", &[("servings", "100")], "2025-07-15");
+    let resp = evaluate_at(&engine, "summer_menu", &[("servings", "100")], "2025-07-15");
     let cream = display(&resp, "cream_per_serving");
     assert_eq!(cream, "0.92", "summer cream: 3.68 / 4 = 0.92");
     let berry = display(&resp, "berry_per_serving");
@@ -871,7 +876,7 @@ rule margin_check: margin_pct >= target_margin
     let resp = run(&engine, "sales_order", &[("order_quantity", "500")]);
 
     // unit_cost = (12.50 + 8.00) / 200 = 20.50 / 200 = 0.1025
-    let _uc = display(&resp, "unit_sell_price");
+    display(&resp, "unit_sell_price");
     // unit_sell_price = 0.1025 / (1 - 0.35) = 0.1025 / 0.65 ≈ 0.15769...
     assert!(!vetoed(&resp, "unit_sell_price"));
 

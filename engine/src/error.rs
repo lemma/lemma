@@ -382,9 +382,18 @@ impl Error {
         }
     }
 
-    /// Attach spec context for display grouping. Returns a new Error with context set.
+    /// Attach spec context for display grouping when none is set. An error already attributed
+    /// to the spec it arose in (e.g. an imported spec re-resolved while planning a consumer)
+    /// keeps that attribution, so the same failure is not reported once per consumer.
     pub fn with_spec_context(self, spec: &LemmaSpec) -> Self {
         self.map_details(|d| {
+            if d.spec_context_name.is_some() {
+                assert!(
+                    d.spec_context_effective_from.is_some(),
+                    "BUG: spec_context_name set without spec_context_effective_from"
+                );
+                return;
+            }
             d.spec_context_name = Some(spec.name.clone());
             d.spec_context_effective_from = Some(spec.effective_from.clone());
         })
@@ -886,5 +895,14 @@ mod tests {
         assert_eq!(err.spec_context_name(), Some("pricing"));
         let display = format!("{err}");
         assert!(display.contains("In spec 'pricing':"));
+    }
+
+    #[test]
+    fn test_with_spec_context_keeps_existing_attribution() {
+        let origin = LemmaSpec::new("production".to_string());
+        let consumer = LemmaSpec::new("manufacturing".to_string());
+        let err = Error::validation_with_context("bad", None, None::<String>, Some(&origin), None)
+            .with_spec_context(&consumer);
+        assert_eq!(err.spec_context_name(), Some("production"));
     }
 }

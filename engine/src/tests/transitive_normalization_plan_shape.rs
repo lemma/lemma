@@ -4,7 +4,9 @@ use crate::engine::Context;
 use crate::limits::ResourceLimits;
 use crate::parsing::parse;
 use crate::planning::execution_plan::ExecutionPlan;
-use crate::planning::normalize::{LeafKind, NormalForm, NormalFormId, NormalFormKind};
+use crate::planning::normalize::{
+    DispatchRegion, LeafKind, NormalForm, NormalFormId, NormalFormKind,
+};
 use crate::planning::plan;
 use crate::planning::semantics::{MathematicalComputation, ValueKind};
 use rust_decimal::Decimal;
@@ -26,14 +28,9 @@ fn plan_from_code(code: &str) -> ExecutionPlan {
             .expect("insert spec");
     }
 
-    let changed: Vec<(Arc<crate::LemmaRepository>, String)> = specs
-        .iter()
-        .map(|spec| (Arc::clone(&repository), spec.name.clone()))
-        .collect();
     let result = plan(
         &ctx,
         &ResourceLimits::default(),
-        &crate::planning::ReplanScope::from_changed_sets(&ctx, changed),
         &crate::planning::PlanStore::new(),
     );
     assert!(
@@ -48,7 +45,7 @@ fn plan_from_code(code: &str) -> ExecutionPlan {
         .get_plans(repository.name.as_deref(), &spec_name)
         .expect("spec result");
     assert_eq!(plans.len(), 1, "expected one plan");
-    plans.values().next().expect("plan").clone()
+    plans.values().next().expect("plan").as_ref().clone()
 }
 
 fn rule_root<'a>(plan: &'a ExecutionPlan, rule_name: &str) -> &'a NormalForm {
@@ -177,7 +174,7 @@ rule rate: 0
     );
     let mut nested = 0;
     for (index, region) in regions.iter().enumerate() {
-        match &plan.normal_form(*region).kind {
+        match &plan.normal_form(region.cell()).kind {
             NormalFormKind::OrderedDispatch { boundaries, .. } if index % 2 == 1 => {
                 assert!(
                     !boundaries.is_empty(),
@@ -193,6 +190,51 @@ rule rate: 0
         }
     }
     assert_eq!(nested, 2, "one inner dispatch per zone key");
+}
+
+#[test]
+fn conjunctive_boolean_residual_folds_to_piecewise_regions() {
+    let code = r#"
+spec repro
+data model: text
+data remote_negated: boolean
+data hybrid_negated: boolean
+data onsite_negated: boolean
+rule negated: false
+  unless model is "remote" and remote_negated then true
+  unless model is "hybrid" and hybrid_negated then true
+  unless model is "onsite" and onsite_negated then true
+"#;
+    let plan = plan_from_code(code);
+    let root = rule_root(&plan, "negated");
+    let NormalFormKind::OrderedDispatch { regions, .. } = &root.kind else {
+        panic!(
+            "conjunctive LUT must fold to an outer OrderedDispatch, got {:?}",
+            root.kind
+        );
+    };
+    let mut residual_groups = 0;
+    for (index, region) in regions.iter().enumerate() {
+        match region {
+            DispatchRegion::Body(_) => assert!(
+                index % 2 == 0,
+                "point region {index} must hold a residual group, not a plain body"
+            ),
+            DispatchRegion::Conjunctive(group) => {
+                assert!(
+                    index % 2 == 1,
+                    "interval region {index} must hold the default body"
+                );
+                assert!(
+                    matches!(plan.normal_form(*group).kind, NormalFormKind::Piecewise(_)),
+                    "boolean residual must stay a Piecewise, got {:?}",
+                    plan.normal_form(*group).kind
+                );
+                residual_groups += 1;
+            }
+        }
+    }
+    assert_eq!(residual_groups, 3, "one residual group per model key");
 }
 
 #[test]
@@ -334,12 +376,12 @@ fn normal_form_cells_carry_stamped_result_type() {
     let code = r#"
 spec test
 data n: number
-rule sum: n + 1
+rule next: n + 1
 rule flag: n > 0
   unless n is 0 then false
 "#;
     let plan = plan_from_code(code);
-    let sum_id = plan.get_rule("sum").expect("sum").normal_form;
+    let sum_id = plan.get_rule("next").expect("next").normal_form;
     let flag_id = plan.get_rule("flag").expect("flag").normal_form;
     assert_eq!(
         plan.result_type(sum_id).as_ref(),
@@ -409,11 +451,12 @@ rule out: a + b + c
         "associative flatten is not a semantic rewrite; origin must be None, got {:?}",
         root.origin
     );
-    let NormalFormKind::Sum(children) = &root.kind else {
+    let NormalFormKind::Sum(terms) = &root.kind else {
         panic!("root must be Sum, got {:?}", root.kind);
     };
+    let children = terms.iter().map(|term| term.operand).collect::<Vec<_>>();
     assert_eq!(children.len(), 3, "n-ary sum children, got {:?}", root.kind);
-    for child in children {
+    for child in &children {
         assert!(
             matches!(
                 plan.normal_form(*child).kind,
@@ -442,16 +485,17 @@ rule out: a * b * c
         "associative flatten is not a semantic rewrite; origin must be None, got {:?}",
         root.origin
     );
-    let NormalFormKind::Product(children) = &root.kind else {
+    let NormalFormKind::Product(terms) = &root.kind else {
         panic!("root must be Product, got {:?}", root.kind);
     };
+    let children = terms.iter().map(|term| term.operand).collect::<Vec<_>>();
     assert_eq!(
         children.len(),
         3,
         "n-ary product children, got {:?}",
         root.kind
     );
-    for child in children {
+    for child in &children {
         assert!(
             matches!(
                 plan.normal_form(*child).kind,
@@ -492,16 +536,17 @@ rule out: 2 + (3 + 5)
         "flattened sum origin must itself have no origin, got {:?}",
         origin.origin
     );
-    let NormalFormKind::Sum(children) = &origin.kind else {
+    let NormalFormKind::Sum(terms) = &origin.kind else {
         panic!("origin must be Sum, got {:?}", origin.kind);
     };
+    let children = terms.iter().map(|term| term.operand).collect::<Vec<_>>();
     assert_eq!(
         children.len(),
         3,
         "n-ary sum children, got {:?}",
         origin.kind
     );
-    for child in children {
+    for child in &children {
         assert!(
             number_literal_kind(&plan.normal_form(*child).kind),
             "summand must be a bare number literal, got {:?}",
@@ -530,9 +575,10 @@ rule out: (2 + 3) + x
         "associative flatten is not a semantic rewrite; origin must be None, got {:?}",
         root.origin
     );
-    let NormalFormKind::Sum(children) = &root.kind else {
+    let NormalFormKind::Sum(terms) = &root.kind else {
         panic!("root must be Sum, got {:?}", root.kind);
     };
+    let children = terms.iter().map(|term| term.operand).collect::<Vec<_>>();
     assert_eq!(children.len(), 3, "n-ary sum children, got {:?}", root.kind);
     assert!(
         number_literal_kind(&plan.normal_form(children[0]).kind),
@@ -565,9 +611,10 @@ rule out: 2 + (3 - 5)
     let root = rule_root(&plan, "out");
     let origin_id = root.origin.expect("constant fold must record sum origin");
     let origin = plan.normal_form(origin_id);
-    let NormalFormKind::Sum(children) = &origin.kind else {
+    let NormalFormKind::Sum(terms) = &origin.kind else {
         panic!("origin must be Sum, got {:?}", origin.kind);
     };
+    let children = terms.iter().map(|term| term.operand).collect::<Vec<_>>();
     assert_eq!(
         children.len(),
         2,
@@ -608,26 +655,15 @@ rule out: 2 + inner
 "#,
     );
     let root = rule_root(&plan, "out");
-    let NormalFormKind::Sum(children) = &root.kind else {
-        // Constant-fold may wrap the outer sum; walk origin if present.
-        let origin_id = root.origin.expect("expected Sum root or folded Sum origin");
-        let origin = plan.normal_form(origin_id);
-        let NormalFormKind::Sum(children) = &origin.kind else {
-            panic!("expected Sum, got {:?}", origin.kind);
-        };
-        assert_eq!(
-            children.len(),
-            2,
-            "literal + rule ref, got {:?}",
-            origin.kind
-        );
-        assert!(
-            plan.normal_form(children[1]).rule_ref.is_some(),
-            "second summand must carry rule_ref, got {:?}",
-            plan.normal_form(children[1])
-        );
-        return;
+    assert!(
+        root.origin.is_none(),
+        "root must have no origin, got {:?}",
+        root.origin
+    );
+    let NormalFormKind::Sum(terms) = &root.kind else {
+        panic!("root must be Sum, got {:?}", root.kind);
     };
+    let children = terms.iter().map(|term| term.operand).collect::<Vec<_>>();
     assert_eq!(children.len(), 2, "literal + rule ref, got {:?}", root.kind);
     assert!(
         plan.normal_form(children[1]).rule_ref.is_some(),

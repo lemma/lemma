@@ -1,6 +1,6 @@
+use indexmap::IndexMap;
 use lemma::Engine;
 use rust_decimal::Decimal;
-use std::collections::HashMap;
 use std::str::FromStr;
 
 fn decimal_lit(d: &str) -> Decimal {
@@ -70,15 +70,15 @@ fn test_unit_multiply_percentage() -> Result<(), lemma::Errors> {
 
     let now = lemma::DateTimeValue::now();
     let response = engine
-        .run(
+        .evaluate(
             None,
             "unit_percentage_ops",
             Some(&now),
-            HashMap::new(),
+            IndexMap::new(),
             None,
             true,
         )
-        .expect("run should succeed after load");
+        .expect("evaluate should succeed after load");
 
     let scaled_result = response
         .results
@@ -93,7 +93,7 @@ fn test_unit_multiply_percentage() -> Result<(), lemma::Errors> {
         .result
         .literal_value()
         .expect("value");
-    if let lemma::ValueKind::Number(_n) = &lit.value {
+    if let lemma::ValueKind::Number(_) = &lit.value {
         assert_eq!(
             lit.value,
             lemma::LiteralValue::number_from_decimal(decimal_lit("10")).value
@@ -147,15 +147,15 @@ fn test_percentage_arithmetic() -> Result<(), lemma::Errors> {
 
     let now = lemma::DateTimeValue::now();
     let response = engine
-        .run(
+        .evaluate(
             None,
             "percentage_ops",
             Some(&now),
-            HashMap::new(),
+            IndexMap::new(),
             None,
             true,
         )
-        .expect("run should succeed after load");
+        .expect("evaluate should succeed after load");
 
     // ratio + ratio = ratio (5% + 10% = 15%)
     let combined_result = response
@@ -171,7 +171,7 @@ fn test_percentage_arithmetic() -> Result<(), lemma::Errors> {
         .result
         .literal_value()
         .expect("value");
-    if let lemma::ValueKind::Ratio(_r) = &lit.value {
+    if let lemma::ValueKind::Ratio(_) = &lit.value {
         assert_eq!(
             lit.value,
             lemma::LiteralValue::ratio_from_decimal(decimal_lit("0.15")).value
@@ -197,7 +197,7 @@ fn test_percentage_arithmetic() -> Result<(), lemma::Errors> {
         .result
         .literal_value()
         .expect("value");
-    if let lemma::ValueKind::Ratio(_r) = &lit.value {
+    if let lemma::ValueKind::Ratio(_) = &lit.value {
         assert_eq!(
             lit.value,
             lemma::LiteralValue::ratio_from_decimal(decimal_lit("0.10")).value
@@ -223,7 +223,7 @@ fn test_percentage_arithmetic() -> Result<(), lemma::Errors> {
         .result
         .literal_value()
         .expect("value");
-    if let lemma::ValueKind::Ratio(_r) = &lit.value {
+    if let lemma::ValueKind::Ratio(_) = &lit.value {
         assert_eq!(
             lit.value,
             lemma::LiteralValue::ratio_from_decimal(decimal_lit("0.04")).value

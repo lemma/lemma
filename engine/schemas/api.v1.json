@@ -1,8 +1,8 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://lemma.dev/schemas/api.v1.json",
+  "$id": "https://github.com/lemma/lemma/blob/main/engine/schemas/api.v1.json",
   "title": "Lemma engine API",
-  "description": "Schema for the JSON document shapes the engine produces at its consumer boundary: Show (Engine::show), Response (Engine::run), list (Engine::list, array of ResolvedRepository), errors (array of EngineError), and RepositoryInstallResult (SDK install). Explanation trees live under RuleResult.explanation (RuleNode / ExplanationNode).",
+  "description": "Schema for the JSON document shapes the engine produces at its consumer boundary: Show (Engine::show), Response (Engine::evaluate), specs (Engine::specs, array of Repository), errors (array of EngineError), and RepositoryInstallResult (SDK install). Explanation trees live under RuleResult.explanation (RuleNode / ExplanationNode).",
   "$defs": {
     "DecimalString": {
       "type": "string",
@@ -231,6 +231,658 @@
         },
         {
           "$ref": "#/$defs/LemmaTypeSpec"
+        },
+        {
+          "$ref": "#/$defs/LemmaTypeList"
+        }
+      ]
+    },
+    "TypeSpecification": {
+      "description": "Element type of a list: the `LemmaType` fields without `name` and `extends`. A spec element names the row spec of an instance list. Lists do not nest.",
+      "oneOf": [
+        {
+          "type": "object",
+          "required": [
+            "kind",
+            "help"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "boolean"
+            },
+            "help": {
+              "type": "string"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "kind",
+            "minimum",
+            "maximum",
+            "decimals",
+            "units",
+            "traits",
+            "decomposition",
+            "help"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "measure"
+            },
+            "minimum": {
+              "anyOf": [
+                {
+                  "type": "null"
+                },
+                {
+                  "$ref": "#/$defs/NamedBound"
+                }
+              ]
+            },
+            "maximum": {
+              "anyOf": [
+                {
+                  "type": "null"
+                },
+                {
+                  "$ref": "#/$defs/NamedBound"
+                }
+              ]
+            },
+            "decimals": {
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "units": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/MeasureUnit"
+              }
+            },
+            "traits": {
+              "type": "array",
+              "items": {
+                "enum": [
+                  "duration",
+                  "calendar"
+                ]
+              }
+            },
+            "decomposition": {
+              "anyOf": [
+                {
+                  "type": "null"
+                },
+                {
+                  "type": "object",
+                  "additionalProperties": {
+                    "type": "integer"
+                  }
+                }
+              ]
+            },
+            "help": {
+              "type": "string"
+            },
+            "unit": {
+              "type": "string"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "kind",
+            "minimum",
+            "maximum",
+            "decimals",
+            "help"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "number"
+            },
+            "minimum": {
+              "anyOf": [
+                {
+                  "type": "null"
+                },
+                {
+                  "$ref": "#/$defs/DecimalString"
+                }
+              ]
+            },
+            "maximum": {
+              "anyOf": [
+                {
+                  "type": "null"
+                },
+                {
+                  "$ref": "#/$defs/DecimalString"
+                }
+              ]
+            },
+            "decimals": {
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "help": {
+              "type": "string"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "kind",
+            "lower",
+            "upper",
+            "minimum",
+            "maximum",
+            "help"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "number_range"
+            },
+            "lower": {
+              "anyOf": [
+                {
+                  "type": "null"
+                },
+                {
+                  "$ref": "#/$defs/DecimalString"
+                }
+              ]
+            },
+            "upper": {
+              "anyOf": [
+                {
+                  "type": "null"
+                },
+                {
+                  "$ref": "#/$defs/DecimalString"
+                }
+              ]
+            },
+            "minimum": {
+              "anyOf": [
+                {
+                  "type": "null"
+                },
+                {
+                  "$ref": "#/$defs/DecimalString"
+                }
+              ]
+            },
+            "maximum": {
+              "anyOf": [
+                {
+                  "type": "null"
+                },
+                {
+                  "$ref": "#/$defs/DecimalString"
+                }
+              ]
+            },
+            "help": {
+              "type": "string"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "kind",
+            "minimum",
+            "maximum",
+            "decimals",
+            "units",
+            "help"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "ratio"
+            },
+            "minimum": {
+              "anyOf": [
+                {
+                  "type": "null"
+                },
+                {
+                  "$ref": "#/$defs/DecimalString"
+                }
+              ]
+            },
+            "maximum": {
+              "anyOf": [
+                {
+                  "type": "null"
+                },
+                {
+                  "$ref": "#/$defs/DecimalString"
+                }
+              ]
+            },
+            "decimals": {
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "units": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/RatioUnit"
+              }
+            },
+            "help": {
+              "type": "string"
+            },
+            "unit": {
+              "type": "string"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "kind",
+            "lower",
+            "upper",
+            "minimum",
+            "maximum",
+            "units",
+            "help"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "ratio_range"
+            },
+            "lower": {
+              "anyOf": [
+                {
+                  "type": "null"
+                },
+                {
+                  "$ref": "#/$defs/DecimalString"
+                }
+              ]
+            },
+            "upper": {
+              "anyOf": [
+                {
+                  "type": "null"
+                },
+                {
+                  "$ref": "#/$defs/DecimalString"
+                }
+              ]
+            },
+            "minimum": {
+              "anyOf": [
+                {
+                  "type": "null"
+                },
+                {
+                  "$ref": "#/$defs/DecimalString"
+                }
+              ]
+            },
+            "maximum": {
+              "anyOf": [
+                {
+                  "type": "null"
+                },
+                {
+                  "$ref": "#/$defs/DecimalString"
+                }
+              ]
+            },
+            "units": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/RatioUnit"
+              }
+            },
+            "help": {
+              "type": "string"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "kind",
+            "length",
+            "options",
+            "help"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "text"
+            },
+            "length": {
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "options": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "help": {
+              "type": "string"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "kind",
+            "minimum",
+            "maximum",
+            "help"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "date"
+            },
+            "minimum": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "maximum": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "help": {
+              "type": "string"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "kind",
+            "lower",
+            "upper",
+            "minimum",
+            "maximum",
+            "help"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "date_range"
+            },
+            "lower": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "upper": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "minimum": {
+              "anyOf": [
+                {
+                  "type": "null"
+                },
+                {
+                  "$ref": "#/$defs/NamedBound"
+                }
+              ]
+            },
+            "maximum": {
+              "anyOf": [
+                {
+                  "type": "null"
+                },
+                {
+                  "$ref": "#/$defs/NamedBound"
+                }
+              ]
+            },
+            "help": {
+              "type": "string"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "kind",
+            "minimum",
+            "maximum",
+            "help"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "time"
+            },
+            "minimum": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "maximum": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "help": {
+              "type": "string"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "kind",
+            "lower",
+            "upper",
+            "minimum",
+            "maximum",
+            "help"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "time_range"
+            },
+            "lower": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "upper": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "minimum": {
+              "anyOf": [
+                {
+                  "type": "null"
+                },
+                {
+                  "$ref": "#/$defs/NamedBound"
+                }
+              ]
+            },
+            "maximum": {
+              "anyOf": [
+                {
+                  "type": "null"
+                },
+                {
+                  "$ref": "#/$defs/NamedBound"
+                }
+              ]
+            },
+            "help": {
+              "type": "string"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "kind",
+            "lower",
+            "upper",
+            "minimum",
+            "maximum",
+            "units",
+            "decomposition",
+            "help"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "measure_range"
+            },
+            "lower": {
+              "anyOf": [
+                {
+                  "type": "null"
+                },
+                {
+                  "$ref": "#/$defs/NamedBound"
+                }
+              ]
+            },
+            "upper": {
+              "anyOf": [
+                {
+                  "type": "null"
+                },
+                {
+                  "$ref": "#/$defs/NamedBound"
+                }
+              ]
+            },
+            "minimum": {
+              "anyOf": [
+                {
+                  "type": "null"
+                },
+                {
+                  "$ref": "#/$defs/NamedBound"
+                }
+              ]
+            },
+            "maximum": {
+              "anyOf": [
+                {
+                  "type": "null"
+                },
+                {
+                  "$ref": "#/$defs/NamedBound"
+                }
+              ]
+            },
+            "units": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/MeasureUnit"
+              }
+            },
+            "decomposition": {
+              "anyOf": [
+                {
+                  "type": "null"
+                },
+                {
+                  "type": "object",
+                  "additionalProperties": {
+                    "type": "integer"
+                  }
+                }
+              ]
+            },
+            "help": {
+              "type": "string"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "kind",
+            "spec",
+            "effective"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "spec"
+            },
+            "spec": {
+              "type": "string"
+            },
+            "effective": {
+              "type": "string"
+            },
+            "repository": {
+              "type": "string"
+            }
+          }
+        }
+      ]
+    },
+    "ListKey": {
+      "description": "How a list addresses its rows: \"numbered\" (by row number), or the ordered `-> key` field names.",
+      "oneOf": [
+        {
+          "const": "numbered"
+        },
+        {
+          "type": "object",
+          "required": [
+            "fields"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "fields": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "minItems": 1
+            }
+          }
         }
       ]
     },
@@ -244,17 +896,17 @@
       ],
       "additionalProperties": false,
       "properties": {
-        "name": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
         "kind": {
           "const": "boolean"
         },
         "help": {
           "type": "string"
+        },
+        "name": {
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "extends": {
           "$ref": "#/$defs/TypeExtends"
@@ -277,12 +929,6 @@
       ],
       "additionalProperties": false,
       "properties": {
-        "name": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
         "kind": {
           "const": "measure"
         },
@@ -346,6 +992,12 @@
         "unit": {
           "type": "string"
         },
+        "name": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "extends": {
           "$ref": "#/$defs/TypeExtends"
         }
@@ -364,12 +1016,6 @@
       ],
       "additionalProperties": false,
       "properties": {
-        "name": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
         "kind": {
           "const": "number"
         },
@@ -402,6 +1048,12 @@
         "help": {
           "type": "string"
         },
+        "name": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "extends": {
           "$ref": "#/$defs/TypeExtends"
         }
@@ -421,14 +1073,8 @@
       ],
       "additionalProperties": false,
       "properties": {
-        "name": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
         "kind": {
-          "const": "numberrange"
+          "const": "number_range"
         },
         "lower": {
           "anyOf": [
@@ -473,6 +1119,12 @@
         "help": {
           "type": "string"
         },
+        "name": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "extends": {
           "$ref": "#/$defs/TypeExtends"
         }
@@ -492,12 +1144,6 @@
       ],
       "additionalProperties": false,
       "properties": {
-        "name": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
         "kind": {
           "const": "ratio"
         },
@@ -539,6 +1185,12 @@
         "unit": {
           "type": "string"
         },
+        "name": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "extends": {
           "$ref": "#/$defs/TypeExtends"
         }
@@ -559,14 +1211,8 @@
       ],
       "additionalProperties": false,
       "properties": {
-        "name": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
         "kind": {
-          "const": "ratiorange"
+          "const": "ratio_range"
         },
         "lower": {
           "anyOf": [
@@ -617,6 +1263,12 @@
         "help": {
           "type": "string"
         },
+        "name": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "extends": {
           "$ref": "#/$defs/TypeExtends"
         }
@@ -634,12 +1286,6 @@
       ],
       "additionalProperties": false,
       "properties": {
-        "name": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
         "kind": {
           "const": "text"
         },
@@ -658,6 +1304,12 @@
         "help": {
           "type": "string"
         },
+        "name": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "extends": {
           "$ref": "#/$defs/TypeExtends"
         }
@@ -675,12 +1327,6 @@
       ],
       "additionalProperties": false,
       "properties": {
-        "name": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
         "kind": {
           "const": "date"
         },
@@ -698,6 +1344,12 @@
         },
         "help": {
           "type": "string"
+        },
+        "name": {
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "extends": {
           "$ref": "#/$defs/TypeExtends"
@@ -718,14 +1370,8 @@
       ],
       "additionalProperties": false,
       "properties": {
-        "name": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
         "kind": {
-          "const": "daterange"
+          "const": "date_range"
         },
         "lower": {
           "type": [
@@ -762,6 +1408,12 @@
         "help": {
           "type": "string"
         },
+        "name": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "extends": {
           "$ref": "#/$defs/TypeExtends"
         }
@@ -779,12 +1431,6 @@
       ],
       "additionalProperties": false,
       "properties": {
-        "name": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
         "kind": {
           "const": "time"
         },
@@ -802,6 +1448,12 @@
         },
         "help": {
           "type": "string"
+        },
+        "name": {
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "extends": {
           "$ref": "#/$defs/TypeExtends"
@@ -822,14 +1474,8 @@
       ],
       "additionalProperties": false,
       "properties": {
-        "name": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
         "kind": {
-          "const": "timerange"
+          "const": "time_range"
         },
         "lower": {
           "type": [
@@ -865,6 +1511,12 @@
         },
         "help": {
           "type": "string"
+        },
+        "name": {
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "extends": {
           "$ref": "#/$defs/TypeExtends"
@@ -887,14 +1539,8 @@
       ],
       "additionalProperties": false,
       "properties": {
-        "name": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
         "kind": {
-          "const": "measurerange"
+          "const": "measure_range"
         },
         "lower": {
           "anyOf": [
@@ -958,6 +1604,12 @@
         "help": {
           "type": "string"
         },
+        "name": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "extends": {
           "$ref": "#/$defs/TypeExtends"
         }
@@ -974,12 +1626,6 @@
       ],
       "additionalProperties": false,
       "properties": {
-        "name": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
         "kind": {
           "const": "spec"
         },
@@ -991,6 +1637,43 @@
         },
         "repository": {
           "type": "string"
+        },
+        "name": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "extends": {
+          "$ref": "#/$defs/TypeExtends"
+        }
+      }
+    },
+    "LemmaTypeList": {
+      "type": "object",
+      "required": [
+        "name",
+        "kind",
+        "element",
+        "key",
+        "extends"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "list"
+        },
+        "element": {
+          "$ref": "#/$defs/TypeSpecification"
+        },
+        "key": {
+          "$ref": "#/$defs/ListKey"
+        },
+        "name": {
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "extends": {
           "$ref": "#/$defs/TypeExtends"
@@ -1101,6 +1784,7 @@
         "spec",
         "effective",
         "instance",
+        "path",
         "data",
         "rules"
       ],
@@ -1117,6 +1801,77 @@
           "type": "string"
         },
         "instance": {
+          "type": "string"
+        },
+        "path": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/PathSegment"
+          },
+          "minItems": 1,
+          "description": "One segment per uses hop of instance."
+        },
+        "data": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/SpecRuleResult"
+          }
+        },
+        "rules": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/SpecRuleResult"
+          }
+        }
+      }
+    },
+    "RowReference": {
+      "type": "object",
+      "required": [
+        "spec",
+        "effective",
+        "instance",
+        "index"
+      ],
+      "additionalProperties": false,
+      "description": "A row of an instance list. Its data and rules are Response.rows[index]. instance is the row path relative to the spec holding this value (lines.2).",
+      "properties": {
+        "repository": {
+          "type": "string"
+        },
+        "spec": {
+          "type": "string"
+        },
+        "effective": {
+          "type": "string"
+        },
+        "instance": {
+          "type": "string"
+        },
+        "index": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "RowResult": {
+      "type": "object",
+      "required": [
+        "spec",
+        "effective",
+        "data",
+        "rules"
+      ],
+      "additionalProperties": false,
+      "description": "Data and rules of one distinct row reached by a response, filled once and referenced by RowReference.index. Keys are relative to the row spec; unbound slots are omitted.",
+      "properties": {
+        "repository": {
+          "type": "string"
+        },
+        "spec": {
+          "type": "string"
+        },
+        "effective": {
           "type": "string"
         },
         "data": {
@@ -1136,7 +1891,7 @@
     "RuleResultValue": {
       "type": "object",
       "additionalProperties": false,
-      "description": "API value shared by RuleResult (flattened), ShowData.fill/suggestion, and explanation Rule/Data nodes (flattened). When present: always `result`, plus exactly one typed field for a non-range value; `range` is set instead for a range value.",
+      "description": "API value shared by RuleResult (flattened), Show property x-lemma-value/x-lemma-suggestion, and explanation Rule/Data nodes (flattened). When present: always `result`, plus exactly one typed field for a non-range value; `range` is set instead for a range value. A list sets `list`, one value per row. A list row sets `row` in rule results and RowResult members; in explanation nodes and Show it carries `result` only.",
       "properties": {
         "result": {
           "type": "string"
@@ -1179,6 +1934,26 @@
         },
         "spec": {
           "$ref": "#/$defs/SpecResult"
+        },
+        "row": {
+          "$ref": "#/$defs/RowReference"
+        },
+        "list": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/RuleResultValue"
+          }
+        },
+        "fields": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/RuleResultValue"
+          },
+          "description": "Show only: on a source row of an instance list value, the fields the row sets, keyed relative to the row spec. Such rows and their list carry no result; row order is array order."
+        },
+        "reference": {
+          "type": "string",
+          "description": "Show only: on a source-row field whose value is a reference; the input key of the referenced data in the spec declaring the list."
         }
       }
     },
@@ -1202,56 +1977,487 @@
         }
       }
     },
-    "ShowData": {
+    "EvaluateDataJson": {
+      "description": "An evaluation-data JSON value: a literal string, a boolean, a list (array), or an object (list row, or single-unit measure map). JSON numbers and null are not evaluation data.",
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "boolean"
+        },
+        {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/EvaluateDataJson"
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/EvaluateDataJson"
+          }
+        }
+      ]
+    },
+    "ShowPropertyType": {
+      "description": "x-lemma-type of a Show property: the LemmaType without help and text options/length, which the property states as description, enum and minLength/maxLength. Single spec types are uses aliases, never properties.",
+      "oneOf": [
+        {
+          "allOf": [
+            {
+              "$ref": "#/$defs/ShowTypeBoolean"
+            },
+            {
+              "$ref": "#/$defs/ShowTypeNameExtends"
+            }
+          ],
+          "unevaluatedProperties": false
+        },
+        {
+          "allOf": [
+            {
+              "$ref": "#/$defs/ShowTypeMeasure"
+            },
+            {
+              "$ref": "#/$defs/ShowTypeNameExtends"
+            }
+          ],
+          "unevaluatedProperties": false
+        },
+        {
+          "allOf": [
+            {
+              "$ref": "#/$defs/ShowTypeNumber"
+            },
+            {
+              "$ref": "#/$defs/ShowTypeNameExtends"
+            }
+          ],
+          "unevaluatedProperties": false
+        },
+        {
+          "allOf": [
+            {
+              "$ref": "#/$defs/ShowTypeNumberRange"
+            },
+            {
+              "$ref": "#/$defs/ShowTypeNameExtends"
+            }
+          ],
+          "unevaluatedProperties": false
+        },
+        {
+          "allOf": [
+            {
+              "$ref": "#/$defs/ShowTypeRatio"
+            },
+            {
+              "$ref": "#/$defs/ShowTypeNameExtends"
+            }
+          ],
+          "unevaluatedProperties": false
+        },
+        {
+          "allOf": [
+            {
+              "$ref": "#/$defs/ShowTypeRatioRange"
+            },
+            {
+              "$ref": "#/$defs/ShowTypeNameExtends"
+            }
+          ],
+          "unevaluatedProperties": false
+        },
+        {
+          "allOf": [
+            {
+              "$ref": "#/$defs/ShowTypeText"
+            },
+            {
+              "$ref": "#/$defs/ShowTypeNameExtends"
+            }
+          ],
+          "unevaluatedProperties": false
+        },
+        {
+          "allOf": [
+            {
+              "$ref": "#/$defs/ShowTypeDate"
+            },
+            {
+              "$ref": "#/$defs/ShowTypeNameExtends"
+            }
+          ],
+          "unevaluatedProperties": false
+        },
+        {
+          "allOf": [
+            {
+              "$ref": "#/$defs/ShowTypeDateRange"
+            },
+            {
+              "$ref": "#/$defs/ShowTypeNameExtends"
+            }
+          ],
+          "unevaluatedProperties": false
+        },
+        {
+          "allOf": [
+            {
+              "$ref": "#/$defs/ShowTypeTime"
+            },
+            {
+              "$ref": "#/$defs/ShowTypeNameExtends"
+            }
+          ],
+          "unevaluatedProperties": false
+        },
+        {
+          "allOf": [
+            {
+              "$ref": "#/$defs/ShowTypeTimeRange"
+            },
+            {
+              "$ref": "#/$defs/ShowTypeNameExtends"
+            }
+          ],
+          "unevaluatedProperties": false
+        },
+        {
+          "allOf": [
+            {
+              "$ref": "#/$defs/ShowTypeMeasureRange"
+            },
+            {
+              "$ref": "#/$defs/ShowTypeNameExtends"
+            }
+          ],
+          "unevaluatedProperties": false
+        },
+        {
+          "allOf": [
+            {
+              "$ref": "#/$defs/ShowTypeList"
+            },
+            {
+              "$ref": "#/$defs/ShowTypeNameExtends"
+            }
+          ],
+          "unevaluatedProperties": false
+        }
+      ]
+    },
+    "ShowPropertyElementType": {
+      "description": "Element of a list ShowPropertyType: the TypeSpecification without help and text options/length.",
+      "oneOf": [
+        {
+          "allOf": [
+            {
+              "$ref": "#/$defs/ShowTypeBoolean"
+            }
+          ],
+          "unevaluatedProperties": false
+        },
+        {
+          "allOf": [
+            {
+              "$ref": "#/$defs/ShowTypeMeasure"
+            }
+          ],
+          "unevaluatedProperties": false
+        },
+        {
+          "allOf": [
+            {
+              "$ref": "#/$defs/ShowTypeNumber"
+            }
+          ],
+          "unevaluatedProperties": false
+        },
+        {
+          "allOf": [
+            {
+              "$ref": "#/$defs/ShowTypeNumberRange"
+            }
+          ],
+          "unevaluatedProperties": false
+        },
+        {
+          "allOf": [
+            {
+              "$ref": "#/$defs/ShowTypeRatio"
+            }
+          ],
+          "unevaluatedProperties": false
+        },
+        {
+          "allOf": [
+            {
+              "$ref": "#/$defs/ShowTypeRatioRange"
+            }
+          ],
+          "unevaluatedProperties": false
+        },
+        {
+          "allOf": [
+            {
+              "$ref": "#/$defs/ShowTypeText"
+            }
+          ],
+          "unevaluatedProperties": false
+        },
+        {
+          "allOf": [
+            {
+              "$ref": "#/$defs/ShowTypeDate"
+            }
+          ],
+          "unevaluatedProperties": false
+        },
+        {
+          "allOf": [
+            {
+              "$ref": "#/$defs/ShowTypeDateRange"
+            }
+          ],
+          "unevaluatedProperties": false
+        },
+        {
+          "allOf": [
+            {
+              "$ref": "#/$defs/ShowTypeTime"
+            }
+          ],
+          "unevaluatedProperties": false
+        },
+        {
+          "allOf": [
+            {
+              "$ref": "#/$defs/ShowTypeTimeRange"
+            }
+          ],
+          "unevaluatedProperties": false
+        },
+        {
+          "allOf": [
+            {
+              "$ref": "#/$defs/ShowTypeMeasureRange"
+            }
+          ],
+          "unevaluatedProperties": false
+        },
+        {
+          "allOf": [
+            {
+              "$ref": "#/$defs/ShowTypeSpec"
+            }
+          ],
+          "unevaluatedProperties": false
+        }
+      ]
+    },
+    "ShowItems": {
+      "description": "items of a list property: the element literal schema of a value list, or a $ref to the row object schema of an instance list in the document's $defs.",
+      "oneOf": [
+        {
+          "type": "object",
+          "anyOf": [
+            {
+              "required": [
+                "type"
+              ]
+            },
+            {
+              "required": [
+                "oneOf"
+              ]
+            }
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "type": {
+              "enum": [
+                "string",
+                "boolean"
+              ]
+            },
+            "oneOf": {
+              "type": "array",
+              "minItems": 2,
+              "items": {
+                "type": "object"
+              }
+            },
+            "pattern": {
+              "type": "string"
+            },
+            "enum": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "minLength": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "maxLength": {
+              "type": "integer",
+              "minimum": 0
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "$ref"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "$ref": {
+              "type": "string",
+              "pattern": "^#/\\$defs/LemmaRow_[A-Za-z0-9_-]+$"
+            }
+          }
+        }
+      ]
+    },
+    "ShowProperty": {
       "type": "object",
       "required": [
-        "type",
-        "path",
-        "needed_by_rules"
+        "x-lemma-type",
+        "x-lemma-path",
+        "x-lemma-needed-by-rules"
+      ],
+      "anyOf": [
+        {
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "required": [
+            "oneOf"
+          ]
+        }
       ],
       "additionalProperties": false,
+      "description": "One evaluation-data input of a Show document, keyed by its input key (dotted keys included). Standard keywords state the JSON shape; default/examples are the evaluation-data JSON of x-lemma-value/x-lemma-suggestion.",
       "properties": {
         "type": {
-          "$ref": "#/$defs/LemmaType"
+          "enum": [
+            "boolean",
+            "string",
+            "array"
+          ]
         },
-        "path": {
+        "oneOf": {
+          "type": "array",
+          "minItems": 2,
+          "items": {
+            "type": "object"
+          },
+          "description": "Alternatives: text, boolean, or a single-unit object for measure and ratio data."
+        },
+        "pattern": {
+          "type": "string",
+          "description": "Literal grammar of number, measure and ratio inputs (ECMA-262)."
+        },
+        "enum": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Text options."
+        },
+        "minLength": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "maxLength": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "description": {
+          "type": "string",
+          "description": "Type help."
+        },
+        "default": {
+          "$ref": "#/$defs/EvaluateDataJson"
+        },
+        "examples": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/EvaluateDataJson"
+          },
+          "minItems": 1,
+          "maxItems": 1
+        },
+        "items": {
+          "$ref": "#/$defs/ShowItems"
+        },
+        "maxItems": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "max_list_rows."
+        },
+        "x-lemma-type": {
+          "$ref": "#/$defs/ShowPropertyType"
+        },
+        "x-lemma-path": {
           "type": "array",
           "items": {
             "$ref": "#/$defs/PathSegment"
           },
           "description": "Import hops to this slot. Empty means this spec."
         },
-        "fill": {
-          "$ref": "#/$defs/RuleResultValue"
-        },
-        "suggestion": {
-          "$ref": "#/$defs/RuleResultValue"
-        },
-        "needed_by_rules": {
+        "x-lemma-needed-by-rules": {
           "type": "array",
           "items": {
             "type": "string"
           },
-          "description": "Show.rules keys that transitively need this data after normalize. Empty = reuse catalog only (not an eval intake key for this spec)."
+          "description": "x-lemma-rules keys that transitively need this data after normalize. Empty = reuse catalog only (not an eval intake key for this spec)."
+        },
+        "x-lemma-value": {
+          "$ref": "#/$defs/RuleResultValue"
+        },
+        "x-lemma-suggestion": {
+          "$ref": "#/$defs/RuleResultValue"
         }
       }
     },
-    "ShowVersion": {
+    "ShowRowSchema": {
       "type": "object",
+      "required": [
+        "title",
+        "type",
+        "additionalProperties",
+        "properties"
+      ],
       "additionalProperties": false,
-      "description": "Half-open [effective_from, effective_to) for one loaded temporal row.",
+      "description": "Row object schema of an instance list, one per row spec in the Show document's $defs. Every row-spec data entry is a property, dotted uses fields included.",
       "properties": {
-        "effective_from": {
-          "type": [
-            "string",
-            "null"
-          ]
+        "title": {
+          "type": "string"
         },
-        "effective_to": {
-          "type": [
-            "string",
-            "null"
-          ]
+        "type": {
+          "const": "object"
+        },
+        "additionalProperties": {
+          "const": true
+        },
+        "properties": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/ShowProperty"
+          }
+        },
+        "required": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
         }
       }
     },
@@ -1317,26 +2523,23 @@
           ],
           "additionalProperties": false,
           "properties": {
-            "type": {
-              "const": "literal"
-            },
             "result": {
               "type": "string"
             },
             "measure": {
               "type": "object",
               "additionalProperties": {
-                "type": "string"
+                "$ref": "#/$defs/DecimalString"
               }
             },
             "ratio": {
               "type": "object",
               "additionalProperties": {
-                "type": "string"
+                "$ref": "#/$defs/DecimalString"
               }
             },
             "number": {
-              "type": "string"
+              "$ref": "#/$defs/DecimalString"
             },
             "boolean": {
               "type": "boolean"
@@ -1353,8 +2556,37 @@
             "calendar": {
               "$ref": "#/$defs/CalendarResult"
             },
+            "unit": {
+              "type": "string"
+            },
             "range": {
               "$ref": "#/$defs/RangeResult"
+            },
+            "spec": {
+              "$ref": "#/$defs/SpecResult"
+            },
+            "row": {
+              "$ref": "#/$defs/RowReference"
+            },
+            "list": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/RuleResultValue"
+              }
+            },
+            "fields": {
+              "type": "object",
+              "additionalProperties": {
+                "$ref": "#/$defs/RuleResultValue"
+              },
+              "description": "Show only: on a source row of an instance list value, the fields the row sets, keyed relative to the row spec. Such rows and their list carry no result; row order is array order."
+            },
+            "reference": {
+              "type": "string",
+              "description": "Show only: on a source-row field whose value is a reference; the input key of the referenced data in the spec declaring the list."
+            },
+            "type": {
+              "const": "literal"
             }
           }
         },
@@ -1394,19 +2626,19 @@
           "type": "object",
           "required": [
             "type",
-            "left",
-            "right"
+            "operands"
           ],
           "additionalProperties": false,
           "properties": {
             "type": {
               "const": "and"
             },
-            "left": {
-              "$ref": "#/$defs/ShowExpression"
-            },
-            "right": {
-              "$ref": "#/$defs/ShowExpression"
+            "operands": {
+              "type": "array",
+              "minItems": 2,
+              "items": {
+                "$ref": "#/$defs/ShowExpression"
+              }
             }
           }
         },
@@ -1430,31 +2662,44 @@
           "type": "object",
           "required": [
             "type",
-            "op",
-            "left",
-            "right"
+            "first",
+            "steps"
           ],
           "additionalProperties": false,
           "properties": {
             "type": {
               "const": "arithmetic"
             },
-            "op": {
-              "type": "string",
-              "enum": [
-                "add",
-                "subtract",
-                "multiply",
-                "divide",
-                "modulo",
-                "power"
-              ]
-            },
-            "left": {
+            "first": {
               "$ref": "#/$defs/ShowExpression"
             },
-            "right": {
-              "$ref": "#/$defs/ShowExpression"
+            "steps": {
+              "type": "array",
+              "minItems": 1,
+              "items": {
+                "type": "object",
+                "required": [
+                  "op",
+                  "operand"
+                ],
+                "additionalProperties": false,
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "enum": [
+                      "add",
+                      "subtract",
+                      "multiply",
+                      "divide",
+                      "modulo",
+                      "power"
+                    ]
+                  },
+                  "operand": {
+                    "$ref": "#/$defs/ShowExpression"
+                  }
+                }
+              }
             }
           }
         },
@@ -1495,7 +2740,7 @@
           "required": [
             "type",
             "operand",
-            "target"
+            "targets"
           ],
           "additionalProperties": false,
           "properties": {
@@ -1505,8 +2750,11 @@
             "operand": {
               "$ref": "#/$defs/ShowExpression"
             },
-            "target": {
-              "$ref": "#/$defs/ShowConversionTarget"
+            "targets": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/ShowConversionTarget"
+              }
             }
           }
         },
@@ -1754,6 +3002,130 @@
               "type": "string"
             }
           }
+        },
+        {
+          "type": "object",
+          "required": [
+            "type",
+            "base",
+            "member"
+          ],
+          "additionalProperties": false,
+          "description": "Field of a computed row value: `(menu -> find ordered).price`.",
+          "properties": {
+            "type": {
+              "const": "member"
+            },
+            "base": {
+              "$ref": "#/$defs/ShowExpression"
+            },
+            "member": {
+              "type": "string"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "type",
+            "field"
+          ],
+          "additionalProperties": false,
+          "description": "Field of the current row inside a list command argument.",
+          "properties": {
+            "type": {
+              "const": "row_field"
+            },
+            "field": {
+              "type": "string"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "type"
+          ],
+          "additionalProperties": false,
+          "description": "The current row's value inside a value-list command argument.",
+          "properties": {
+            "type": {
+              "const": "row_value"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "type",
+            "field",
+            "value"
+          ],
+          "additionalProperties": false,
+          "description": "One `field: value` pair of an inline row appended by `-> with`.",
+          "properties": {
+            "type": {
+              "const": "row_field_value"
+            },
+            "field": {
+              "type": "string"
+            },
+            "value": {
+              "$ref": "#/$defs/ShowExpression"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "type",
+            "list",
+            "command",
+            "args"
+          ],
+          "additionalProperties": false,
+          "description": "Postfix list command (`staff -> sum bonus`). direction is present exactly on sort. A value-list condition is a comparison or range_containment whose left operand is row_value.",
+          "properties": {
+            "type": {
+              "const": "list_command"
+            },
+            "list": {
+              "$ref": "#/$defs/ShowExpression"
+            },
+            "command": {
+              "type": "string",
+              "enum": [
+                "find",
+                "first",
+                "last",
+                "count",
+                "sum",
+                "avg",
+                "product",
+                "min",
+                "max",
+                "any",
+                "all",
+                "where",
+                "sort",
+                "top",
+                "with"
+              ]
+            },
+            "direction": {
+              "type": "string",
+              "enum": [
+                "asc",
+                "desc"
+              ]
+            },
+            "args": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/ShowExpression"
+              }
+            }
+          }
         }
       ]
     },
@@ -1958,73 +3330,99 @@
       ]
     },
     "Show": {
-      "type": "object",
-      "required": [
-        "spec",
-        "start_line",
-        "data",
-        "rules",
-        "meta"
-      ],
-      "additionalProperties": false,
-      "description": "Result of Engine::show: declared promptable data catalog (needed_by_rules empty = reuse-only), this spec's rule graph (local rules plus reachable imports as ShowRule with type, path, branches, depends_on_rules), and resolved temporal window.",
-      "properties": {
-        "repository": {
-          "type": "string",
-          "description": "Interned repository name. Omitted for the unnamed workspace."
+      "description": "Result of Engine::show: a Draft 2020-12 JSON Schema for the spec's evaluation-data inputs. properties holds inputs rules need (non-empty x-lemma-needed-by-rules), required the unbound ones, $defs instance-list row schemas. x-lemma-types is local data declarations; x-lemma-rules is this spec's rule graph (local plus reachable imports).",
+      "allOf": [
+        {
+          "$ref": "https://json-schema.org/draft/2020-12/schema"
         },
-        "spec": {
-          "type": "string"
-        },
-        "commentary": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "effective_from": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "effective_to": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "versions": {
-          "type": "array",
-          "items": {
-            "$ref": "#/$defs/ShowVersion"
-          }
-        },
-        "start_line": {
-          "type": "integer"
-        },
-        "source_type": {
-          "$ref": "#/$defs/SourceType"
-        },
-        "data": {
+        {
           "type": "object",
-          "additionalProperties": {
-            "$ref": "#/$defs/ShowData"
-          }
-        },
-        "rules": {
-          "type": "object",
-          "additionalProperties": {
-            "$ref": "#/$defs/ShowRule"
-          }
-        },
-        "meta": {
-          "type": "object",
-          "additionalProperties": {
-            "$ref": "#/$defs/LiteralValue"
+          "required": [
+            "$schema",
+            "title",
+            "type",
+            "additionalProperties",
+            "properties",
+            "x-lemma-start-line",
+            "x-lemma-meta",
+            "x-lemma-types",
+            "x-lemma-rules"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "$schema": {
+              "const": "https://json-schema.org/draft/2020-12/schema"
+            },
+            "title": {
+              "type": "string",
+              "description": "Spec name."
+            },
+            "description": {
+              "type": "string",
+              "description": "Spec commentary."
+            },
+            "type": {
+              "const": "object"
+            },
+            "additionalProperties": {
+              "const": true
+            },
+            "properties": {
+              "type": "object",
+              "additionalProperties": {
+                "$ref": "#/$defs/ShowProperty"
+              }
+            },
+            "required": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "$defs": {
+              "type": "object",
+              "additionalProperties": {
+                "$ref": "#/$defs/ShowRowSchema"
+              }
+            },
+            "x-lemma-repository": {
+              "type": "string",
+              "description": "Interned repository name. Omitted for the unnamed workspace."
+            },
+            "x-lemma-effective-from": {
+              "type": "string"
+            },
+            "x-lemma-effective-to": {
+              "type": "string"
+            },
+            "x-lemma-start-line": {
+              "type": "integer"
+            },
+            "x-lemma-source-type": {
+              "$ref": "#/$defs/SourceType"
+            },
+            "x-lemma-meta": {
+              "type": "object",
+              "additionalProperties": {
+                "$ref": "#/$defs/LiteralValue"
+              }
+            },
+            "x-lemma-types": {
+              "type": "object",
+              "additionalProperties": {
+                "$ref": "#/$defs/LemmaType"
+              },
+              "description": "Local data declarations (empty path), declaration order."
+            },
+            "x-lemma-rules": {
+              "type": "object",
+              "additionalProperties": {
+                "$ref": "#/$defs/ShowRule"
+              }
+            }
           }
         }
-      }
+      ]
     },
     "RuleResult": {
       "type": "object",
@@ -2077,6 +3475,26 @@
         "spec": {
           "$ref": "#/$defs/SpecResult"
         },
+        "row": {
+          "$ref": "#/$defs/RowReference"
+        },
+        "list": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/RuleResultValue"
+          }
+        },
+        "fields": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/RuleResultValue"
+          },
+          "description": "Show only: on a source row of an instance list value, the fields the row sets, keyed relative to the row spec. Such rows and their list carry no result; row order is array order."
+        },
+        "reference": {
+          "type": "string",
+          "description": "Show only: on a source-row field whose value is a reference; the input key of the referenced data in the spec declaring the list."
+        },
         "vetoed": {
           "type": "boolean"
         },
@@ -2105,7 +3523,7 @@
         "results"
       ],
       "additionalProperties": false,
-      "description": "Result of Engine::run.",
+      "description": "Result of Engine::evaluate.",
       "properties": {
         "spec": {
           "type": "string"
@@ -2124,15 +3542,42 @@
           "additionalProperties": {
             "$ref": "#/$defs/RuleResult"
           }
+        },
+        "rows": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/RowResult"
+          },
+          "description": "Rows reached by results, in first-reached order, indexed by RowReference.index. Omitted when no result reaches a row."
         }
       }
     },
-    "ListedSpec": {
+    "SpecDependency": {
       "type": "object",
       "required": [
         "name"
       ],
       "additionalProperties": false,
+      "description": "One uses target written on a spec version.",
+      "properties": {
+        "repository": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "effective": {
+          "type": "string"
+        }
+      }
+    },
+    "SpecVersion": {
+      "type": "object",
+      "required": [
+        "name"
+      ],
+      "additionalProperties": false,
+      "description": "One temporal spec version from Engine::specs.",
       "properties": {
         "name": {
           "type": "string"
@@ -2142,16 +3587,23 @@
         },
         "effective_to": {
           "type": "string"
+        },
+        "dependencies": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/SpecDependency"
+          },
+          "description": "uses targets in declaration order. Omitted when empty."
         }
       }
     },
-    "ResolvedRepository": {
+    "Repository": {
       "type": "object",
       "required": [
         "specs"
       ],
       "additionalProperties": false,
-      "description": "One repository group from Engine::list. `repository` is absent for the default unnamed repository.",
+      "description": "One repository group from Engine::specs. `repository` is absent for the default unnamed repository.",
       "properties": {
         "repository": {
           "type": "string"
@@ -2159,7 +3611,7 @@
         "specs": {
           "type": "array",
           "items": {
-            "$ref": "#/$defs/ListedSpec"
+            "$ref": "#/$defs/SpecVersion"
           }
         }
       }
@@ -2243,7 +3695,7 @@
         "actual_value"
       ],
       "additionalProperties": false,
-      "description": "Structured error thrown by Engine::run/show/load/fetch.",
+      "description": "Structured error thrown by Engine::evaluate/show/load/fetch.",
       "properties": {
         "kind": {
           "enum": [
@@ -2396,7 +3848,7 @@
     "ExplanationNode": {
       "oneOf": [
         {
-          "$ref": "#/$defs/RuleNode"
+          "$ref": "#/$defs/RuleRefNode"
         },
         {
           "$ref": "#/$defs/ComposeNode"
@@ -2412,6 +3864,12 @@
         },
         {
           "$ref": "#/$defs/VetoNode"
+        },
+        {
+          "$ref": "#/$defs/RowNode"
+        },
+        {
+          "$ref": "#/$defs/FilterNode"
         }
       ]
     },
@@ -2424,7 +3882,7 @@
         "body"
       ],
       "additionalProperties": false,
-      "description": "Rule explanation node. RuleResultValue fields are flattened (result plus typed measure/ratio/… maps).",
+      "description": "Root rule explanation under RuleResult.explanation. Nested rule uses are rule_ref into the rules table. RuleResultValue fields are flattened.",
       "properties": {
         "result": {
           "type": "string"
@@ -2468,6 +3926,26 @@
         "spec": {
           "$ref": "#/$defs/SpecResult"
         },
+        "row": {
+          "$ref": "#/$defs/RowReference"
+        },
+        "list": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/RuleResultValue"
+          }
+        },
+        "fields": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/RuleResultValue"
+          },
+          "description": "Show only: on a source row of an instance list value, the fields the row sets, keyed relative to the row spec. Such rows and their list carry no result; row order is array order."
+        },
+        "reference": {
+          "type": "string",
+          "description": "Show only: on a source-row field whose value is a reference; the input key of the referenced data in the spec declaring the list."
+        },
         "type": {
           "const": "rule"
         },
@@ -2482,6 +3960,264 @@
           "items": {
             "$ref": "#/$defs/Cause"
           }
+        },
+        "children": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ExplanationNode"
+          }
+        },
+        "rules": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ExplainedRule"
+          },
+          "description": "Narrated rules reachable from this root, referenced by rule_ref nodes. Ids are dense from 0 in first-reach order."
+        }
+      }
+    },
+    "ExplainedRule": {
+      "type": "object",
+      "required": [
+        "id",
+        "name",
+        "result",
+        "body"
+      ],
+      "additionalProperties": false,
+      "description": "One narrated rule body in a root explanation's rules table.",
+      "properties": {
+        "result": {
+          "type": "string"
+        },
+        "measure": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/DecimalString"
+          }
+        },
+        "ratio": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/DecimalString"
+          }
+        },
+        "number": {
+          "$ref": "#/$defs/DecimalString"
+        },
+        "boolean": {
+          "type": "boolean"
+        },
+        "text": {
+          "type": "string"
+        },
+        "date": {
+          "type": "string"
+        },
+        "time": {
+          "type": "string"
+        },
+        "calendar": {
+          "$ref": "#/$defs/CalendarResult"
+        },
+        "unit": {
+          "type": "string"
+        },
+        "range": {
+          "$ref": "#/$defs/RangeResult"
+        },
+        "spec": {
+          "$ref": "#/$defs/SpecResult"
+        },
+        "row": {
+          "$ref": "#/$defs/RowReference"
+        },
+        "list": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/RuleResultValue"
+          }
+        },
+        "fields": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/RuleResultValue"
+          },
+          "description": "Show only: on a source row of an instance list value, the fields the row sets, keyed relative to the row spec. Such rows and their list carry no result; row order is array order."
+        },
+        "reference": {
+          "type": "string",
+          "description": "Show only: on a source-row field whose value is a reference; the input key of the referenced data in the spec declaring the list."
+        },
+        "id": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "name": {
+          "type": "string"
+        },
+        "body": {
+          "type": "string"
+        },
+        "causes": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Cause"
+          }
+        },
+        "children": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ExplanationNode"
+          }
+        }
+      }
+    },
+    "RuleRefNode": {
+      "type": "object",
+      "required": [
+        "type",
+        "id",
+        "name",
+        "result"
+      ],
+      "additionalProperties": false,
+      "description": "Reference to an ExplainedRule in the enclosing root explanation's rules table. RuleResultValue fields are flattened.",
+      "properties": {
+        "result": {
+          "type": "string"
+        },
+        "measure": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/DecimalString"
+          }
+        },
+        "ratio": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/DecimalString"
+          }
+        },
+        "number": {
+          "$ref": "#/$defs/DecimalString"
+        },
+        "boolean": {
+          "type": "boolean"
+        },
+        "text": {
+          "type": "string"
+        },
+        "date": {
+          "type": "string"
+        },
+        "time": {
+          "type": "string"
+        },
+        "calendar": {
+          "$ref": "#/$defs/CalendarResult"
+        },
+        "unit": {
+          "type": "string"
+        },
+        "range": {
+          "$ref": "#/$defs/RangeResult"
+        },
+        "spec": {
+          "$ref": "#/$defs/SpecResult"
+        },
+        "row": {
+          "$ref": "#/$defs/RowReference"
+        },
+        "list": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/RuleResultValue"
+          }
+        },
+        "fields": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/RuleResultValue"
+          },
+          "description": "Show only: on a source row of an instance list value, the fields the row sets, keyed relative to the row spec. Such rows and their list carry no result; row order is array order."
+        },
+        "reference": {
+          "type": "string",
+          "description": "Show only: on a source-row field whose value is a reference; the input key of the referenced data in the spec declaring the list."
+        },
+        "type": {
+          "const": "rule_ref"
+        },
+        "id": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "name": {
+          "type": "string"
+        }
+      }
+    },
+    "RowNode": {
+      "type": "object",
+      "required": [
+        "type",
+        "number",
+        "fields"
+      ],
+      "additionalProperties": false,
+      "description": "One instance-list row a list command read. Label in ASCII is n. when unkeyed, or [key values] when field-keyed.",
+      "properties": {
+        "type": {
+          "const": "row"
+        },
+        "number": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "appended": {
+          "type": "boolean",
+          "description": "True when the row was appended by an expression -> with."
+        },
+        "key": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ExplanationNode"
+          },
+          "description": "Key field Data nodes in -> key order; empty for numbered lists."
+        },
+        "fields": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ExplanationNode"
+          }
+        }
+      }
+    },
+    "FilterNode": {
+      "type": "object",
+      "required": [
+        "type",
+        "condition",
+        "matched",
+        "total"
+      ],
+      "additionalProperties": false,
+      "description": "Summary of a where filter: matched of total rows satisfied the condition.",
+      "properties": {
+        "type": {
+          "const": "filter"
+        },
+        "condition": {
+          "type": "string"
+        },
+        "matched": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "total": {
+          "type": "integer",
+          "minimum": 0
         },
         "children": {
           "type": "array",
@@ -2577,6 +4313,26 @@
         "spec": {
           "$ref": "#/$defs/SpecResult"
         },
+        "row": {
+          "$ref": "#/$defs/RowReference"
+        },
+        "list": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/RuleResultValue"
+          }
+        },
+        "fields": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/RuleResultValue"
+          },
+          "description": "Show only: on a source row of an instance list value, the fields the row sets, keyed relative to the row spec. Such rows and their list carry no result; row order is array order."
+        },
+        "reference": {
+          "type": "string",
+          "description": "Show only: on a source-row field whose value is a reference; the input key of the referenced data in the spec declaring the list."
+        },
         "type": {
           "const": "data"
         },
@@ -2663,6 +4419,588 @@
           "type": "string"
         }
       }
+    },
+    "ShowTypeBoolean": {
+      "type": "object",
+      "required": [
+        "kind"
+      ],
+      "properties": {
+        "kind": {
+          "const": "boolean"
+        }
+      }
+    },
+    "ShowTypeMeasure": {
+      "type": "object",
+      "required": [
+        "kind",
+        "minimum",
+        "maximum",
+        "decimals",
+        "units",
+        "traits",
+        "decomposition"
+      ],
+      "properties": {
+        "kind": {
+          "const": "measure"
+        },
+        "minimum": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/NamedBound"
+            }
+          ]
+        },
+        "maximum": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/NamedBound"
+            }
+          ]
+        },
+        "decimals": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "units": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/MeasureUnit"
+          }
+        },
+        "traits": {
+          "type": "array",
+          "items": {
+            "enum": [
+              "duration",
+              "calendar"
+            ]
+          }
+        },
+        "decomposition": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "object",
+              "additionalProperties": {
+                "type": "integer"
+              }
+            }
+          ]
+        },
+        "unit": {
+          "type": "string"
+        }
+      }
+    },
+    "ShowTypeNumber": {
+      "type": "object",
+      "required": [
+        "kind",
+        "minimum",
+        "maximum",
+        "decimals"
+      ],
+      "properties": {
+        "kind": {
+          "const": "number"
+        },
+        "minimum": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/DecimalString"
+            }
+          ]
+        },
+        "maximum": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/DecimalString"
+            }
+          ]
+        },
+        "decimals": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      }
+    },
+    "ShowTypeNumberRange": {
+      "type": "object",
+      "required": [
+        "kind",
+        "lower",
+        "upper",
+        "minimum",
+        "maximum"
+      ],
+      "properties": {
+        "kind": {
+          "const": "number_range"
+        },
+        "lower": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/DecimalString"
+            }
+          ]
+        },
+        "upper": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/DecimalString"
+            }
+          ]
+        },
+        "minimum": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/DecimalString"
+            }
+          ]
+        },
+        "maximum": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/DecimalString"
+            }
+          ]
+        }
+      }
+    },
+    "ShowTypeRatio": {
+      "type": "object",
+      "required": [
+        "kind",
+        "minimum",
+        "maximum",
+        "decimals",
+        "units"
+      ],
+      "properties": {
+        "kind": {
+          "const": "ratio"
+        },
+        "minimum": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/DecimalString"
+            }
+          ]
+        },
+        "maximum": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/DecimalString"
+            }
+          ]
+        },
+        "decimals": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "units": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/RatioUnit"
+          }
+        },
+        "unit": {
+          "type": "string"
+        }
+      }
+    },
+    "ShowTypeRatioRange": {
+      "type": "object",
+      "required": [
+        "kind",
+        "lower",
+        "upper",
+        "minimum",
+        "maximum",
+        "units"
+      ],
+      "properties": {
+        "kind": {
+          "const": "ratio_range"
+        },
+        "lower": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/DecimalString"
+            }
+          ]
+        },
+        "upper": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/DecimalString"
+            }
+          ]
+        },
+        "minimum": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/DecimalString"
+            }
+          ]
+        },
+        "maximum": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/DecimalString"
+            }
+          ]
+        },
+        "units": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/RatioUnit"
+          }
+        }
+      }
+    },
+    "ShowTypeText": {
+      "type": "object",
+      "required": [
+        "kind"
+      ],
+      "properties": {
+        "kind": {
+          "const": "text"
+        }
+      }
+    },
+    "ShowTypeDate": {
+      "type": "object",
+      "required": [
+        "kind",
+        "minimum",
+        "maximum"
+      ],
+      "properties": {
+        "kind": {
+          "const": "date"
+        },
+        "minimum": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "maximum": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "ShowTypeDateRange": {
+      "type": "object",
+      "required": [
+        "kind",
+        "lower",
+        "upper",
+        "minimum",
+        "maximum"
+      ],
+      "properties": {
+        "kind": {
+          "const": "date_range"
+        },
+        "lower": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "upper": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "minimum": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/NamedBound"
+            }
+          ]
+        },
+        "maximum": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/NamedBound"
+            }
+          ]
+        }
+      }
+    },
+    "ShowTypeTime": {
+      "type": "object",
+      "required": [
+        "kind",
+        "minimum",
+        "maximum"
+      ],
+      "properties": {
+        "kind": {
+          "const": "time"
+        },
+        "minimum": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "maximum": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "ShowTypeTimeRange": {
+      "type": "object",
+      "required": [
+        "kind",
+        "lower",
+        "upper",
+        "minimum",
+        "maximum"
+      ],
+      "properties": {
+        "kind": {
+          "const": "time_range"
+        },
+        "lower": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "upper": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "minimum": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/NamedBound"
+            }
+          ]
+        },
+        "maximum": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/NamedBound"
+            }
+          ]
+        }
+      }
+    },
+    "ShowTypeMeasureRange": {
+      "type": "object",
+      "required": [
+        "kind",
+        "lower",
+        "upper",
+        "minimum",
+        "maximum",
+        "units",
+        "decomposition"
+      ],
+      "properties": {
+        "kind": {
+          "const": "measure_range"
+        },
+        "lower": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/NamedBound"
+            }
+          ]
+        },
+        "upper": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/NamedBound"
+            }
+          ]
+        },
+        "minimum": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/NamedBound"
+            }
+          ]
+        },
+        "maximum": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/NamedBound"
+            }
+          ]
+        },
+        "units": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/MeasureUnit"
+          }
+        },
+        "decomposition": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "object",
+              "additionalProperties": {
+                "type": "integer"
+              }
+            }
+          ]
+        }
+      }
+    },
+    "ShowTypeSpec": {
+      "type": "object",
+      "required": [
+        "kind",
+        "spec",
+        "effective"
+      ],
+      "properties": {
+        "kind": {
+          "const": "spec"
+        },
+        "spec": {
+          "type": "string"
+        },
+        "effective": {
+          "type": "string"
+        },
+        "repository": {
+          "type": "string"
+        }
+      }
+    },
+    "ShowTypeList": {
+      "type": "object",
+      "required": [
+        "kind",
+        "element",
+        "key"
+      ],
+      "properties": {
+        "kind": {
+          "const": "list"
+        },
+        "element": {
+          "$ref": "#/$defs/ShowPropertyElementType"
+        },
+        "key": {
+          "$ref": "#/$defs/ListKey"
+        }
+      }
+    },
+    "ShowTypeNameExtends": {
+      "type": "object",
+      "required": [
+        "name",
+        "extends"
+      ],
+      "properties": {
+        "name": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "extends": {
+          "$ref": "#/$defs/TypeExtends"
+        }
+      }
     }
   },
   "anyOf": [
@@ -2675,7 +5013,7 @@
     {
       "type": "array",
       "items": {
-        "$ref": "#/$defs/ResolvedRepository"
+        "$ref": "#/$defs/Repository"
       }
     },
     {

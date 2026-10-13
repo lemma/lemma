@@ -8,4 +8,7 @@ mod digit;
 mod signed;
 
 pub use alloc::AllocError;
+#[cfg(test)]
+pub(crate) use biguint::work_counters;
+pub use biguint::BigUint;
 pub use signed::BigInt;

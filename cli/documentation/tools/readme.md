@@ -22,7 +22,7 @@ More SDKs are on the way. Precompiled binaries make each new one straightforward
 
 ## Command line & servers
 
-- [Lemma CLI](../reference/cli.md): `lemma run`, `show`, `list`, `format`, `install`, plus `server`, `lsp`, and `mcp`
+- [Lemma CLI](../reference/cli.md): `lemma evaluate`, `show`, `list`, `format`, `install`, plus `server`, `lsp`, and `mcp`
 - [Lemma MCP](mcp.md): connect Claude, Gemini CLI, or Cursor to your specs over the Model Context Protocol
 - [LemmaBase](../reference/registry.md): install shared repositories via `@owner/name` imports on `uses`
 

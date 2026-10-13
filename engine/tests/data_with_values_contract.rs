@@ -5,13 +5,13 @@
 //!   - SpecRef override → evaluation completes (import alias ignored like unknown)
 //!   - schema-backed [`DataDefinition::TypeDeclaration`] → success
 //!   - Value → replaces literal
-//!   - Reference → replaces reference target copy
+//!   - Reference (slot bound to data or a rule) → request Error, never overridden
 //!   - validation failures per primitive → Veto on dependent rules
 //!   - invalid override reasons surface in rule veto text
 
-use lemma::DateTimeValue;
+use indexmap::IndexMap;
 use lemma::Engine;
-use std::collections::HashMap;
+use lemma::{DateTimeValue, EvaluateDataValue};
 
 fn assert_rule_vetoed(
     result: Result<lemma::Response, lemma::Error>,
@@ -66,13 +66,13 @@ rule r: x
         )])
         .unwrap();
 
-    let mut data = HashMap::new();
+    let mut data = IndexMap::new();
     data.insert("x".to_string(), "1".into());
     data.insert("does_not_exist".to_string(), "42".into());
 
     let now = DateTimeValue::now();
     let response = engine
-        .run(None, "s", Some(&now), data, None, false)
+        .evaluate(None, "s", Some(&now), data, None, false)
         .expect("unknown keys must not abort evaluation");
     assert_eq!(rule_value(&response, "r"), "1");
 }
@@ -95,21 +95,30 @@ rule r: i.x
         )])
         .unwrap();
 
-    let mut data = HashMap::new();
+    let mut data = IndexMap::new();
     // `i` is a SpecRef, not a data value — overriding it is meaningless.
     data.insert("i".to_string(), "42".into());
 
     let now = DateTimeValue::now();
     let response = engine
-        .run(None, "outer", Some(&now), data, None, false)
+        .evaluate(None, "outer", Some(&now), data, None, false)
         .expect("spec-ref override must not abort evaluation");
     let r = response.results.get("r").expect("r");
     assert!(
         r.vetoed,
         "import override ignored; i.x unbound (default never commits)"
     );
-    let reason = r.veto_reason.as_deref().expect("veto reason");
-    assert!(reason.contains("Missing data"), "got: {reason}");
+    assert_eq!(
+        r.missing_data(),
+        &["i.x"],
+        "unbound nested slot under uses alias"
+    );
+    assert_eq!(
+        r.veto_reason.as_deref(),
+        Some("Missing data: i.x"),
+        "got: {:?}",
+        r.veto_reason
+    );
 }
 
 #[test]
@@ -127,12 +136,12 @@ rule r: x
         )])
         .unwrap();
 
-    let mut data = HashMap::new();
+    let mut data = IndexMap::new();
     data.insert("x".to_string(), "42".into());
 
     let now = DateTimeValue::now();
     let resp = engine
-        .run(None, "s", Some(&now), data, None, false)
+        .evaluate(None, "s", Some(&now), data, None, false)
         .expect("evaluates");
     assert_eq!(rule_value(&resp, "r"), "42");
 }
@@ -152,12 +161,12 @@ rule r: x
         )])
         .unwrap();
 
-    let mut data = HashMap::new();
+    let mut data = IndexMap::new();
     data.insert("x".to_string(), "99".into());
 
     let now = DateTimeValue::now();
     let resp = engine
-        .run(None, "s", Some(&now), data, None, false)
+        .evaluate(None, "s", Some(&now), data, None, false)
         .expect("evaluates");
     assert_eq!(rule_value(&resp, "r"), "99");
 }
@@ -177,12 +186,12 @@ rule r: age
         )])
         .unwrap();
 
-    let mut data = HashMap::new();
+    let mut data = IndexMap::new();
     data.insert("age".to_string(), "thirty".into());
 
     let now = DateTimeValue::now();
     assert_rule_vetoed(
-        engine.run(None, "s", Some(&now), data, None, false),
+        engine.evaluate(None, "s", Some(&now), data, None, false),
         "r",
         "number",
     );
@@ -203,12 +212,12 @@ rule r: n
         )])
         .unwrap();
 
-    let mut data = HashMap::new();
+    let mut data = IndexMap::new();
     data.insert("n".to_string(), "5".into());
 
     let now = DateTimeValue::now();
     assert_rule_vetoed(
-        engine.run(None, "s", Some(&now), data, None, false),
+        engine.evaluate(None, "s", Some(&now), data, None, false),
         "r",
         "minimum",
     );
@@ -229,12 +238,12 @@ rule r: n
         )])
         .unwrap();
 
-    let mut data = HashMap::new();
+    let mut data = IndexMap::new();
     data.insert("n".to_string(), "10".into());
 
     let now = DateTimeValue::now();
     assert_rule_vetoed(
-        engine.run(None, "s", Some(&now), data, None, false),
+        engine.evaluate(None, "s", Some(&now), data, None, false),
         "r",
         "maximum",
     );
@@ -255,12 +264,12 @@ rule r: msg
         )])
         .unwrap();
 
-    let mut data = HashMap::new();
+    let mut data = IndexMap::new();
     data.insert("msg".to_string(), "way too long".into());
 
     let now = DateTimeValue::now();
     assert_rule_vetoed(
-        engine.run(None, "s", Some(&now), data, None, false),
+        engine.evaluate(None, "s", Some(&now), data, None, false),
         "r",
         "length",
     );
@@ -271,7 +280,7 @@ fn override_violating_options_fails() {
     // `options` should restrict to a set.
     let code = r#"
 spec s
-data color: text -> options red green blue
+data color: text -> options "red", "green", "blue"
 rule r: color
 "#;
     let mut engine = Engine::new();
@@ -292,12 +301,12 @@ rule r: color
         );
     }
 
-    let mut data = HashMap::new();
+    let mut data = IndexMap::new();
     data.insert("color".to_string(), "purple".into());
 
     let now = DateTimeValue::now();
     assert_rule_vetoed(
-        engine.run(None, "s", Some(&now), data, None, false),
+        engine.evaluate(None, "s", Some(&now), data, None, false),
         "r",
         "option",
     );
@@ -320,7 +329,7 @@ rule r: x
 
     let now = DateTimeValue::now();
     let resp = engine
-        .run(None, "s", Some(&now), HashMap::new(), None, false)
+        .evaluate(None, "s", Some(&now), IndexMap::new(), None, false)
         .expect("evaluates");
     assert_eq!(rule_value(&resp, "r"), "10");
 }
@@ -344,22 +353,45 @@ rule r: i.v
         )])
         .unwrap();
 
-    let mut data = HashMap::new();
+    let mut data = IndexMap::new();
     data.insert("i.v".to_string(), "500".into());
 
     let now = DateTimeValue::now();
     let resp = engine
-        .run(None, "outer", Some(&now), data, None, false)
+        .evaluate(None, "outer", Some(&now), data, None, false)
         .expect("evaluates");
     assert_eq!(rule_value(&resp, "r"), "500");
 }
 
+fn load(code: &str) -> Engine {
+    let mut engine = Engine::new();
+    engine
+        .load([(
+            lemma::SourceType::Path(std::sync::Arc::new(std::path::PathBuf::from("w.lemma"))),
+            code.to_string(),
+        )])
+        .expect("must plan");
+    engine
+}
+
+fn assert_bound_slot_rejected(engine: &Engine, spec: &str, key: &str, target: &str) {
+    let mut data = IndexMap::new();
+    data.insert(key.to_string(), "10".into());
+    let now = DateTimeValue::now();
+    let error = engine
+        .evaluate(None, spec, Some(&now), data, None, false)
+        .expect_err("run data for a bound slot must be a request error");
+    assert_eq!(
+        error.message(),
+        format!("data '{key}' is bound to '{target}' by the spec and cannot be supplied")
+    );
+    assert_eq!(error.related_data(), Some(key));
+}
+
 #[test]
-fn override_on_reference_still_validates_against_merged_type() {
-    // Reference LHS declares a tighter max. User provides an out-of-range
-    // value. Validation MUST use the merged type (LHS + target + local),
-    // not just the target's type.
-    let code = r#"
+fn evaluate_data_for_slot_bound_to_data_is_request_error() {
+    let engine = load(
+        r#"
 spec inner
 data n: number -> maximum 5
 data v: number
@@ -368,21 +400,89 @@ spec outer
 uses i: inner
   -> with n: i.v
 rule r: i.n
-"#;
-    let mut engine = Engine::new();
-    let load_result = engine.load([(
-        lemma::SourceType::Path(std::sync::Arc::new(std::path::PathBuf::from("w.lemma"))),
-        code.to_string(),
-    )]);
-    load_result.expect("binding with i.n must plan");
+"#,
+    );
+    assert_bound_slot_rejected(&engine, "outer", "i.n", "i.v");
+}
 
-    let mut data = HashMap::new();
-    data.insert("i.n".to_string(), "10".into());
+#[test]
+fn copied_value_still_validates_against_merged_type() {
+    let engine = load(
+        r#"
+spec inner
+data n: number -> maximum 5
+data v: number
 
+spec outer
+uses i: inner
+  -> with n: i.v
+rule r: i.n
+"#,
+    );
+    let mut data = IndexMap::new();
+    data.insert("i.v".to_string(), "10".into());
     let now = DateTimeValue::now();
     assert_rule_vetoed(
-        engine.run(None, "outer", Some(&now), data, None, false),
+        engine.evaluate(None, "outer", Some(&now), data, None, false),
         "r",
         "maximum",
+    );
+}
+
+#[test]
+fn evaluate_data_for_slot_bound_to_rule_is_request_error() {
+    let engine = load(
+        r#"
+spec source_spec
+data x: number
+rule computed: x * 2
+
+spec inner
+data slot: number
+
+spec outer
+uses src: source_spec
+uses i: inner
+  -> with slot: src.computed
+rule r: i.slot
+"#,
+    );
+    assert_bound_slot_rejected(&engine, "outer", "i.slot", "src.computed");
+}
+
+#[test]
+fn evaluate_data_for_row_field_bound_in_row_spec_is_request_error() {
+    let engine = load(
+        r#"
+spec rate
+data base: number
+data amount: number
+
+spec line
+data price: number
+uses r: rate
+  -> with amount: price
+rule total: r.amount
+
+spec order
+uses lines: line list
+rule all_totals: lines -> sum total
+"#,
+    );
+    let mut row = IndexMap::new();
+    row.insert("price".to_string(), EvaluateDataValue::from("4"));
+    row.insert("r.amount".to_string(), EvaluateDataValue::from("9"));
+    let mut data = IndexMap::new();
+    data.insert(
+        "lines".to_string(),
+        EvaluateDataValue::List(vec![EvaluateDataValue::Map(row)]),
+    );
+    let now = DateTimeValue::now();
+    let error = engine
+        .evaluate(None, "order", Some(&now), data, None, false)
+        .expect_err("row field bound in the row spec must be a request error");
+    assert_eq!(
+        error.message(),
+        "data 'r.amount' is bound to 'price' by the spec and cannot be supplied"
     );
 }

@@ -1,0 +1,276 @@
+{
+  "boolean": {
+    "name": "is_active",
+    "kind": "boolean",
+    "extends": {
+      "kind": "primitive"
+    }
+  },
+  "measure": {
+    "name": "money",
+    "kind": "measure",
+    "minimum": null,
+    "maximum": null,
+    "decimals": 2,
+    "units": [
+      {
+        "name": "eur",
+        "factor": {
+          "numer": "1",
+          "denom": "1"
+        },
+        "derived_measure_factors": [],
+        "decomposition": {
+          "tax_bracket.money": 1
+        }
+      }
+    ],
+    "traits": [],
+    "decomposition": {
+      "tax_bracket.money": 1
+    },
+    "extends": {
+      "kind": "primitive"
+    }
+  },
+  "measure_duration_trait": {
+    "name": "elapsed",
+    "kind": "measure",
+    "minimum": null,
+    "maximum": null,
+    "decimals": null,
+    "units": [
+      {
+        "name": "hour",
+        "factor": {
+          "numer": "3600",
+          "denom": "1"
+        },
+        "derived_measure_factors": [],
+        "decomposition": {
+          "duration": 1
+        }
+      }
+    ],
+    "traits": [
+      "duration"
+    ],
+    "decomposition": {
+      "duration": 1
+    },
+    "extends": {
+      "kind": "primitive"
+    }
+  },
+  "measure_calendar_trait": {
+    "name": "age_in_months",
+    "kind": "measure",
+    "minimum": null,
+    "maximum": null,
+    "decimals": null,
+    "units": [
+      {
+        "name": "month",
+        "factor": {
+          "numer": "1",
+          "denom": "1"
+        },
+        "derived_measure_factors": [],
+        "decomposition": {
+          "calendar": 1
+        }
+      }
+    ],
+    "traits": [
+      "calendar"
+    ],
+    "decomposition": {
+      "calendar": 1
+    },
+    "extends": {
+      "kind": "primitive"
+    }
+  },
+  "number": {
+    "name": "amount",
+    "kind": "number",
+    "minimum": null,
+    "maximum": null,
+    "decimals": null,
+    "extends": {
+      "kind": "primitive"
+    }
+  },
+  "number_range": {
+    "name": "age_range",
+    "kind": "number_range",
+    "lower": null,
+    "upper": null,
+    "minimum": "0",
+    "maximum": "120",
+    "extends": {
+      "kind": "primitive"
+    }
+  },
+  "ratio": {
+    "name": "rate",
+    "kind": "ratio",
+    "minimum": null,
+    "maximum": null,
+    "decimals": null,
+    "units": [
+      {
+        "name": "percent",
+        "value": {
+          "numer": "100",
+          "denom": "1"
+        }
+      }
+    ],
+    "extends": {
+      "kind": "primitive"
+    }
+  },
+  "ratio_range": {
+    "name": "rate_range",
+    "kind": "ratio_range",
+    "lower": null,
+    "upper": null,
+    "minimum": null,
+    "maximum": null,
+    "units": [
+      {
+        "name": "percent",
+        "value": {
+          "numer": "100",
+          "denom": "1"
+        }
+      }
+    ],
+    "extends": {
+      "kind": "primitive"
+    }
+  },
+  "text": {
+    "name": "label",
+    "kind": "text",
+    "extends": {
+      "kind": "primitive"
+    }
+  },
+  "date": {
+    "name": "birthday",
+    "kind": "date",
+    "minimum": null,
+    "maximum": null,
+    "extends": {
+      "kind": "primitive"
+    }
+  },
+  "date_range": {
+    "name": "period",
+    "kind": "date_range",
+    "lower": null,
+    "upper": null,
+    "minimum": null,
+    "maximum": null,
+    "extends": {
+      "kind": "primitive"
+    }
+  },
+  "time": {
+    "name": "start_time",
+    "kind": "time",
+    "minimum": null,
+    "maximum": null,
+    "extends": {
+      "kind": "primitive"
+    }
+  },
+  "time_range": {
+    "name": "window",
+    "kind": "time_range",
+    "lower": null,
+    "upper": null,
+    "minimum": null,
+    "maximum": null,
+    "extends": {
+      "kind": "primitive"
+    }
+  },
+  "measure_range": {
+    "name": "distance_range",
+    "kind": "measure_range",
+    "lower": null,
+    "upper": null,
+    "minimum": null,
+    "maximum": null,
+    "units": [
+      {
+        "name": "km",
+        "factor": {
+          "numer": "1",
+          "denom": "1"
+        },
+        "derived_measure_factors": [],
+        "decomposition": {
+          "tax_bracket.length": 1
+        }
+      }
+    ],
+    "decomposition": {
+      "tax_bracket.length": 1
+    },
+    "extends": {
+      "kind": "primitive"
+    }
+  },
+  "list_numbered": {
+    "name": "fares",
+    "kind": "list",
+    "element": {
+      "kind": "measure",
+      "minimum": null,
+      "maximum": null,
+      "decimals": null,
+      "units": [
+        {
+          "name": "eur",
+          "factor": {
+            "numer": "1",
+            "denom": "1"
+          },
+          "derived_measure_factors": [],
+          "decomposition": {
+            "tax_bracket.money": 1
+          }
+        }
+      ],
+      "traits": [],
+      "decomposition": {
+        "tax_bracket.money": 1
+      }
+    },
+    "key": "numbered",
+    "extends": {
+      "kind": "primitive"
+    }
+  },
+  "list_keyed": {
+    "name": "menu_item list",
+    "kind": "list",
+    "element": {
+      "kind": "spec",
+      "spec": "menu_item",
+      "effective": ""
+    },
+    "key": {
+      "fields": [
+        "drink"
+      ]
+    },
+    "extends": {
+      "kind": "primitive"
+    }
+  }
+}

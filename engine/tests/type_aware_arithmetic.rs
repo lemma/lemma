@@ -1,5 +1,5 @@
+use indexmap::IndexMap;
 use lemma::Engine;
-use std::collections::HashMap;
 
 fn expect_plan_error(code: &str, expected_fragment: &str) {
     let mut engine = Engine::new();
@@ -83,11 +83,11 @@ rule test_passes: result is expected
         .unwrap();
     let now = lemma::DateTimeValue::now();
     let response = engine
-        .run(
+        .evaluate(
             None,
             "test_number_times_percentage",
             Some(&now),
-            HashMap::new(),
+            IndexMap::new(),
             None,
             false,
         )
@@ -122,11 +122,11 @@ rule test_passes: final_price is expected
         .unwrap();
     let now = lemma::DateTimeValue::now();
     let response = engine
-        .run(
+        .evaluate(
             None,
             "test_with_rule_reference",
             Some(&now),
-            HashMap::new(),
+            IndexMap::new(),
             None,
             false,
         )

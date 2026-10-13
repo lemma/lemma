@@ -22,45 +22,61 @@ data is_member:     boolean
 data is_loyalty:    boolean
 data is_tax_exempt: boolean
 
-rule is_standard: product_type is "standard"
+rule is_standard:
+  product_type is "standard"
 
-rule is_premium: product_type is "premium"
+rule is_premium:
+  product_type is "premium"
 
-rule is_luxury: product_type is "luxury"
+rule is_luxury:
+  product_type is "luxury"
 
-rule volume_discount: 0%
+rule volume_discount:
+  0%
   unless quantity >= 10  then 5%
   unless quantity >= 50  then 10%
   unless quantity >= 100 then 15%
 
-rule tier_discount: 0%
+rule tier_discount:
+  0%
   unless is_premium then 5%
   unless is_luxury  then 15%
 
-rule member_discount: 0%
+rule member_discount:
+  0%
   unless is_member then 5%
 
-rule loyalty_discount: 0%
+rule loyalty_discount:
+  0%
   unless is_loyalty and loyalty_years >= 1 then 3%
   unless is_loyalty and loyalty_years >= 3 then 6%
   unless is_loyalty and loyalty_years >= 5 then 10%
 
-rule coupon_discount: (coupon_percent / 100) as percent
+rule coupon_discount:
+  (coupon_percent / 100) as percent
 
 rule combined_discount:
-  volume_discount + tier_discount + member_discount
+  volume_discount
+  + tier_discount
+  + member_discount
   + loyalty_discount
   + coupon_discount
 
-rule subtotal: unit_price * quantity
+rule subtotal:
+  unit_price * quantity
 
-rule discount_amount: subtotal * combined_discount
+rule discount_amount:
+  subtotal * combined_discount
 
-rule taxable: subtotal - discount_amount
+rule taxable:
+  subtotal - discount_amount
 
-rule tax_rate: 8%
+rule tax_rate:
+  8%
   unless is_tax_exempt then 0%
 
-rule tax: taxable * tax_rate
+rule tax:
+  taxable * tax_rate
 
-rule total: taxable + tax
+rule total:
+  taxable + tax

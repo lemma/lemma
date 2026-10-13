@@ -11,8 +11,8 @@
 //!
 //! Calendar measure-range span `as` is not supported.
 
+use indexmap::IndexMap;
 use lemma::{DateGranularity, DateTimeValue, Engine, TimezoneValue};
-use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -29,10 +29,7 @@ fn default_effective() -> DateTimeValue {
         minute: 0,
         second: 0,
         microsecond: 0,
-        timezone: Some(TimezoneValue {
-            offset_hours: 0,
-            offset_minutes: 0,
-        }),
+        timezone: Some(TimezoneValue { offset_minutes: 0 }),
         granularity: DateGranularity::DateTime,
     }
 }
@@ -44,11 +41,11 @@ fn eval_rule(code: &str, spec_name: &str, rule_name: &str) -> String {
         .expect("Should parse and plan");
     let effective = default_effective();
     let response = engine
-        .run(
+        .evaluate(
             None,
             spec_name,
             Some(&effective),
-            HashMap::new(),
+            IndexMap::new(),
             Some(&[rule_name.to_string()]),
             true,
         )

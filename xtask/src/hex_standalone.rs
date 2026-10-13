@@ -16,6 +16,8 @@
 //! 3. Converts every `[dependencies].X = { path = ... }` into a registry version
 //!    pin `X = "=VERSION"` (or, if the dep table carries other keys like
 //!    `features`, drops the `path` and inserts `version = "=VERSION"`).
+//! 4. Copies the workspace `[profile.release]` (e.g. `overflow-checks = true`), which a
+//!    standalone build would otherwise not see.
 //!
 //! Post-conditions: no `.workspace = true` and no `path = ...` survives.
 
@@ -56,6 +58,7 @@ fn rewrite(hex_raw: &str, root_raw: &str) -> Result<String, String> {
     inline_package_inheritance(&mut hex_doc, &root_doc)?;
     inline_dep_inheritance(&mut hex_doc, &root_doc)?;
     pin_path_deps_to_workspace_version(&mut hex_doc, &workspace_version);
+    copy_release_profile(&mut hex_doc, &root_doc)?;
 
     assert_no_workspace_inheritance(&hex_doc)?;
     assert_no_path_deps(&hex_doc)?;
@@ -132,6 +135,21 @@ fn inline_dep_inheritance(hex: &mut DocumentMut, root: &DocumentMut) -> Result<(
         deps.insert(&key, workspace_dep);
     }
 
+    Ok(())
+}
+
+fn copy_release_profile(hex: &mut DocumentMut, root: &DocumentMut) -> Result<(), String> {
+    let release = root
+        .get("profile")
+        .and_then(|p| p.get("release"))
+        .cloned()
+        .ok_or_else(|| "workspace Cargo.toml: missing [profile.release]".to_string())?;
+    let profile = hex
+        .entry("profile")
+        .or_insert(toml_edit::table())
+        .as_table_like_mut()
+        .ok_or_else(|| "hex Cargo.toml: [profile] is not a table".to_string())?;
+    profile.insert("release", release);
     Ok(())
 }
 
@@ -256,6 +274,9 @@ repository = "https://github.com/lemma/lemma"
 
 [workspace.dependencies]
 serde_json = "1.0"
+
+[profile.release]
+overflow-checks = true
 "#
     }
 
@@ -420,6 +441,37 @@ lemma-engine = { path = "../../../../", features = ["wasm"] }
             "version inserted alongside features:\n{out}"
         );
         assert!(out.contains("features"), "features preserved:\n{out}");
+    }
+
+    #[test]
+    fn copies_workspace_release_profile() {
+        let out = rewrite(hex_fixture(), workspace_fixture()).unwrap();
+        let parsed: DocumentMut = out.parse().expect("output is valid TOML");
+        assert_eq!(
+            parsed["profile"]["release"]["overflow-checks"].as_bool(),
+            Some(true),
+            "release profile copied:\n{out}"
+        );
+    }
+
+    #[test]
+    fn errors_when_workspace_release_profile_is_missing() {
+        let workspace = r#"
+[workspace.package]
+version = "0.8.12"
+edition = "2021"
+authors = ["A"]
+license = "A"
+repository = "R"
+
+[workspace.dependencies]
+serde_json = "1.0"
+"#;
+        let err = rewrite(hex_fixture(), workspace).unwrap_err();
+        assert!(
+            err.contains("[profile.release]"),
+            "missing release profile is reported: {err}"
+        );
     }
 
     #[test]

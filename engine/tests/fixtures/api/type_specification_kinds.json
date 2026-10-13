@@ -16,11 +16,11 @@
         "name": "eur",
         "factor": { "numer": "1", "denom": "1" },
         "derived_measure_factors": [],
-        "decomposition": { "money": 1 }
+        "decomposition": { "tax_bracket.money": 1 }
       }
     ],
     "traits": [],
-    "decomposition": { "money": 1 },
+    "decomposition": { "tax_bracket.money": 1 },
     "help": "",
     "extends": { "kind": "primitive" }
   },
@@ -71,9 +71,9 @@
     "help": "A dimensionless number.",
     "extends": { "kind": "primitive" }
   },
-  "numberrange": {
+  "number_range": {
     "name": "age_range",
-    "kind": "numberrange",
+    "kind": "number_range",
     "lower": null,
     "upper": null,
     "minimum": "0",
@@ -91,9 +91,9 @@
     "help": "",
     "extends": { "kind": "primitive" }
   },
-  "ratiorange": {
+  "ratio_range": {
     "name": "rate_range",
-    "kind": "ratiorange",
+    "kind": "ratio_range",
     "lower": null,
     "upper": null,
     "minimum": null,
@@ -118,9 +118,9 @@
     "help": "",
     "extends": { "kind": "primitive" }
   },
-  "daterange": {
+  "date_range": {
     "name": "period",
-    "kind": "daterange",
+    "kind": "date_range",
     "lower": null,
     "upper": null,
     "minimum": null,
@@ -136,9 +136,9 @@
     "help": "",
     "extends": { "kind": "primitive" }
   },
-  "timerange": {
+  "time_range": {
     "name": "window",
-    "kind": "timerange",
+    "kind": "time_range",
     "lower": null,
     "upper": null,
     "minimum": null,
@@ -146,9 +146,9 @@
     "help": "",
     "extends": { "kind": "primitive" }
   },
-  "measurerange": {
+  "measure_range": {
     "name": "distance_range",
-    "kind": "measurerange",
+    "kind": "measure_range",
     "lower": null,
     "upper": null,
     "minimum": null,
@@ -158,10 +158,10 @@
         "name": "km",
         "factor": { "numer": "1", "denom": "1" },
         "derived_measure_factors": [],
-        "decomposition": { "length": 1 }
+        "decomposition": { "tax_bracket.length": 1 }
       }
     ],
-    "decomposition": { "length": 1 },
+    "decomposition": { "tax_bracket.length": 1 },
     "help": "",
     "extends": { "kind": "primitive" }
   },
@@ -170,6 +170,36 @@
     "kind": "spec",
     "spec": "tax_bracket",
     "effective": "",
+    "extends": { "kind": "primitive" }
+  },
+  "list_numbered": {
+    "name": "fares",
+    "kind": "list",
+    "element": {
+      "kind": "measure",
+      "minimum": null,
+      "maximum": null,
+      "decimals": null,
+      "units": [
+        {
+          "name": "eur",
+          "factor": { "numer": "1", "denom": "1" },
+          "derived_measure_factors": [],
+          "decomposition": { "tax_bracket.money": 1 }
+        }
+      ],
+      "traits": [],
+      "decomposition": { "tax_bracket.money": 1 },
+      "help": "A numeric amount in one of this type's units."
+    },
+    "key": "numbered",
+    "extends": { "kind": "primitive" }
+  },
+  "list_keyed": {
+    "name": "menu_item list",
+    "kind": "list",
+    "element": { "kind": "spec", "spec": "menu_item", "effective": "" },
+    "key": { "fields": ["drink"] },
     "extends": { "kind": "primitive" }
   }
 }

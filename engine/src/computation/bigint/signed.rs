@@ -29,7 +29,7 @@ impl Serialize for BigInt {
 
 impl<'de> Deserialize<'de> for BigInt {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let (sign, magnitude) = <(Sign, BigUint)>::deserialize(deserializer)?;
+        let (sign, magnitude): (Sign, BigUint) = Deserialize::deserialize(deserializer)?;
         match sign {
             Sign::Zero => {
                 if !magnitude.is_zero() {
@@ -100,7 +100,7 @@ impl BigInt {
     pub fn try_from_str_radix(s: &str, radix: u32) -> Result<Self, AllocError> {
         let s = s.trim();
         if s.is_empty() {
-            return Err(AllocError);
+            panic!("BUG: empty BigInt literal");
         }
         if let Some(rest) = s.strip_prefix('-') {
             let mag = BigUint::try_from_str_radix(rest, radix)?;
@@ -241,7 +241,7 @@ impl BigInt {
 
     pub fn try_div_rem(&self, other: &Self) -> Result<(Self, Self), AllocError> {
         if other.is_zero() {
-            return Err(AllocError);
+            panic!("BUG: BigInt division by zero; callers reject zero divisors first");
         }
         let (q_mag, r_mag) = self.magnitude.try_div_rem(&other.magnitude)?;
         let q_sign = match (self.sign, other.sign) {
@@ -275,15 +275,18 @@ impl BigInt {
     }
 
     pub fn try_gcd(&self, other: &Self) -> Result<Self, AllocError> {
-        Ok(Self {
-            sign: Sign::Plus,
-            magnitude: self.magnitude.try_gcd(&other.magnitude)?,
-        })
+        let magnitude = self.magnitude.try_gcd(&other.magnitude)?;
+        let sign = if magnitude.is_zero() {
+            Sign::Zero
+        } else {
+            Sign::Plus
+        };
+        Ok(Self { sign, magnitude })
     }
 
-    pub fn try_pow_u32(&self, exp: u32) -> Result<Self, AllocError> {
-        let magnitude = self.magnitude.try_pow_u32(exp)?;
-        let sign = if exp.is_multiple_of(2) || !self.is_negative() {
+    pub fn try_pow(&self, exp: &BigUint) -> Result<Self, AllocError> {
+        let magnitude = self.magnitude.try_pow(exp)?;
+        let sign = if !exp.is_odd() || !self.is_negative() {
             if magnitude.is_zero() {
                 Sign::Zero
             } else {
@@ -295,9 +298,10 @@ impl BigInt {
         Ok(Self { sign, magnitude })
     }
 
-    pub fn try_nth_root(&self, n: u32) -> Result<Self, AllocError> {
-        if self.is_negative() && n.is_multiple_of(2) {
-            return Err(AllocError);
+    /// Signed root: odd degrees accept negative values. Even degree on a negative value is a caller bug.
+    pub fn try_nth_root(&self, n: &BigUint) -> Result<Self, AllocError> {
+        if self.is_negative() && !n.is_odd() {
+            panic!("BUG: even root of a negative BigInt; callers take roots of magnitudes");
         }
         let root_mag = self.magnitude.try_nth_root(n)?;
         let sign = if self.is_negative() && !root_mag.is_zero() {
@@ -321,7 +325,7 @@ impl BigInt {
         match self.sign {
             Sign::Zero => Some(0),
             Sign::Plus => i32::try_from(u).ok(),
-            Sign::Minus => i32::try_from(u).ok().map(|v| -v),
+            Sign::Minus => 0i32.checked_sub_unsigned(u),
         }
     }
 
@@ -329,8 +333,8 @@ impl BigInt {
         let u = self.magnitude.to_u128()?;
         match self.sign {
             Sign::Zero => Some(0),
-            Sign::Plus => Some(u as i128),
-            Sign::Minus => Some(-(u as i128)),
+            Sign::Plus => i128::try_from(u).ok(),
+            Sign::Minus => 0i128.checked_sub_unsigned(u),
         }
     }
 
@@ -408,6 +412,47 @@ impl FromStr for BigInt {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn to_i128_rejects_magnitudes_outside_i128_instead_of_wrapping() {
+        let one = BigInt::one();
+        let max = BigInt::from_i128(i128::MAX);
+        let min = BigInt::from_i128(i128::MIN);
+        let above_max = max.try_add(&one).unwrap();
+        let below_min = min.try_sub(&one).unwrap();
+        assert_eq!(max.to_i128(), Some(i128::MAX));
+        assert_eq!(min.to_i128(), Some(i128::MIN));
+        assert_eq!(above_max.to_i128(), None);
+        assert_eq!(below_min.to_i128(), None);
+        assert_eq!(above_max.try_neg().unwrap().to_i128(), Some(i128::MIN));
+        let u128_max = above_max.try_add(&max).unwrap();
+        assert_eq!(u128_max.to_i128(), None);
+        assert_eq!(u128_max.try_neg().unwrap().to_i128(), None);
+    }
+
+    #[test]
+    fn to_i32_covers_exact_i32_range() {
+        assert_eq!(
+            BigInt::from_i64(i64::from(i32::MIN)).to_i32(),
+            Some(i32::MIN)
+        );
+        assert_eq!(
+            BigInt::from_i64(i64::from(i32::MAX)).to_i32(),
+            Some(i32::MAX)
+        );
+        assert_eq!(BigInt::from_i64(i64::from(i32::MIN) - 1).to_i32(), None);
+        assert_eq!(BigInt::from_i64(i64::from(i32::MAX) + 1).to_i32(), None);
+    }
+
+    #[test]
+    fn try_gcd_is_non_negative_and_zero_only_for_two_zeros() {
+        let gcd = |a: i64, b: i64| BigInt::from_i64(a).try_gcd(&BigInt::from_i64(b)).unwrap();
+        assert_eq!(gcd(0, 0), BigInt::zero());
+        assert!(gcd(0, 0).is_zero() && !gcd(0, 0).is_positive());
+        assert_eq!(gcd(-12, 18), BigInt::from_i64(6));
+        assert_eq!(gcd(0, -7), BigInt::from_i64(7));
+        assert_eq!(gcd(-9, 0), BigInt::from_i64(9));
+    }
 
     #[test]
     fn serde_round_trip_negative() {

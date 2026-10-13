@@ -255,7 +255,6 @@ data code: text
   -> option "SX"
   -> option "SS"
 
-
 rule name:
   veto "Select a valid code"
   unless code is "AD"
@@ -1016,7 +1015,6 @@ data code: text
   -> option "CW"
   -> option "SX"
 
-
 rule name:
   veto "Select a valid code"
   unless code is "AD"
@@ -1771,7 +1769,6 @@ data code: text
   -> option "BL"
   -> option "MF"
 
-
 rule name:
   veto "Select a valid code"
   unless code is "AD"
@@ -2521,7 +2518,6 @@ data code: text
   -> option "ME"
   -> option "RS"
 
-
 rule name:
   veto "Select a valid code"
   unless code is "AD"
@@ -3258,7 +3254,6 @@ data code: text
   -> option "TL"
   -> option "AX"
 
-
 rule name:
   veto "Select a valid code"
   unless code is "AD"
@@ -3984,7 +3979,6 @@ data code: text
   -> option "PS"
   -> option "TL"
 
-
 rule name:
   veto "Select a valid code"
   unless code is "AD"
@@ -4707,7 +4701,6 @@ data code: text
   -> option "CD"
   -> option "PS"
 
-
 rule name:
   veto "Select a valid code"
   unless code is "AD"
@@ -5426,7 +5419,6 @@ data code: text
   -> option "SK"
   -> option "YT"
   -> option "CD"
-
 
 rule name:
   veto "Select a valid code"
@@ -6148,7 +6140,6 @@ data code: text
   -> option "MK"
   -> option "SK"
   -> option "YT"
-
 
 rule name:
   veto "Select a valid code"
@@ -6873,7 +6864,6 @@ data code: text
   -> option "TM"
   -> option "UZ"
 
-
 rule name:
   veto "Select a valid code"
   unless code is "AD"
@@ -7554,7 +7544,6 @@ data code: text
   -> option "UM"
   -> option "MM"
 
-
 rule name:
   veto "Select a valid code"
   unless code is "AD"
@@ -8207,7 +8196,6 @@ data code: text
   -> option "PW"
   -> option "UM"
 
-
 rule name:
   veto "Select a valid code"
   unless code is "AD"
@@ -8847,7 +8835,6 @@ data code: text
   -> option "BF"
   -> option "AI"
 
-
 rule name:
   veto "Select a valid code"
   unless code is "AD"
@@ -9474,7 +9461,6 @@ data code: text
   -> option "ZW"
   -> option "BF"
 
-
 rule name:
   veto "Select a valid code"
   unless code is "AD"
@@ -10099,7 +10085,6 @@ data code: text
   -> option "VU"
   -> option "ZW"
 
-
 rule name:
   veto "Select a valid code"
   unless code is "AD"
@@ -10720,7 +10705,6 @@ data code: text
   -> option "KI"
   -> option "TF"
 
-
 rule name:
   veto "Select a valid code"
   unless code is "AD"
@@ -11336,7 +11320,6 @@ data code: text
   -> option "DJ"
   -> option "TV"
 
-
 rule name:
   veto "Select a valid code"
   unless code is "AD"
@@ -11944,7 +11927,6 @@ data code: text
   -> option "YE"
   -> option "ZA"
   -> option "ZM"
-
 
 rule name:
   veto "Select a valid code"
@@ -12598,7 +12580,6 @@ data code: text
   -> option "CUW"
   -> option "SXM"
   -> option "SSD"
-
 
 rule name:
   veto "Select a valid code"
@@ -13360,7 +13341,6 @@ data code: text
   -> option "CUW"
   -> option "SXM"
 
-
 rule name:
   veto "Select a valid code"
   unless code is "AND"
@@ -14115,7 +14095,6 @@ data code: text
   -> option "BLM"
   -> option "MAF"
 
-
 rule name:
   veto "Select a valid code"
   unless code is "AND"
@@ -14865,7 +14844,6 @@ data code: text
   -> option "MNE"
   -> option "SRB"
 
-
 rule name:
   veto "Select a valid code"
   unless code is "AND"
@@ -15602,7 +15580,6 @@ data code: text
   -> option "TLS"
   -> option "ALA"
 
-
 rule name:
   veto "Select a valid code"
   unless code is "AND"
@@ -16328,7 +16305,6 @@ data code: text
   -> option "PSE"
   -> option "TLS"
 
-
 rule name:
   veto "Select a valid code"
   unless code is "AND"
@@ -17051,7 +17027,6 @@ data code: text
   -> option "COD"
   -> option "PSE"
 
-
 rule name:
   veto "Select a valid code"
   unless code is "AND"
@@ -17770,7 +17745,6 @@ data code: text
   -> option "SVK"
   -> option "MYT"
   -> option "COD"
-
 
 rule name:
   veto "Select a valid code"
@@ -18492,7 +18466,6 @@ data code: text
   -> option "MKD"
   -> option "SVK"
   -> option "MYT"
-
 
 rule name:
   veto "Select a valid code"
@@ -19217,7 +19190,6 @@ data code: text
   -> option "TKM"
   -> option "UZB"
 
-
 rule name:
   veto "Select a valid code"
   unless code is "AND"
@@ -19898,7 +19870,6 @@ data code: text
   -> option "UMI"
   -> option "MMR"
 
-
 rule name:
   veto "Select a valid code"
   unless code is "AND"
@@ -20551,7 +20522,6 @@ data code: text
   -> option "PLW"
   -> option "UMI"
 
-
 rule name:
   veto "Select a valid code"
   unless code is "AND"
@@ -21191,7 +21161,6 @@ data code: text
   -> option "BFA"
   -> option "AIA"
 
-
 rule name:
   veto "Select a valid code"
   unless code is "AND"
@@ -21818,7 +21787,6 @@ data code: text
   -> option "ZWE"
   -> option "BFA"
 
-
 rule name:
   veto "Select a valid code"
   unless code is "AND"
@@ -22443,7 +22411,6 @@ data code: text
   -> option "VUT"
   -> option "ZWE"
 
-
 rule name:
   veto "Select a valid code"
   unless code is "AND"
@@ -23064,7 +23031,6 @@ data code: text
   -> option "KIR"
   -> option "ATF"
 
-
 rule name:
   veto "Select a valid code"
   unless code is "AND"
@@ -23680,7 +23646,6 @@ data code: text
   -> option "DJI"
   -> option "TUV"
 
-
 rule name:
   veto "Select a valid code"
   unless code is "AND"
@@ -24288,7 +24253,6 @@ data code: text
   -> option "YEM"
   -> option "ZAF"
   -> option "ZMB"
-
 
 rule name:
   veto "Select a valid code"
@@ -24942,7 +24906,6 @@ data code: text
   -> option "531"
   -> option "534"
   -> option "728"
-
 
 rule name:
   veto "Select a valid code"
@@ -25704,7 +25667,6 @@ data code: text
   -> option "531"
   -> option "534"
 
-
 rule name:
   veto "Select a valid code"
   unless code is "020"
@@ -26459,7 +26421,6 @@ data code: text
   -> option "652"
   -> option "663"
 
-
 rule name:
   veto "Select a valid code"
   unless code is "020"
@@ -27209,7 +27170,6 @@ data code: text
   -> option "499"
   -> option "688"
 
-
 rule name:
   veto "Select a valid code"
   unless code is "020"
@@ -27946,7 +27906,6 @@ data code: text
   -> option "626"
   -> option "248"
 
-
 rule name:
   veto "Select a valid code"
   unless code is "020"
@@ -28672,7 +28631,6 @@ data code: text
   -> option "275"
   -> option "626"
 
-
 rule name:
   veto "Select a valid code"
   unless code is "020"
@@ -29395,7 +29353,6 @@ data code: text
   -> option "180"
   -> option "275"
 
-
 rule name:
   veto "Select a valid code"
   unless code is "020"
@@ -30114,7 +30071,6 @@ data code: text
   -> option "703"
   -> option "175"
   -> option "180"
-
 
 rule name:
   veto "Select a valid code"
@@ -30836,7 +30792,6 @@ data code: text
   -> option "807"
   -> option "703"
   -> option "175"
-
 
 rule name:
   veto "Select a valid code"
@@ -31561,7 +31516,6 @@ data code: text
   -> option "795"
   -> option "860"
 
-
 rule name:
   veto "Select a valid code"
   unless code is "020"
@@ -32242,7 +32196,6 @@ data code: text
   -> option "581"
   -> option "104"
 
-
 rule name:
   veto "Select a valid code"
   unless code is "020"
@@ -32895,7 +32848,6 @@ data code: text
   -> option "585"
   -> option "581"
 
-
 rule name:
   veto "Select a valid code"
   unless code is "020"
@@ -33535,7 +33487,6 @@ data code: text
   -> option "854"
   -> option "660"
 
-
 rule name:
   veto "Select a valid code"
   unless code is "020"
@@ -34162,7 +34113,6 @@ data code: text
   -> option "716"
   -> option "854"
 
-
 rule name:
   veto "Select a valid code"
   unless code is "020"
@@ -34787,7 +34737,6 @@ data code: text
   -> option "548"
   -> option "716"
 
-
 rule name:
   veto "Select a valid code"
   unless code is "020"
@@ -35408,7 +35357,6 @@ data code: text
   -> option "296"
   -> option "260"
 
-
 rule name:
   veto "Select a valid code"
   unless code is "020"
@@ -36024,7 +35972,6 @@ data code: text
   -> option "262"
   -> option "798"
 
-
 rule name:
   veto "Select a valid code"
   unless code is "020"
@@ -36632,7 +36579,6 @@ data code: text
   -> option "887"
   -> option "710"
   -> option "894"
-
 
 rule name:
   veto "Select a valid code"

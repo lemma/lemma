@@ -29,19 +29,18 @@ data money: measure
   -> unit eur: 1.00
   -> decimals 2
 
-data product: text
+data drink: text
   -> option "espresso"
   -> option "latte"
   -> option "cappuccino"
   -> option "mocha"
 
-
 rule base_price:
   veto "Unknown type of coffee"
-  unless product is "espresso"   then 2.5 eur
-  unless product is "latte"      then 3.5 eur
-  unless product is "cappuccino" then 3.5 eur
-  unless product is "mocha"      then 4 eur
+  unless drink is "espresso"   then 2.5 eur
+  unless drink is "latte"      then 3.5 eur
+  unless drink is "cappuccino" then 3.5 eur
+  unless drink is "mocha"      then 4 eur
 ```
 
 If `base_price` vetoes, dependents that need its value veto too (propagates). Full example: [01_coffee_order.lemma](https://raw.githubusercontent.com/lemma/lemma/main/engine/documentation/examples/01_coffee_order.lemma).
@@ -64,7 +63,6 @@ data customer_age: number
   -> minimum 0
   -> maximum 120
   -> help "How old is the customer?"
-
 
 rule is_adult:
   customer_age >= 18

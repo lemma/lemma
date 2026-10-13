@@ -1,5 +1,5 @@
+use indexmap::IndexMap;
 use lemma::{DateTimeValue, Engine};
-use std::collections::HashMap;
 
 #[test]
 fn necessary_data_include_nested_spec_data_for_local_rule_deps() {
@@ -47,20 +47,20 @@ rule total: calc.total
     );
 
     let response = engine
-        .run(
+        .evaluate(
             None,
             "cashier",
             Some(&now),
-            HashMap::new(),
+            IndexMap::new(),
             Some(&["total".to_string()]),
             false,
         )
-        .expect("run must succeed");
+        .expect("evaluate must succeed");
     let total = response.results.get("total").expect("total rule");
-    assert!(
-        total.missing_data().iter().any(|k| k == "calc.price"),
-        "unbound calc.price must appear in total.missing_data: {:?}",
-        total.missing_data()
+    assert_eq!(
+        total.missing_data(),
+        &["calc.price"],
+        "only unbound nested price (quantity/is_member have defaults)"
     );
     let show_price_type = &show_all.data.get("calc.price").unwrap().lemma_type;
     assert_eq!(
@@ -71,7 +71,7 @@ rule total: calc.total
 }
 
 #[test]
-fn run_errors_on_unknown_rule() {
+fn evaluate_errors_on_unknown_rule() {
     let mut engine = Engine::new();
     engine
         .load([(
@@ -81,11 +81,11 @@ fn run_errors_on_unknown_rule() {
         .unwrap();
     let now = DateTimeValue::now();
 
-    let result = engine.run(
+    let result = engine.evaluate(
         None,
         "test",
         Some(&now),
-        HashMap::new(),
+        IndexMap::new(),
         Some(&["nonexistent".to_string()]),
         false,
     );

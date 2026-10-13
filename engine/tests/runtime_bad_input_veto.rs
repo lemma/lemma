@@ -1,8 +1,8 @@
 //! Invalid runtime data overrides complete evaluation with Veto, not abort with Error.
 
-use lemma::DateTimeValue;
+use indexmap::IndexMap;
 use lemma::Engine;
-use std::collections::HashMap;
+use lemma::{DateTimeValue, EvaluateDataValue};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -34,9 +34,9 @@ fn load_recipe(engine: &mut Engine) {
         .expect("load recipe_scaling");
 }
 
-fn full_coffee_data(product: &str) -> HashMap<String, String> {
-    HashMap::from([
-        ("product".to_string(), product.to_string()),
+fn full_coffee_data(product: &str) -> IndexMap<String, EvaluateDataValue> {
+    IndexMap::from([
+        ("sku".to_string(), product.into()),
         ("size".to_string(), "medium".into()),
         ("number_of_cups".to_string(), "1".into()),
         ("has_loyalty_card".to_string(), "false".into()),
@@ -65,7 +65,7 @@ fn invalid_text_option_override_completes_with_veto_not_validation_error() {
     let data = full_coffee_data("tea");
 
     let response = assert_run_completes_with_veto_not_validation_error(
-        engine.run(None, "coffee_order", Some(&now), data, None, false),
+        engine.evaluate(None, "coffee_order", Some(&now), data, None, false),
         "product=tea (not in options)",
     );
 
@@ -89,7 +89,7 @@ fn below_minimum_number_override_completes_with_veto_not_validation_error() {
     data.insert("age".to_string(), "-5".into());
 
     let response = assert_run_completes_with_veto_not_validation_error(
-        engine.run(None, "coffee_order", Some(&now), data, None, false),
+        engine.evaluate(None, "coffee_order", Some(&now), data, None, false),
         "age=-5 (below minimum 0)",
     );
 
@@ -107,6 +107,37 @@ fn below_minimum_number_override_completes_with_veto_not_validation_error() {
 }
 
 #[test]
+fn multibyte_first_char_time_override_completes_with_veto() {
+    let code = r#"
+spec s
+data opens: time
+rule opens_late: opens > 09:00
+"#;
+    let mut engine = Engine::new();
+    engine
+        .load([(lemma::SourceType::Volatile, code.to_string())])
+        .expect("plan");
+
+    let now = DateTimeValue::now();
+    for value in ["é", "é10:00", "日12:00+01:00"] {
+        let mut data = IndexMap::new();
+        data.insert("opens".to_string(), value.into());
+
+        let response = assert_run_completes_with_veto_not_validation_error(
+            engine.evaluate(None, "s", Some(&now), data, None, false),
+            &format!("opens={value}"),
+        );
+        let opens_late = response.results.get("opens_late").expect("opens_late");
+        assert!(opens_late.vetoed, "opens={value} must veto opens_late");
+        let reason = opens_late.veto_reason.as_deref().expect("veto reason");
+        assert!(
+            reason.contains("Data opens [time]:") && reason.contains(value),
+            "veto reason must name field and value, got: {reason}"
+        );
+    }
+}
+
+#[test]
 fn unparsable_number_override_completes_with_veto_not_validation_error() {
     let code = r#"
 spec s
@@ -119,11 +150,11 @@ rule doubled: age * 2
         .expect("plan");
 
     let now = DateTimeValue::now();
-    let mut data = HashMap::new();
+    let mut data = IndexMap::new();
     data.insert("age".to_string(), "twenty".into());
 
     let response = assert_run_completes_with_veto_not_validation_error(
-        engine.run(None, "s", Some(&now), data, None, false),
+        engine.evaluate(None, "s", Some(&now), data, None, false),
         "age=twenty (not a number)",
     );
 
@@ -159,11 +190,11 @@ rule total: price
 
     let now = DateTimeValue::now();
     for empty in ["", "   "] {
-        let mut data = HashMap::new();
-        data.insert("price".to_string(), empty.to_string());
+        let mut data = IndexMap::new();
+        data.insert("price".to_string(), empty.into());
 
         let response = assert_run_completes_with_veto_not_validation_error(
-            engine.run(None, "s", Some(&now), data, None, false),
+            engine.evaluate(None, "s", Some(&now), data, None, false),
             &format!("price={empty:?} (empty measure)"),
         );
         let total = response.results.get("total").expect("total");
@@ -198,11 +229,11 @@ rule doubled: age * 2
         .expect("plan");
 
     let now = DateTimeValue::now();
-    let mut data = HashMap::new();
+    let mut data = IndexMap::new();
     data.insert("age".to_string(), "   ".into());
 
     let response = assert_run_completes_with_veto_not_validation_error(
-        engine.run(None, "s", Some(&now), data, None, false),
+        engine.evaluate(None, "s", Some(&now), data, None, false),
         "age=whitespace (empty number)",
     );
     let doubled = response.results.get("doubled").expect("doubled");
@@ -224,14 +255,14 @@ fn below_minimum_typedecl_override_completes_with_veto_not_validation_error() {
     load_recipe(&mut engine);
 
     let now = DateTimeValue::now();
-    let data = HashMap::from([
+    let data = IndexMap::from([
         ("desired_servings".to_string(), "0".into()),
         ("original_servings".to_string(), "4".into()),
         ("recipe_name".to_string(), "chocolate_cake".into()),
     ]);
 
     let response = assert_run_completes_with_veto_not_validation_error(
-        engine.run(None, "recipe_scaling", Some(&now), data, None, false),
+        engine.evaluate(None, "recipe_scaling", Some(&now), data, None, false),
         "desired_servings=0 (below minimum 1)",
     );
 
@@ -264,11 +295,11 @@ rule flag: active
         .expect("plan");
 
     let now = DateTimeValue::now();
-    let mut data = HashMap::new();
+    let mut data = IndexMap::new();
     data.insert("active".to_string(), "maybe".into());
 
     let response = assert_run_completes_with_veto_not_validation_error(
-        engine.run(None, "s", Some(&now), data, None, false),
+        engine.evaluate(None, "s", Some(&now), data, None, false),
         "active=maybe (not boolean)",
     );
 

@@ -1,9 +1,13 @@
 defmodule Lemma.Response do
   @moduledoc """
-  Typed projection of the JSON map returned by `Lemma.run/3`: evaluated rule
+  Typed projection of the JSON map returned by `Lemma.evaluate/3`: evaluated rule
   results and the resolved temporal window of the spec version actually run.
 
-  `Lemma.run/3` itself still returns the plain decoded JSON map for backward
+  `rows` holds the list rows the results reach, in first-reached order, each a raw
+  map with `"spec"`, `"effective"`, `"data"` and `"rules"`. A row reference's
+  `"index"` points into it. Absent from the JSON when no result reaches a row.
+
+  `Lemma.evaluate/3` itself still returns the plain decoded JSON map for backward
   compatibility; call `from_map/1` on that map to get a typed struct.
   """
 
@@ -14,7 +18,8 @@ defmodule Lemma.Response do
           effective: String.t(),
           spec_effective_from: String.t() | nil,
           spec_effective_to: String.t() | nil,
-          results: %{optional(String.t()) => RuleResult.t()}
+          results: %{optional(String.t()) => RuleResult.t()},
+          rows: [map()]
         }
 
   @enforce_keys [:spec, :effective, :results]
@@ -23,14 +28,15 @@ defmodule Lemma.Response do
     :effective,
     :spec_effective_from,
     :spec_effective_to,
-    results: %{}
+    results: %{},
+    rows: []
   ]
 
   @doc """
-  Builds a `Lemma.Response` from the map decoded from `Lemma.run/3`'s JSON.
+  Builds a `Lemma.Response` from the map decoded from `Lemma.evaluate/3`'s JSON.
 
   Raises `KeyError` if a required field (`spec`, `effective`, `results`) is
-  missing — that shape never comes from a real `Lemma.run/3` call.
+  missing — that shape never comes from a real `Lemma.evaluate/3` call.
   """
   @spec from_map(map()) :: t()
   def from_map(map) when is_map(map) do
@@ -42,7 +48,8 @@ defmodule Lemma.Response do
       results:
         map
         |> Map.fetch!("results")
-        |> Map.new(fn {key, result} -> {key, RuleResult.from_map(result)} end)
+        |> Map.new(fn {key, result} -> {key, RuleResult.from_map(result)} end),
+      rows: Map.get(map, "rows", [])
     }
   end
 end

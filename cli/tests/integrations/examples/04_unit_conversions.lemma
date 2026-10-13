@@ -11,15 +11,15 @@ This example demonstrates:
 
 uses lemma units
 
-data container_volume    : 5
-data contract_term       : 52 week
-data data_size           : 500
-data distance            : 100
-data package_weight      : 25
-data processing_duration : 90 minute
-data project_length      : 14 day
-data review_period       : 2 hour
-data temperature         : 20
+data container_volume:    5
+data contract_term:       52 week
+data data_size:           500
+data distance:            100
+data package_weight:      25
+data processing_duration: 90 minute
+data project_length:      14 day
+data review_period:       2 hour
+data temperature:         20
 
 rule duration_hours:
   processing_duration as hour

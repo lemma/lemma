@@ -22,18 +22,32 @@ allow = [
     "CC0-1.0",
     "CDLA-Permissive-2.0",
     "Zlib",
+    "MIT-0",
 ]
 exceptions = []
 
 [bans]
 # Transitive stacks often pull two major lines (e.g. tower-lsp vs axum, notify vs rustls). Unifying
 # is upstream work; advisories + licenses still apply per crate.
-multiple-versions = "allow"
-wildcards = "allow"
+multiple-versions = "deny"
+wildcards = "deny"
 highlight = "all"
 workspace-default-features = "allow"
 external-default-features = "allow"
-skip = []
+skip = [
+    { crate = "core-foundation@0.9.4", reason = "transitive duplicate, pinned until upstream unifies" },
+    { crate = "core-foundation@0.10.1", reason = "transitive duplicate, pinned until upstream unifies" },
+    { crate = "hashbrown@0.14.5", reason = "transitive duplicate via dashmap, pinned until upstream unifies" },
+    { crate = "hashbrown@0.17.1", reason = "transitive duplicate, pinned until upstream unifies" },
+    { crate = "syn@2.0.119", reason = "transitive duplicate, pinned until upstream unifies" },
+    { crate = "syn@3.0.6", reason = "transitive duplicate, pinned until upstream unifies" },
+    { crate = "thiserror@1.0.69", reason = "transitive duplicate, pinned until upstream unifies" },
+    { crate = "thiserror@2.0.21", reason = "transitive duplicate, pinned until upstream unifies" },
+    { crate = "thiserror-impl@1.0.69", reason = "transitive duplicate, pinned until upstream unifies" },
+    { crate = "thiserror-impl@2.0.21", reason = "transitive duplicate, pinned until upstream unifies" },
+    { crate = "windows-sys@0.60.2", reason = "transitive duplicate, pinned until upstream unifies" },
+    { crate = "windows-sys@0.61.2", reason = "transitive duplicate, pinned until upstream unifies" },
+]
 skip-tree = []
 
 [sources]

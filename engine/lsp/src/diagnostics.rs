@@ -1,11 +1,11 @@
 use lemma::Error;
-use tower_lsp::lsp_types::{Diagnostic, DiagnosticSeverity, Position, Range};
+use tower_lsp_server::ls_types::{Diagnostic, DiagnosticSeverity, Position, Range};
 
 /// Convert a byte offset to an LSP Position (0-based line and UTF-16 code unit column).
 ///
 /// Walks the text to compute the line and column at the given byte offset.
 /// If the offset is beyond the end of the text, returns the position at the end of the text.
-fn byte_offset_to_position(text: &str, byte_offset: usize) -> Position {
+pub(crate) fn byte_offset_to_position(text: &str, byte_offset: usize) -> Position {
     let clamped_offset = byte_offset.min(text.len());
     let mut line: u32 = 0;
     let mut line_start_byte: usize = 0;
@@ -30,6 +30,52 @@ fn byte_offset_to_position(text: &str, byte_offset: usize) -> Position {
         };
 
     Position { line, character }
+}
+
+/// Convert an LSP Position (0-based line, UTF-16 column) to a byte offset in `text`.
+///
+/// Positions past the last line or past the line's last character clamp to the
+/// corresponding line end or the end of `text`.
+pub(crate) fn position_to_byte_offset(text: &str, position: Position) -> usize {
+    let mut current_line = 0u32;
+    let mut line_start = 0usize;
+    for (index, byte) in text.bytes().enumerate() {
+        if current_line == position.line {
+            break;
+        }
+        if byte == b'\n' {
+            current_line += 1;
+            line_start = index + 1;
+        }
+    }
+    if current_line < position.line {
+        return text.len();
+    }
+
+    let rest = &text[line_start..];
+    let line_end = rest
+        .find('\n')
+        .map(|i| line_start + i)
+        .unwrap_or(text.len());
+    let line_slice = &text[line_start..line_end];
+    let mut utf16 = 0u32;
+    for (byte_index, ch) in line_slice.char_indices() {
+        if utf16 >= position.character {
+            return line_start + byte_index;
+        }
+        utf16 += ch.len_utf16() as u32;
+    }
+    line_end
+}
+
+/// True when `position` falls inside `range` using LSP's half-open interval
+/// (`range.start <= position < range.end`).
+pub(crate) fn position_within_range(position: Position, range: &Range) -> bool {
+    let start_before_or_at = position.line > range.start.line
+        || (position.line == range.start.line && position.character >= range.start.character);
+    let end_after = position.line < range.end.line
+        || (position.line == range.end.line && position.character < range.end.character);
+    start_before_or_at && end_after
 }
 
 /// Convert a Lemma `Span` (byte offsets) to an LSP `Range` using the editor buffer text.
@@ -185,6 +231,53 @@ mod tests {
         let position = byte_offset_to_position(text, 4);
         assert_eq!(position.line, 0);
         assert_eq!(position.character, 2); // 'a' + '日' = 2 UTF-16 code units
+    }
+
+    #[test]
+    fn position_to_byte_offset_round_trips() {
+        let text = "hello\nwor日d";
+        for offset in 0..=text.len() {
+            if !text.is_char_boundary(offset) {
+                continue;
+            }
+            if text.as_bytes().get(offset) == Some(&b'\n') {
+                continue;
+            }
+            let position = byte_offset_to_position(text, offset);
+            assert_eq!(
+                position_to_byte_offset(text, position),
+                offset,
+                "offset {offset} position {position:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn position_within_range_treats_end_as_exclusive() {
+        let range = Range {
+            start: Position {
+                line: 1,
+                character: 5,
+            },
+            end: Position {
+                line: 1,
+                character: 10,
+            },
+        };
+        assert!(position_within_range(
+            Position {
+                line: 1,
+                character: 5
+            },
+            &range
+        ));
+        assert!(!position_within_range(
+            Position {
+                line: 1,
+                character: 10
+            },
+            &range
+        ));
     }
 
     #[test]

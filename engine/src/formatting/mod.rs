@@ -4,13 +4,15 @@
 //! and `Expression::Display` for syntax; this module handles layout only.
 //! Canonical source includes ASCII-lowercase logical identifier names.
 
+pub(crate) mod expression;
+
 use crate::parsing::ast::{
-    arithmetic_associativity, expression_precedence, operand_needs_parentheses, AsLemmaSource,
-    Associativity, Constraint, DataValue, Expression, ExpressionKind, LemmaData, LemmaRule,
-    LemmaSpec, OperandSide,
+    AsLemmaSource, Constraint, ContinuationShape, DataValue, Expression, LemmaData, LemmaRule,
+    LemmaSpec, TypeConstraintCommand,
 };
 use crate::parsing::{parse, ParseResult};
 use crate::{Error, ResourceLimits};
+use expression::{display_broken, Syntax};
 
 /// Soft line length limit. Longer lines may be wrapped (unless clauses, expressions).
 /// Data and other constructs are not broken if they exceed this.
@@ -112,23 +114,15 @@ pub(crate) fn format_spec(spec: &LemmaSpec, max_cols: usize) -> String {
     }
 
     for meta in &spec.meta_fields {
-        out.push_str(&format!(
-            "meta {}: {}\n",
-            meta.key,
-            AsLemmaSource(&meta.value)
-        ));
+        out.push_str(&format!("{meta}\n"));
     }
 
     if !spec.data.is_empty() {
-        format_sorted_data(&spec.data, &mut out, "");
+        format_sorted_data(&spec.data, &mut out, "", max_cols);
     }
 
     if !spec.rules.is_empty() {
-        if !spec.data.is_empty() {
-            out.push_str("\n\n");
-        } else {
-            out.push('\n');
-        }
+        out.push('\n');
         for (index, rule) in spec.rules.iter().enumerate() {
             if index > 0 {
                 out.push('\n');
@@ -158,7 +152,7 @@ fn data_constraints_nonempty(constraints: &Option<Vec<Constraint>>) -> bool {
 fn data_value_has_arrow_constraints(value: &DataValue) -> bool {
     match value {
         DataValue::Definition { constraints, .. } => data_constraints_nonempty(constraints),
-        DataValue::Import { .. } => false,
+        DataValue::Import { .. } | DataValue::ImportList { .. } => false,
     }
 }
 
@@ -169,7 +163,11 @@ fn format_with_rhs(rhs: &crate::parsing::ast::WithRhs) -> String {
     }
 }
 
-fn data_value_rhs_for_spec_body(value: &DataValue, continuation_prefix: &str) -> String {
+fn data_value_rhs_for_spec_body(
+    value: &DataValue,
+    continuation_prefix: &str,
+    max_cols: usize,
+) -> String {
     match value {
         DataValue::Definition {
             base,
@@ -193,124 +191,240 @@ fn data_value_rhs_for_spec_body(value: &DataValue, continuation_prefix: &str) ->
             let mut out = head;
             for row in cs {
                 out.push('\n');
-                out.push_str(continuation_prefix);
-                out.push_str("-> ");
-                out.push_str(&crate::parsing::ast::format_constraint_as_source(
+                out.push_str(&format_constraint_block(
                     &row.command,
                     &row.args,
+                    continuation_prefix,
+                    max_cols,
                 ));
             }
             out
         }
         DataValue::Definition { .. } => format!("{}", AsLemmaSource(value)),
-        DataValue::Import { .. } => unreachable!("BUG: format_data called on Import row"),
+        DataValue::Import { .. } | DataValue::ImportList { .. } => {
+            unreachable!("BUG: data row right-hand side requested for an import")
+        }
     }
 }
 
-fn data_declaration_keyword(data: &LemmaData) -> &'static str {
-    match &data.value {
-        DataValue::Import { .. } => unreachable!("BUG: format_data called on Import row"),
-        DataValue::Definition { .. } => "data",
+fn format_constraint_block(
+    command: &TypeConstraintCommand,
+    args: &[crate::parsing::ast::CommandArg],
+    continuation_prefix: &str,
+    max_cols: usize,
+) -> String {
+    if command.continuation_shape() != ContinuationShape::CommaSeparated || args.len() < 2 {
+        return format!(
+            "{}-> {}",
+            continuation_prefix,
+            crate::parsing::ast::format_constraint_as_source(command, args)
+        );
     }
-}
-
-fn format_data(data: &LemmaData, line_prefix: &str) -> String {
-    let kw = data_declaration_keyword(data);
-    let ref_str = format!("{}", data.reference);
-    let continuation = format!("{line_prefix}{DATA_CONSTRAINT_INDENT}");
-    let rhs = data_value_rhs_for_spec_body(&data.value, &continuation);
-    if let Some((first, rest)) = rhs.split_once('\n') {
-        format!("{kw} {}: {}\n{}", ref_str, first, rest)
-    } else {
-        format!("{kw} {}: {}", ref_str, rhs)
+    let items: Vec<String> = args
+        .iter()
+        .map(|arg| format!("{}", AsLemmaSource(arg)))
+        .collect();
+    let wrap_indent = format!("{continuation_prefix}    ");
+    let mut lines: Vec<String> = Vec::new();
+    let mut current = format!("{continuation_prefix}-> {command} {}", items[0]);
+    for item in items.iter().skip(1) {
+        let candidate = format!("{current}, {item}");
+        if candidate.len() <= max_cols {
+            current = candidate;
+        } else {
+            current.push(',');
+            lines.push(current);
+            current = format!("{wrap_indent}{item}");
+        }
     }
+    lines.push(current);
+    lines.join("\n")
 }
 
-/// Byte length from start of `data ` or `with ` through the single space after `:` (same layout as [`format_data`]).
-fn data_line_prefix_len_before_rhs(keyword: &str, ref_str: &str) -> usize {
-    keyword.len() + 1 + ref_str.len() + 2
-}
-
-fn data_is_simple_single_line(data: &LemmaData, line_prefix: &str) -> bool {
-    if data_value_has_arrow_constraints(&data.value) {
-        return false;
-    }
-    let continuation = format!("{line_prefix}{DATA_CONSTRAINT_INDENT}");
-    let rhs = data_value_rhs_for_spec_body(&data.value, &continuation);
-    !rhs.contains('\n')
-}
-
-fn push_formatted_simple_data_line_padded(
-    out: &mut String,
-    data: &LemmaData,
-    line_prefix: &str,
-    target_prefix_len_before_rhs: usize,
-) {
-    let kw = data_declaration_keyword(data);
-    let ref_str = format!("{}", data.reference);
-    let continuation = format!("{line_prefix}{DATA_CONSTRAINT_INDENT}");
-    let rhs = data_value_rhs_for_spec_body(&data.value, &continuation);
-    let base = data_line_prefix_len_before_rhs(kw, &ref_str);
-    let gap = 1 + target_prefix_len_before_rhs.saturating_sub(base);
+/// `data reference:` then `gap` spaces, then `rhs`.
+fn push_data_line(out: &mut String, line_prefix: &str, reference: &str, gap: usize, rhs: &str) {
     out.push_str(line_prefix);
-    out.push_str(kw);
-    out.push(' ');
-    out.push_str(&ref_str);
+    out.push_str("data ");
+    out.push_str(reference);
     out.push(':');
     out.push_str(&" ".repeat(gap));
-    out.push_str(&rhs);
+    out.push_str(rhs);
+    out.push('\n');
 }
 
-fn emit_data_row_group(rows: &[&LemmaData], line_prefix: &str, out: &mut String) {
+/// A run of single-line rows aligns its right-hand sides; a multi-line row stands alone.
+fn emit_data_row_group(rows: &[&LemmaData], line_prefix: &str, max_cols: usize, out: &mut String) {
+    let continuation = format!("{line_prefix}{DATA_CONSTRAINT_INDENT}");
+    let formatted: Vec<(String, String)> = rows
+        .iter()
+        .map(|row| {
+            (
+                row.reference.to_string(),
+                data_value_rhs_for_spec_body(&row.value, &continuation, max_cols),
+            )
+        })
+        .collect();
     let mut i = 0;
     while i < rows.len() {
-        if data_is_simple_single_line(rows[i], line_prefix) {
-            let run_start = i;
-            i += 1;
-            while i < rows.len() && data_is_simple_single_line(rows[i], line_prefix) {
-                i += 1;
-            }
-            let run_end = i;
-            let target = (run_start..run_end)
-                .map(|k| {
-                    let row = rows[k];
-                    let kw = data_declaration_keyword(row);
-                    let ref_str = format!("{}", row.reference);
-                    data_line_prefix_len_before_rhs(kw, &ref_str)
-                })
-                .max()
-                .expect("BUG: non-empty run");
-            for row in rows[run_start..run_end].iter().copied() {
-                push_formatted_simple_data_line_padded(out, row, line_prefix, target);
-                out.push('\n');
-            }
-        } else {
-            let row = rows[i];
-            out.push_str(line_prefix);
-            out.push_str(&format_data(row, line_prefix));
-            out.push('\n');
-            if data_value_has_arrow_constraints(&row.value) && i + 1 < rows.len() {
-                out.push('\n');
-            }
-            i += 1;
+        let mut run_end = i;
+        while run_end < rows.len() && !formatted[run_end].1.contains('\n') {
+            run_end += 1;
         }
+        if run_end == i {
+            let (reference, rhs) = &formatted[i];
+            push_data_line(out, line_prefix, reference, 1, rhs);
+            if data_value_has_arrow_constraints(&rows[i].value) && i + 1 < rows.len() {
+                out.push('\n');
+            }
+            i += 1;
+            continue;
+        }
+        let width = formatted[i..run_end]
+            .iter()
+            .map(|(reference, _)| reference.len())
+            .max()
+            .expect("BUG: non-empty run");
+        for (reference, rhs) in &formatted[i..run_end] {
+            push_data_line(
+                out,
+                line_prefix,
+                reference,
+                1 + width - reference.len(),
+                rhs,
+            );
+        }
+        i = run_end;
     }
 }
 
 fn format_import_header(data: &LemmaData) -> String {
     let alias = &data.reference.name;
-    let DataValue::Import { spec_ref, .. } = &data.value else {
-        unreachable!("BUG: format_import_header called on non-Import data");
+    let (spec_ref, suffix) = match &data.value {
+        DataValue::Import { spec_ref, .. } => (spec_ref, ""),
+        DataValue::ImportList { spec_ref, .. } => (spec_ref, " list"),
+        DataValue::Definition { .. } => {
+            unreachable!("BUG: format_import_header called on non-Import data")
+        }
     };
     let spec_name = &spec_ref.name;
     if alias == spec_name {
-        format!("uses {}", spec_ref)
+        format!("uses {spec_ref}{suffix}")
     } else {
-        format!("uses {}: {}", alias, spec_ref)
+        format!("uses {alias}: {spec_ref}{suffix}")
     }
 }
 
-fn format_uses_block(data: &LemmaData, line_prefix: &str) -> String {
+/// `name: value` strings of one inline row, before alignment.
+fn uses_row_fields(bindings: &[crate::parsing::ast::UsesBinding]) -> Vec<(String, String)> {
+    bindings
+        .iter()
+        .map(|binding| (binding.path.to_string(), format_with_rhs(&binding.rhs)))
+        .collect()
+}
+
+/// `-> key` first, then rows in source order. Inline rows with the same field order align
+/// their columns; a row too long for one line puts one field per line.
+fn format_uses_list_block(data: &LemmaData, line_prefix: &str, max_cols: usize) -> String {
+    use crate::parsing::ast::UsesListRow;
+    let mut out = format_import_header(data);
+    let DataValue::ImportList { list, .. } = &data.value else {
+        unreachable!("BUG: format_uses_list_block called on non-list import");
+    };
+    let command_prefix = format!("{line_prefix}{DATA_CONSTRAINT_INDENT}-> ");
+    if let Some(key) = &list.key {
+        let fields: Vec<String> = key.fields.iter().map(ToString::to_string).collect();
+        out.push('\n');
+        out.push_str(&command_prefix);
+        out.push_str("key ");
+        out.push_str(&fields.join(", "));
+    }
+
+    let field_rows: Vec<Vec<(String, String)>> = list
+        .rows
+        .iter()
+        .filter_map(|row| match row {
+            UsesListRow::Fields { bindings, .. } => Some(uses_row_fields(bindings)),
+            UsesListRow::Values { .. } => None,
+        })
+        .collect();
+    let shared_names: Option<Vec<&str>> = field_rows
+        .first()
+        .map(|first| first.iter().map(|(name, _)| name.as_str()).collect());
+    let aligned = shared_names.as_ref().is_some_and(|names| {
+        field_rows.iter().all(|row| {
+            row.len() == names.len()
+                && row
+                    .iter()
+                    .zip(names.iter())
+                    .all(|((name, _), shared)| name == shared)
+        })
+    });
+    let column_widths: Vec<usize> = if aligned {
+        let columns = shared_names.as_ref().map_or(0, Vec::len);
+        (0..columns)
+            .map(|column| {
+                field_rows
+                    .iter()
+                    .map(|row| row[column].0.len() + 2 + row[column].1.len() + 1)
+                    .max()
+                    .expect("BUG: aligned rows are non-empty")
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+
+    let vertical_indent = format!("{line_prefix}{DATA_CONSTRAINT_INDENT}     ");
+    for row in &list.rows {
+        out.push('\n');
+        match row {
+            UsesListRow::Fields { bindings, .. } => {
+                let fields = uses_row_fields(bindings);
+                let mut inline = String::new();
+                for (index, (name, value)) in fields.iter().enumerate() {
+                    let last = index + 1 == fields.len();
+                    let cell = if last {
+                        format!("{name}: {value}")
+                    } else {
+                        format!("{name}: {value},")
+                    };
+                    inline.push_str(&cell);
+                    if !last {
+                        let width = column_widths.get(index).copied().unwrap_or(cell.len());
+                        inline.push_str(&" ".repeat(width.saturating_sub(cell.len()) + 1));
+                    }
+                }
+                let line = format!("{command_prefix}with {inline}");
+                if line.len() <= max_cols {
+                    out.push_str(&line);
+                } else {
+                    out.push_str(&command_prefix);
+                    out.push_str("with");
+                    for (index, (name, value)) in fields.iter().enumerate() {
+                        out.push('\n');
+                        out.push_str(&vertical_indent);
+                        out.push_str(&format!("{name}: {value}"));
+                        if index + 1 < fields.len() {
+                            out.push(',');
+                        }
+                    }
+                }
+            }
+            UsesListRow::Values { values, .. } => {
+                let items: Vec<String> = values.iter().map(format_with_rhs).collect();
+                out.push_str(&command_prefix);
+                out.push_str("with ");
+                out.push_str(&items.join(", "));
+            }
+        }
+    }
+    out
+}
+
+fn format_uses_block(data: &LemmaData, line_prefix: &str, max_cols: usize) -> String {
+    if matches!(&data.value, DataValue::ImportList { .. }) {
+        return format_uses_list_block(data, line_prefix, max_cols);
+    }
     let mut out = format_import_header(data);
     let DataValue::Import { bindings, .. } = &data.value else {
         unreachable!("BUG: format_uses_block called on non-Import data");
@@ -333,20 +447,21 @@ fn format_uses_block(data: &LemmaData, line_prefix: &str) -> String {
 ///
 /// 1. Imports (`uses`) with `-> with` bindings — declaration order
 /// 2. Regular local `data` — declaration order
-fn format_sorted_data(data: &[LemmaData], out: &mut String, line_prefix: &str) {
+fn format_sorted_data(data: &[LemmaData], out: &mut String, line_prefix: &str, max_cols: usize) {
     let mut regular: Vec<&LemmaData> = Vec::new();
     let mut imports: Vec<&LemmaData> = Vec::new();
 
     for data in data {
-        if matches!(&data.value, DataValue::Import { .. }) {
+        if data.value.uses_spec_ref().is_some() {
             imports.push(data);
         } else {
             regular.push(data);
         }
     }
 
-    let emit_group =
-        |rows: &[&LemmaData], out: &mut String| emit_data_row_group(rows, line_prefix, out);
+    let emit_group = |rows: &[&LemmaData], out: &mut String| {
+        emit_data_row_group(rows, line_prefix, max_cols, out)
+    };
 
     if !imports.is_empty() {
         out.push('\n');
@@ -356,7 +471,7 @@ fn format_sorted_data(data: &[LemmaData], out: &mut String, line_prefix: &str) {
                 out.push('\n');
             }
             out.push_str(line_prefix);
-            out.push_str(&format_uses_block(row, line_prefix));
+            out.push_str(&format_uses_block(row, line_prefix, max_cols));
             out.push('\n');
         }
     }
@@ -380,7 +495,7 @@ const UNLESS_LINE_PREFIX: &str = "  unless ";
 /// flat line), every clause on the rule uses split `then` at a fixed 4-space indent.
 fn format_rule(rule: &LemmaRule, max_cols: usize) -> String {
     let expr_indent = "  ";
-    let body = format_expr_wrapped(&rule.expression, max_cols, expr_indent, 10);
+    let body = format_expr_wrapped(&rule.expression, max_cols, expr_indent);
     let mut out = String::new();
     out.push_str("rule ");
     out.push_str(&rule.name);
@@ -395,13 +510,9 @@ fn format_rule(rule: &LemmaRule, max_cols: usize) -> String {
 
     let mut clauses: Vec<(String, String)> = Vec::new();
     for unless_clause in &rule.unless_clauses {
-        let condition = format_expr_wrapped(
-            &unless_clause.condition,
-            unless_condition_budget,
-            "    ",
-            10,
-        );
-        let result = format_expr_wrapped(&unless_clause.result, max_cols, "    ", 10);
+        let condition =
+            format_expr_wrapped(&unless_clause.condition, unless_condition_budget, "    ");
+        let result = format_expr_wrapped(&unless_clause.result, max_cols, "    ");
         clauses.push((condition, result));
     }
 
@@ -415,60 +526,43 @@ fn format_rule(rule: &LemmaRule, max_cols: usize) -> String {
 
     const SPLIT_THEN_INDENT_SPACES: usize = 4;
 
-    if any_split {
-        for (condition, result) in &clauses {
-            out.push_str("\n  unless ");
-            out.push_str(condition);
+    let mut singles: Vec<usize> = if any_split {
+        Vec::new()
+    } else {
+        (0..clauses.len()).collect()
+    };
+
+    loop {
+        if singles.is_empty() {
+            break;
+        }
+        let max_end = singles
+            .iter()
+            .map(|&i| pl + clauses[i].0.len())
+            .max()
+            .expect("BUG: singles non-empty");
+        let before = singles.len();
+        singles.retain(|&i| aligned_single_len(&clauses[i].1, max_end) <= max_cols);
+        if singles.len() == before {
+            break;
+        }
+    }
+
+    let align_max_end = singles.iter().map(|&i| pl + clauses[i].0.len()).max();
+
+    for (i, (condition, result)) in clauses.iter().enumerate() {
+        out.push('\n');
+        out.push_str(UNLESS_LINE_PREFIX);
+        out.push_str(condition);
+        if singles.contains(&i) {
+            let max_end = align_max_end.expect("BUG: singles.contains but align_max_end empty");
+            out.push_str(&" ".repeat(1 + max_end.saturating_sub(pl + condition.len())));
+        } else {
             out.push('\n');
             out.push_str(&" ".repeat(SPLIT_THEN_INDENT_SPACES));
-            out.push_str("then ");
-            out.push_str(result);
         }
-    } else {
-        let mut singles: Vec<usize> = clauses
-            .iter()
-            .enumerate()
-            .filter(|(_, (c, r))| naive_single_len(c, r) <= max_cols)
-            .map(|(i, _)| i)
-            .collect();
-
-        loop {
-            if singles.is_empty() {
-                break;
-            }
-            let max_end = singles
-                .iter()
-                .map(|&i| pl + clauses[i].0.len())
-                .max()
-                .expect("BUG: singles non-empty");
-            let before = singles.len();
-            singles.retain(|&i| aligned_single_len(&clauses[i].1, max_end) <= max_cols);
-            if singles.len() == before {
-                break;
-            }
-        }
-
-        let align_max_end = singles.iter().map(|&i| pl + clauses[i].0.len()).max();
-
-        for (i, (condition, result)) in clauses.iter().enumerate() {
-            if singles.contains(&i) {
-                let max_end = align_max_end.expect("BUG: singles.contains but align_max_end empty");
-                let gap = 1 + max_end.saturating_sub(pl + condition.len());
-                out.push('\n');
-                out.push_str(UNLESS_LINE_PREFIX);
-                out.push_str(condition);
-                out.push_str(&" ".repeat(gap));
-                out.push_str("then ");
-                out.push_str(result);
-            } else {
-                out.push_str("\n  unless ");
-                out.push_str(condition);
-                out.push('\n');
-                out.push_str(&" ".repeat(SPLIT_THEN_INDENT_SPACES));
-                out.push_str("then ");
-                out.push_str(result);
-            }
-        }
+        out.push_str("then ");
+        out.push_str(result);
     }
     out.push('\n');
     out
@@ -478,132 +572,14 @@ fn format_rule(rule: &LemmaRule, max_cols: usize) -> String {
 // Expression wrapping (soft line breaking at max_cols)
 // =============================================================================
 
-/// Indent every line after the first by `indent`.
-fn indent_after_first_line(s: &str, indent: &str) -> String {
-    let mut first = true;
-    let mut out = String::new();
-    for line in s.lines() {
-        if first {
-            first = false;
-            out.push_str(line);
-        } else {
-            out.push('\n');
-            out.push_str(indent);
-            out.push_str(line);
-        }
-    }
-    if s.ends_with('\n') {
-        out.push('\n');
-    }
-    out
-}
-
-struct BinaryWrapContext<'a> {
-    max_cols: usize,
-    indent: &'a str,
-    parent_prec: u8,
-    my_prec: u8,
-    assoc: Option<Associativity>,
-}
-
-fn format_binary_expr_wrapped(
-    left: &Expression,
-    op: &str,
-    right: &Expression,
-    ctx: BinaryWrapContext<'_>,
-) -> String {
-    let BinaryWrapContext {
-        max_cols,
-        indent,
-        parent_prec,
-        my_prec,
-        assoc,
-    } = ctx;
-    let left_inner = format_expr_wrapped(left, max_cols, indent, 10);
-    let right_inner = format_expr_wrapped(right, max_cols, indent, 10);
-    let left_str = if operand_needs_parentheses(
-        expression_precedence(&left.kind),
-        my_prec,
-        OperandSide::Left,
-        assoc,
-    ) {
-        format!("({})", left_inner)
+/// The expression on one line when it fits `max_cols`; otherwise every top-level `and` /
+/// arithmetic operator starts a new line at `indent`. Operands always print on one line.
+fn format_expr_wrapped(expr: &Expression, max_cols: usize, indent: &str) -> String {
+    let flat = Syntax(expr.root()).to_string();
+    if flat.len() <= max_cols {
+        flat
     } else {
-        left_inner
-    };
-    let right_str = if operand_needs_parentheses(
-        expression_precedence(&right.kind),
-        my_prec,
-        OperandSide::Right,
-        assoc,
-    ) {
-        format!("({})", right_inner)
-    } else {
-        right_inner
-    };
-    let single_line = format!("{} {} {}", left_str, op, right_str);
-    let body = if single_line.len() <= max_cols && !single_line.contains('\n') {
-        single_line
-    } else {
-        let continued_right = indent_after_first_line(&right_str, indent);
-        let continuation = format!("{}{} {}", indent, op, continued_right);
-        format!("{}\n{}", left_str, continuation)
-    };
-    if parent_prec < 10 && operand_needs_parentheses(my_prec, parent_prec, OperandSide::Left, None)
-    {
-        format!("({})", body)
-    } else {
-        body
-    }
-}
-
-/// Format an expression with optional wrapping at arithmetic and `and` operators when over max_cols.
-///
-/// Binary children use the same parenthesis policy as [`Expression`] display
-/// ([`operand_needs_parentheses`]). Pass `10` for top-level (no outer wrap).
-fn format_expr_wrapped(
-    expr: &Expression,
-    max_cols: usize,
-    indent: &str,
-    parent_prec: u8,
-) -> String {
-    let my_prec = expression_precedence(&expr.kind);
-
-    match &expr.kind {
-        ExpressionKind::Arithmetic(left, op, right) => format_binary_expr_wrapped(
-            left,
-            &op.to_string(),
-            right,
-            BinaryWrapContext {
-                max_cols,
-                indent,
-                parent_prec,
-                my_prec,
-                assoc: Some(arithmetic_associativity(op)),
-            },
-        ),
-        ExpressionKind::LogicalAnd(left, right) => format_binary_expr_wrapped(
-            left,
-            "and",
-            right,
-            BinaryWrapContext {
-                max_cols,
-                indent,
-                parent_prec,
-                my_prec,
-                assoc: Some(Associativity::Left),
-            },
-        ),
-        _ => {
-            let s = expr.to_string();
-            if parent_prec < 10
-                && operand_needs_parentheses(my_prec, parent_prec, OperandSide::Left, None)
-            {
-                format!("({})", s)
-            } else {
-                s
-            }
-        }
+        display_broken(expr.root(), indent)
     }
 }
 
@@ -723,10 +699,7 @@ mod tests {
             minute: 30,
             second: 0,
             microsecond: 0,
-            timezone: Some(TimezoneValue {
-                offset_hours: 0,
-                offset_minutes: 0,
-            }),
+            timezone: Some(TimezoneValue { offset_minutes: 0 }),
 
             granularity: DateGranularity::DateTime,
         });
@@ -1154,8 +1127,9 @@ rule window: past length
         let formatted =
             format_source(source, crate::parsing::source::SourceType::Volatile).unwrap();
         assert!(
-            formatted.contains("data x: 1\n\n\nrule r:\n"),
-            "two blank lines required between data block and rules block, got:\n{formatted:?}"
+            formatted.contains("data x: 1\n\nrule r:\n")
+                && !formatted.contains("data x: 1\n\n\nrule r:\n"),
+            "one blank line required between data block and rules block, got:\n{formatted:?}"
         );
     }
 
@@ -1283,5 +1257,72 @@ rule child_auto_covered_service_only:
         let twice =
             format_source(&formatted, crate::parsing::source::SourceType::Volatile).unwrap();
         assert_eq!(formatted, twice);
+    }
+
+    #[test]
+    fn test_format_long_arithmetic_chain_breaks_before_every_operator() {
+        let source = r#"spec test
+data first_amount: number
+data second_amount: number
+data third_amount: number
+data fourth_amount: number
+data fifth_amount: number
+data sixth_amount: number
+
+rule total: first_amount + second_amount + third_amount + fourth_amount + fifth_amount + sixth_amount
+"#;
+        let formatted =
+            format_source(source, crate::parsing::source::SourceType::Volatile).unwrap();
+        assert!(
+            formatted.contains(
+                "rule total:\n  first_amount\n  + second_amount\n  + third_amount\n  + fourth_amount\n  + fifth_amount\n  + sixth_amount\n"
+            ),
+            "overlong chain breaks before every operator, got:\n{formatted}"
+        );
+        let twice =
+            format_source(&formatted, crate::parsing::source::SourceType::Volatile).unwrap();
+        assert_eq!(formatted, twice);
+    }
+
+    #[test]
+    fn test_format_broken_chain_keeps_nested_chain_operand_flat() {
+        let source = r#"spec test
+data base_amount_value: number
+data first_amount: number
+data second_amount: number
+data third_amount: number
+data other_amount_value: number
+
+rule total: base_amount_value * (first_amount + second_amount + third_amount) + other_amount_value
+"#;
+        let formatted =
+            format_source(source, crate::parsing::source::SourceType::Volatile).unwrap();
+        assert!(
+            formatted.contains(
+                "rule total:\n  base_amount_value * (first_amount + second_amount + third_amount)\n  + other_amount_value\n"
+            ),
+            "only the root chain breaks, got:\n{formatted}"
+        );
+        let twice =
+            format_source(&formatted, crate::parsing::source::SourceType::Volatile).unwrap();
+        assert_eq!(formatted, twice);
+    }
+
+    #[test]
+    fn test_format_constrained_data_row_stands_alone_between_aligned_runs() {
+        let source = r#"spec test
+data a: 1
+data longer_name: 2
+data limit: number -> minimum 0
+data b: 3
+"#;
+        let formatted =
+            format_source(source, crate::parsing::source::SourceType::Volatile).unwrap();
+        assert!(
+            formatted.contains(
+                "data a:           1\ndata longer_name: 2\ndata limit: number\n  -> minimum 0\n\ndata b: 3\n"
+            ),
+            "got:\n{formatted}"
+        );
     }
 }

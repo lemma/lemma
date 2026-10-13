@@ -2,7 +2,7 @@
 
 > **A command-line interface for the Lemma language.**
 
-This package provides the `lemma` CLI for running, inspecting, and serving Lemma specs. It ships alongside the `lemma-engine` crate and exposes the same deterministic, auditable evaluation pipeline from the terminal.
+This package provides the `lemma` CLI for evaluating, inspecting and serving Lemma specs.
 
 ## Status
 
@@ -20,30 +20,37 @@ After installation the `lemma` binary is available on your PATH.
 
 ```bash
 # Evaluate a spec (all rules)
-lemma run shipping
+lemma evaluate shipping
 
 # Evaluate specific rules
-lemma run tax_calculation --rules=tax_owed
+lemma evaluate tax_calculation --rules=tax_owed
 
 # Provide data values
-lemma run tax_calculation income=75000 filing_status="married"
+lemma evaluate tax_calculation income=75000 filing_status="married"
+
+# Provide data as JSON from stdin (lists are passed this way)
+cat order.json | lemma evaluate order -
 
 # Explore specs interactively
-lemma run --interactive
+lemma evaluate --interactive
 
-# Show spec structure
+# Show the inputs, types and rules of a spec
 lemma show pricing
 
-# List loaded specs grouped by repository
-lemma list
-lemma list --prefix ./my_project
-lemma list --json
+# The same as a JSON Schema for the evaluation data
+lemma show pricing --json
+
+# Loaded specs grouped by repository
+lemma specs
+lemma specs --path ./my_project
+lemma specs --json
+lemma specs --all
 
 # Start the HTTP server
-lemma server --prefix ./engine/documentation/examples --port 8012
+lemma server --path ./engine/documentation/examples --port 8012
 
 # Start the MCP server (AI assistant integration)
-lemma mcp --prefix ./engine/documentation/examples
+lemma mcp --path ./engine/documentation/examples
 ```
 
 Each command supports `--help` for full usage details.
@@ -58,22 +65,21 @@ Each command supports `--help` for full usage details.
 
 ## Example session
 
-```bash
-lemma run shipping
-
-# Output:
-# ┌───────────────┬──────────────────────────────────────────────────────┐
-# │ Rule          ┆ Evaluation                                           │
-# ╞═══════════════╪══════════════════════════════════════════════════════╡
-# │ express_fee   ┆ 4.99                                                 │
-# │               ┆    ...                                               │
-# └───────────────┴──────────────────────────────────────────────────────┘
+```
+$ lemma evaluate shipping
+┌───────────────┬───────────┐
+│ base_shipping ┆ 8.99 eur  │
+├───────────────┼───────────┤
+│ express_fee   ┆ 4.99 eur  │
+├───────────────┼───────────┤
+│ total_cost    ┆ 13.98 eur │
+└───────────────┴───────────┘
 ```
 
-Enable raw mode to pipe results:
+JSON for tooling:
 
 ```bash
-lemma run shipping --json > output.json
+lemma evaluate shipping --json > output.json
 ```
 
 ## Documentation

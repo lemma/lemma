@@ -5,7 +5,7 @@ use std::fs;
 use tempfile::TempDir;
 
 #[test]
-fn test_cli_run_simple_spec() {
+fn test_cli_run_alias_still_evaluates() {
     let temp_dir = TempDir::new().unwrap();
     fs::write(
         temp_dir.path().join("test.lemma"),
@@ -13,28 +13,28 @@ fn test_cli_run_simple_spec() {
 spec simple_test
 data x: 10
 data y: 5
-rule sum: x + y
-rule product: x * y
+rule added: x + y
+rule multiplied: x * y
 "#,
     )
     .unwrap();
 
     let mut cmd = cargo_bin_cmd!("lemma");
     cmd.arg("run")
-        .arg("--prefix")
+        .arg("--path")
         .arg(temp_dir.path())
         .arg("simple_test");
 
     cmd.assert()
         .success()
-        .stdout(predicate::str::contains("sum"))
+        .stdout(predicate::str::contains("added"))
         .stdout(predicate::str::contains("15"))
-        .stdout(predicate::str::contains("product"))
+        .stdout(predicate::str::contains("multiplied"))
         .stdout(predicate::str::contains("50"));
 }
 
 #[test]
-fn test_cli_run_data_values() {
+fn test_cli_evaluate_data_values() {
     let temp_dir = TempDir::new().unwrap();
     fs::write(
         temp_dir.path().join("test.lemma"),
@@ -47,8 +47,8 @@ rule doubled: base * 2
     .unwrap();
 
     let mut cmd = cargo_bin_cmd!("lemma");
-    cmd.arg("run")
-        .arg("--prefix")
+    cmd.arg("evaluate")
+        .arg("--path")
         .arg(temp_dir.path())
         .arg("override_test")
         .arg("base=7");
@@ -63,24 +63,14 @@ fn test_cli_run_nonexistent_spec() {
     let temp_dir = TempDir::new().unwrap();
 
     let mut cmd = cargo_bin_cmd!("lemma");
-    cmd.arg("run")
-        .arg("--prefix")
+    cmd.arg("evaluate")
+        .arg("--path")
         .arg(temp_dir.path())
         .arg("nonexistent");
 
     cmd.assert().failure().stderr(
         predicate::str::contains("No execution plan").and(predicate::str::contains("nonexistent")),
     );
-}
-
-#[test]
-fn test_cli_run_rejects_dash_source() {
-    let mut cmd = cargo_bin_cmd!("lemma");
-    cmd.arg("run").arg("-").arg("any_spec");
-
-    cmd.assert()
-        .failure()
-        .stderr(predicate::str::contains("--prefix"));
 }
 
 #[test]
@@ -99,8 +89,8 @@ rule discount: 0
     .unwrap();
 
     let mut cmd = cargo_bin_cmd!("lemma");
-    cmd.arg("run")
-        .arg("--prefix")
+    cmd.arg("evaluate")
+        .arg("--path")
         .arg(temp_dir.path())
         .arg("discount_test");
 
@@ -127,7 +117,7 @@ rule doubled: value * 2
 
     let mut cmd = cargo_bin_cmd!("lemma");
     cmd.arg("show")
-        .arg("--prefix")
+        .arg("--path")
         .arg(temp_dir.path())
         .arg("inspect_test");
 
@@ -142,7 +132,87 @@ rule doubled: value * 2
 }
 
 #[test]
-fn test_cli_list_summary() {
+fn test_cli_show_json_is_input_json_schema() {
+    let temp_dir = TempDir::new().unwrap();
+    fs::write(
+        temp_dir.path().join("test.lemma"),
+        r#"
+spec inspect_test
+data name: text
+  -> option "Test"
+data value: number
+  -> minimum 0
+rule doubled: value * 2
+rule label: name
+"#,
+    )
+    .unwrap();
+
+    let mut cmd = cargo_bin_cmd!("lemma");
+    let output = cmd
+        .arg("show")
+        .arg("--path")
+        .arg(temp_dir.path())
+        .arg("inspect_test")
+        .arg("--json")
+        .output()
+        .expect("run lemma show --json");
+    assert!(output.status.success(), "{output:?}");
+    let document: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("show --json prints JSON");
+    assert_eq!(
+        document["$schema"],
+        "https://json-schema.org/draft/2020-12/schema"
+    );
+    assert_eq!(document["title"], "inspect_test");
+    assert_eq!(
+        document["properties"]["name"]["enum"],
+        serde_json::json!(["Test"])
+    );
+    assert_eq!(document["properties"]["value"]["type"], "string");
+    assert_eq!(document["required"], serde_json::json!(["name", "value"]));
+    assert!(document["x-lemma-rules"]["doubled"].is_object());
+}
+
+#[test]
+fn test_cli_show_json_serializes_measure_types() {
+    let temp_dir = TempDir::new().unwrap();
+    fs::write(
+        temp_dir.path().join("money.lemma"),
+        r#"
+spec purse
+data money: measure
+  -> unit eur: 1
+data amount: money
+rule out: amount
+"#,
+    )
+    .unwrap();
+
+    let mut cmd = cargo_bin_cmd!("lemma");
+    let output = cmd
+        .arg("show")
+        .arg("--path")
+        .arg(temp_dir.path())
+        .arg("purse")
+        .arg("--json")
+        .output()
+        .expect("run lemma show --json");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let document: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("show --json prints JSON");
+    assert_eq!(
+        document["properties"]["amount"]["x-lemma-type"]["decomposition"],
+        serde_json::json!({ "purse.money": 1 })
+    );
+}
+
+#[test]
+fn test_cli_specs_summary() {
     let temp_dir = TempDir::new().unwrap();
 
     fs::write(
@@ -164,7 +234,7 @@ data y: 2
     .unwrap();
 
     let mut cmd = cargo_bin_cmd!("lemma");
-    cmd.arg("list").arg("--prefix").arg(temp_dir.path());
+    cmd.arg("specs").arg("--path").arg(temp_dir.path());
 
     cmd.assert()
         .success()
@@ -175,7 +245,7 @@ data y: 2
 }
 
 #[test]
-fn test_cli_list_scopes_main_repository() {
+fn test_cli_specs_scopes_main_repository() {
     let temp_dir = TempDir::new().unwrap();
 
     fs::write(
@@ -196,7 +266,7 @@ data x: 1"#,
     .unwrap();
 
     let mut cmd = cargo_bin_cmd!("lemma");
-    cmd.arg("list").arg("--prefix").arg(temp_dir.path());
+    cmd.arg("specs").arg("--path").arg(temp_dir.path());
 
     cmd.assert().success().stdout(
         predicate::str::contains("entry")
@@ -205,6 +275,33 @@ data x: 1"#,
             .and(predicate::str::contains("Found").not())
             .and(predicate::str::contains("Repositories:").not()),
     );
+}
+
+#[test]
+fn test_cli_specs_text_groups_unique_names_per_repository() {
+    let temp_dir = TempDir::new().unwrap();
+    fs::write(
+        temp_dir.path().join("named.lemma"),
+        "repo deps_repo\n\nspec dep_only\ndata d: 1\n",
+    )
+    .unwrap();
+    fs::write(
+        temp_dir.path().join("workspace.lemma"),
+        "spec entry\ndata x: 1\n",
+    )
+    .unwrap();
+    fs::write(
+        temp_dir.path().join("workspace_2026.lemma"),
+        "spec entry 2026-01-01\ndata x: 2\n",
+    )
+    .unwrap();
+
+    let mut cmd = cargo_bin_cmd!("lemma");
+    cmd.arg("specs").arg("--path").arg(temp_dir.path());
+
+    cmd.assert()
+        .success()
+        .stdout("entry ...2026-01-01\nentry 2026-01-01\n\ndeps_repo\n  dep_only\n");
 }
 
 #[test]
@@ -221,8 +318,8 @@ rule with_tax: price * 1.21
     .unwrap();
 
     let mut cmd = cargo_bin_cmd!("lemma");
-    cmd.arg("run")
-        .arg("--prefix")
+    cmd.arg("evaluate")
+        .arg("--path")
         .arg(temp_dir.path())
         .arg("arithmetic_test");
 
@@ -244,8 +341,8 @@ this is not valid lemma syntax
     .unwrap();
 
     let mut cmd = cargo_bin_cmd!("lemma");
-    cmd.arg("run")
-        .arg("--prefix")
+    cmd.arg("evaluate")
+        .arg("--path")
         .arg(temp_dir.path())
         .arg("invalid");
 
@@ -287,8 +384,8 @@ also invalid lemma syntax
     .unwrap();
 
     let mut cmd = cargo_bin_cmd!("lemma");
-    cmd.arg("run")
-        .arg("--prefix")
+    cmd.arg("evaluate")
+        .arg("--path")
         .arg(temp_dir.path())
         .arg("valid_spec");
 
@@ -320,8 +417,8 @@ rule doubled: base_value * 2
     .unwrap();
 
     let mut cmd = cargo_bin_cmd!("lemma");
-    cmd.arg("run")
-        .arg("--prefix")
+    cmd.arg("evaluate")
+        .arg("--path")
         .arg(temp_dir.path())
         .arg("data_section")
         .arg("--rules=doubled")
@@ -331,7 +428,7 @@ rule doubled: base_value * 2
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
         output.status.success(),
-        "run --explain should succeed: {}",
+        "evaluate --explain should succeed: {}",
         stdout
     );
 
@@ -372,8 +469,8 @@ rule premium: (1 / denom) * loading
     .unwrap();
 
     let mut cmd = cargo_bin_cmd!("lemma");
-    cmd.arg("run")
-        .arg("--prefix")
+    cmd.arg("evaluate")
+        .arg("--path")
         .arg(temp_dir.path())
         .arg("settle")
         .arg("--rules=premium")
@@ -384,7 +481,7 @@ rule premium: (1 / denom) * loading
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
         output.status.success(),
-        "run --explain should succeed: {}",
+        "evaluate --explain should succeed: {}",
         stdout
     );
     assert!(
@@ -414,8 +511,8 @@ rule main: a + b
     .unwrap();
 
     let mut cmd = cargo_bin_cmd!("lemma");
-    cmd.arg("run")
-        .arg("--prefix")
+    cmd.arg("evaluate")
+        .arg("--path")
         .arg(temp_dir.path())
         .arg("open")
         .arg("--rules=main")
@@ -425,7 +522,7 @@ rule main: a + b
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
         output.status.success(),
-        "run --explain should succeed: {}",
+        "evaluate --explain should succeed: {}",
         stdout
     );
     assert!(
@@ -464,8 +561,8 @@ rule total: a + b + c
     .unwrap();
 
     let mut cmd = cargo_bin_cmd!("lemma");
-    cmd.arg("run")
-        .arg("--prefix")
+    cmd.arg("evaluate")
+        .arg("--path")
         .arg(temp_dir.path())
         .arg("nested_explanation")
         .arg("--rules=total")
@@ -475,7 +572,7 @@ rule total: a + b + c
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
         output.status.success(),
-        "run --explain should succeed: {}",
+        "evaluate --explain should succeed: {}",
         stdout
     );
 
@@ -518,8 +615,8 @@ rule out: true
     .unwrap();
 
     let mut cmd = cargo_bin_cmd!("lemma");
-    cmd.arg("run")
-        .arg("--prefix")
+    cmd.arg("evaluate")
+        .arg("--path")
         .arg(temp_dir.path())
         .arg("explain_test")
         .arg("--explain")
@@ -529,7 +626,7 @@ rule out: true
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
         output.status.success(),
-        "run --explain --json should succeed: {}",
+        "evaluate --explain --json should succeed: {}",
         stdout
     );
 
@@ -561,8 +658,8 @@ rule result: mass as gram
     .unwrap();
 
     let mut cmd = cargo_bin_cmd!("lemma");
-    cmd.arg("run")
-        .arg("--prefix")
+    cmd.arg("evaluate")
+        .arg("--path")
         .arg(temp_dir.path())
         .arg("test_cli_conversion_explain")
         .arg("mass=2 kilogram")
@@ -573,12 +670,12 @@ rule result: mass as gram
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
         output.status.success(),
-        "run --explain should succeed: {}",
+        "evaluate --explain should succeed: {}",
         stdout
     );
     assert!(stdout.contains("2 kilogram"), "stdout:\n{stdout}");
     assert!(
-        stdout.contains("1 kilogram is 1000 gram"),
+        stdout.contains("1 gram is 0.001 kilogram"),
         "stdout:\n{stdout}"
     );
     assert!(stdout.contains("mass"), "stdout:\n{stdout}");
@@ -605,8 +702,8 @@ rule result: age as day
     .unwrap();
 
     let mut cmd = cargo_bin_cmd!("lemma");
-    cmd.arg("run")
-        .arg("--prefix")
+    cmd.arg("evaluate")
+        .arg("--path")
         .arg(temp_dir.path())
         .arg("test_cli_date_conversion_explain")
         .arg("age=2024-06-01...2024-06-15")
@@ -617,7 +714,7 @@ rule result: age as day
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
         output.status.success(),
-        "run --explain should succeed: {}",
+        "evaluate --explain should succeed: {}",
         stdout
     );
     assert!(
@@ -654,8 +751,8 @@ rule result: (mass * 2) as gram
     .unwrap();
 
     let mut cmd = cargo_bin_cmd!("lemma");
-    cmd.arg("run")
-        .arg("--prefix")
+    cmd.arg("evaluate")
+        .arg("--path")
         .arg(temp_dir.path())
         .arg("test_cli_nested_conversion_explain")
         .arg("mass=2 kilogram")
@@ -666,11 +763,11 @@ rule result: (mass * 2) as gram
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
         output.status.success(),
-        "run --explain should succeed: {}",
+        "evaluate --explain should succeed: {}",
         stdout
     );
     assert!(
-        stdout.contains("1 kilogram is 1000 gram"),
+        stdout.contains("1 gram is 0.001 kilogram"),
         "stdout:\n{stdout}"
     );
     assert!(!stdout.contains("The measure is"), "stdout:\n{stdout}");
@@ -695,8 +792,8 @@ rule total: price
     .unwrap();
 
     let mut cmd = cargo_bin_cmd!("lemma");
-    cmd.arg("run")
-        .arg("--prefix")
+    cmd.arg("evaluate")
+        .arg("--path")
         .arg(temp_dir.path())
         .arg("money")
         .arg("price=100 eur")
@@ -721,26 +818,26 @@ data price: measure
     -> unit eur: 1
     -> suggest 10 eur
 data quantity: number -> suggest 3
-rule product: price * quantity
+rule multiplied: price * quantity
 "#,
     )
     .unwrap();
 
     let mut cmd = cargo_bin_cmd!("lemma");
-    cmd.arg("run")
-        .arg("--prefix")
+    cmd.arg("evaluate")
+        .arg("--path")
         .arg(temp_dir.path())
         .arg("product_explanation")
         .arg("price=10 eur")
         .arg("quantity=3")
-        .arg("--rules=product")
+        .arg("--rules=multiplied")
         .arg("--explain");
 
     let output = cmd.output().unwrap();
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
         output.status.success(),
-        "run --explain should succeed: {}",
+        "evaluate --explain should succeed: {}",
         stdout
     );
     assert!(
@@ -762,26 +859,26 @@ data price: measure
     -> unit usd: 0.91
     -> suggest 10 eur
 data quantity: number -> suggest 3
-rule product: price * quantity
+rule multiplied: price * quantity
 "#,
     )
     .unwrap();
 
     let mut cmd = cargo_bin_cmd!("lemma");
-    cmd.arg("run")
-        .arg("--prefix")
+    cmd.arg("evaluate")
+        .arg("--path")
         .arg(temp_dir.path())
         .arg("product_as_explanation")
         .arg("price=10 eur")
         .arg("quantity=3")
-        .arg("--rules=product")
+        .arg("--rules=multiplied")
         .arg("--explain");
 
     let output = cmd.output().unwrap();
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
         output.status.success(),
-        "run --explain should succeed: {}",
+        "evaluate --explain should succeed: {}",
         stdout
     );
     assert!(
@@ -820,8 +917,8 @@ rule total: subtotal + vat
     .unwrap();
 
     let mut cmd = cargo_bin_cmd!("lemma");
-    cmd.arg("run")
-        .arg("--prefix")
+    cmd.arg("evaluate")
+        .arg("--path")
         .arg(temp_dir.path())
         .arg("calc")
         .arg("is_rush=true")
@@ -848,7 +945,7 @@ rule total: subtotal + vat
 }
 
 #[test]
-fn run_json_without_explain_exposes_rule_missing_data() {
+fn evaluate_json_without_explain_exposes_rule_missing_data() {
     let temp_dir = TempDir::new().unwrap();
     fs::write(
         temp_dir.path().join("suggest.lemma"),
@@ -861,8 +958,8 @@ rule r: n
     .unwrap();
 
     let mut cmd = cargo_bin_cmd!("lemma");
-    cmd.arg("run")
-        .arg("--prefix")
+    cmd.arg("evaluate")
+        .arg("--path")
         .arg(temp_dir.path())
         .arg("suggest_demo")
         .arg("--json");
@@ -871,7 +968,7 @@ rule r: n
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
         output.status.success(),
-        "run --json without --explain should succeed: {stdout}"
+        "evaluate --json without --explain should succeed: {stdout}"
     );
 
     let json: serde_json::Value = serde_json::from_str(&stdout).expect("stdout is valid JSON");
@@ -894,7 +991,7 @@ rule r: n
 }
 
 #[test]
-fn list_json_emits_listed_spec_temporal_rows() {
+fn specs_json_emits_spec_version_temporal_rows() {
     let temp_dir = TempDir::new().unwrap();
     fs::write(
         temp_dir.path().join("pricing.lemma"),
@@ -911,8 +1008,8 @@ rule r: x
     .unwrap();
 
     let mut cmd = cargo_bin_cmd!("lemma");
-    cmd.arg("list")
-        .arg("--prefix")
+    cmd.arg("specs")
+        .arg("--path")
         .arg(temp_dir.path())
         .arg("--json");
 
@@ -920,13 +1017,13 @@ rule r: x
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
         output.status.success(),
-        "list --json should succeed: {stdout}"
+        "specs --json should succeed: {stdout}"
     );
 
     let json: serde_json::Value = serde_json::from_str(&stdout).expect("stdout is valid JSON");
     let workspace = json
         .as_array()
-        .expect("list is array")
+        .expect("specs is array")
         .iter()
         .find(|g| g["repository"].is_null())
         .expect("workspace group");
@@ -935,16 +1032,106 @@ rule r: x
     assert_eq!(
         pricing.len(),
         2,
-        "dual-version pricing must appear as two ListedSpec rows: {workspace}"
+        "dual-version pricing must appear as two SpecVersion rows: {workspace}"
     );
     assert!(
         pricing.iter().any(|s| s.get("effective_from").is_some()),
-        "ListedSpec rows must carry effective_from: {pricing:?}"
+        "SpecVersion rows must carry effective_from: {pricing:?}"
+    );
+    assert!(
+        !json
+            .as_array()
+            .expect("specs is array")
+            .iter()
+            .any(|g| g["repository"] == "lemma"),
+        "default specs --json omits lemma: {json}"
     );
 }
 
 #[test]
-fn run_json_incomplete_rule_exposes_results_missing_data() {
+fn specs_text_lists_uses_and_all_lists_loaded_repositories() {
+    let temp_dir = TempDir::new().unwrap();
+    fs::write(
+        temp_dir.path().join("compose.lemma"),
+        r#"
+spec inner
+data x: 1
+
+spec outer
+uses inner
+uses u: lemma units
+rule r: inner.x
+"#,
+    )
+    .unwrap();
+
+    let mut default_cmd = cargo_bin_cmd!("lemma");
+    default_cmd.arg("specs").arg("--path").arg(temp_dir.path());
+    let default_out = default_cmd.output().unwrap();
+    let default_text = String::from_utf8_lossy(&default_out.stdout);
+    assert!(
+        default_out.status.success(),
+        "lemma specs should succeed: {default_text}"
+    );
+    assert_eq!(default_text, "inner\nouter\n  inner\n  lemma units\n");
+
+    let mut all_cmd = cargo_bin_cmd!("lemma");
+    all_cmd
+        .arg("specs")
+        .arg("--all")
+        .arg("--path")
+        .arg(temp_dir.path());
+    let all_out = all_cmd.output().unwrap();
+    let all_text = String::from_utf8_lossy(&all_out.stdout);
+    assert!(
+        all_out.status.success(),
+        "lemma specs --all should succeed: {all_text}"
+    );
+    assert!(
+        all_text.starts_with("inner\nouter\n\nlemma\n  units\n"),
+        "{all_text}"
+    );
+    assert!(
+        !all_text.contains("  lemma units\n"),
+        "--all must not nest uses: {all_text}"
+    );
+
+    let mut json_cmd = cargo_bin_cmd!("lemma");
+    json_cmd
+        .arg("specs")
+        .arg("--path")
+        .arg(temp_dir.path())
+        .arg("--json");
+    let json_out = json_cmd.output().unwrap();
+    let json_stdout = String::from_utf8_lossy(&json_out.stdout);
+    assert!(
+        json_out.status.success(),
+        "lemma specs --json should succeed: {json_stdout}"
+    );
+    let json: serde_json::Value = serde_json::from_str(&json_stdout).expect("JSON");
+    let workspace = json
+        .as_array()
+        .expect("array")
+        .iter()
+        .find(|g| g["repository"].is_null())
+        .expect("workspace");
+    let outer = workspace["specs"]
+        .as_array()
+        .expect("specs")
+        .iter()
+        .find(|s| s["name"] == "outer")
+        .expect("outer");
+    assert_eq!(
+        outer["dependencies"],
+        serde_json::json!([
+            { "name": "inner" },
+            { "repository": "lemma", "name": "units" }
+        ])
+    );
+}
+
+#[test]
+fn evaluate_json_incomplete_rule_exposes_results_missing_data() {
     let temp_dir = TempDir::new().unwrap();
     fs::write(
         temp_dir.path().join("incomplete.lemma"),
@@ -958,8 +1145,8 @@ rule main: a + b
     .unwrap();
 
     let mut cmd = cargo_bin_cmd!("lemma");
-    cmd.arg("run")
-        .arg("--prefix")
+    cmd.arg("evaluate")
+        .arg("--path")
         .arg(temp_dir.path())
         .arg("incomplete")
         .arg("--json");
@@ -968,7 +1155,7 @@ rule main: a + b
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
         output.status.success(),
-        "run --json should succeed: {stdout}"
+        "evaluate --json should succeed: {stdout}"
     );
 
     let json: serde_json::Value = serde_json::from_str(&stdout).expect("stdout is valid JSON");
@@ -981,4 +1168,197 @@ rule main: a + b
         ["a", "b"],
         "smoke: missing_data must list unbound inputs: {json}"
     );
+}
+
+const SHIPPING_SPEC: &str = r#"
+spec shipping
+data weight: measure
+  -> unit kilogram: 1
+data express: boolean
+data note: text
+rule heavy: weight > 10 kilogram
+rule fast: express
+"#;
+
+fn evaluate_with_stdin_json(json: &str, extra: &[&str]) -> assert_cmd::assert::Assert {
+    let temp_dir = TempDir::new().unwrap();
+    fs::write(temp_dir.path().join("shipping.lemma"), SHIPPING_SPEC).unwrap();
+    let mut cmd = cargo_bin_cmd!("lemma");
+    cmd.arg("evaluate")
+        .arg("--path")
+        .arg(temp_dir.path())
+        .arg("shipping")
+        .arg("-");
+    for arg in extra {
+        cmd.arg(arg);
+    }
+    cmd.write_stdin(json.to_string());
+    cmd.assert()
+}
+
+#[test]
+fn evaluate_stdin_data_binds_single_unit_map_and_boolean() {
+    evaluate_with_stdin_json(r#"{"weight": {"kilogram": "12"}, "express": true}"#, &[])
+        .success()
+        .stdout(predicate::str::contains("heavy"))
+        .stdout(predicate::str::contains("fast"))
+        .stdout(predicate::str::contains("true"));
+}
+
+#[test]
+fn evaluate_stdin_data_null_is_omitted() {
+    let assert =
+        evaluate_with_stdin_json(r#"{"weight": null, "express": true}"#, &["--json"]).success();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    let json: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(
+        json["results"]["heavy"]["missing_data"][0], "weight",
+        "{json}"
+    );
+}
+
+#[test]
+fn evaluate_stdin_data_number_is_request_error() {
+    evaluate_with_stdin_json(r#"{"weight": {"kilogram": 12}}"#, &[])
+        .failure()
+        .stderr(predicate::str::contains("pass as string: \"12\""));
+}
+
+#[test]
+fn evaluate_stdin_data_multi_key_unit_map_is_request_error() {
+    evaluate_with_stdin_json(r#"{"weight": {"kilogram": "12", "gram": "1"}}"#, &[])
+        .failure()
+        .stderr(predicate::str::contains("single-unit"));
+}
+
+#[test]
+fn evaluate_stdin_data_boolean_on_text_is_request_error() {
+    evaluate_with_stdin_json(r#"{"note": true}"#, &[])
+        .failure()
+        .stderr(predicate::str::contains("note"));
+}
+
+#[test]
+fn evaluate_stdin_data_array_on_scalar_is_request_error() {
+    evaluate_with_stdin_json(r#"{"note": ["a"]}"#, &[])
+        .failure()
+        .stderr(predicate::str::contains("array overlay"));
+}
+
+#[test]
+fn evaluate_stdin_data_non_object_is_error() {
+    evaluate_with_stdin_json(r#"["weight"]"#, &[])
+        .failure()
+        .stderr(predicate::str::contains("must contain a JSON object"));
+}
+
+#[test]
+fn evaluate_stdin_data_and_name_value_same_key_is_error() {
+    evaluate_with_stdin_json(r#"{"express": true}"#, &["Express=false"])
+        .failure()
+        .stderr(predicate::str::contains("Duplicate data key 'express'"));
+}
+
+#[test]
+fn evaluate_stdin_data_combines_with_name_value() {
+    evaluate_with_stdin_json(r#"{"express": true}"#, &["weight=12 kilogram"])
+        .success()
+        .stdout(predicate::str::contains("heavy"));
+}
+
+#[test]
+fn evaluate_stdin_data_seeds_interactive() {
+    evaluate_with_stdin_json(
+        r#"{"weight": {"kilogram": "12"}, "express": true}"#,
+        &["--interactive", "--rules=heavy,fast"],
+    )
+    .success()
+    .stdout(predicate::str::contains("heavy"))
+    .stdout(predicate::str::contains("true"));
+}
+
+#[test]
+fn evaluate_stdin_data_dash_twice_is_error() {
+    let temp_dir = TempDir::new().unwrap();
+    fs::write(temp_dir.path().join("shipping.lemma"), SHIPPING_SPEC).unwrap();
+    cargo_bin_cmd!("lemma")
+        .arg("evaluate")
+        .arg("--path")
+        .arg(temp_dir.path())
+        .arg("shipping")
+        .arg("-")
+        .arg("-")
+        .write_stdin(r#"{"express": true}"#)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("`-` given more than once"));
+}
+
+#[test]
+fn evaluate_stdin_data_empty_is_error() {
+    evaluate_with_stdin_json("", &[])
+        .failure()
+        .stderr(predicate::str::contains("stdin is empty"));
+}
+
+#[test]
+fn evaluate_without_dash_ignores_piped_stdin() {
+    let temp_dir = TempDir::new().unwrap();
+    fs::write(temp_dir.path().join("shipping.lemma"), SHIPPING_SPEC).unwrap();
+    cargo_bin_cmd!("lemma")
+        .arg("evaluate")
+        .arg("--path")
+        .arg(temp_dir.path())
+        .arg("shipping")
+        .arg("weight=12 kilogram")
+        .arg("express=true")
+        .write_stdin("not json")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("heavy"));
+}
+
+#[test]
+fn format_rewrites_lemma_fences_in_markdown() {
+    let temp_dir = TempDir::new().unwrap();
+    let md = temp_dir.path().join("guide.md");
+    fs::write(
+        &md,
+        "# Demo\n\n```lemma\nspec demo\ndata X: 1\nrule Y: X\n```\n",
+    )
+    .unwrap();
+
+    cargo_bin_cmd!("lemma")
+        .arg("format")
+        .arg(&md)
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("Formatted:"));
+
+    let rewritten = fs::read_to_string(&md).unwrap();
+    assert!(rewritten.contains("data x: 1"));
+    assert!(rewritten.contains("rule y:"));
+    assert!(rewritten.contains("# Demo"));
+
+    cargo_bin_cmd!("lemma")
+        .arg("format")
+        .arg("--check")
+        .arg(&md)
+        .assert()
+        .success();
+}
+
+#[test]
+fn format_check_fails_unformatted_markdown_fence() {
+    let temp_dir = TempDir::new().unwrap();
+    let md = temp_dir.path().join("guide.md");
+    fs::write(&md, "```lemma\nspec demo\ndata X: 1\n```\n").unwrap();
+
+    cargo_bin_cmd!("lemma")
+        .arg("format")
+        .arg("--check")
+        .arg(&md)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("Would reformat:"));
 }

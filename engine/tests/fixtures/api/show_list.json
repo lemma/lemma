@@ -1,0 +1,1305 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "coffee_order",
+  "type": "object",
+  "additionalProperties": true,
+  "properties": {
+    "menu": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/LemmaRow_menu__item"
+      },
+      "maxItems": 1024,
+      "description": "menu_item",
+      "default": [
+        {
+          "drink": "espresso",
+          "price": "2.5 eur",
+          "size": "1"
+        },
+        {
+          "drink": "latte",
+          "price": "3.5 eur",
+          "size": "2"
+        }
+      ],
+      "x-lemma-type": {
+        "name": "menu_item list",
+        "kind": "list",
+        "element": {
+          "kind": "spec",
+          "spec": "menu_item",
+          "effective": ""
+        },
+        "key": {
+          "fields": [
+            "drink"
+          ]
+        },
+        "extends": {
+          "kind": "primitive"
+        }
+      },
+      "x-lemma-path": [],
+      "x-lemma-needed-by-rules": [
+        "all_cheap",
+        "any_large",
+        "average",
+        "cheapest",
+        "drink_count",
+        "extended",
+        "highest",
+        "large",
+        "lowest",
+        "newest",
+        "priciest",
+        "selected",
+        "selected_price",
+        "size_product",
+        "top_two",
+        "total"
+      ],
+      "x-lemma-value": {
+        "list": [
+          {
+            "fields": {
+              "drink": {
+                "result": "espresso",
+                "text": "espresso"
+              },
+              "price": {
+                "result": "2.5 eur",
+                "measure": {
+                  "eur": "2.5"
+                },
+                "unit": "eur"
+              },
+              "size": {
+                "result": "1",
+                "number": "1"
+              }
+            }
+          },
+          {
+            "fields": {
+              "drink": {
+                "result": "latte",
+                "text": "latte"
+              },
+              "price": {
+                "result": "3.5 eur",
+                "measure": {
+                  "eur": "3.5"
+                },
+                "unit": "eur"
+              },
+              "size": {
+                "result": "2",
+                "number": "2"
+              }
+            }
+          }
+        ]
+      }
+    },
+    "ordered": {
+      "type": "string",
+      "description": "A text value. Text values are limited to 1024 UTF-8 bytes.",
+      "default": "latte",
+      "x-lemma-type": {
+        "name": "ordered",
+        "kind": "text",
+        "extends": {
+          "kind": "custom",
+          "parent": "menu.drink",
+          "family": "menu_item.drink",
+          "defining_spec": {
+            "kind": "import"
+          }
+        }
+      },
+      "x-lemma-path": [],
+      "x-lemma-needed-by-rules": [
+        "selected",
+        "selected_price"
+      ],
+      "x-lemma-value": {
+        "result": "latte",
+        "text": "latte"
+      }
+    },
+    "fares": {
+      "type": "array",
+      "items": {
+        "oneOf": [
+          {
+            "type": "string",
+            "pattern": "^\\s*[+-]?(?:[0-9](?:_?[0-9]){0,27}(?:\\.(?:[0-9](?:_?[0-9]){0,27})?)?|\\.[0-9](?:_?[0-9]){0,27})(?:[eE][+-]?[0-9]{1,2})?\\s+(eur)\\s*$"
+          },
+          {
+            "type": "object",
+            "minProperties": 1,
+            "maxProperties": 1,
+            "propertyNames": {
+              "enum": [
+                "eur"
+              ]
+            },
+            "additionalProperties": {
+              "type": "string",
+              "pattern": "^\\s*[+-]?(?:[0-9](?:_?[0-9]){0,27}(?:\\.(?:[0-9](?:_?[0-9]){0,27})?)?|\\.[0-9](?:_?[0-9]){0,27})(?:[eE][+-]?[0-9]{1,2})?\\s*$"
+            }
+          }
+        ]
+      },
+      "maxItems": 1024,
+      "description": "A numeric amount in one of this type's units.",
+      "default": [
+        "89 eur",
+        "120 eur"
+      ],
+      "x-lemma-type": {
+        "name": "fares",
+        "kind": "list",
+        "element": {
+          "kind": "measure",
+          "minimum": null,
+          "maximum": null,
+          "decimals": null,
+          "units": [
+            {
+              "name": "eur",
+              "factor": {
+                "numer": "1",
+                "denom": "1"
+              },
+              "derived_measure_factors": [
+                [
+                  "eur",
+                  1
+                ]
+              ],
+              "decomposition": {
+                "menu_item.price": 1
+              }
+            }
+          ],
+          "traits": [],
+          "decomposition": {
+            "menu_item.price": 1
+          }
+        },
+        "key": "numbered",
+        "extends": {
+          "kind": "custom",
+          "parent": "menu.price list",
+          "family": "coffee_order.fares",
+          "defining_spec": {
+            "kind": "import"
+          }
+        }
+      },
+      "x-lemma-path": [],
+      "x-lemma-needed-by-rules": [
+        "high_fares",
+        "more_fares"
+      ],
+      "x-lemma-value": {
+        "result": "89 eur, 120 eur",
+        "list": [
+          {
+            "result": "89 eur",
+            "measure": {
+              "eur": "89"
+            },
+            "unit": "eur"
+          },
+          {
+            "result": "120 eur",
+            "measure": {
+              "eur": "120"
+            },
+            "unit": "eur"
+          }
+        ]
+      }
+    }
+  },
+  "$defs": {
+    "LemmaRow_menu__item": {
+      "title": "menu_item row",
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "drink": {
+          "type": "string",
+          "description": "A text value. Text values are limited to 1024 UTF-8 bytes.",
+          "x-lemma-type": {
+            "name": "drink",
+            "kind": "text",
+            "extends": {
+              "kind": "custom",
+              "parent": "text",
+              "family": "menu_item.drink",
+              "defining_spec": {
+                "kind": "local"
+              }
+            }
+          },
+          "x-lemma-path": [],
+          "x-lemma-needed-by-rules": [
+            "extended",
+            "selected",
+            "selected_price"
+          ]
+        },
+        "price": {
+          "oneOf": [
+            {
+              "type": "string",
+              "pattern": "^\\s*[+-]?(?:[0-9](?:_?[0-9]){0,27}(?:\\.(?:[0-9](?:_?[0-9]){0,27})?)?|\\.[0-9](?:_?[0-9]){0,27})(?:[eE][+-]?[0-9]{1,2})?\\s+(eur)\\s*$"
+            },
+            {
+              "type": "object",
+              "minProperties": 1,
+              "maxProperties": 1,
+              "propertyNames": {
+                "enum": [
+                  "eur"
+                ]
+              },
+              "additionalProperties": {
+                "type": "string",
+                "pattern": "^\\s*[+-]?(?:[0-9](?:_?[0-9]){0,27}(?:\\.(?:[0-9](?:_?[0-9]){0,27})?)?|\\.[0-9](?:_?[0-9]){0,27})(?:[eE][+-]?[0-9]{1,2})?\\s*$"
+              }
+            }
+          ],
+          "description": "A numeric amount in one of this type's units.",
+          "x-lemma-type": {
+            "name": "price",
+            "kind": "measure",
+            "minimum": null,
+            "maximum": null,
+            "decimals": null,
+            "units": [
+              {
+                "name": "eur",
+                "factor": {
+                  "numer": "1",
+                  "denom": "1"
+                },
+                "derived_measure_factors": [
+                  [
+                    "eur",
+                    1
+                  ]
+                ],
+                "decomposition": {
+                  "menu_item.price": 1
+                }
+              }
+            ],
+            "traits": [],
+            "decomposition": {
+              "menu_item.price": 1
+            },
+            "extends": {
+              "kind": "custom",
+              "parent": "measure",
+              "family": "menu_item.price",
+              "defining_spec": {
+                "kind": "local"
+              }
+            }
+          },
+          "x-lemma-path": [],
+          "x-lemma-needed-by-rules": [
+            "all_cheap",
+            "average",
+            "cheapest",
+            "highest",
+            "lowest",
+            "priciest",
+            "selected_price",
+            "total"
+          ]
+        },
+        "size": {
+          "type": "string",
+          "pattern": "^\\s*[+-]?(?:[0-9](?:_?[0-9]){0,27}(?:\\.(?:[0-9](?:_?[0-9]){0,27})?)?|\\.[0-9](?:_?[0-9]){0,27})(?:[eE][+-]?[0-9]{1,2})?\\s*$",
+          "description": "A dimensionless number.",
+          "x-lemma-type": {
+            "name": "size",
+            "kind": "number",
+            "minimum": null,
+            "maximum": null,
+            "decimals": null,
+            "extends": {
+              "kind": "custom",
+              "parent": "number",
+              "family": "menu_item.size",
+              "defining_spec": {
+                "kind": "local"
+              }
+            }
+          },
+          "x-lemma-path": [],
+          "x-lemma-needed-by-rules": [
+            "any_large",
+            "large",
+            "size_product"
+          ]
+        }
+      },
+      "required": [
+        "drink",
+        "price",
+        "size"
+      ]
+    }
+  },
+  "x-lemma-start-line": 10,
+  "x-lemma-source-type": {
+    "path": "coffee_order_lists.lemma"
+  },
+  "x-lemma-meta": {},
+  "x-lemma-types": {
+    "ordered": {
+      "name": "ordered",
+      "kind": "text",
+      "length": null,
+      "options": [],
+      "help": "A text value.",
+      "extends": {
+        "kind": "custom",
+        "parent": "menu.drink",
+        "family": "menu_item.drink",
+        "defining_spec": {
+          "kind": "import"
+        }
+      }
+    },
+    "fares": {
+      "name": "fares",
+      "kind": "list",
+      "element": {
+        "kind": "measure",
+        "minimum": null,
+        "maximum": null,
+        "decimals": null,
+        "units": [
+          {
+            "name": "eur",
+            "factor": {
+              "numer": "1",
+              "denom": "1"
+            },
+            "derived_measure_factors": [
+              [
+                "eur",
+                1
+              ]
+            ],
+            "decomposition": {
+              "menu_item.price": 1
+            }
+          }
+        ],
+        "traits": [],
+        "decomposition": {
+          "menu_item.price": 1
+        },
+        "help": "A numeric amount in one of this type's units."
+      },
+      "key": "numbered",
+      "extends": {
+        "kind": "custom",
+        "parent": "menu.price list",
+        "family": "coffee_order.fares",
+        "defining_spec": {
+          "kind": "import"
+        }
+      }
+    }
+  },
+  "x-lemma-rules": {
+    "all_cheap": {
+      "type": {
+        "name": null,
+        "kind": "boolean",
+        "help": "Whether this holds (true or false).",
+        "extends": {
+          "kind": "primitive"
+        }
+      },
+      "path": [],
+      "branches": [
+        {
+          "result": {
+            "type": "list_command",
+            "list": {
+              "type": "data",
+              "name": "menu"
+            },
+            "command": "all",
+            "args": [
+              {
+                "type": "comparison",
+                "op": "less_than",
+                "left": {
+                  "type": "row_field",
+                  "field": "price"
+                },
+                "right": {
+                  "type": "literal",
+                  "result": "5 eur",
+                  "measure": {
+                    "eur": "5"
+                  },
+                  "unit": "eur"
+                }
+              }
+            ]
+          }
+        }
+      ],
+      "depends_on_rules": []
+    },
+    "any_large": {
+      "type": {
+        "name": null,
+        "kind": "boolean",
+        "help": "Whether this holds (true or false).",
+        "extends": {
+          "kind": "primitive"
+        }
+      },
+      "path": [],
+      "branches": [
+        {
+          "result": {
+            "type": "list_command",
+            "list": {
+              "type": "data",
+              "name": "menu"
+            },
+            "command": "any",
+            "args": [
+              {
+                "type": "comparison",
+                "op": "greater_than",
+                "left": {
+                  "type": "row_field",
+                  "field": "size"
+                },
+                "right": {
+                  "type": "literal",
+                  "result": "1",
+                  "number": "1"
+                }
+              }
+            ]
+          }
+        }
+      ],
+      "depends_on_rules": []
+    },
+    "average": {
+      "type": {
+        "name": "price",
+        "kind": "measure",
+        "minimum": null,
+        "maximum": null,
+        "decimals": null,
+        "units": [
+          {
+            "name": "eur",
+            "factor": {
+              "numer": "1",
+              "denom": "1"
+            },
+            "derived_measure_factors": [
+              [
+                "eur",
+                1
+              ]
+            ],
+            "decomposition": {
+              "menu_item.price": 1
+            }
+          }
+        ],
+        "traits": [],
+        "decomposition": {
+          "menu_item.price": 1
+        },
+        "help": "A numeric amount in one of this type's units.",
+        "extends": {
+          "kind": "custom",
+          "parent": "measure",
+          "family": "menu_item.price",
+          "defining_spec": {
+            "kind": "local"
+          }
+        }
+      },
+      "path": [],
+      "branches": [
+        {
+          "result": {
+            "type": "list_command",
+            "list": {
+              "type": "data",
+              "name": "menu"
+            },
+            "command": "avg",
+            "args": [
+              {
+                "type": "row_field",
+                "field": "price"
+              }
+            ]
+          }
+        }
+      ],
+      "depends_on_rules": []
+    },
+    "cheapest": {
+      "type": {
+        "name": null,
+        "kind": "spec",
+        "spec": "menu_item",
+        "effective": "",
+        "extends": {
+          "kind": "primitive"
+        }
+      },
+      "path": [],
+      "branches": [
+        {
+          "result": {
+            "type": "list_command",
+            "list": {
+              "type": "list_command",
+              "list": {
+                "type": "data",
+                "name": "menu"
+              },
+              "command": "sort",
+              "direction": "asc",
+              "args": [
+                {
+                  "type": "row_field",
+                  "field": "price"
+                }
+              ]
+            },
+            "command": "first",
+            "args": []
+          }
+        }
+      ],
+      "depends_on_rules": []
+    },
+    "drink_count": {
+      "type": {
+        "name": null,
+        "kind": "number",
+        "minimum": null,
+        "maximum": null,
+        "decimals": null,
+        "help": "A dimensionless number.",
+        "extends": {
+          "kind": "primitive"
+        }
+      },
+      "path": [],
+      "branches": [
+        {
+          "result": {
+            "type": "list_command",
+            "list": {
+              "type": "data",
+              "name": "menu"
+            },
+            "command": "count",
+            "args": []
+          }
+        }
+      ],
+      "depends_on_rules": []
+    },
+    "extended": {
+      "type": {
+        "name": "menu_item list",
+        "kind": "list",
+        "element": {
+          "kind": "spec",
+          "spec": "menu_item",
+          "effective": ""
+        },
+        "key": {
+          "fields": [
+            "drink"
+          ]
+        },
+        "extends": {
+          "kind": "primitive"
+        }
+      },
+      "path": [],
+      "branches": [
+        {
+          "result": {
+            "type": "list_command",
+            "list": {
+              "type": "data",
+              "name": "menu"
+            },
+            "command": "with",
+            "args": [
+              {
+                "type": "row_field_value",
+                "field": "drink",
+                "value": {
+                  "type": "literal",
+                  "result": "mocha",
+                  "text": "mocha"
+                }
+              },
+              {
+                "type": "row_field_value",
+                "field": "price",
+                "value": {
+                  "type": "literal",
+                  "result": "4 eur",
+                  "measure": {
+                    "eur": "4"
+                  },
+                  "unit": "eur"
+                }
+              },
+              {
+                "type": "row_field_value",
+                "field": "size",
+                "value": {
+                  "type": "literal",
+                  "result": "2",
+                  "number": "2"
+                }
+              }
+            ]
+          }
+        }
+      ],
+      "depends_on_rules": []
+    },
+    "high_fares": {
+      "type": {
+        "name": "fares",
+        "kind": "list",
+        "element": {
+          "kind": "measure",
+          "minimum": null,
+          "maximum": null,
+          "decimals": null,
+          "units": [
+            {
+              "name": "eur",
+              "factor": {
+                "numer": "1",
+                "denom": "1"
+              },
+              "derived_measure_factors": [
+                [
+                  "eur",
+                  1
+                ]
+              ],
+              "decomposition": {
+                "menu_item.price": 1
+              }
+            }
+          ],
+          "traits": [],
+          "decomposition": {
+            "menu_item.price": 1
+          },
+          "help": "A numeric amount in one of this type's units."
+        },
+        "key": "numbered",
+        "extends": {
+          "kind": "custom",
+          "parent": "menu.price list",
+          "family": "coffee_order.fares",
+          "defining_spec": {
+            "kind": "import"
+          }
+        }
+      },
+      "path": [],
+      "branches": [
+        {
+          "result": {
+            "type": "list_command",
+            "list": {
+              "type": "data",
+              "name": "fares"
+            },
+            "command": "where",
+            "args": [
+              {
+                "type": "comparison",
+                "op": "greater_than_or_equal",
+                "left": {
+                  "type": "row_value"
+                },
+                "right": {
+                  "type": "literal",
+                  "result": "100 eur",
+                  "measure": {
+                    "eur": "100"
+                  },
+                  "unit": "eur"
+                }
+              }
+            ]
+          }
+        }
+      ],
+      "depends_on_rules": []
+    },
+    "highest": {
+      "type": {
+        "name": "price",
+        "kind": "measure",
+        "minimum": null,
+        "maximum": null,
+        "decimals": null,
+        "units": [
+          {
+            "name": "eur",
+            "factor": {
+              "numer": "1",
+              "denom": "1"
+            },
+            "derived_measure_factors": [
+              [
+                "eur",
+                1
+              ]
+            ],
+            "decomposition": {
+              "menu_item.price": 1
+            }
+          }
+        ],
+        "traits": [],
+        "decomposition": {
+          "menu_item.price": 1
+        },
+        "help": "A numeric amount in one of this type's units.",
+        "extends": {
+          "kind": "custom",
+          "parent": "measure",
+          "family": "menu_item.price",
+          "defining_spec": {
+            "kind": "local"
+          }
+        }
+      },
+      "path": [],
+      "branches": [
+        {
+          "result": {
+            "type": "list_command",
+            "list": {
+              "type": "data",
+              "name": "menu"
+            },
+            "command": "max",
+            "args": [
+              {
+                "type": "row_field",
+                "field": "price"
+              }
+            ]
+          }
+        }
+      ],
+      "depends_on_rules": []
+    },
+    "large": {
+      "type": {
+        "name": "menu_item list",
+        "kind": "list",
+        "element": {
+          "kind": "spec",
+          "spec": "menu_item",
+          "effective": ""
+        },
+        "key": {
+          "fields": [
+            "drink"
+          ]
+        },
+        "extends": {
+          "kind": "primitive"
+        }
+      },
+      "path": [],
+      "branches": [
+        {
+          "result": {
+            "type": "list_command",
+            "list": {
+              "type": "data",
+              "name": "menu"
+            },
+            "command": "where",
+            "args": [
+              {
+                "type": "comparison",
+                "op": "greater_than",
+                "left": {
+                  "type": "row_field",
+                  "field": "size"
+                },
+                "right": {
+                  "type": "literal",
+                  "result": "1",
+                  "number": "1"
+                }
+              }
+            ]
+          }
+        }
+      ],
+      "depends_on_rules": []
+    },
+    "lowest": {
+      "type": {
+        "name": "price",
+        "kind": "measure",
+        "minimum": null,
+        "maximum": null,
+        "decimals": null,
+        "units": [
+          {
+            "name": "eur",
+            "factor": {
+              "numer": "1",
+              "denom": "1"
+            },
+            "derived_measure_factors": [
+              [
+                "eur",
+                1
+              ]
+            ],
+            "decomposition": {
+              "menu_item.price": 1
+            }
+          }
+        ],
+        "traits": [],
+        "decomposition": {
+          "menu_item.price": 1
+        },
+        "help": "A numeric amount in one of this type's units.",
+        "extends": {
+          "kind": "custom",
+          "parent": "measure",
+          "family": "menu_item.price",
+          "defining_spec": {
+            "kind": "local"
+          }
+        }
+      },
+      "path": [],
+      "branches": [
+        {
+          "result": {
+            "type": "list_command",
+            "list": {
+              "type": "data",
+              "name": "menu"
+            },
+            "command": "min",
+            "args": [
+              {
+                "type": "row_field",
+                "field": "price"
+              }
+            ]
+          }
+        }
+      ],
+      "depends_on_rules": []
+    },
+    "more_fares": {
+      "type": {
+        "name": "fares",
+        "kind": "list",
+        "element": {
+          "kind": "measure",
+          "minimum": null,
+          "maximum": null,
+          "decimals": null,
+          "units": [
+            {
+              "name": "eur",
+              "factor": {
+                "numer": "1",
+                "denom": "1"
+              },
+              "derived_measure_factors": [
+                [
+                  "eur",
+                  1
+                ]
+              ],
+              "decomposition": {
+                "menu_item.price": 1
+              }
+            }
+          ],
+          "traits": [],
+          "decomposition": {
+            "menu_item.price": 1
+          },
+          "help": "A numeric amount in one of this type's units."
+        },
+        "key": "numbered",
+        "extends": {
+          "kind": "custom",
+          "parent": "menu.price list",
+          "family": "coffee_order.fares",
+          "defining_spec": {
+            "kind": "import"
+          }
+        }
+      },
+      "path": [],
+      "branches": [
+        {
+          "result": {
+            "type": "list_command",
+            "list": {
+              "type": "data",
+              "name": "fares"
+            },
+            "command": "with",
+            "args": [
+              {
+                "type": "literal",
+                "result": "64 eur",
+                "measure": {
+                  "eur": "64"
+                },
+                "unit": "eur"
+              }
+            ]
+          }
+        }
+      ],
+      "depends_on_rules": []
+    },
+    "newest": {
+      "type": {
+        "name": null,
+        "kind": "spec",
+        "spec": "menu_item",
+        "effective": "",
+        "extends": {
+          "kind": "primitive"
+        }
+      },
+      "path": [],
+      "branches": [
+        {
+          "result": {
+            "type": "list_command",
+            "list": {
+              "type": "data",
+              "name": "menu"
+            },
+            "command": "last",
+            "args": []
+          }
+        }
+      ],
+      "depends_on_rules": []
+    },
+    "priciest": {
+      "type": {
+        "name": null,
+        "kind": "spec",
+        "spec": "menu_item",
+        "effective": "",
+        "extends": {
+          "kind": "primitive"
+        }
+      },
+      "path": [],
+      "branches": [
+        {
+          "result": {
+            "type": "list_command",
+            "list": {
+              "type": "list_command",
+              "list": {
+                "type": "data",
+                "name": "menu"
+              },
+              "command": "sort",
+              "direction": "desc",
+              "args": [
+                {
+                  "type": "row_field",
+                  "field": "price"
+                }
+              ]
+            },
+            "command": "first",
+            "args": []
+          }
+        }
+      ],
+      "depends_on_rules": []
+    },
+    "selected": {
+      "type": {
+        "name": null,
+        "kind": "spec",
+        "spec": "menu_item",
+        "effective": "",
+        "extends": {
+          "kind": "primitive"
+        }
+      },
+      "path": [],
+      "branches": [
+        {
+          "result": {
+            "type": "list_command",
+            "list": {
+              "type": "data",
+              "name": "menu"
+            },
+            "command": "find",
+            "args": [
+              {
+                "type": "data",
+                "name": "ordered"
+              }
+            ]
+          }
+        }
+      ],
+      "depends_on_rules": []
+    },
+    "selected_price": {
+      "type": {
+        "name": "price",
+        "kind": "measure",
+        "minimum": null,
+        "maximum": null,
+        "decimals": null,
+        "units": [
+          {
+            "name": "eur",
+            "factor": {
+              "numer": "1",
+              "denom": "1"
+            },
+            "derived_measure_factors": [
+              [
+                "eur",
+                1
+              ]
+            ],
+            "decomposition": {
+              "menu_item.price": 1
+            }
+          }
+        ],
+        "traits": [],
+        "decomposition": {
+          "menu_item.price": 1
+        },
+        "help": "A numeric amount in one of this type's units.",
+        "extends": {
+          "kind": "custom",
+          "parent": "measure",
+          "family": "menu_item.price",
+          "defining_spec": {
+            "kind": "local"
+          }
+        }
+      },
+      "path": [],
+      "branches": [
+        {
+          "result": {
+            "type": "member",
+            "base": {
+              "type": "list_command",
+              "list": {
+                "type": "data",
+                "name": "menu"
+              },
+              "command": "find",
+              "args": [
+                {
+                  "type": "data",
+                  "name": "ordered"
+                }
+              ]
+            },
+            "member": "price"
+          }
+        }
+      ],
+      "depends_on_rules": []
+    },
+    "size_product": {
+      "type": {
+        "name": "size",
+        "kind": "number",
+        "minimum": null,
+        "maximum": null,
+        "decimals": null,
+        "help": "A dimensionless number.",
+        "extends": {
+          "kind": "custom",
+          "parent": "number",
+          "family": "menu_item.size",
+          "defining_spec": {
+            "kind": "local"
+          }
+        }
+      },
+      "path": [],
+      "branches": [
+        {
+          "result": {
+            "type": "list_command",
+            "list": {
+              "type": "data",
+              "name": "menu"
+            },
+            "command": "product",
+            "args": [
+              {
+                "type": "row_field",
+                "field": "size"
+              }
+            ]
+          }
+        }
+      ],
+      "depends_on_rules": []
+    },
+    "top_two": {
+      "type": {
+        "name": "menu_item list",
+        "kind": "list",
+        "element": {
+          "kind": "spec",
+          "spec": "menu_item",
+          "effective": ""
+        },
+        "key": {
+          "fields": [
+            "drink"
+          ]
+        },
+        "extends": {
+          "kind": "primitive"
+        }
+      },
+      "path": [],
+      "branches": [
+        {
+          "result": {
+            "type": "list_command",
+            "list": {
+              "type": "data",
+              "name": "menu"
+            },
+            "command": "top",
+            "args": [
+              {
+                "type": "literal",
+                "result": "2",
+                "number": "2"
+              }
+            ]
+          }
+        }
+      ],
+      "depends_on_rules": []
+    },
+    "total": {
+      "type": {
+        "name": "price",
+        "kind": "measure",
+        "minimum": null,
+        "maximum": null,
+        "decimals": null,
+        "units": [
+          {
+            "name": "eur",
+            "factor": {
+              "numer": "1",
+              "denom": "1"
+            },
+            "derived_measure_factors": [
+              [
+                "eur",
+                1
+              ]
+            ],
+            "decomposition": {
+              "menu_item.price": 1
+            }
+          }
+        ],
+        "traits": [],
+        "decomposition": {
+          "menu_item.price": 1
+        },
+        "help": "A numeric amount in one of this type's units.",
+        "extends": {
+          "kind": "custom",
+          "parent": "measure",
+          "family": "menu_item.price",
+          "defining_spec": {
+            "kind": "local"
+          }
+        }
+      },
+      "path": [],
+      "branches": [
+        {
+          "result": {
+            "type": "list_command",
+            "list": {
+              "type": "data",
+              "name": "menu"
+            },
+            "command": "sum",
+            "args": [
+              {
+                "type": "row_field",
+                "field": "price"
+              }
+            ]
+          }
+        }
+      ],
+      "depends_on_rules": []
+    }
+  }
+}

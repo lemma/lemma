@@ -1,7 +1,8 @@
 //! Repository (`repo …`) scope integration tests.
 
+use indexmap::IndexMap;
 use lemma::{DateTimeValue, Engine, SourceType};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::sync::Arc;
 
 fn path_source(path: &str) -> SourceType {
@@ -16,16 +17,16 @@ fn engine_run_resolves_unambiguous_spec_from_any_repo() {
         .expect("parse and plan must succeed for named-repo specs");
 
     let now = DateTimeValue::now();
-    let outcome = engine.run(None, "tax", Some(&now), HashMap::new(), None, false);
+    let outcome = engine.evaluate(None, "tax", Some(&now), IndexMap::new(), None, false);
     assert!(
         outcome.is_err(),
         "run(None, name) targets workspace; spec in named repo should not be found"
     );
-    let outcome = engine.run(
+    let outcome = engine.evaluate(
         Some("scoped"),
         "tax",
         Some(&now),
-        HashMap::new(),
+        IndexMap::new(),
         None,
         false,
     );
@@ -55,7 +56,7 @@ rule r: x"#
         .expect("duplicate names across repos should load");
 
     let now = DateTimeValue::now();
-    let main_run = engine.run(None, "s", Some(&now), HashMap::new(), None, false);
+    let main_run = engine.evaluate(None, "s", Some(&now), IndexMap::new(), None, false);
     assert!(
         main_run.is_err(),
         "bare spec name `s` is not in main repository; run must not silently pick one repo"
@@ -88,7 +89,7 @@ rule out: dep.val"#
 
     let now = DateTimeValue::now();
     let response = engine
-        .run(None, "consumer", Some(&now), HashMap::new(), None, false)
+        .evaluate(None, "consumer", Some(&now), IndexMap::new(), None, false)
         .expect("consumer should resolve cross-repo uses");
     assert!(
         response.results.contains_key("out"),
@@ -115,7 +116,7 @@ rule r: x"#
         .expect("temporal rows in named repo");
 
     let v_spec_count: usize = engine
-        .list()
+        .specs()
         .iter()
         .flat_map(|r| &r.specs)
         .filter(|ls| ls.name == "v")
@@ -144,7 +145,7 @@ rule y: b"#
         )])
         .unwrap();
 
-    let repos = engine.list();
+    let repos = engine.specs();
     let names: HashSet<_> = repos
         .iter()
         .flat_map(|r| &r.specs)
@@ -193,7 +194,7 @@ fn engine_dependency_bundle_with_repo_keyword_loads() {
             "repo @pkg/lib\nspec s\ndata x: 1\nrule r: x".to_string(),
         )])
         .expect("dependency bundles with `repo` keyword should load");
-    let specs = engine.list();
+    let specs = engine.specs();
     assert!(
         specs.iter().flat_map(|r| &r.specs).any(|ls| ls.name == "s"),
         "spec `s` must be loaded from dependency bundle"
@@ -217,7 +218,7 @@ fn anonymous_dependency_bundle_does_not_collide_with_workspace_main() {
         )])
         .expect("dependency without `repo` uses dependency id as repository name; no default-repo clash");
 
-    let repos = engine.list();
+    let repos = engine.specs();
     let dep_repo = repos
         .iter()
         .find(|r| r.repository.as_deref() == Some("@iso/countries"));
@@ -248,7 +249,7 @@ rule r: x"#
         .expect("empty repo section should not invalidate file");
 
     let s_count: usize = engine
-        .list()
+        .specs()
         .iter()
         .flat_map(|r| &r.specs)
         .filter(|ls| ls.name == "s")
@@ -281,15 +282,15 @@ rule z: q"#
 
     let now = DateTimeValue::now();
     assert!(engine
-        .run(None, "main_only", Some(&now), HashMap::new(), None, false)
+        .evaluate(None, "main_only", Some(&now), IndexMap::new(), None, false)
         .is_ok());
     assert!(
         engine
-            .run(
+            .evaluate(
                 None,
                 "named_only",
                 Some(&now),
-                HashMap::new(),
+                IndexMap::new(),
                 Some(&["z".to_string()]),
                 false
             )
@@ -298,11 +299,11 @@ rule z: q"#
     );
     assert!(
         engine
-            .run(
+            .evaluate(
                 Some("r"),
                 "named_only",
                 Some(&now),
-                HashMap::new(),
+                IndexMap::new(),
                 None,
                 false
             )
@@ -336,7 +337,7 @@ rule m: x"#
         .unwrap();
 
     let dup_count: usize = engine
-        .list()
+        .specs()
         .iter()
         .flat_map(|r| &r.specs)
         .filter(|ls| ls.name == "dup")
@@ -461,7 +462,7 @@ fn dependency_can_have_multiple_repos() {
         )])
         .expect("single dependency with multiple repos should load");
 
-    let specs = engine.list();
+    let specs = engine.specs();
     assert!(specs
         .iter()
         .flat_map(|r| &r.specs)
@@ -488,7 +489,7 @@ fn workspace_files_can_share_repo() {
         )])
         .expect("second workspace file merges into same repo");
 
-    let repos = engine.list();
+    let repos = engine.specs();
     let billing_repos: Vec<_> = repos
         .iter()
         .filter(|r| r.repository.as_deref() == Some("billing"))
@@ -528,7 +529,7 @@ fn dependency_and_workspace_different_names_coexist() {
         )])
         .expect("dependency with different repo name should coexist");
 
-    let repos = engine.list();
+    let repos = engine.specs();
     assert!(
         repos
             .iter()

@@ -4,6 +4,7 @@ use crate::api::value::RuleResultValue;
 use crate::evaluation::explanations::Explanation;
 use crate::evaluation::response::{Response as DomainResponse, RuleResult as DomainRuleResult};
 use crate::parsing::ast::DateTimeValue;
+use crate::result_value::RowResult;
 use indexmap::IndexMap;
 use serde::Serialize;
 
@@ -17,6 +18,8 @@ pub struct Response {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub spec_effective_to: Option<DateTimeValue>,
     pub results: IndexMap<String, RuleResult>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub rows: Vec<RowResult>,
 }
 
 impl From<&DomainResponse> for Response {
@@ -31,6 +34,7 @@ impl From<&DomainResponse> for Response {
                 .iter()
                 .map(|(name, result)| (name.clone(), RuleResult::from(result)))
                 .collect(),
+            rows: response.rows.clone(),
         }
     }
 }

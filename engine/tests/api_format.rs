@@ -4,7 +4,7 @@
 //! [`engine::wasm`] and show export use (`serde_json` on those types).
 //! Plan persistence tests live in `execution_plan` unit tests (section I).
 //!
-//! `RuleResultValue` (the type behind `ShowData.fill`/`suggestion`) is a flat map of
+//! `RuleResultValue` (the type behind `ShowData.value`/`suggestion`) is a flat map of
 //! every declared unit; it carries no unit tag for the "one value the user typed" the way the
 //! old canonical `ValueKind::Ratio(_)` did. `RuleResultValue::to_literal`
 //! reconstructs a canonical literal for further computation, but for ratios that
@@ -14,15 +14,15 @@
 //!
 //! Section F additionally requires that every show-default per-unit magnitude from
 //! section E (`magnitude_in_unit`, API `measure` / `ratio` maps) is submittable
-//! as convenience input through [`Engine::run`] without computation veto — same path
+//! as convenience input through [`Engine::evaluate`] without computation veto — same path
 //! as the CLI interactive trial. See `cli/documentation/learn/precision.md`.
 
+use indexmap::IndexMap;
 use lemma::{
-    DateTimeValue, Engine, LemmaType, LiteralValue, RuleResultValue, Show, TypeSpecification,
-    ValueKind,
+    DateTimeValue, Engine, EvaluateDataValue, LemmaType, LiteralValue, RuleResultValue, Show,
+    TypeSpecification, ValueKind,
 };
 use rust_decimal::Decimal;
-use std::collections::HashMap;
 use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -94,6 +94,11 @@ fn plan_interface_show(engine: &Engine, spec: &str) -> Show {
     engine.show(None, spec, Some(&now)).expect("show")
 }
 
+/// The Show document property of `name`.
+fn show_property_json(engine: &Engine, show: &Show, name: &str) -> serde_json::Value {
+    lemma::api::show_document(engine, show)["properties"][name].clone()
+}
+
 /// Reconstruct the canonical literal that a data's show suggestion converts to.
 ///
 /// Lossy for ratio unit tags: `RuleResultValue::to_literal` always reconstructs a ratio
@@ -126,7 +131,7 @@ fn wrap_suggestion_in_show_json(
         lemma::ShowData {
             lemma_type,
             path: Vec::new(),
-            fill: None,
+            value: None,
             suggestion: Some(value),
             needed_by_rules: Vec::new(),
         },
@@ -137,15 +142,15 @@ fn wrap_suggestion_in_show_json(
         commentary: None,
         effective_from: None,
         effective_to: None,
-        versions: Vec::new(),
+        plan_effective: lemma::EffectiveDate::Origin,
         start_line: 1,
         source_type: None,
+        types: indexmap::IndexMap::new(),
         data,
         rules: indexmap::IndexMap::new(),
         meta: indexmap::IndexMap::new(),
     };
-    serde_json::to_value(lemma::api::Show::from(&show)).expect("Show API JSON must serialize")
-        ["data"][name]["suggestion"]
+    lemma::api::show_document(&Engine::new(), &show)["properties"][name]["x-lemma-suggestion"]
         .clone()
 }
 
@@ -194,8 +199,16 @@ fn range_endpoint_unit_value(
         .to_string()
 }
 
+fn bound_ratio_unit(lemma_type: &LemmaType) -> Option<&str> {
+    match &lemma_type.specifications {
+        TypeSpecification::Ratio { unit, .. } => unit.as_deref(),
+        other => panic!("expected Ratio type, got {other:?}"),
+    }
+}
+
 fn assert_ratio_exact(
     lit: &LiteralValue,
+    lemma_type: &LemmaType,
     ctx: &str,
     expected_canonical: &str,
     expected_unit: Option<&str>,
@@ -209,7 +222,11 @@ fn assert_ratio_exact(
                 decimal_lit(expected_canonical),
                 "{ctx}: canonical magnitude"
             );
-            let _ = expected_unit; // binding unit on type, not LiteralValue
+            assert_eq!(
+                bound_ratio_unit(lemma_type),
+                expected_unit,
+                "{ctx}: bound unit"
+            );
         }
         other => panic!("{ctx}: expected Ratio, got {other:?}"),
     }
@@ -223,9 +240,9 @@ fn show_literal_api_json(engine: &Engine, spec: &str, data_name: &str) -> serde_
         .unwrap_or_else(|| panic!("{data_name} missing from show.data"))
         .clone();
     let value = entry
-        .fill
+        .value
         .or(entry.suggestion)
-        .unwrap_or_else(|| panic!("{data_name} has no fill or suggestion in show.data"));
+        .unwrap_or_else(|| panic!("{data_name} has no value or suggestion in show.data"));
     wrap_suggestion_in_show_json(data_name, entry.lemma_type, value)
 }
 
@@ -239,14 +256,14 @@ fn deserialize_api_literal(json: serde_json::Value, lemma_type: &LemmaType) -> L
 
 #[test]
 fn in_memory_ratio_percent_default_is_canonical() {
-    let (default, _default_ty) = show_default_literal(&policy_engine(), "policy", "margin");
-    assert_ratio_exact(&default, "margin default", "0.15", None);
+    let (default, ty) = show_default_literal(&policy_engine(), "policy", "margin");
+    assert_ratio_exact(&default, &ty, "margin default", "0.15", None);
 }
 
 #[test]
 fn in_memory_ratio_basis_points_default_is_canonical() {
-    let (default, _default_ty) = show_default_literal(&policy_engine(), "policy", "bps");
-    assert_ratio_exact(&default, "bps default", "0.05", None);
+    let (default, ty) = show_default_literal(&policy_engine(), "policy", "bps");
+    assert_ratio_exact(&default, &ty, "bps default", "0.05", None);
 }
 
 #[test]
@@ -271,7 +288,13 @@ fn in_memory_measure_eur_per_hour_default_is_canonical() {
 #[test]
 fn in_memory_bare_ratio_is_canonical_0_5() {
     let bare = LiteralValue::ratio_from_decimal(decimal_lit("0.5"));
-    assert_ratio_exact(&bare, "bare ratio", "0.5", None);
+    assert_ratio_exact(
+        &bare,
+        &LemmaType::primitive(TypeSpecification::ratio()),
+        "bare ratio",
+        "0.5",
+        None,
+    );
 }
 
 // --- B: Ratio API serialize ---
@@ -330,7 +353,13 @@ fn ratio_api_bare_0_5_accepted() {
     );
     let roundtrip =
         deserialize_api_literal(json, &LemmaType::primitive(TypeSpecification::ratio()));
-    assert_ratio_exact(&roundtrip, "bare deserialize", "0.5", None);
+    assert_ratio_exact(
+        &roundtrip,
+        &LemmaType::primitive(TypeSpecification::ratio()),
+        "bare deserialize",
+        "0.5",
+        None,
+    );
 }
 
 #[test]
@@ -351,7 +380,7 @@ fn ratio_api_percent_roundtrip() {
     let (original, original_ty) = show_default_literal(&policy_engine(), "policy", "margin");
     let json = api_json_for_literal("margin", &original, &original_ty);
     let roundtrip = deserialize_api_literal(json, &original_ty);
-    assert_ratio_exact(&roundtrip, "percent roundtrip", "0.15", None);
+    assert_ratio_exact(&roundtrip, &original_ty, "percent roundtrip", "0.15", None);
 }
 
 #[test]
@@ -359,7 +388,7 @@ fn ratio_api_basis_points_roundtrip() {
     let (original, original_ty) = show_default_literal(&policy_engine(), "policy", "bps");
     let json = api_json_for_literal("bps", &original, &original_ty);
     let roundtrip = deserialize_api_literal(json, &original_ty);
-    assert_ratio_exact(&roundtrip, "bps roundtrip", "0.05", None);
+    assert_ratio_exact(&roundtrip, &original_ty, "bps roundtrip", "0.05", None);
 }
 
 // --- D: Prompt matches API ---
@@ -504,17 +533,17 @@ fn entry_unit_for(data_name: &str) -> &'static str {
 
 // --- F: End-to-end consumer ---
 
-fn cost_price_run_inputs() -> HashMap<String, String> {
-    HashMap::from([
+fn cost_price_run_inputs() -> IndexMap<String, EvaluateDataValue> {
+    IndexMap::from([
         ("product_cost".into(), "4 eur_per_kg".into()),
         ("labor_cost".into(), "25 eur_per_hour".into()),
         ("throughput".into(), "12 kg_per_hour".into()),
     ])
 }
 
-fn run_cost_price(engine: &Engine, now: &DateTimeValue) -> lemma::Response {
+fn evaluate_cost_price(engine: &Engine, now: &DateTimeValue) -> lemma::Response {
     engine
-        .run(
+        .evaluate(
             None,
             "cost_price",
             Some(now),
@@ -529,10 +558,10 @@ fn run_cost_price(engine: &Engine, now: &DateTimeValue) -> lemma::Response {
 fn measure_eval_per_unit_inputs_ok() {
     let engine = cost_price_engine();
     let now = DateTimeValue::now();
-    run_cost_price(&engine, &now);
+    evaluate_cost_price(&engine, &now);
 }
 
-fn run_cost_price_with_single_override(
+fn evaluate_cost_price_with_single_override(
     engine: &Engine,
     now: &DateTimeValue,
     data_name: &str,
@@ -541,11 +570,11 @@ fn run_cost_price_with_single_override(
     explain: bool,
 ) -> lemma::Response {
     let mut data = cost_price_run_inputs();
-    data.insert(data_name.to_string(), convenience.to_string());
+    data.insert(data_name.to_string(), convenience.into());
     let rules: Option<Vec<String>> =
         rule_names.map(|names| names.iter().map(|name| (*name).to_string()).collect());
     engine
-        .run(
+        .evaluate(
             None,
             "cost_price",
             Some(now),
@@ -586,7 +615,7 @@ fn measure_show_default_inr_per_hour_convenience_input_evaluates() {
         .magnitude_in_unit(&default_ty, "inr_per_hour")
         .expect("section E guarantees inr_per_hour RuleResultValue");
     let input = format!("{magnitude} inr_per_hour");
-    let response = run_cost_price_with_single_override(
+    let response = evaluate_cost_price_with_single_override(
         &engine,
         &now,
         "labor_cost",
@@ -617,7 +646,7 @@ fn measure_show_default_each_declared_unit_convenience_input_evaluates() {
             .magnitude_in_unit(&default_ty, unit)
             .unwrap_or_else(|| panic!("{data_name} must have decimal for unit {unit}"));
         let input = format!("{magnitude} {unit}");
-        let response = run_cost_price_with_single_override(
+        let response = evaluate_cost_price_with_single_override(
             &engine,
             &now,
             data_name,
@@ -655,10 +684,10 @@ fn ratio_show_default_basis_points_convenience_input_evaluates() {
         .magnitude_in_unit(&default_ty, "basis_points")
         .expect("section E guarantees basis_points RuleResultValue");
     assert_eq!(magnitude, decimal_lit("500"));
-    let mut data = HashMap::new();
-    data.insert("bps".into(), format!("{magnitude} basis_points"));
+    let mut data = IndexMap::new();
+    data.insert("bps".into(), format!("{magnitude} basis_points").into());
     let response = engine
-        .run(
+        .evaluate(
             None,
             "policy",
             Some(&now),
@@ -679,7 +708,7 @@ fn ratio_show_default_basis_points_convenience_input_evaluates() {
 fn measure_show_literal_api_after_run() {
     let engine = cost_price_engine();
     let now = DateTimeValue::now();
-    run_cost_price(&engine, &now);
+    evaluate_cost_price(&engine, &now);
     assert_eq!(
         json_measure_unit_value(
             &show_literal_api_json(&engine, "cost_price", "labor_cost"),
@@ -700,7 +729,7 @@ fn measure_show_literal_api_after_run() {
 fn measure_response_json_serializes() {
     let engine = cost_price_engine();
     let now = DateTimeValue::now();
-    let response = run_cost_price(&engine, &now);
+    let response = evaluate_cost_price(&engine, &now);
     serde_json::to_string(&lemma::api::Response::from(&response))
         .expect("response API JSON must serialize");
 }
@@ -709,21 +738,22 @@ fn measure_response_json_serializes() {
 fn ratio_eval_15_percent_ok() {
     let engine = policy_engine();
     let now = DateTimeValue::now();
-    let mut data = HashMap::new();
+    let mut data = IndexMap::new();
     data.insert("margin".into(), "15%".into());
     let response = engine
-        .run(None, "policy", Some(&now), data, None, true)
+        .evaluate(None, "policy", Some(&now), data, None, true)
         .expect("evaluation");
     let rr = response.results.get("m").expect("rule m");
     assert!(!rr.vetoed, "rule must not veto");
-    let lit = rr
-        .explanation
-        .as_ref()
-        .expect("explanation")
-        .result
-        .literal_value()
-        .expect("result value");
-    assert_ratio_exact(&lit, "rule m", "0.15", Some("percent"));
+    let explanation = rr.explanation.as_ref().expect("explanation");
+    let lit = explanation.result.literal_value().expect("result value");
+    assert_ratio_exact(
+        &lit,
+        explanation.result_type.as_ref(),
+        "rule m",
+        "0.15",
+        Some("percent"),
+    );
 }
 
 #[test]
@@ -744,7 +774,13 @@ fn ratio_rule_result_bare_0_5_api() {
     assert_eq!(json_ratio_unit_value(&json, "percent"), "50");
     let roundtrip =
         deserialize_api_literal(json, &LemmaType::primitive(TypeSpecification::ratio()));
-    assert_ratio_exact(&roundtrip, "bare API roundtrip", "0.5", None);
+    assert_ratio_exact(
+        &roundtrip,
+        &LemmaType::primitive(TypeSpecification::ratio()),
+        "bare API roundtrip",
+        "0.5",
+        None,
+    );
 }
 
 // --- H: Range API ---
@@ -757,8 +793,9 @@ rule band: allowed_band
 
 const RATIO_RANGE_BPS_SPEC: &str = r#"
 spec policy
-data allowed_band: ratio range
+data bps: ratio
   -> unit basis_points: 10000
+data allowed_band: bps range
   -> suggest 200 basis_points...3500 basis_points
 rule band: allowed_band
 "#;
@@ -851,7 +888,7 @@ fn show_suggestion_carries_per_unit_magnitude() {
     let engine = load_engine(NON_BASE_MEASURE_SPEC, "pricing.lemma");
     let show = plan_interface_show(&engine, "pricing");
     let entry = show.data.get("money").expect("money").clone();
-    let json = serde_json::to_value(lemma::api::ShowData::from(&entry)).expect("ShowData JSON");
+    let json = show_property_json(&engine, &show, "money");
     let suggestion = entry.suggestion.expect("suggestion");
     let measure = suggestion.measure.as_ref().expect("measure unit map");
     assert_eq!(measure.get("inr").copied(), Some(decimal_lit("100.00")));
@@ -861,7 +898,7 @@ fn show_suggestion_carries_per_unit_magnitude() {
         "eur magnitude must differ from inr (real unit conversion, not raw echo)"
     );
     assert_eq!(
-        json["suggestion"]["measure"]["inr"].as_str(),
+        json["x-lemma-suggestion"]["measure"]["inr"].as_str(),
         Some("100.00")
     );
     assert_eq!(
@@ -872,15 +909,18 @@ fn show_suggestion_carries_per_unit_magnitude() {
 }
 
 #[test]
-fn show_fill_carries_per_unit_magnitude() {
+fn show_value_carries_per_unit_magnitude() {
     let engine = load_engine(PREFILLED_INR_SPEC, "priced.lemma");
     let show = plan_interface_show(&engine, "priced");
     let entry = show.data.get("base.money").expect("base.money").clone();
-    let json = serde_json::to_value(lemma::api::ShowData::from(&entry)).expect("ShowData JSON");
-    let fill = entry.fill.expect("fill");
-    let measure = fill.measure.as_ref().expect("measure unit map");
+    let json = show_property_json(&engine, &show, "base.money");
+    let value = entry.value.expect("value");
+    let measure = value.measure.as_ref().expect("measure unit map");
     assert_eq!(measure.get("inr").copied(), Some(decimal_lit("100.00")));
-    assert_eq!(json["fill"]["measure"]["inr"].as_str(), Some("100.00"));
+    assert_eq!(
+        json["x-lemma-value"]["measure"]["inr"].as_str(),
+        Some("100.00")
+    );
 }
 
 #[test]
@@ -888,8 +928,8 @@ fn execution_plan_constant_keeps_canonical_magnitude() {
     let engine = load_engine(PREFILLED_INR_SPEC, "priced.lemma");
     let now = DateTimeValue::now();
     let response = engine
-        .run(None, "priced", Some(&now), HashMap::new(), None, true)
-        .expect("run");
+        .evaluate(None, "priced", Some(&now), IndexMap::new(), None, true)
+        .expect("evaluate");
     let lit = response
         .results
         .get("out")
@@ -978,8 +1018,8 @@ rule band: window
         "display must keep written magnitudes, got {display}"
     );
 
-    let json = serde_json::to_value(lemma::api::ShowData::from(entry)).expect("ShowData JSON");
-    let suggestion_json = &json["suggestion"];
+    let json = show_property_json(&engine, &show, "window");
+    let suggestion_json = &json["x-lemma-suggestion"];
     let from = suggestion_json["range"]["from"]["measure"]
         .as_object()
         .expect("from measure map");
@@ -1027,9 +1067,8 @@ rule band: window
         "qualified_mixed_band.lemma",
     );
     let show = plan_interface_show(&engine, "band");
-    let entry = show.data.get("window").expect("window");
-    let json = serde_json::to_value(lemma::api::ShowData::from(entry)).expect("ShowData JSON");
-    let suggestion = &json["suggestion"];
+    let json = show_property_json(&engine, &show, "window");
+    let suggestion = &json["x-lemma-suggestion"];
     assert_eq!(suggestion["range"]["from"]["unit"].as_str(), Some("eur"));
     assert_eq!(suggestion["range"]["to"]["unit"].as_str(), Some("usd"));
     let display = suggestion["result"].as_str().expect("display");

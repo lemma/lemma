@@ -17,15 +17,16 @@ spec order_discount
 data quantity: number
 data is_vip:   false
 
-rule discount: 0%
-  unless quantity >= 10  then 10%
-  unless quantity >= 50  then 20%
-  unless is_vip          then 25%
+rule discount:
+  0%
+  unless quantity >= 10 then 10%
+  unless quantity >= 50 then 20%
+  unless is_vip         then 25%
 ```
 
 If a VIP customer orders 75 items, they get 25% (last matching wins), not 20%.
 
-There is no `or` operator. Unless chains accommodate disjunctive logic. For boolean composition within a single condition, use `and` and `not`.
+There is no `or` operator. Unless chains accommodate disjunctive logic. For boolean composition within a single condition, use `and` and `not`. `and` is order-independent: a `false` operand makes the condition `false` whatever the other operands are, including a missing or vetoed one.
 
 ## Boolean literals
 

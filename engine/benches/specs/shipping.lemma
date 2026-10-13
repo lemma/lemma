@@ -10,20 +10,26 @@ data destination: text
 
 data is_member: boolean
 
-rule base_rate: 5
+rule base_rate:
+  5
   unless destination is "express"       then 15
   unless destination is "international" then 30
 
-rule weight_fee: 0
+rule weight_fee:
+  0
   unless weight > 1  then 2
   unless weight > 5  then 5
   unless weight > 20 then 12
 
-rule member_discount: 0%
+rule member_discount:
+  0%
   unless is_member then 10%
 
-rule subtotal: base_rate + weight_fee
+rule subtotal:
+  base_rate + weight_fee
 
-rule discount_amount: subtotal * member_discount
+rule discount_amount:
+  subtotal * member_discount
 
-rule total: subtotal - discount_amount
+rule total:
+  subtotal - discount_amount

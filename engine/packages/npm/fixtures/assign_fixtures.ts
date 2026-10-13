@@ -1,7 +1,7 @@
 /**
  * Assign each API fixture to its declared generated type.
  * `npm run typecheck:fixtures` must pass once lemma.d.ts is generated from Rust
- * with one API shape per field (no Show vs ListedSpec drift).
+ * with one API shape per field (no Show vs SpecVersion drift).
  *
  * TypeScript widens string-literal properties from `resolveJsonModule` imports to
  * `string` (no literal narrowing), so discriminated unions (`kind`, `extends.kind`)
@@ -15,84 +15,30 @@ import showMinimalJson from "../../../tests/fixtures/api/show_minimal.json";
 import sourceTypeVariantsJson from "../../../tests/fixtures/api/source_type_variants.json";
 import repositoryInstallResultJson from "../../../tests/fixtures/api/repository_install_result.json";
 
+import showListJson from "../../../tests/fixtures/api/show_list.json";
+import responseListJson from "../../../tests/fixtures/api/response_list.json";
+
 import type {
-  ListedSpec,
+  LemmaType,
   RepositoryInstallResult,
+  Response,
   Show,
   SourceType,
+  SpecVersion,
 } from "../lemma";
 
-const showMinimal = showMinimalJson as {
-  spec: "sample";
-  effective_from: "2024-01-01";
-  versions: [{ effective_from: "2024-01-01" }];
-  start_line: 1;
-  source_type: "volatile";
-  data: {
-    amount: {
-      type: {
-        name: "amount";
-        kind: "number";
-        minimum: null;
-        maximum: null;
-        decimals: null;
-        help: string;
-        extends: {
-          kind: "custom";
-          parent: "number";
-          family: "amount";
-          defining_spec: { kind: "local" };
-        };
-      };
-      path: [];
-      suggestion: { number: "1" };
-      needed_by_rules: ["ok"];
-    };
-  };
-  rules: {
-    ok: {
-      type: {
-        name: "amount";
-        kind: "number";
-        minimum: null;
-        maximum: null;
-        decimals: null;
-        help: string;
-        extends: {
-          kind: "custom";
-          parent: "number";
-          family: "amount";
-          defining_spec: { kind: "local" };
-        };
-      };
-      path: [];
-      branches: [
-        {
-          result: {
-            type: "literal";
-            number: "1";
-            display: "1";
-          };
-        }
-      ];
-      depends_on_rules: [];
-    };
-  };
-  meta: {
-    title: { text: "t" };
-    author: { text: "alice" };
-  };
-};
-
+// Fixture JSON is validated by engine api_schema tests; widen through unknown so
+// resolveJsonModule string[] does not fight literal tuples in the hand shape.
+const showMinimal = showMinimalJson as unknown as Show;
 const show: Show = showMinimal;
 void show;
 
 // Same Rust field, same ISO string in the API response.
-const listed: ListedSpec = {
-  name: showMinimal.spec,
-  effective_from: showMinimal.effective_from,
+const specVersion: SpecVersion = {
+  name: showMinimal.title,
+  effective_from: showMinimal["x-lemma-effective-from"],
 };
-void listed;
+void specVersion;
 
 const sourceTypeVariants = sourceTypeVariantsJson as {
   path: { path: string };
@@ -112,3 +58,39 @@ const installResult: RepositoryInstallResult = repositoryInstallResultJson as {
   id: "@iso/countries";
 };
 void installResult;
+
+const menuType: LemmaType = showListJson.properties.menu["x-lemma-type"] as {
+  name: "menu_item list";
+  kind: "list";
+  element: { kind: "spec"; spec: "menu_item"; effective: "" };
+  key: { fields: ["drink"] };
+  extends: { kind: "primitive" };
+};
+void menuType;
+
+const responseList = responseListJson as {
+  spec: "coffee_order";
+  effective: string;
+  results: {
+    selected: {
+      vetoed: false;
+      rule_type: "menu_item";
+      result: "menu.2";
+      row: { spec: "menu_item"; effective: ""; instance: "menu.2"; index: 1 };
+    };
+    high_fares: {
+      vetoed: false;
+      rule_type: "fares";
+      result: "120 eur";
+      list: { result: "120 eur"; measure: { eur: "120" }; unit: "eur" }[];
+    };
+  };
+  rows: {
+    spec: "menu_item";
+    effective: "";
+    data: Record<string, { vetoed: boolean; rule_type: string; result: { result: string } }>;
+    rules: Record<string, never>;
+  }[];
+};
+const response: Response = responseList;
+void response;

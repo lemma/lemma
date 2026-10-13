@@ -15,7 +15,7 @@ rule's dependency closure.
 
 Cross-language latency compares steady-state evaluation only (C-vs-Python model):
 
-- **Lemma**: compile once (`load` before measurement); timed = inline input literals + `Engine::run` → terminal rule
+- **Lemma**: compile once (`load` before measurement); timed = inline input literals + `Engine::evaluate` → terminal rule
 - **Python**: import once before measurement; timed = inline input literals + `build_inputs(raw)` + `compute_terminal(inputs)`
 
 Lemma compile cost is reported separately, not in the Python/Lemma ratio. No disk I/O. No JSON input sidecars.

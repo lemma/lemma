@@ -1,9 +1,9 @@
 //! Case-insensitive logical identifiers: parse canonicalization and API boundaries.
 
+use indexmap::IndexMap;
 use lemma::format_source;
 use lemma::DateTimeValue;
 use lemma::Engine;
-use std::collections::HashMap;
 use std::sync::Arc;
 
 fn load_ok(engine: &mut Engine, code: &str) {
@@ -61,10 +61,10 @@ rule r: price
     let mut engine = Engine::new();
     load_ok(&mut engine, code);
     let now = DateTimeValue::now();
-    let mut data = HashMap::new();
+    let mut data = IndexMap::new();
     data.insert("price".to_string(), "10".into());
     let resp = engine
-        .run(None, "s", Some(&now), data, None, false)
+        .evaluate(None, "s", Some(&now), data, None, false)
         .expect("evaluates");
     assert_eq!(rule_value(&resp, "r"), "10");
 }
@@ -80,7 +80,7 @@ rule r: 500 Gram
     load_ok(&mut engine, code);
     let now = DateTimeValue::now();
     let resp = engine
-        .run(None, "s", Some(&now), HashMap::new(), None, false)
+        .evaluate(None, "s", Some(&now), IndexMap::new(), None, false)
         .expect("evaluates");
     assert!(rule_value(&resp, "r").contains("500"));
     assert!(rule_value(&resp, "r").contains("gram"));

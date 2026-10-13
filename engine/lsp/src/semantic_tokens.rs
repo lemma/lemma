@@ -1,5 +1,5 @@
-use lemma::{Lexer, TokenKind};
-use tower_lsp::lsp_types::*;
+use lemma::{can_be_label, Lexer, TokenKind};
+use tower_lsp_server::ls_types::*;
 
 /// Legend indices — must stay in sync with TOKEN_TYPES order and monaco.js SEMANTIC_TOKEN_TYPES.
 const IDX_NAMESPACE: u32 = 0; // repo qualifier tokens
@@ -47,9 +47,9 @@ pub const TOKEN_MODIFIERS: &[SemanticTokenModifier] = &[];
 enum HeaderState {
     /// Not inside a declaration header — standard body context.
     None,
-    /// After `repo`: consume qualifier tokens (At, Identifier, separators).
+    /// After `repo`: consume one opaque qualifier [`TokenKind::LogicalName`].
     Repo,
-    /// After `spec`: consume spec name tokens.
+    /// After `spec`: consume opaque spec name / uses targets.
     Spec,
     /// After `data`: consume field-path tokens until Colon.
     Data,
@@ -109,7 +109,25 @@ fn type_in_body(kind: &TokenKind) -> Option<u32> {
         | TokenKind::Abs
         | TokenKind::Floor
         | TokenKind::Ceil
-        | TokenKind::Round => Some(IDX_KEYWORD),
+        | TokenKind::Round
+        | TokenKind::List
+        | TokenKind::Key
+        | TokenKind::Find
+        | TokenKind::First
+        | TokenKind::Last
+        | TokenKind::Sum
+        | TokenKind::Avg
+        | TokenKind::Product
+        | TokenKind::Count
+        | TokenKind::Min
+        | TokenKind::Max
+        | TokenKind::Any
+        | TokenKind::All
+        | TokenKind::Where
+        | TokenKind::Sort
+        | TokenKind::Top
+        | TokenKind::Asc
+        | TokenKind::Desc => Some(IDX_KEYWORD),
 
         // Operators
         TokenKind::Plus
@@ -129,10 +147,9 @@ fn type_in_body(kind: &TokenKind) -> Option<u32> {
         // Comment
         TokenKind::Commentary => Some(IDX_COMMENT),
 
-        // Value-like: literals, booleans, @ in body (identifiers
+        // Value-like: literals, booleans (identifiers
         // use [`expression_semantic_type`] → IDX_REFERENCE).
-        TokenKind::At
-        | TokenKind::StringLit
+        TokenKind::StringLit
         | TokenKind::NumberLit
         | TokenKind::True
         | TokenKind::False
@@ -149,7 +166,7 @@ fn type_in_body(kind: &TokenKind) -> Option<u32> {
 /// [`type_in_body`], plus [`TokenKind::Identifier`] as [`IDX_REFERENCE`].
 fn expression_semantic_type(kind: &TokenKind) -> Option<u32> {
     type_in_body(kind).or(match kind {
-        TokenKind::Identifier => Some(IDX_REFERENCE),
+        TokenKind::Identifier | TokenKind::LogicalName => Some(IDX_REFERENCE),
         TokenKind::Colon => Some(IDX_PUNCTUATION),
         _ => None,
     })
@@ -176,8 +193,24 @@ pub fn tokenize(text: &str) -> Vec<SemanticToken> {
     let mut prev_col: u32 = 0;
     let mut state = HeaderState::None;
     let mut prev_token_kind: Option<TokenKind> = None;
+    let mut uses_import = false;
+    let mut uses_alias = false;
+    // Next token in Repo/Spec header is an opaque name — use Lexer::next_logical_name.
+    let mut expect_opaque_name = false;
 
-    while let Ok(tok) = lexer.next_token() {
+    loop {
+        let tok = if expect_opaque_name {
+            expect_opaque_name = false;
+            match lexer.next_logical_name() {
+                Ok(t) => t,
+                Err(_) => break,
+            }
+        } else {
+            match lexer.next_token() {
+                Ok(t) => t,
+                Err(_) => break,
+            }
+        };
         if tok.kind == TokenKind::Eof {
             break;
         }
@@ -189,51 +222,80 @@ pub fn tokenize(text: &str) -> Vec<SemanticToken> {
         let token_info: Option<(u32, u32)> = match tok.kind {
             TokenKind::Spec => {
                 state = HeaderState::Spec;
+                uses_import = false;
+                uses_alias = false;
+                expect_opaque_name = true;
                 Some((IDX_DECLARATION, 0))
             }
             TokenKind::Data => {
                 state = HeaderState::Data;
+                expect_opaque_name = false;
                 Some((IDX_DECLARATION, 0))
             }
             TokenKind::With => {
                 state = HeaderState::Data;
+                expect_opaque_name = false;
                 Some((IDX_DECLARATION, 0))
             }
             TokenKind::Rule => {
                 state = HeaderState::Rule;
+                expect_opaque_name = false;
                 Some((IDX_DECLARATION, 0))
             }
             TokenKind::Uses => {
-                state = HeaderState::None;
+                state = HeaderState::Spec;
+                uses_import = true;
+                uses_alias = match lexer.peek() {
+                    Ok(first) if can_be_label(&first.kind) => {
+                        matches!(lexer.peek_second(), Ok(second) if second.kind == TokenKind::Colon)
+                    }
+                    _ => false,
+                };
+                // Alias form: first token is a simple label; otherwise opaque target/qualifier.
+                expect_opaque_name = !uses_alias;
                 Some((IDX_DECLARATION, 0))
             }
             TokenKind::Meta => {
                 state = HeaderState::None;
+                expect_opaque_name = false;
                 Some((IDX_DECLARATION, 0))
             }
 
             _ => match state {
                 HeaderState::Repo => match tok.kind {
-                    // Qualifier segments (keyword text may appear in paths, e.g. `@org/repo`)
-                    TokenKind::At | TokenKind::Identifier | TokenKind::Repo => {
-                        Some((IDX_NAMESPACE, 0))
-                    }
-                    // Separators within a qualifier (/, ., -) — transparent but stay in state
-                    TokenKind::Slash | TokenKind::Dot | TokenKind::Minus => None,
-                    // Anything else terminates the header; reprocess in body context
+                    TokenKind::LogicalName => Some((IDX_NAMESPACE, 0)),
                     _ => {
                         state = HeaderState::None;
                         expression_semantic_type(&tok.kind).map(|idx| (idx, 0))
                     }
                 },
 
+                HeaderState::Spec if uses_import => match tok.kind {
+                    TokenKind::Colon => {
+                        // After `alias:`, next token is the opaque qualifier/target.
+                        expect_opaque_name = true;
+                        Some((IDX_PUNCTUATION, 0))
+                    }
+                    _ if uses_alias && can_be_label(&tok.kind) => {
+                        uses_alias = false;
+                        Some((IDX_PROPERTY, 0))
+                    }
+                    TokenKind::LogicalName | TokenKind::NumberLit => Some((IDX_REFERENCE, 0)),
+                    _ if can_be_label(&tok.kind) => Some((IDX_REFERENCE, 0)),
+                    _ => {
+                        uses_import = false;
+                        uses_alias = false;
+                        state = HeaderState::None;
+                        expression_semantic_type(&tok.kind).map(|idx| (idx, 0))
+                    }
+                },
+
                 HeaderState::Spec => match tok.kind {
-                    TokenKind::Identifier => Some((IDX_CLASS, 0)),
+                    TokenKind::LogicalName => Some((IDX_CLASS, 0)),
                     // NumberLit covers the effective-from year/date (e.g. `spec foo 2025`
-                    // or `spec foo 2026-03-04`). Minus is already transparent so date
-                    // separators stay invisible between the coloured number segments.
+                    // or `spec foo 2026-03-04`). Minus stays transparent between date parts.
                     TokenKind::NumberLit => Some((IDX_CLASS, 0)),
-                    TokenKind::Slash | TokenKind::Dot | TokenKind::Minus => None,
+                    TokenKind::Minus => None,
                     _ => {
                         state = HeaderState::None;
                         expression_semantic_type(&tok.kind).map(|idx| (idx, 0))
@@ -388,6 +450,7 @@ pub fn tokenize(text: &str) -> Vec<SemanticToken> {
                 HeaderState::None => {
                     if tok.kind == TokenKind::Repo {
                         state = HeaderState::Repo;
+                        expect_opaque_name = true;
                         Some((IDX_DECLARATION, 0))
                     } else if tok.kind == TokenKind::Dot
                         && matches!(prev_token_kind, Some(TokenKind::Identifier))
@@ -470,10 +533,10 @@ mod tests {
 
     #[test]
     fn repo_keyword_and_qualifier_same_colour() {
-        // repo → DECLARATION, @lemma → NAMESPACE (At + Identifier), / transparent, std → NAMESPACE
+        // repo → DECLARATION, @iso/countries → one NAMESPACE LogicalName
         assert_eq!(
             token_types("repo @iso/countries"),
-            vec![IDX_DECLARATION, IDX_NAMESPACE, IDX_NAMESPACE, IDX_NAMESPACE]
+            vec![IDX_DECLARATION, IDX_NAMESPACE]
         );
     }
 
@@ -495,11 +558,10 @@ mod tests {
         );
     }
 
-    /// `repo` after `spec` is invalid Lemma; highlight as control, not as a `repo` declaration.
+    /// `repo` after `spec` is invalid Lemma; opaque name scan yields CLASS, not a `repo` declaration.
     #[test]
-    fn spec_followed_by_repo_keyword_is_control_not_namespace() {
-        // spec → DECLARATION, repo → CONTROL (stray body context)
-        assert_eq!(token_types("spec repo"), vec![IDX_DECLARATION, IDX_CONTROL]);
+    fn spec_followed_by_repo_spelling_is_class_not_namespace() {
+        assert_eq!(token_types("spec repo"), vec![IDX_DECLARATION, IDX_CLASS]);
     }
 
     #[test]
@@ -790,28 +852,59 @@ mod tests {
     }
 
     #[test]
-    fn repo_declaration_vs_qualifier_segment() {
-        // repo → DECLARATION, @ → NAMESPACE, org → NAMESPACE, / transparent, repo → NAMESPACE (qualifier segment)
+    fn repo_declaration_one_logical_name() {
         assert_eq!(
             token_types("repo @org/repo"),
-            vec![IDX_DECLARATION, IDX_NAMESPACE, IDX_NAMESPACE, IDX_NAMESPACE]
+            vec![IDX_DECLARATION, IDX_NAMESPACE]
         );
     }
 
     #[test]
     fn uses_with_alias() {
-        // spec → DECLARATION, s → CLASS, uses → DECLARATION, alias → REFERENCE, : PUNCT
-        // @ → VALUE, iso → REFERENCE, / → OPERATOR, countries → REFERENCE
-        let types = token_types("spec s\nuses alias: @iso/countries");
-        assert_eq!(types[0], IDX_DECLARATION); // spec
-        assert_eq!(types[1], IDX_CLASS); // s
-        assert_eq!(types[2], IDX_DECLARATION); // uses
-        assert_eq!(types[3], IDX_REFERENCE); // alias
-        assert_eq!(types[4], IDX_PUNCTUATION); // :
-        assert_eq!(types[5], IDX_VALUE); // @
-        assert_eq!(types[6], IDX_REFERENCE); // iso
-        assert_eq!(types[7], IDX_OPERATOR); // /
-        assert_eq!(types[8], IDX_REFERENCE); // countries
+        // @iso/countries is one LogicalName REFERENCE
+        assert_eq!(
+            token_types("spec s\nuses alias: @iso/countries"),
+            vec![
+                IDX_DECLARATION,
+                IDX_CLASS,
+                IDX_DECLARATION,
+                IDX_PROPERTY,
+                IDX_PUNCTUATION,
+                IDX_REFERENCE,
+            ]
+        );
+    }
+
+    #[test]
+    fn uses_alias_qualified_path_and_year_are_reference() {
+        assert_eq!(
+            token_types("spec s\nuses alias: @iso/countries alpha2 2025"),
+            vec![
+                IDX_DECLARATION,
+                IDX_CLASS,
+                IDX_DECLARATION,
+                IDX_PROPERTY,
+                IDX_PUNCTUATION,
+                IDX_REFERENCE,
+                IDX_REFERENCE,
+                IDX_REFERENCE,
+            ]
+        );
+    }
+
+    #[test]
+    fn uses_bare_qualified_path_and_year_are_reference() {
+        assert_eq!(
+            token_types("spec s\nuses @iso/countries alpha2 2026"),
+            vec![
+                IDX_DECLARATION,
+                IDX_CLASS,
+                IDX_DECLARATION,
+                IDX_REFERENCE,
+                IDX_REFERENCE,
+                IDX_REFERENCE,
+            ]
+        );
     }
 
     #[test]

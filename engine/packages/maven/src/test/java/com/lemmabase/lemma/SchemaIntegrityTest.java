@@ -11,6 +11,8 @@ import com.fasterxml.jackson.core.JsonToken;
 import com.lemmabase.lemma.schema.ExplanationNode;
 import com.lemmabase.lemma.schema.LemmaType;
 import com.lemmabase.lemma.schema.LiteralValue;
+import com.lemmabase.lemma.schema.ShowPropertyElementType;
+import com.lemmabase.lemma.schema.ShowPropertyType;
 import com.lemmabase.lemma.schema.TypeExtends;
 import java.math.BigDecimal;
 import java.nio.file.Files;
@@ -57,6 +59,48 @@ final class SchemaIntegrityTest {
   }
 
   @Test
+  void showPropertyTypeKindsMatchSchema() throws Exception {
+    Set<String> schemaKinds = inlineOneOfConsts(defs.get("ShowPropertyType"), "kind");
+    Map<String, ShowPropertyType> byKind = showPropertyTypesFromFixture();
+    assertEquals(schemaKinds, byKind.keySet());
+
+    Set<String> permitted =
+        Arrays.stream(ShowPropertyType.class.getPermittedSubclasses())
+            .map(Class::getSimpleName)
+            .collect(Collectors.toSet());
+    Set<String> instanceClasses =
+        byKind.values().stream()
+            .map(t -> t.getClass().getSimpleName())
+            .collect(Collectors.toSet());
+    assertEquals(permitted, instanceClasses);
+
+    for (Map.Entry<String, ShowPropertyType> e : byKind.entrySet()) {
+      assertEquals(e.getKey(), e.getValue().kind());
+    }
+  }
+
+  @Test
+  void showPropertyElementTypeKindsMatchSchema() throws Exception {
+    Set<String> schemaKinds = inlineOneOfConsts(defs.get("ShowPropertyElementType"), "kind");
+    Map<String, ShowPropertyElementType> byKind = showPropertyElementTypesFromFixture();
+    assertEquals(schemaKinds, byKind.keySet());
+
+    Set<String> permitted =
+        Arrays.stream(ShowPropertyElementType.class.getPermittedSubclasses())
+            .map(Class::getSimpleName)
+            .collect(Collectors.toSet());
+    Set<String> instanceClasses =
+        byKind.values().stream()
+            .map(t -> t.getClass().getSimpleName())
+            .collect(Collectors.toSet());
+    assertEquals(permitted, instanceClasses);
+
+    for (Map.Entry<String, ShowPropertyElementType> e : byKind.entrySet()) {
+      assertEquals(e.getKey(), e.getValue().kind());
+    }
+  }
+
+  @Test
   void lemmaTypeKindsMatchSchema() throws Exception {
     Set<String> schemaKinds = refOneOfConsts(defs.get("LemmaType"), "kind");
     Map<String, LemmaType> byKind = lemmaTypesFromFixture();
@@ -81,7 +125,7 @@ final class SchemaIntegrityTest {
   void specRuleResultReadsInstance() throws Exception {
     String json =
         """
-        {"vetoed":false,"rule_type":"tax_bracket","result":"basic","spec":{"spec":"tax_bracket","effective":"","instance":"basic","data":{"income":{"vetoed":false,"rule_type":"money","result":{"result":"30000 eur","measure":{"eur":"30000"}}}},"rules":{"tax":{"vetoed":false,"rule_type":"money","result":{"result":"10800 eur","measure":{"eur":"10800"}}}}}}
+        {"vetoed":false,"rule_type":"tax_bracket","result":"basic","spec":{"spec":"tax_bracket","effective":"","instance":"basic","path":[{"uses":"basic","spec":"tax_bracket"}],"data":{"income":{"vetoed":false,"rule_type":"money","result":{"result":"30000 eur","measure":{"eur":"30000"}}}},"rules":{"tax":{"vetoed":false,"rule_type":"money","result":{"result":"10800 eur","measure":{"eur":"10800"}}}}}}
         """;
     try (JsonParser parser = FACTORY.createParser(json)) {
       parser.nextToken();
@@ -90,6 +134,8 @@ final class SchemaIntegrityTest {
       assertEquals("tax_bracket", spec.ruleType());
       assertEquals("tax_bracket", spec.spec().spec());
       assertEquals("basic", spec.spec().instance());
+      assertEquals(
+          List.of(new Show.PathSegment("basic", null, "tax_bracket")), spec.spec().path());
       assertEquals(false, spec.spec().data().get("income").vetoed());
       assertEquals("30000 eur", spec.spec().data().get("income").result().result());
       assertEquals(false, spec.spec().rules().get("tax").vetoed());
@@ -104,14 +150,15 @@ final class SchemaIntegrityTest {
     Set<String> schemaTypes = refOneOfConsts(defs.get("ExplanationNode"), "type");
     Map<String, ExplanationNode> samples =
         Map.of(
-            "rule",
-                new ExplanationNode.Rule(
-                    "n", new RuleResultValue.ResultOnly("d"), "b", null, null),
+            "rule_ref",
+                new ExplanationNode.RuleRef(0, "n", new RuleResultValue.ResultOnly("d")),
             "compose", new ExplanationNode.Compose("e", null, List.of()),
             "data", new ExplanationNode.Data("n", new RuleResultValue.ResultOnly("d")),
             "data_unused", new ExplanationNode.DataUnused("n"),
             "conversion", new ExplanationNode.Conversion("e", List.of(), List.of()),
-            "veto", new ExplanationNode.Veto(null));
+            "veto", new ExplanationNode.Veto(null),
+            "row", new ExplanationNode.Row(1, false, null, List.of()),
+            "filter", new ExplanationNode.Filter("enabled", 1, 2, null));
     assertEquals(schemaTypes, samples.keySet());
 
     Set<String> permitted =
@@ -196,6 +243,45 @@ final class SchemaIntegrityTest {
             .collect(Collectors.toSet()));
   }
 
+  private static Map<String, ShowPropertyType> showPropertyTypesFromFixture() throws Exception {
+    Path fixture =
+        Path.of(System.getProperty("user.dir"))
+            .toAbsolutePath()
+            .normalize()
+            .resolve("../../tests/fixtures/api/show_property_type_kinds.json")
+            .normalize();
+    Map<String, ShowPropertyType> byKind = new HashMap<>();
+    try (JsonParser p = FACTORY.createParser(Files.readString(fixture))) {
+      p.nextToken();
+      while (p.nextToken() != JsonToken.END_OBJECT) {
+        p.nextToken();
+        ShowPropertyType type = ShowPropertyType.read(p);
+        byKind.putIfAbsent(type.kind(), type);
+      }
+    }
+    return byKind;
+  }
+
+  private static Map<String, ShowPropertyElementType> showPropertyElementTypesFromFixture()
+      throws Exception {
+    Path fixture =
+        Path.of(System.getProperty("user.dir"))
+            .toAbsolutePath()
+            .normalize()
+            .resolve("../../tests/fixtures/api/show_property_element_type_kinds.json")
+            .normalize();
+    Map<String, ShowPropertyElementType> byKind = new HashMap<>();
+    try (JsonParser p = FACTORY.createParser(Files.readString(fixture))) {
+      p.nextToken();
+      while (p.nextToken() != JsonToken.END_OBJECT) {
+        p.nextToken();
+        ShowPropertyElementType type = ShowPropertyElementType.read(p);
+        byKind.putIfAbsent(type.kind(), type);
+      }
+    }
+    return byKind;
+  }
+
   private static Map<String, LemmaType> lemmaTypesFromFixture() throws Exception {
     Path fixture =
         Path.of(System.getProperty("user.dir"))
@@ -251,9 +337,41 @@ final class SchemaIntegrityTest {
     }
     Set<String> consts = new LinkedHashSet<>();
     for (Json item : oneOf.array()) {
-      consts.add(requireConst(item, discriminatorField));
+      consts.add(constThroughAllOf(item, discriminatorField));
     }
     return consts;
+  }
+
+  /** An arm is the object itself, or {@code allOf} of {@code $ref} bodies that carry the const. */
+  private static String constThroughAllOf(Json arm, String discriminatorField) {
+    Json allOf = arm.object().get("allOf");
+    if (allOf == null) {
+      return requireConst(arm, discriminatorField);
+    }
+    for (Json part : allOf.array()) {
+      Json ref = part.object().get("$ref");
+      if (ref == null) {
+        continue;
+      }
+      Json target = defs.get(refName(ref));
+      if (target == null) {
+        fail("BUG: unresolved $ref " + ref.asString());
+      }
+      Json properties = target.object().get("properties");
+      if (properties != null && properties.object().containsKey(discriminatorField)) {
+        return requireConst(target, discriminatorField);
+      }
+    }
+    fail("BUG: allOf arm carries no properties." + discriminatorField);
+    throw new AssertionError("unreachable");
+  }
+
+  private static String refName(Json ref) {
+    String text = ref.asString();
+    if (!text.startsWith("#/$defs/")) {
+      fail("BUG: unexpected $ref " + text);
+    }
+    return text.substring("#/$defs/".length());
   }
 
   /**

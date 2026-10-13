@@ -33,7 +33,6 @@ data monthly_spend: number
   -> minimum 0
   -> suggest 150
 
-
 rule discount:
   monthly_spend * membership.discount_rate
 

@@ -5,10 +5,10 @@
 //! demonstrates.  Tests that should succeed use `eval_rule`; tests that must be rejected at
 //! plan time use `expect_plan_error`.
 
+use indexmap::IndexMap;
 use lemma::DateTimeValue;
 use lemma::Engine;
 use rust_decimal::Decimal;
-use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -23,7 +23,7 @@ fn eval_rule(code: &str, spec_name: &str, rule_name: &str) -> String {
         .expect("Should parse and plan");
     let now = DateTimeValue::now();
     let response = engine
-        .run(None, spec_name, Some(&now), HashMap::new(), None, false)
+        .evaluate(None, spec_name, Some(&now), IndexMap::new(), None, false)
         .expect("Should evaluate");
     let result = response
         .results
@@ -45,7 +45,7 @@ fn eval_rule_measure_unit(code: &str, spec_name: &str, rule_name: &str, unit: &s
         .expect("Should parse and plan");
     let now = DateTimeValue::now();
     let response = engine
-        .run(None, spec_name, Some(&now), HashMap::new(), None, false)
+        .evaluate(None, spec_name, Some(&now), IndexMap::new(), None, false)
         .expect("Should evaluate");
     let result = response
         .results
@@ -142,7 +142,6 @@ fn d2_velocity_compound_unit_decomposition() {
     // 100 meter / 20 second → anonymous {length:1, duration:-1} → `as mps` → 5 mps.
     let code = r#"spec d2
 uses lemma units
-data length: measure -> unit meter: 1 -> unit kilometer: 1000
 data velocity: measure -> unit mps: meter/second -> unit kmh: kilometer/hour
 data dist: 100 meter
 data secs: 20 second
@@ -161,7 +160,6 @@ fn d2_velocity_in_kmh_conversion() {
     // 5 m/s × (3600 s/h ÷ 1000 m/km) = 18 km/h exactly.
     let code = r#"spec d2b
 uses lemma units
-data length: measure -> unit meter: 1 -> unit kilometer: 1000
 data velocity: measure -> unit mps: meter/second -> unit kmh: kilometer/hour
 data dist: 100 meter
 data secs: 20 second
@@ -181,7 +179,6 @@ fn d3_inconsistent_unit_decompositions_rejected() {
     // One unit is `meter/second` (velocity), another is `meter` (length) — inconsistent.
     let code = r#"spec d3
 uses lemma units
-data length: measure -> unit meter: 1
 data velocity: measure -> unit mps: meter/second -> unit just_meters: meter"#;
     expect_plan_error(code, "inconsistent");
 }
@@ -240,17 +237,17 @@ data velocity: measure -> unit mps: meter/second"#;
 
 #[test]
 fn d6_uses_and_qualified_parent_makes_type_available_for_compound_units() {
-    // `uses spec_b` plus `data length: spec_b.length` imports the `length` type (including its `meter` unit)
-    // and makes `meter` available for compound unit expressions in `spec_a`.
+    // `uses spec_b` plus `data length: spec_b.length` imports the `length` type (including its `metre` unit)
+    // and makes `metre` available for compound unit expressions in `spec_a`.
     let code = r#"spec spec_b
-data length: measure -> unit meter: 1
+data length: measure -> unit metre: 1
 
 spec spec_a
 uses lemma units
 uses spec_b
 data length: spec_b.length
-data velocity: measure -> unit mps: meter/second
-data dist: 100 meter
+data velocity: measure -> unit mps: metre/second
+data dist: 100 metre
 data secs: 20 second
 rule speed: (dist / secs) as mps"#;
     let val = eval_rule(code, "spec_a", "speed");
@@ -263,17 +260,17 @@ rule speed: (dist / secs) as mps"#;
 
 #[test]
 fn d7_cross_library_same_named_measure_resolves_speed_literal() {
-    // Two `length` types from different specs: `spec_a` defines its own `length` and
-    // imports `velocity` from `spec_b`. Anonymous `dist / secs` must still cast to
+    // Two `length` types from different specs, both extending `units.length`: `spec_a`
+    // defines its own `length` and imports `velocity` from `spec_b`. Anonymous `dist / secs` must still cast to
     // the imported `mps` unit; planning and evaluation complete without error.
     let code = r#"spec spec_b
 uses lemma units
-data length: measure -> unit meter: 1
+data length: units.length
 data velocity: measure -> unit mps: meter/second
 
 spec spec_a
 uses lemma units
-data length: measure -> unit meter: 1
+data length: units.length
 uses spec_b_ref: spec_b
 data velocity: spec_b_ref.velocity
 data dist: 100 meter
@@ -418,7 +415,7 @@ rule runway_months: (balance / burn_rate) as month"#;
         .expect("runway spec must load and plan");
     let now = DateTimeValue::now();
     let response = engine
-        .run(None, "d10_runway", Some(&now), HashMap::new(), None, false)
+        .evaluate(None, "d10_runway", Some(&now), IndexMap::new(), None, false)
         .expect("runway spec must evaluate");
     let display = response
         .results
@@ -460,7 +457,6 @@ fn d12_duration_keyword_in_compound_unit() {
     // This is the basic mechanism that makes velocity `meter/second` work.
     let code = r#"spec d12
 uses lemma units
-data length: measure -> unit meter: 1
 data velocity: measure -> unit mps: meter/second
 data dist: 200 meter
 data secs: 40 second
@@ -477,7 +473,6 @@ rule speed: (dist / secs) as mps"#;
 fn integration_velocity_basic() {
     let code = r#"spec phys
 uses lemma units
-data length: measure -> unit meter: 1 -> unit kilometer: 1000
 data velocity: measure -> unit mps: meter/second -> unit kmh: kilometer/hour
 data dist: 1000 meter
 data elapsed: 200 second
@@ -567,7 +562,7 @@ fn integration_same_family_measure_multiply_rejected() {
 data money: measure -> unit eur: 1.00
 data a: 10 eur
 data b: 5 eur
-rule product: a * b"#;
+rule multiplied: a * b"#;
     expect_plan_error(code, "anonymous intermediate");
 }
 
@@ -578,8 +573,8 @@ fn integration_same_family_measure_multiply_via_as_number() {
 data money: measure -> unit eur: 1.00
 data a: 10 eur
 data b: 5 eur
-rule product: (a as eur as number) * (b as eur as number)"#;
-    let val = eval_rule(code, "t", "product");
+rule multiplied: (a as eur as number) * (b as eur as number)"#;
+    let val = eval_rule(code, "t", "multiplied");
     assert!(val.contains("50"), "Expected 50, got: {val}");
 }
 

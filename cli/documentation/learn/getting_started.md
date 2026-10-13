@@ -5,7 +5,7 @@ nav_order: 10
 
 # Getting started
 
-Lemma is a pure, declarative language for business rules that stakeholders can read and systems can evaluate precisely. Rules live in Specs: named collections of Data (inputs) and Rules (computed outputs). Lemma validates every Spec before evaluation; after that, each Rule returns a value or a Veto (no value). Explanations are opt-in (`lemma run -x` / `explain: true`).
+Lemma is a pure, declarative language for business rules that stakeholders can read and systems can evaluate precisely. Rules live in Specs: named collections of Data (inputs) and Rules (computed outputs). Lemma validates every Spec before evaluation; after that, each Rule returns a value or a Veto (no value). Explanations are opt-in (`lemma evaluate -x` / `explain: true`).
 
 This chapter walks through installation, your first Spec, and running it from the CLI.
 
@@ -45,14 +45,17 @@ data weight: measure
 data is_express:     true
 data package_weight: 2.5 kilogram
 
-rule express_fee: 0 eur
+rule express_fee:
+  0 eur
   unless is_express then 4.99 eur
 
-rule base_shipping: 5.99 eur
-  unless package_weight > 1 kilogram  then 8.99 eur
-  unless package_weight > 5 kilogram  then 15.99 eur
+rule base_shipping:
+  5.99 eur
+  unless package_weight > 1 kilogram then 8.99 eur
+  unless package_weight > 5 kilogram then 15.99 eur
 
-rule total_cost: base_shipping + express_fee
+rule total_cost:
+  base_shipping + express_fee
 ```
 
 Three building blocks appear here:
@@ -67,10 +70,10 @@ There is no inline comment syntax. The only in-source documentation is a comment
 lemma format
 ```
 
-## Run it
+## Evaluate it
 
 ```bash
-lemma run shipping
+lemma evaluate shipping
 ```
 
 Output:
@@ -88,7 +91,7 @@ Output:
 Override Data from the command line:
 
 ```bash
-lemma run shipping is_express=false package_weight="6.0 kilogram"
+lemma evaluate shipping is_express=false package_weight="6.0 kilogram"
 ```
 
 Output:
@@ -106,13 +109,13 @@ Output:
 Other useful flags:
 
 ```bash
-lemma run shipping --json
+lemma evaluate shipping --json
 ```
 
 Machine-readable output.
 
 ```bash
-lemma run shipping -x
+lemma evaluate shipping -x
 ```
 
 Show how each Rule was evaluated (human reasoning table; with `--json`, per-rule `explanation` objects per [api.v1.json](../../../engine/schemas/api.v1.json)).
@@ -121,7 +124,7 @@ Show how each Rule was evaluated (human reasoning table; with `--json`, per-rule
 lemma show shipping
 ```
 
-Show the static catalog (declared data types, constraints, and rules). Empty `needed_by_rules` on a data slot means offered for reuse. Run-data-aware needs for a concrete `run` come from each rule's `missing_data`; types and suggestions are on `lemma show` only.
+Show the static catalog: Types (local data declarations), Data (inputs rules need), and rules. With `--json` it is a JSON Schema for the evaluation data (`properties` = Data; `x-lemma-types` = Types). Evaluation-data-aware needs for a concrete `evaluate` come from each rule's `missing_data`; types and suggestions are on `lemma show` only.
 
 See [CLI reference](../reference/cli.md) for all commands and flags.
 

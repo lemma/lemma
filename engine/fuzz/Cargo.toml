@@ -50,3 +50,10 @@ path = "fuzz_targets/fuzz_data_bindings.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "fuzz_snapshot_decode"
+path = "fuzz_targets/fuzz_snapshot_decode.rs"
+test = false
+doc = false
+bench = false

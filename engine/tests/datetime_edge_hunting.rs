@@ -1,5 +1,5 @@
-use lemma::{DateGranularity, DateTimeValue, Engine, TimezoneValue, ValueKind};
-use std::collections::HashMap;
+use indexmap::IndexMap;
+use lemma::{DateGranularity, DateTimeValue, Engine, EvaluateDataValue, TimezoneValue, ValueKind};
 
 fn effective(y: i32, m: u32, d: u32, h: u32, min: u32, s: u32) -> DateTimeValue {
     DateTimeValue {
@@ -10,10 +10,7 @@ fn effective(y: i32, m: u32, d: u32, h: u32, min: u32, s: u32) -> DateTimeValue 
         minute: min,
         second: s,
         microsecond: 0,
-        timezone: Some(TimezoneValue {
-            offset_hours: 0,
-            offset_minutes: 0,
-        }),
+        timezone: Some(TimezoneValue { offset_minutes: 0 }),
         granularity: DateGranularity::DateTime,
     }
 }
@@ -27,16 +24,13 @@ fn effective_us(y: i32, m: u32, d: u32, h: u32, min: u32, s: u32, us: u32) -> Da
         minute: min,
         second: s,
         microsecond: us,
-        timezone: Some(TimezoneValue {
-            offset_hours: 0,
-            offset_minutes: 0,
-        }),
+        timezone: Some(TimezoneValue { offset_minutes: 0 }),
         granularity: DateGranularity::DateTime,
     }
 }
 
 fn eval_bool(engine: &Engine, spec_name: &str, rule: &str, eff: &DateTimeValue) -> bool {
-    eval_bool_with_datas(engine, spec_name, rule, eff, HashMap::new())
+    eval_bool_with_datas(engine, spec_name, rule, eff, IndexMap::new())
 }
 
 fn eval_bool_with_datas(
@@ -44,10 +38,10 @@ fn eval_bool_with_datas(
     spec_name: &str,
     rule: &str,
     eff: &DateTimeValue,
-    data: HashMap<String, String>,
+    data: IndexMap<String, EvaluateDataValue>,
 ) -> bool {
     let response = engine
-        .run(None, spec_name, Some(eff), data, None, true)
+        .evaluate(None, spec_name, Some(eff), data, None, true)
         .unwrap();
     let rr = response
         .results
@@ -75,7 +69,7 @@ fn eval_value(
     eff: &DateTimeValue,
 ) -> lemma::LiteralValue {
     let response = engine
-        .run(None, spec_name, Some(eff), HashMap::new(), None, true)
+        .evaluate(None, spec_name, Some(eff), IndexMap::new(), None, true)
         .unwrap();
     let rr = response
         .results
@@ -363,8 +357,8 @@ rule check: event_date in past
         .expect("pure-veto date sugar must plan");
     let eff = effective(2026, 3, 7, 12, 0, 0);
     let response = engine
-        .run(None, "test", Some(&eff), HashMap::new(), None, false)
-        .expect("run");
+        .evaluate(None, "test", Some(&eff), IndexMap::new(), None, false)
+        .expect("evaluate");
     let check = response
         .results
         .values()
@@ -400,8 +394,8 @@ rule tolerance_check: event_date in past 1 day
         .expect("pure-veto calendar/tolerance sugar must plan");
     let eff = effective(2026, 3, 7, 12, 0, 0);
     let response = engine
-        .run(None, "test", Some(&eff), HashMap::new(), None, false)
-        .expect("run");
+        .evaluate(None, "test", Some(&eff), IndexMap::new(), None, false)
+        .expect("evaluate");
     for name in ["calendar_check", "tolerance_check"] {
         let rule = response
             .results
@@ -756,6 +750,52 @@ uses lemma units\n\nrule current: now\n";
     assert!(formatted.contains("now"), "got: {}", formatted);
     let reparsed = lemma::format_source(&formatted, lemma::SourceType::Volatile).unwrap();
     assert_eq!(formatted, reparsed, "double format should be idempotent");
+}
+
+#[test]
+fn bare_in_past_before_next_rule_parses() {
+    let code = r#"
+spec test
+uses lemma units
+data event_date: date
+rule was_before_now: event_date in past
+rule recent: event_date in past 7 day
+"#;
+    let mut engine = Engine::new();
+    engine
+        .load([(lemma::SourceType::Volatile, code.to_string())])
+        .expect("bare `in past` must end before the next rule");
+}
+
+#[test]
+fn bare_in_future_before_next_rule_parses() {
+    let code = r#"
+spec test
+uses lemma units
+data event_date: date
+rule upcoming: event_date in future
+rule soon: event_date in future 7 day
+"#;
+    let mut engine = Engine::new();
+    engine
+        .load([(lemma::SourceType::Volatile, code.to_string())])
+        .expect("bare `in future` must end before the next rule");
+}
+
+#[test]
+fn format_round_trip_parenthesized_in_past_before_next_rule() {
+    let input = r#"
+spec test
+uses lemma units
+data event_date: date
+rule was_before_now: (event_date in past)
+rule recent: event_date in past 7 day
+"#;
+    let formatted = lemma::format_source(input, lemma::SourceType::Volatile)
+        .expect("parenthesized `in past` must format");
+    let again = lemma::format_source(&formatted, lemma::SourceType::Volatile)
+        .expect("formatted `in past` before next rule must re-parse");
+    assert_eq!(formatted, again, "format must be idempotent");
 }
 
 // =============================================================================

@@ -17,7 +17,8 @@ uses @iso/countries alpha2 2026-01-01
 
 data country: alpha2.code
 
-rule x: country
+rule x:
+  country
 
 
 spec with_alias
@@ -27,9 +28,11 @@ uses @iso/countries alpha2 2024-01-01
 data country:       alpha2.code
 data fallback_code: "NL"
 
-rule x: country
+rule x:
+  country
 
-rule label: fallback_code
+rule label:
+  fallback_code
 
 
 repo x
@@ -40,4 +43,5 @@ data code: text
   -> option "NL"
   -> option "BE"
 
-rule x: code
+rule x:
+  code

@@ -19,7 +19,9 @@ import org.jspecify.annotations.Nullable;
  * @param maxNormalizedExpressionNodes maximum unique normal-form cells reachable from one rule root
  * @param maxSpecDependencyDepth maximum depth of the spec dependency chain
  * @param maxDagSpecs maximum number of specs in one dependency DAG
- * @param maxNormalFormDepth maximum nesting depth of a rule's normalized NormalForm DAG
+ * @param maxListRows maximum rows in one list (evaluation-data bind)
+ * @param maxListDepth maximum nested self-list depth
+ * @param maxListNodes maximum total rows across one evaluation-data list tree
  */
 public record ResourceLimits(
     long maxSourceSizeBytes,
@@ -31,7 +33,9 @@ public record ResourceLimits(
     long maxNormalizedExpressionNodes,
     long maxSpecDependencyDepth,
     long maxDagSpecs,
-    long maxNormalFormDepth) {
+    long maxListRows,
+    long maxListDepth,
+    long maxListNodes) {
 
   /**
    * Named overrides for {@link Engine#create(Builder)}. Unset keys keep engine defaults.
@@ -62,7 +66,9 @@ public record ResourceLimits(
     Long maxNormalizedExpressionNodes = null;
     Long maxSpecDependencyDepth = null;
     Long maxDagSpecs = null;
-    Long maxNormalFormDepth = null;
+    Long maxListRows = null;
+    Long maxListDepth = null;
+    Long maxListNodes = null;
     while (p.nextToken() != JsonToken.END_OBJECT) {
       String field = p.currentName();
       p.nextToken();
@@ -76,7 +82,9 @@ public record ResourceLimits(
         case "max_normalized_expression_nodes" -> maxNormalizedExpressionNodes = p.getLongValue();
         case "max_spec_dependency_depth" -> maxSpecDependencyDepth = p.getLongValue();
         case "max_dag_specs" -> maxDagSpecs = p.getLongValue();
-        case "max_normal_form_depth" -> maxNormalFormDepth = p.getLongValue();
+        case "max_list_rows" -> maxListRows = p.getLongValue();
+        case "max_list_depth" -> maxListDepth = p.getLongValue();
+        case "max_list_nodes" -> maxListNodes = p.getLongValue();
         default -> JsonReading.unknownField(field, "ResourceLimits");
       }
     }
@@ -107,8 +115,14 @@ public record ResourceLimits(
     if (maxDagSpecs == null) {
       JsonReading.missingRequired("max_dag_specs", "ResourceLimits");
     }
-    if (maxNormalFormDepth == null) {
-      JsonReading.missingRequired("max_normal_form_depth", "ResourceLimits");
+    if (maxListRows == null) {
+      JsonReading.missingRequired("max_list_rows", "ResourceLimits");
+    }
+    if (maxListDepth == null) {
+      JsonReading.missingRequired("max_list_depth", "ResourceLimits");
+    }
+    if (maxListNodes == null) {
+      JsonReading.missingRequired("max_list_nodes", "ResourceLimits");
     }
     return new ResourceLimits(
         maxSourceSizeBytes,
@@ -120,7 +134,9 @@ public record ResourceLimits(
         maxNormalizedExpressionNodes,
         maxSpecDependencyDepth,
         maxDagSpecs,
-        maxNormalFormDepth);
+        maxListRows,
+        maxListDepth,
+        maxListNodes);
   }
 
   /**
@@ -147,8 +163,12 @@ public record ResourceLimits(
         + maxSpecDependencyDepth
         + ",\"max_dag_specs\":"
         + maxDagSpecs
-        + ",\"max_normal_form_depth\":"
-        + maxNormalFormDepth
+        + ",\"max_list_rows\":"
+        + maxListRows
+        + ",\"max_list_depth\":"
+        + maxListDepth
+        + ",\"max_list_nodes\":"
+        + maxListNodes
         + "}";
   }
 
@@ -166,7 +186,9 @@ public record ResourceLimits(
     private @Nullable Long maxNormalizedExpressionNodes;
     private @Nullable Long maxSpecDependencyDepth;
     private @Nullable Long maxDagSpecs;
-    private @Nullable Long maxNormalFormDepth;
+    private @Nullable Long maxListRows;
+    private @Nullable Long maxListDepth;
+    private @Nullable Long maxListNodes;
 
     private Builder() {}
 
@@ -270,13 +292,35 @@ public record ResourceLimits(
     }
 
     /**
-     * Sets maximum nesting depth of a rule's normalized NormalForm DAG.
+     * Sets maximum rows in one list (evaluation-data bind).
      *
      * @param value override value
      * @return this builder
      */
-    public Builder maxNormalFormDepth(long value) {
-      this.maxNormalFormDepth = value;
+    public Builder maxListRows(long value) {
+      this.maxListRows = value;
+      return this;
+    }
+
+    /**
+     * Sets maximum nested self-list depth.
+     *
+     * @param value override value
+     * @return this builder
+     */
+    public Builder maxListDepth(long value) {
+      this.maxListDepth = value;
+      return this;
+    }
+
+    /**
+     * Sets maximum total rows across one evaluation-data list tree.
+     *
+     * @param value override value
+     * @return this builder
+     */
+    public Builder maxListNodes(long value) {
+      this.maxListNodes = value;
       return this;
     }
 
@@ -297,7 +341,9 @@ public record ResourceLimits(
       first = append(json, first, "max_normalized_expression_nodes", maxNormalizedExpressionNodes);
       first = append(json, first, "max_spec_dependency_depth", maxSpecDependencyDepth);
       first = append(json, first, "max_dag_specs", maxDagSpecs);
-      append(json, first, "max_normal_form_depth", maxNormalFormDepth);
+      first = append(json, first, "max_list_rows", maxListRows);
+      first = append(json, first, "max_list_depth", maxListDepth);
+      append(json, first, "max_list_nodes", maxListNodes);
       json.append('}');
       return json.toString();
     }

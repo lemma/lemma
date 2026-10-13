@@ -18,16 +18,23 @@ data base_price: 100
 data is_member:  false
 data quantity:   number
 
-rule discount: 0%
-  unless quantity >= 10  then 10%
-  unless quantity >= 50  then 15%
-  unless is_member       then 20%
+rule discount:
+  0%
+  unless quantity >= 10 then 10%
+  unless quantity >= 50 then 15%
+  unless is_member      then 20%
 
-rule discount_amount: base_price * discount
-rule discounted_price: base_price - discount_amount
+rule discount_amount:
+  base_price * discount
 
-rule vat: discounted_price * 21%
-rule total: discounted_price + vat
+rule discounted_price:
+  base_price - discount_amount
+
+rule vat:
+  discounted_price * 21%
+
+rule total:
+  discounted_price + vat
 ```
 
 ## Get started
@@ -48,7 +55,7 @@ Precompiled binaries for Linux, macOS, and Windows are included in the npm packa
 
 ## Writing your first Spec
 
-Write a `.lemma` file and run it. The [Learn guide](learn/readme.md) walks you through everything from your first Spec to composing Rules across time and registries. You'll be productive in minutes.
+Write a `.lemma` file and evaluate it. The [Learn guide](learn/readme.md) walks you through everything from your first Spec to composing Rules across time and registries. You'll be productive in minutes.
 
 ## Documentation
 

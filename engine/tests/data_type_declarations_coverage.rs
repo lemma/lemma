@@ -4,9 +4,9 @@
 //! Named-typedef references: happy + unknown + name-collision with rule.
 //! Qualified parent types (`uses` plus `data x: alias.TypeName`): happy + unknown + errors.
 
-use lemma::DateTimeValue;
+use indexmap::IndexMap;
 use lemma::Engine;
-use std::collections::HashMap;
+use lemma::{DateTimeValue, EvaluateDataValue};
 
 fn load_ok(engine: &mut Engine, code: &str) {
     engine
@@ -52,10 +52,10 @@ fn rule_value(result: &lemma::Response, name: &str) -> String {
 fn run(
     engine: &Engine,
     spec: &str,
-    data: HashMap<String, String>,
+    data: IndexMap<String, EvaluateDataValue>,
 ) -> Result<lemma::Response, lemma::Error> {
     let now = DateTimeValue::now();
-    engine.run(None, spec, Some(&now), data, None, false)
+    engine.evaluate(None, spec, Some(&now), data, None, false)
 }
 
 fn assert_is_missing_data(rr: &lemma::RuleResult, key: &str) {
@@ -111,7 +111,7 @@ rule r: x
 "#;
     let mut engine = Engine::new();
     load_ok(&mut engine, code);
-    let resp = run(&engine, "s", HashMap::new()).expect("evaluates");
+    let resp = run(&engine, "s", IndexMap::new()).expect("evaluates");
     assert_is_missing_data(resp.results.get("r").expect("r"), "x");
 }
 
@@ -124,7 +124,7 @@ rule r: x
 "#;
     let mut engine = Engine::new();
     load_ok(&mut engine, code);
-    let resp = run(&engine, "s", HashMap::new()).expect("evaluates");
+    let resp = run(&engine, "s", IndexMap::new()).expect("evaluates");
     assert_is_missing_data(resp.results.get("r").expect("r"), "x");
 }
 
@@ -137,7 +137,7 @@ rule r: b
 "#;
     let mut engine = Engine::new();
     load_ok(&mut engine, code);
-    let resp = run(&engine, "s", HashMap::new()).expect("evaluates");
+    let resp = run(&engine, "s", IndexMap::new()).expect("evaluates");
     assert_is_missing_data(resp.results.get("r").expect("r"), "b");
 }
 
@@ -150,7 +150,7 @@ rule r: d
 "#;
     let mut engine = Engine::new();
     load_ok(&mut engine, code);
-    let resp = run(&engine, "s", HashMap::new()).expect("evaluates");
+    let resp = run(&engine, "s", IndexMap::new()).expect("evaluates");
     assert_is_missing_data(resp.results.get("r").expect("r"), "d");
 }
 
@@ -164,7 +164,7 @@ rule r: d
 "#;
     let mut engine = Engine::new();
     load_ok(&mut engine, code);
-    let resp = run(&engine, "s", HashMap::new()).expect("evaluates");
+    let resp = run(&engine, "s", IndexMap::new()).expect("evaluates");
     assert_is_missing_data(resp.results.get("r").expect("r"), "d");
 }
 
@@ -177,7 +177,7 @@ rule r: p
 "#;
     let mut engine = Engine::new();
     load_ok(&mut engine, code);
-    let resp = run(&engine, "s", HashMap::new()).expect("evaluates");
+    let resp = run(&engine, "s", IndexMap::new()).expect("evaluates");
     assert_is_missing_data(resp.results.get("r").expect("r"), "p");
 }
 
@@ -193,7 +193,7 @@ rule r: n
 "#;
     let mut engine = Engine::new();
     load_ok(&mut engine, code);
-    let mut data = HashMap::new();
+    let mut data = IndexMap::new();
     data.insert("n".to_string(), "5".into());
     let resp = run(&engine, "s", data).expect("5 < 10 must complete with veto");
     let rr = resp.results.get("r").expect("rule r");
@@ -215,7 +215,7 @@ rule r: n
 "#;
     let mut engine = Engine::new();
     load_ok(&mut engine, code);
-    let mut data = HashMap::new();
+    let mut data = IndexMap::new();
     data.insert("n".to_string(), "10".into());
     let resp = run(&engine, "s", data).expect("10 > 5 must complete with veto");
     let rr = resp.results.get("r").expect("rule r");
@@ -302,7 +302,7 @@ rule r: msg
 "#;
     let mut engine = Engine::new();
     load_ok(&mut engine, code);
-    let mut data = HashMap::new();
+    let mut data = IndexMap::new();
     data.insert("msg".to_string(), "way too long".into());
     let resp = run(&engine, "s", data).expect("length 5 must complete with veto");
     let rr = resp.results.get("r").expect("rule r");
@@ -341,7 +341,7 @@ rule r: n
 "#;
     let mut engine = Engine::new();
     load_ok(&mut engine, code);
-    let resp = run(&engine, "s", HashMap::new()).expect("evaluates");
+    let resp = run(&engine, "s", IndexMap::new()).expect("evaluates");
     let rr = resp.results.get("r").unwrap();
     assert!(
         rr.vetoed,
@@ -359,7 +359,7 @@ rule r: n
 "#;
     let mut engine = Engine::new();
     load_ok(&mut engine, code);
-    let mut data = HashMap::new();
+    let mut data = IndexMap::new();
     data.insert("n".to_string(), "99".into());
     let resp = run(&engine, "s", data).expect("evaluates");
     assert_eq!(rule_value(&resp, "r"), "99");
@@ -450,12 +450,12 @@ rule r: z
     let mut engine = Engine::new();
     load_ok(&mut engine, code);
 
-    let mut above_child = HashMap::new();
+    let mut above_child = IndexMap::new();
     above_child.insert("z".to_string(), "4".into());
     let resp = run(&engine, "s", above_child).expect("4 >= child min 3");
     assert_eq!(rule_value(&resp, "r"), "4");
 
-    let mut below_child = HashMap::new();
+    let mut below_child = IndexMap::new();
     below_child.insert("z".to_string(), "2".into());
     let resp = run(&engine, "s", below_child).expect("2 < child min 3 must veto");
     let rr = resp.results.get("r").expect("rule r");
@@ -467,7 +467,7 @@ rule r: z
         rr.veto_reason
     );
 
-    let mut above_parent_max = HashMap::new();
+    let mut above_parent_max = IndexMap::new();
     above_parent_max.insert("z".to_string(), "11".into());
     let resp = run(&engine, "s", above_parent_max).expect("11 > inherited max 10 must veto");
     let rr = resp.results.get("r").expect("rule r");
@@ -490,7 +490,7 @@ rule r: small_number
 "#;
     let mut engine = Engine::new();
     load_ok(&mut engine, code);
-    let mut data = HashMap::new();
+    let mut data = IndexMap::new();
     data.insert("small_number".to_string(), "200".into());
     let resp = run(&engine, "s", data).expect("overridden max 100 must complete with veto");
     let rr = resp.results.get("r").expect("rule r");
@@ -558,7 +558,7 @@ rule r: person_age
 "#;
     let mut engine = Engine::new();
     load_ok(&mut engine, code);
-    let mut data = HashMap::new();
+    let mut data = IndexMap::new();
     data.insert("person_age".to_string(), "30".into());
     let resp = run(&engine, "s", data).expect("evaluates");
     assert_eq!(rule_value(&resp, "r"), "30");
@@ -574,7 +574,7 @@ rule r: person_age
 "#;
     let mut engine = Engine::new();
     load_ok(&mut engine, code);
-    let mut data = HashMap::new();
+    let mut data = IndexMap::new();
     data.insert("person_age".to_string(), "200".into());
     let resp = run(&engine, "s", data).expect("200 > 150 must complete with veto");
     let rr = resp.results.get("r").expect("rule r");
@@ -627,7 +627,7 @@ fn number_literal_at_max_fractional_digits_plans() {
     let code = format!("spec s\ndata n: {literal}\nrule r: n\n");
     let mut engine = Engine::new();
     load_ok(&mut engine, &code);
-    let resp = run(&engine, "s", HashMap::new()).expect("evaluates");
+    let resp = run(&engine, "s", IndexMap::new()).expect("evaluates");
     assert_eq!(rule_value(&resp, "r"), literal);
 }
 
@@ -658,7 +658,7 @@ rule r: price
 "#;
     let mut engine = Engine::new();
     load_ok(&mut engine, code);
-    let mut data = HashMap::new();
+    let mut data = IndexMap::new();
     data.insert("price".to_string(), "100 eur".into());
     let resp = run(&engine, "app", data).expect("evaluates");
     let out = rule_value(&resp, "r");
@@ -704,7 +704,7 @@ rule r: dep.money
 fn qualified_type_with_slashed_opaque_spec_name_resolves() {
     let code = r#"
 spec logistics/terms
-data incoterm_type: text -> options "FOB" "CIF"
+data incoterm_type: text -> options "FOB", "CIF"
 
 spec logistics/shipping
 uses logistics/terms
@@ -716,9 +716,9 @@ rule label: incoterm
     let result = run(
         &engine,
         "logistics/shipping",
-        HashMap::from([("incoterm".into(), "FOB".into())]),
+        IndexMap::from([("incoterm".into(), "FOB".into())]),
     )
-    .expect("run");
+    .expect("evaluate");
     assert_eq!(rule_value(&result, "label"), "FOB");
 }
 
@@ -751,7 +751,7 @@ data n: number
 data n_band: number range
 data label: text
 data amount: measure -> unit eur: 1
-data band: measure range -> unit eur: 1
+data band: amount range
 data rate: ratio
 data rate_band: ratio range
 data when: date
@@ -806,4 +806,55 @@ rule use_shift: shift
             "default help for {name}"
         );
     }
+}
+
+#[test]
+fn extra_item_after_minimum_is_parse_error() {
+    let mut engine = Engine::new();
+    let joined = load_err_joined(
+        &mut engine,
+        r#"
+spec s
+data n: number -> minimum 5 6
+rule r: n
+"#,
+    );
+    assert!(
+        joined.contains("one value") || joined.contains("comma"),
+        "extra item after minimum must be a parse error, got: {joined}"
+    );
+}
+
+#[test]
+fn extra_item_after_help_is_parse_error() {
+    let mut engine = Engine::new();
+    let joined = load_err_joined(
+        &mut engine,
+        r#"
+spec s
+data n: number -> help "a" "b"
+rule r: n
+"#,
+    );
+    assert!(
+        joined.contains("one value") || joined.contains("comma"),
+        "extra item after help must be a parse error, got: {joined}"
+    );
+}
+
+#[test]
+fn extra_item_after_decimals_is_parse_error() {
+    let mut engine = Engine::new();
+    let joined = load_err_joined(
+        &mut engine,
+        r#"
+spec s
+data n: number -> decimals 2 3
+rule r: n
+"#,
+    );
+    assert!(
+        joined.contains("one value") || joined.contains("comma"),
+        "extra item after decimals must be a parse error, got: {joined}"
+    );
 }

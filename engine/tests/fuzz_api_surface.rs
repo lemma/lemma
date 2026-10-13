@@ -2,6 +2,7 @@
 //! to the public API are caught by `cargo nextest run` before the
 //! nightly-only fuzz job ever runs.
 
+use indexmap::IndexMap;
 use lemma::DateTimeValue;
 use lemma::{Engine, SourceType};
 use std::collections::HashMap;
@@ -15,13 +16,15 @@ fn engine_with_files(files: HashMap<String, String>) -> Engine {
         } else {
             SourceType::Path(std::sync::Arc::new(std::path::PathBuf::from(attr.as_str())))
         };
-        let _ = engine.load([(src, &code.to_string())]);
+        if let Err(error) = engine.load([(src, &code.to_string())]) {
+            std::hint::black_box(error);
+        }
     }
     engine
 }
 
 fn single_file(name: &str, code: &str) -> HashMap<String, String> {
-    std::iter::once((name.to_string(), code.to_string())).collect()
+    std::iter::once((name.to_string(), code.into())).collect()
 }
 
 #[test]
@@ -58,12 +61,12 @@ fn fuzz_data_bindings_api_number_too_long_no_panic() {
         .unwrap();
     // 30 nines exceeds Decimal::MAX (~7.92e28): unrepresentable input must
     // veto with a parse reason, not panic.
-    let mut data = HashMap::new();
+    let mut data = IndexMap::new();
     data.insert("x".to_string(), "999999999999999999999999999999".into());
     let now = DateTimeValue::now();
     let response = engine
-        .run(None, "fuzz_test", Some(&now), data, None, false)
-        .expect("run must complete with veto, not Error");
+        .evaluate(None, "fuzz_test", Some(&now), data, None, false)
+        .expect("evaluate must complete with veto, not Error");
     let doubled = response.results.get("doubled").expect("doubled");
     assert!(
         doubled.vetoed,
@@ -116,8 +119,9 @@ rule rw: window
             r#"
 spec veto_and_range
 uses lemma units
-data band: measure range
+data mass: measure
   -> unit kilogram: 1
+data band: mass range
   -> suggest 1 kilogram...5 kilogram
 rule outcome: veto "nope"
 rule band_out: band
@@ -139,16 +143,16 @@ rule band_out: band
         let show = engine
             .show(None, name, Some(&now))
             .unwrap_or_else(|e| panic!("{name} show: {e:?}"));
-        serde_json::to_string(&lemma::api::Show::from(&show))
+        serde_json::to_string(&lemma::api::show_document(&engine, &show))
             .unwrap_or_else(|e| panic!("{name} Show serialize: {e}"));
 
         let response = engine
-            .run(None, name, Some(&now), HashMap::new(), None, true)
+            .evaluate(None, name, Some(&now), IndexMap::new(), None, true)
             .unwrap_or_else(|e| panic!("{name} run: {e:?}"));
         serde_json::to_string(&lemma::api::Response::from(&response))
             .unwrap_or_else(|e| panic!("{name} Response serialize: {e}"));
-        let list = engine.list();
-        serde_json::to_string(&list).unwrap_or_else(|e| panic!("{name} list serialize: {e}"));
+        let specs = engine.specs();
+        serde_json::to_string(&specs).unwrap_or_else(|e| panic!("{name} specs serialize: {e}"));
     }
 }
 
@@ -167,12 +171,12 @@ fn data_binding_at_max_fractional_digits_evaluates() {
             code.to_string(),
         )])
         .unwrap();
-    let mut data = HashMap::new();
-    data.insert("x".to_string(), literal.clone());
+    let mut data = IndexMap::new();
+    data.insert("x".to_string(), literal.clone().into());
     let now = DateTimeValue::now();
     let response = engine
-        .run(None, "fuzz_test", Some(&now), data, None, false)
-        .expect("run must complete");
+        .evaluate(None, "fuzz_test", Some(&now), data, None, false)
+        .expect("evaluate must complete");
     let doubled = response.results.get("doubled").expect("doubled");
     assert!(
         !doubled.vetoed,
@@ -203,12 +207,12 @@ fn data_binding_with_excess_fractional_digits_vetoes_at_input() {
             code.to_string(),
         )])
         .unwrap();
-    let mut data = HashMap::new();
-    data.insert("x".to_string(), literal.clone());
+    let mut data = IndexMap::new();
+    data.insert("x".to_string(), literal.clone().into());
     let now = DateTimeValue::now();
     let response = engine
-        .run(None, "fuzz_test", Some(&now), data, None, false)
-        .expect("run must complete with veto, not Error");
+        .evaluate(None, "fuzz_test", Some(&now), data, None, false)
+        .expect("evaluate must complete with veto, not Error");
     let doubled = response.results.get("doubled").expect("doubled");
     assert!(
         doubled.vetoed,

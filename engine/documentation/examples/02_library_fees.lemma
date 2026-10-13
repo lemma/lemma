@@ -23,7 +23,6 @@ data is_first_offense: boolean
 data due_date:         date
 data return_date:      date
 
-
 rule days_overdue:
   due_date...return_date as day as number
 

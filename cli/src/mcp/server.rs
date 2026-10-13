@@ -249,8 +249,25 @@ mod imp {
                 workdir.display()
             ))
         })?;
-        let path_canon =
-            fs::canonicalize(source_path).unwrap_or_else(|_| source_path.to_path_buf());
+        if source_path
+            .components()
+            .any(|component| matches!(component, Component::ParentDir))
+        {
+            return Err(McpError::invalid_params(format!(
+                "path {} must not contain '..'",
+                source_path.display()
+            )));
+        }
+        let path_canon = match fs::canonicalize(source_path) {
+            Ok(canonical) => canonical,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => source_path.to_path_buf(),
+            Err(error) => {
+                return Err(McpError::invalid_params(format!(
+                    "path {} cannot be resolved: {error}",
+                    source_path.display()
+                )));
+            }
+        };
         if !path_canon.starts_with(&workdir_canon) {
             return Err(McpError::invalid_params(format!(
                 "path {} is outside the workspace",
@@ -641,15 +658,17 @@ mod imp {
                 "add_spec" => self.tool_add_spec(arguments),
                 "update_spec" => self.tool_update_spec(arguments),
                 "remove_spec" => self.tool_remove_spec(arguments),
-                "clear" => self.tool_clear(arguments),
+                "clear" => self.tool_clear(),
                 "install" => self.tool_install(arguments),
-                "run" | "evaluate" => map_tool_result(lemma::mcp::run(&self.engine, arguments)),
-                "list" => self.tool_list(arguments),
+                "run" | "evaluate" => {
+                    map_tool_result(lemma::mcp::evaluate(&self.engine, arguments))
+                }
+                "specs" => map_tool_result(lemma::mcp::specs(&self.engine, arguments)),
                 "show" => map_tool_result(lemma::mcp::show(&self.engine, arguments)),
                 "source" => map_tool_result(lemma::mcp::source(&self.engine, arguments)),
                 "check" => map_tool_result(lemma::mcp::check(arguments)),
                 "guide" => map_tool_result(lemma::mcp::guide(arguments)),
-                other => panic!("BUG: unknown MCP tool {other}"),
+                other => Err(McpError::invalid_params(format!("unknown tool '{other}'"))),
             }
         }
 
@@ -735,26 +754,26 @@ mod imp {
             // when the file is absent on disk but the engine already has rows).
             let engine_snapshot = {
                 let mut pieces: Vec<String> = Vec::new();
-                for repo_group in self.engine.list() {
+                for repo_group in self.engine.specs() {
                     let repo = repo_group.repository.clone();
-                    for listed in repo_group.specs {
+                    for version in repo_group.specs {
                         let show = self
                             .engine
                             .show(
                                 repo.as_deref(),
-                                &listed.name,
-                                listed.effective_from.as_ref(),
+                                &version.name,
+                                version.effective_from.as_ref(),
                             )
-                            .expect("BUG: listed spec must show for update snapshot");
+                            .expect("BUG: loaded spec version must show for update snapshot");
                         if show.source_type.as_ref() == Some(&source_type) {
                             let piece = self
                                 .engine
                                 .source(
                                     repo.as_deref(),
-                                    Some(&listed.name),
-                                    listed.effective_from.as_ref(),
+                                    Some(&version.name),
+                                    version.effective_from.as_ref(),
                                 )
-                                .expect("BUG: listed source_type row must have source text");
+                                .expect("BUG: loaded source_type row must have source text");
                             pieces.push(piece);
                         }
                     }
@@ -857,12 +876,12 @@ mod imp {
 
             // Sibling temporal rows that share this Path (exclude the row about to be removed).
             let mut siblings: Vec<(Option<String>, String, Option<DateTimeValue>)> = Vec::new();
-            for repo_group in self.engine.list() {
+            for repo_group in self.engine.specs() {
                 let repo = repo_group.repository.clone();
-                for listed in repo_group.specs {
+                for version in repo_group.specs {
                     let same_identity = repo.as_deref() == repository
-                        && listed.name == spec
-                        && listed.effective_from == effective;
+                        && version.name == spec
+                        && version.effective_from == effective;
                     if same_identity {
                         continue;
                     }
@@ -870,12 +889,12 @@ mod imp {
                         .engine
                         .show(
                             repo.as_deref(),
-                            &listed.name,
-                            listed.effective_from.as_ref(),
+                            &version.name,
+                            version.effective_from.as_ref(),
                         )
-                        .expect("BUG: listed sibling must show");
+                        .expect("BUG: loaded sibling must show");
                     if sibling_show.source_type.as_ref() == Some(&source_type) {
-                        siblings.push((repo.clone(), listed.name, listed.effective_from));
+                        siblings.push((repo.clone(), version.name, version.effective_from));
                     }
                 }
             }
@@ -935,7 +954,7 @@ mod imp {
             }))
         }
 
-        fn tool_clear(&mut self, _args: &serde_json::Value) -> Result<serde_json::Value, McpError> {
+        fn tool_clear(&mut self) -> Result<serde_json::Value, McpError> {
             for path in Self::workspace_lemma_files(&self.workdir)? {
                 match fs::remove_file(&path) {
                     Ok(()) => {}
@@ -984,7 +1003,7 @@ mod imp {
 
         fn repository_in_engine(engine: &Engine, repository: &str) -> bool {
             engine
-                .list()
+                .specs()
                 .iter()
                 .any(|repo| repo.repository.as_deref() == Some(repository))
         }
@@ -992,7 +1011,7 @@ mod imp {
         /// Remove every temporal row currently loaded under `repository`.
         fn unload_repository(engine: &mut Engine, repository: &str) {
             let rows: Vec<(String, Option<DateTimeValue>)> = engine
-                .list()
+                .specs()
                 .into_iter()
                 .find(|repo| repo.repository.as_deref() == Some(repository))
                 .map(|repo| {
@@ -1001,11 +1020,11 @@ mod imp {
                         .map(|spec| (spec.name, spec.effective_from))
                         .collect()
                 })
-                .unwrap_or_default();
+                .expect("BUG: caller checked repository is loaded before unload");
             for (name, effective) in rows {
                 engine
                     .remove(Some(repository), &name, effective.as_ref())
-                    .expect("BUG: unload of previously listed repository row must succeed");
+                    .expect("BUG: unload of previously loaded repository row must succeed");
             }
         }
 
@@ -1138,10 +1157,6 @@ mod imp {
 
             Ok((code, source_type))
         }
-
-        fn tool_list(&self, args: &serde_json::Value) -> Result<serde_json::Value, McpError> {
-            map_tool_result(lemma::mcp::list(&self.engine, args))
-        }
     }
 
     /// Result of reading one stdin line under a byte cap.
@@ -1229,33 +1244,10 @@ mod imp {
             std::thread::spawn(move || {
                 let mut server = McpServer::new(engine, config, workdir, registries, transport);
                 for work in work_rx {
-                    let request_id = work.request.id.clone();
-                    let response =
-                        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                            server.handle_request(work.request)
-                        })) {
-                            Ok(resp) => resp,
-                            Err(panic_payload) => {
-                                let msg = panic_payload
-                                    .downcast_ref::<&str>()
-                                    .copied()
-                                    .or_else(|| {
-                                        panic_payload.downcast_ref::<String>().map(|s| s.as_str())
-                                    })
-                                    .unwrap_or("unknown internal error");
-                                error!("engine panic caught: {}", msg);
-                                Some(McpResponse {
-                                    jsonrpc: "2.0".to_string(),
-                                    id: request_id,
-                                    result: None,
-                                    error: Some(McpError::internal_error(
-                                        "internal engine error".to_string(),
-                                    )),
-                                })
-                            }
-                        };
-                    // Receiver may have timed out and dropped; ignore late reply.
-                    let _ = work.reply.send(response);
+                    let response = server.handle_request(work.request);
+                    if let Err(late) = work.reply.send(response) {
+                        debug!("MCP request already timed out; dropped reply {:?}", late.0);
+                    }
                 }
             });
             Self {
@@ -1596,15 +1588,15 @@ mod imp {
                 .unwrap()
                 .contains("spec alpha2"));
 
-            let list = s
-                .handle_request(tools_call(2, "list", serde_json::json!({})))
-                .expect("list");
-            let list_text = list.result.as_ref().unwrap()["content"][0]["text"]
+            let specs = s
+                .handle_request(tools_call(2, "specs", serde_json::json!({ "all": true })))
+                .expect("specs");
+            let specs_text = specs.result.as_ref().unwrap()["content"][0]["text"]
                 .as_str()
                 .unwrap();
             assert!(
-                list_text.contains("@iso/countries") && list_text.contains("alpha2"),
-                "got: {list_text}"
+                specs_text.contains("@iso/countries") && specs_text.contains("alpha2"),
+                "got: {specs_text}"
             );
         }
 

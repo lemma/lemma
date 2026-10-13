@@ -33,8 +33,8 @@ cargo nextest run -p lemma-engine --tests
 | `per_rule_missing_data.rs` | Per-rule `missing_data` contract matrix: overlays, requested rules, unless pruning, And Propagate, Product/Comparison sibling walks, short-circuit release |
 | `linear_rule_chain_stack.rs` | Linear rule-chain stack safety (tip-only eval depth; load NF depth) |
 | `load_scaling.rs` | Deep/wide/unless load wall-clock bounds; wide show transitive needed_by pin |
-| `rule_ref_schedule.rs` | Requested-rule missing_data through unless and rule references (And left, Piecewise condition); cross-spec requested run |
-| `eval_allocations.rs` | `SHIPPING_EVAL_ALLOCATIONS` pin: allocations per `Engine::run` on the shipping fixture |
+| `rule_ref_schedule.rs` | Requested-rule missing_data through unless and rule references (And left, Piecewise condition); cross-spec requested evaluation |
+| `eval_allocations.rs` | `SHIPPING_EVAL_ALLOCATIONS` pin: allocations per `Engine::evaluate` on the shipping fixture |
 
 ### Temporal versioning & planning
 
@@ -99,17 +99,18 @@ cargo nextest run -p lemma-engine --tests
 | `data_type_declarations_coverage.rs` | Type declarations on data |
 | `data_nested_bindings_coverage.rs` | Nested bindings |
 | `data_references.rs` | Cross-data references |
-| `data_with_values_contract.rs` | Run data contract |
+| `data_with_values_contract.rs` | Evaluation data contract |
 | `typed_values.rs` | Typed value handling |
 | `show_suggestion_distinction.rs` | Show vs suggestions (`-> suggest` never commits) |
 | `show_only_rule_used_data.rs` | Show lists declared data; needed_by_rules marks intake vs reuse |
 | `show_rule_graph.rs` | Show.rules is ShowRule: branches, depends_on_rules, rule-target with-binding |
-| `show_with_bindings.rs` | Show + `with` / fill bindings |
+| `show_with_bindings.rs` | Show + `with` / value bindings |
 | `show_unless_last_wins_pruning.rs` | Show after static unless collapse |
 | `show_unit_constraints.rs` | Show unit / suggest magnitudes |
 | `show_uncommittable_bounds.rs` | Show bounds that cannot commit |
 | `accept_reject_removed.rs` | `accept` / `reject` keywords removed |
-| `overlay_veto_as_value.rs` | Run data veto as value |
+| `fill_command.rs` | `-> fill` is an unknown command |
+| `overlay_veto_as_value.rs` | Evaluation data veto as value |
 | `meta_fields.rs` | Meta fields on specs |
 
 ### Explanation / NormalForm eval
@@ -142,6 +143,23 @@ cargo nextest run -p lemma-engine --tests
 |------|--------|
 | `expression_syntax.rs` | Expression grammar |
 | `error_messages.rs` | Error text/locations |
+
+### Lists (red until language lands)
+
+| File | Focus |
+|------|--------|
+| `lists/list_syntax.rs` | Commas, digit comma removal, options, field-pair lookahead, `(expr).field`, reserved keywords |
+| `lists/scalar_with_command.rs` | Scalar `-> with` (replaces `fill`); standalone `with` rejected |
+| `lists/list_declarations.rs` | Value/`uses` lists, empty default, type positions, query commands rejected on data |
+| `lists/list_rows_with.rs` | Inline/dotted/named rows, append, key collision |
+| `lists/list_keys.rs` | Field/range/composite/numbered keys, coverage, temporal interface |
+| `lists/list_access.rs` | `find`/`first`/`last`, row dot, unless branch typing |
+| `lists/list_commands.rs` | Aggregations, precedence, empty/veto semantics, `top`/`sort`, name clash |
+| `lists/list_run_data.rs` | Whole-list replace, shape request Errors, limits, `Literal` |
+| `lists/list_temporal.rs` | Pinned vs unpinned row spec bodies |
+| `lists/list_recursion.rs` | Self-lists: bicycle, offer, shift, planning Errors |
+| `lists/list_worked_examples.rs` | Design worked examples verbatim |
+| `lists/list_output.rs` | Row-number paths, list/row result arms, Show `value` |
 
 ### Formatting
 
@@ -201,7 +219,7 @@ Coverage for these lives mainly in this directory (integration) or in `engine/sr
 | `serialization/mod.rs` | `json.rs` has unit tests |
 | `limits.rs`, `deps.rs`, `stdlib.rs`, `wasm.rs` | |
 
-Prefer adding **unit** tests beside the module when testing private helpers; add **integration** tests here when exercising full load → plan → run paths.
+Prefer adding **unit** tests beside the module when testing private helpers; add **integration** tests here when exercising full load → plan → evaluate paths.
 
 ---
 
@@ -212,10 +230,10 @@ Prefer adding **unit** tests beside the module when testing private helpers; add
 | Layer | Where | API | Typical assertion |
 |-------|--------|-----|-------------------|
 | Unit | `engine/src/**` `#[cfg(test)]`, `engine/src/tests/` | Private + public | Parser nodes, planner invariants, `LiteralValue`, serde |
-| Integration (this dir) | `engine/tests/*.rs` | Public `lemma::*` only | `Engine::load` → `run` / `show` / `invert` |
+| Integration (this dir) | `engine/tests/*.rs` | Public `lemma::*` only | `Engine::load` → `evaluate` / `show` / `invert` |
 | CLI | `cli/tests/integrations/*` | `lemma` binary, MCP JSON | stdout, HTTP, tool payloads |
-| WASM npm | `engine/packages/npm/test.js` | JS `Engine` | Shape of load/run/list/show |
-| Hex | `engine/packages/hex/test/` | `Lemma.*` NIF | Lifecycle, list groups, run JSON |
+| WASM npm | `engine/packages/npm/test.js` | JS `Engine` | Shape of load/evaluate/list/show |
+| Hex | `engine/packages/hex/test/` | `Lemma.*` NIF | Lifecycle, list groups, evaluate JSON |
 
 **Integration binaries:** one per `engine/tests/*.rs` file (**144** as of this refresh). Run `cargo nextest run -p lemma-engine --lib` / `--tests` for current test counts.
 
@@ -224,7 +242,7 @@ Prefer adding **unit** tests beside the module when testing private helpers; add
 | API | ~Files | Role |
 |-----|--------|------|
 | `Engine::load` | most | Parse + plan workspace sources |
-| `Engine::run` | many | Evaluate rules |
+| `Engine::evaluate` | many | Evaluate rules |
 | `Engine::show` | many (`show_*`, response/data contracts) | Spec interface API without full eval |
 | `Engine::load` (batch) | few | Dependency bundles (multi-source load) |
 | `parse` / `format_source` | 2 | `formatter.rs`, `format_weather_clothing_integration.rs` (no `Engine`) |
@@ -237,7 +255,7 @@ Prefer adding **unit** tests beside the module when testing private helpers; add
 | `planning/` (graph, normalize, semantics, execution_plan) | Heavy (~150+) | `temporal_*`, `validator_*`, `uses_lemma_*`, `type_definitions` |
 | `computation/datetime`, `rational`, `units` | datetime/rational heavy | `datetime_*`, `arithmetic_*`, `measure_*`, `ratio_*` |
 | `computation/arithmetic`, `comparison`, `range` | **None** | `arithmetic_type_combinations`, `math_ops`, `range_*`, `equal_operator` |
-| `evaluation/expression`, `explanations` | **None** | E2E via `run` in most files |
+| `evaluation/expression`, `explanations` | **None** | E2E via `evaluate` in most files |
 | `engine.rs` | ~32 | `integration_*`, `coffee_order`, registry repros |
 | `formatting/` | ~25 | `formatter`, `format_weather_clothing_integration` |
 | `registry` | ~8 | `repo_keyword`, `load_batch_wasm_planning_parity`, repros |
@@ -280,13 +298,13 @@ No integration file uses `#[should_panic]`.
 | Gap | Recommendation |
 |-----|----------------|
 | No `computation/*` unit tests except datetime/rational/units | Add unit tests beside `arithmetic.rs` / `comparison.rs` for edge cases; keep integration matrix |
-| `evaluation/expression.rs` untested in isolation | Unit-test eval of individual ops; integration already heavy via `run` |
+| `evaluation/expression.rs` untested in isolation | Unit-test eval of individual ops; integration already heavy via `evaluate` |
 | Duplicate example runners | `integration_examples` vs CLI `documentation_examples`: different roots; keep both |
 | Stale “must fail” comments | `spec_name_*` / `repro_finance_*` **pass** when fixed; comments describe failure mode if bug returns |
 
 ### CLI integration map
 
-See [cli/tests/README.md](../../cli/tests/README.md): `run`, `mcp`, `server`, `examples`: 57 tests, black-box on the `lemma` binary.
+See [cli/tests/README.md](../../cli/tests/README.md): `evaluate`, `mcp`, `server`, `examples`: 57 tests, black-box on the `lemma` binary.
 
 ### Shared integration helpers
 

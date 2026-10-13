@@ -1,7 +1,7 @@
 //! Integration tests for unit-agnostic plan-time arithmetic and calendar units.
 
+use indexmap::IndexMap;
 use lemma::{Engine, ValueKind};
-use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -15,7 +15,7 @@ fn eval_str(code: &str, spec_name: &str, rule_name: &str) -> String {
         .load([(source(), code.to_string())])
         .expect("spec must load");
     let response = engine
-        .run(None, spec_name, None, HashMap::new(), None, true)
+        .evaluate(None, spec_name, None, IndexMap::new(), None, true)
         .expect("spec must evaluate");
     response
         .results
@@ -37,7 +37,7 @@ fn eval_measure_in_unit(
         .load([(source(), code.to_string())])
         .expect("spec must load");
     let response = engine
-        .run(None, spec_name, None, HashMap::new(), None, true)
+        .evaluate(None, spec_name, None, IndexMap::new(), None, true)
         .expect("spec must evaluate");
     let rule = response
         .results
@@ -59,7 +59,7 @@ fn eval_decimal(code: &str, spec_name: &str, rule_name: &str) -> rust_decimal::D
         .load([(source(), code.to_string())])
         .expect("spec must load");
     let response = engine
-        .run(None, spec_name, None, HashMap::new(), None, true)
+        .evaluate(None, spec_name, None, IndexMap::new(), None, true)
         .expect("spec must evaluate");
     let rule = response
         .results
@@ -222,7 +222,7 @@ data metric_length: measure
   -> unit meter: 1
 data x: 3 inch
 data y: 4 meter
-rule product: x * y"#;
+rule multiplied: x * y"#;
     // Multiplication produces {length:2} — no named type → anonymous boundary rejection
     // OR ambiguity. Either way, it must not panic; it must produce a planning error.
     let err = load_expect_error(cross_code);
@@ -356,14 +356,14 @@ data weight: measure
   -> unit quarter_kg: 0.25
 data a: 5 half_kg
 data b: 3 quarter_kg
-rule sum: a + b
+rule added: a + b
 rule converted: (a) as quarter_kg"#;
     assert_loads(code);
     // 5 half_kg + 3 quarter_kg:
     // Convert b to half_kg: 3 * (0.25/0.5) = 1.5 half_kg
     // Sum = 6.5 half_kg
     assert_eq!(
-        eval_decimal(code, "weird_units", "sum"),
+        eval_decimal(code, "weird_units", "added"),
         rust_decimal::Decimal::new(65, 1),
         "expected 6.5 half_kg in measure map"
     );
@@ -696,7 +696,7 @@ data revenue: money_flow
 rule deadline: veto "Everything is fine: no deadline"
   unless burn_rate - revenue > 0 eur_month
     then (balance / (burn_rate - revenue)) as month"#;
-    let mut data = HashMap::new();
+    let mut data = IndexMap::new();
     data.insert("balance".to_string(), "120000 eur".into());
     data.insert("burn_rate".to_string(), "10000 eur_month".into());
     data.insert("revenue".to_string(), "2000 eur_month".into());
@@ -705,7 +705,7 @@ rule deadline: veto "Everything is fine: no deadline"
         .load([(source(), code.to_string())])
         .expect("burn_baby_burn must load and plan");
     let response = engine
-        .run(None, "burn_baby_burn", None, data, None, true)
+        .evaluate(None, "burn_baby_burn", None, data, None, true)
         .expect("burn_baby_burn must evaluate");
     let deadline = response.results.get("deadline").expect("deadline rule");
     assert!(

@@ -16,21 +16,11 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 /// Plan every spec set of a fresh context, starting from no committed plans: the
-/// pass a first load performs, where every spec set is new and therefore changed.
+/// pass a first load performs.
 fn plan_everything(ctx: &Context) -> crate::planning::PlanningResult {
-    let changed: Vec<(std::sync::Arc<crate::LemmaRepository>, String)> = ctx
-        .repositories()
-        .iter()
-        .flat_map(|(repository, by_name)| {
-            by_name
-                .keys()
-                .map(move |spec_name| (std::sync::Arc::clone(repository), spec_name.clone()))
-        })
-        .collect();
     plan(
         ctx,
         &ResourceLimits::default(),
-        &crate::planning::ReplanScope::from_changed_sets(ctx, changed),
         &crate::planning::PlanStore::new(),
     )
 }
@@ -86,7 +76,7 @@ fn plan_single(
             None::<String>,
         )])
     } else {
-        Ok(plans.values().next().expect("plan").clone())
+        Ok(plans.values().next().expect("plan").as_ref().clone())
     }
 }
 
@@ -515,11 +505,17 @@ rule getx: one.x
         data: "x".to_string(),
     };
 
-    let one_x_type = execution_plan
-        .data
-        .get(&one_x_path)
-        .and_then(|d| d.schema_type())
-        .expect("one.x should have a resolved type");
+    assert!(
+        !execution_plan.data.contains_key(&one_x_path),
+        "named-`uses` member must not be materialized into consumer data"
+    );
+    let one_x_type = crate::planning::normalize::lookup_data_definition(
+        &execution_plan.data,
+        &execution_plan.row_templates,
+        &one_x_path,
+    )
+    .and_then(|d| d.schema_type())
+    .expect("one.x should have a resolved type");
 
     assert_eq!(
         one_x_type.name(),
@@ -540,7 +536,7 @@ data money: measure
 spec checkout
 uses examples
 data money: measure
-  -> unit eur: 1.00
+  -> unit usd: 1.00
 data local_price: money
 data imported_price: examples.money
 "#;

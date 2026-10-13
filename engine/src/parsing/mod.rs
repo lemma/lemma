@@ -1,6 +1,7 @@
 use crate::error::Error;
 use crate::limits::ResourceLimits;
 
+pub mod arena;
 pub mod ast;
 pub mod lexer;
 pub mod parser;
@@ -17,9 +18,6 @@ pub fn parse(
     parser::parse(content, source_type, limits)
 }
 
-#[cfg(test)]
-mod assignment_continuation_tests;
-
 // ============================================================================
 // Tests
 // ============================================================================
@@ -27,12 +25,32 @@ mod assignment_continuation_tests;
 #[cfg(test)]
 mod tests {
     use super::{
-        parse, ArithmeticComputation, DataValue, Expression, ExpressionKind,
-        MathematicalComputation, RangeBound, TypeConstraintCommand,
+        parse, ArithmeticComputation, CommandArg, Constraint, DataValue, Expression,
+        ExpressionKind, LemmaSpec, MathematicalComputation, RangeBound, TypeConstraintCommand,
+        UnitArg, UnitFactor,
     };
     use crate::formatting::format_parse_result;
+    use crate::parsing::arena::ExprRef;
     use crate::Error;
     use crate::ResourceLimits;
+
+    /// `first op operand` for a one-step arithmetic chain.
+    fn binary_arithmetic(
+        node: ExprRef<'_, ExpressionKind>,
+    ) -> Option<(
+        ExprRef<'_, ExpressionKind>,
+        ArithmeticComputation,
+        ExprRef<'_, ExpressionKind>,
+    )> {
+        match node.kind() {
+            ExpressionKind::Arithmetic { first, steps } if steps.len() == 1 => Some((
+                node.child(*first),
+                steps[0].op.clone(),
+                node.child(steps[0].operand),
+            )),
+            _ => None,
+        }
+    }
 
     #[test]
     fn parse_empty_input_returns_no_specs() {
@@ -617,6 +635,277 @@ rule z: age as day + c"#,
         }
     }
 
+    fn decimal(value: &str) -> rust_decimal::Decimal {
+        value.parse().expect("decimal literal in test")
+    }
+
+    fn parse_single_spec(source: &str) -> LemmaSpec {
+        let specs = parse(
+            source,
+            crate::parsing::source::SourceType::Volatile,
+            &ResourceLimits::default(),
+        )
+        .expect("spec must parse")
+        .into_flattened_specs();
+        assert_eq!(specs.len(), 1, "expected one spec, got {}", specs.len());
+        specs[0].clone()
+    }
+
+    fn measure_unit_constraints(spec: &LemmaSpec) -> Vec<Constraint> {
+        let mut unit_rows = Vec::new();
+        for data in &spec.data {
+            let DataValue::Definition { constraints, .. } = &data.value else {
+                continue;
+            };
+            if let Some(rows) = constraints {
+                for row in rows {
+                    if row.command == TypeConstraintCommand::Unit {
+                        unit_rows.push(row.clone());
+                    }
+                }
+            }
+        }
+        unit_rows
+    }
+
+    fn unit_name_and_arg(row: &Constraint) -> (String, UnitArg) {
+        let args = &row.args;
+        let name = match args.first() {
+            Some(CommandArg::Label(label)) => label.clone(),
+            other => panic!("unit constraint needs label name, got: {:?}", other),
+        };
+        let unit_arg = match args.get(1) {
+            Some(CommandArg::UnitExpr(unit_arg)) => unit_arg.clone(),
+            other => panic!("unit constraint needs UnitExpr payload, got: {:?}", other),
+        };
+        (name, unit_arg)
+    }
+
+    // ─── Parse: canonical colon unit form ──────────────────────────────────
+
+    #[test]
+    fn parse_unit_colon_factor_payload() {
+        let spec = parse_single_spec(
+            r#"spec money_spec
+data money: measure
+  -> unit eur: 1.00
+"#,
+        );
+        let rows = measure_unit_constraints(&spec);
+        assert_eq!(rows.len(), 1);
+        let (name, unit_arg) = unit_name_and_arg(&rows[0]);
+        assert_eq!(name, "eur");
+        assert_eq!(unit_arg, UnitArg::Factor(decimal("1.00")));
+        assert!(!rows[0].deprecated_without_colon);
+    }
+
+    #[test]
+    fn parse_unit_colon_compound_only_payload() {
+        let spec = parse_single_spec(
+            r#"spec rates
+uses lemma units
+
+data money: measure
+  -> unit eur: 1.00
+
+data rate: measure
+  -> unit eur_per_hour: eur/hour
+"#,
+        );
+        let rows = measure_unit_constraints(&spec);
+        assert_eq!(rows.len(), 2);
+        let (name, unit_arg) = unit_name_and_arg(&rows[1]);
+        assert_eq!(name, "eur_per_hour");
+        assert_eq!(
+            unit_arg,
+            UnitArg::Expr(
+                rust_decimal::Decimal::ONE,
+                vec![
+                    UnitFactor {
+                        measure_ref: "eur".to_string(),
+                        exp: 1,
+                    },
+                    UnitFactor {
+                        measure_ref: "hour".to_string(),
+                        exp: -1,
+                    }
+                ],
+            )
+        );
+        assert!(!rows[1].deprecated_without_colon);
+    }
+
+    #[test]
+    fn parse_unit_colon_numeric_prefix_and_compound_payload() {
+        let spec = parse_single_spec(
+            r#"spec speed
+uses lemma units
+
+data velocity: measure
+  -> unit kmh: 3.6 meter/second
+"#,
+        );
+        let rows = measure_unit_constraints(&spec);
+        assert_eq!(rows.len(), 1);
+        let (name, unit_arg) = unit_name_and_arg(&rows[0]);
+        assert_eq!(name, "kmh");
+        assert_eq!(
+            unit_arg,
+            UnitArg::Expr(
+                decimal("3.6"),
+                vec![
+                    UnitFactor {
+                        measure_ref: "meter".to_string(),
+                        exp: 1,
+                    },
+                    UnitFactor {
+                        measure_ref: "second".to_string(),
+                        exp: -1,
+                    }
+                ],
+            )
+        );
+        assert!(!rows[0].deprecated_without_colon);
+    }
+
+    // ─── Parse: deprecated space-separated unit form ───────────────────────
+
+    #[test]
+    fn parse_unit_deprecated_space_factor_payload() {
+        let spec = parse_single_spec(
+            r#"spec money_spec
+data money: measure
+  -> unit eur 1.00
+"#,
+        );
+        let rows = measure_unit_constraints(&spec);
+        assert_eq!(rows.len(), 1);
+        let (name, unit_arg) = unit_name_and_arg(&rows[0]);
+        assert_eq!(name, "eur");
+        assert_eq!(unit_arg, UnitArg::Factor(decimal("1.00")));
+        assert!(rows[0].deprecated_without_colon);
+    }
+
+    #[test]
+    fn parse_unit_deprecated_space_compound_only_payload() {
+        let spec = parse_single_spec(
+            r#"spec rates
+uses lemma units
+
+data money: measure
+  -> unit eur 1.00
+
+data rate: measure
+  -> unit eur_per_hour eur/hour
+"#,
+        );
+        let rows = measure_unit_constraints(&spec);
+        assert_eq!(rows.len(), 2);
+        let (name, unit_arg) = unit_name_and_arg(&rows[1]);
+        assert_eq!(name, "eur_per_hour");
+        assert_eq!(
+            unit_arg,
+            UnitArg::Expr(
+                rust_decimal::Decimal::ONE,
+                vec![
+                    UnitFactor {
+                        measure_ref: "eur".to_string(),
+                        exp: 1,
+                    },
+                    UnitFactor {
+                        measure_ref: "hour".to_string(),
+                        exp: -1,
+                    }
+                ],
+            )
+        );
+        assert!(rows[1].deprecated_without_colon);
+    }
+
+    #[test]
+    fn parse_unit_deprecated_space_numeric_prefix_and_compound_payload() {
+        let spec = parse_single_spec(
+            r#"spec speed
+uses lemma units
+
+data velocity: measure
+  -> unit kmh 3.6 meter/second
+"#,
+        );
+        let rows = measure_unit_constraints(&spec);
+        assert_eq!(rows.len(), 1);
+        let (name, unit_arg) = unit_name_and_arg(&rows[0]);
+        assert_eq!(name, "kmh");
+        assert_eq!(
+            unit_arg,
+            UnitArg::Expr(
+                decimal("3.6"),
+                vec![
+                    UnitFactor {
+                        measure_ref: "meter".to_string(),
+                        exp: 1,
+                    },
+                    UnitFactor {
+                        measure_ref: "second".to_string(),
+                        exp: -1,
+                    }
+                ],
+            )
+        );
+        assert!(rows[0].deprecated_without_colon);
+    }
+
+    #[test]
+    fn parse_unit_deprecated_space_matches_colon_payload() {
+        let canonical = parse_single_spec(
+            r#"spec rates
+uses lemma units
+
+data money: measure
+  -> unit eur: 1.00
+
+data rate: measure
+  -> unit eur_per_hour: eur/hour
+"#,
+        );
+        let deprecated = parse_single_spec(
+            r#"spec rates
+uses lemma units
+
+data money: measure
+  -> unit eur 1.00
+
+data rate: measure
+  -> unit eur_per_hour eur/hour
+"#,
+        );
+        let canonical_args: Vec<UnitArg> = measure_unit_constraints(&canonical)
+            .iter()
+            .map(|row| unit_name_and_arg(row).1)
+            .collect();
+        let deprecated_args: Vec<UnitArg> = measure_unit_constraints(&deprecated)
+            .iter()
+            .map(|row| unit_name_and_arg(row).1)
+            .collect();
+        assert_eq!(canonical_args, deprecated_args);
+    }
+
+    #[test]
+    fn parse_unit_colon_without_payload_errors() {
+        let result = parse(
+            r#"spec s
+data money: measure
+  -> unit eur:
+"#,
+            crate::parsing::source::SourceType::Volatile,
+            &ResourceLimits::default(),
+        );
+        assert!(
+            result.is_err(),
+            "empty unit payload after colon must not parse"
+        );
+    }
+
     fn rule_expression(source: &str, rule_name: &str) -> Expression {
         let parsed = parse(
             source,
@@ -637,25 +926,27 @@ rule z: age as day + c"#,
             .clone()
     }
 
-    fn assert_multiply_range_side(expression: &Expression, range_on_left: bool, label: &str) {
-        let ExpressionKind::Arithmetic(left, ArithmeticComputation::Multiply, right) =
-            &expression.kind
-        else {
-            panic!("{label}: expected Multiply, got {:?}", expression.kind);
+    fn assert_multiply_range_side(
+        root: ExprRef<'_, ExpressionKind>,
+        range_on_left: bool,
+        label: &str,
+    ) {
+        let Some((left, ArithmeticComputation::Multiply, right)) = binary_arithmetic(root) else {
+            panic!("{label}: expected Multiply, got {:?}", root.kind());
         };
         let (range, other) = if range_on_left {
-            (left.as_ref(), right.as_ref())
+            (left, right)
         } else {
-            (right.as_ref(), left.as_ref())
+            (right, left)
         };
         assert!(
-            matches!(range.kind, ExpressionKind::RangeLiteral(..)),
+            matches!(range.kind(), ExpressionKind::RangeLiteral(..)),
             "{label}: expected RangeLiteral on {} of *, got {:?}",
             if range_on_left { "left" } else { "right" },
-            range.kind
+            range.kind()
         );
         assert!(
-            !matches!(other.kind, ExpressionKind::RangeLiteral(..)),
+            !matches!(other.kind(), ExpressionKind::RangeLiteral(..)),
             "{label}: expected non-range on other side of *"
         );
     }
@@ -668,22 +959,16 @@ data rate: measure -> unit eur: 1
 data period_start: 2026-01-01
 data period_end: 2026-01-02
 "#;
-        assert_multiply_range_side(
-            &rule_expression(
-                &format!("{base}rule rhs: rate * period_start...period_end"),
-                "rhs",
-            ),
-            false,
-            "rate * period_start...period_end",
+        let rhs = rule_expression(
+            &format!("{base}rule rhs: rate * period_start...period_end"),
+            "rhs",
         );
-        assert_multiply_range_side(
-            &rule_expression(
-                &format!("{base}rule lhs: period_start...period_end * rate"),
-                "lhs",
-            ),
-            true,
-            "period_start...period_end * rate",
+        assert_multiply_range_side(rhs.root(), false, "rate * period_start...period_end");
+        let lhs = rule_expression(
+            &format!("{base}rule lhs: period_start...period_end * rate"),
+            "lhs",
         );
+        assert_multiply_range_side(lhs.root(), true, "period_start...period_end * rate");
     }
 
     #[test]
@@ -696,42 +981,46 @@ data length: units.duration
 rule valid: now in start...start + length"#,
             "valid",
         );
-        let ExpressionKind::RangeContainment(value, range) = &expression.kind else {
-            panic!("expected RangeContainment, got {:?}", expression.kind);
+        let root = expression.root();
+        let ExpressionKind::RangeContainment(value, range) = root.kind() else {
+            panic!("expected RangeContainment, got {:?}", root.kind());
         };
+        let value = root.child(*value);
         assert!(
-            matches!(value.kind, ExpressionKind::Now),
+            matches!(value.kind(), ExpressionKind::Now),
             "expected now as containment value, got {:?}",
-            value.kind
+            value.kind()
         );
-        let ExpressionKind::RangeLiteral(left, right) = &range.kind else {
+        let range = root.child(*range);
+        let ExpressionKind::RangeLiteral(left, right) = range.kind() else {
             panic!(
                 "expected RangeLiteral as containment range, got {:?}",
-                range.kind
+                range.kind()
             );
         };
+        let left = range.child(*left);
         assert!(
-            matches!(left.kind, ExpressionKind::Reference(..)),
+            matches!(left.kind(), ExpressionKind::Reference(..)),
             "expected start reference as left endpoint, got {:?}",
-            left.kind
+            left.kind()
         );
-        let ExpressionKind::Arithmetic(add_left, ArithmeticComputation::Add, add_right) =
-            &right.kind
+        let right = range.child(*right);
+        let Some((add_left, ArithmeticComputation::Add, add_right)) = binary_arithmetic(right)
         else {
             panic!(
                 "expected start + length as right endpoint, got {:?}",
-                right.kind
+                right.kind()
             );
         };
         assert!(
-            matches!(add_left.kind, ExpressionKind::Reference(..)),
+            matches!(add_left.kind(), ExpressionKind::Reference(..)),
             "expected start reference in right endpoint add, got {:?}",
-            add_left.kind
+            add_left.kind()
         );
         assert!(
-            matches!(add_right.kind, ExpressionKind::Reference(..)),
+            matches!(add_right.kind(), ExpressionKind::Reference(..)),
             "expected length reference in right endpoint add, got {:?}",
-            add_right.kind
+            add_right.kind()
         );
     }
 
@@ -748,10 +1037,10 @@ data period_end: 2026-01-02
 rule pay: (hourly_rate * period_start...period_end) as eur"#,
             "pay",
         );
-        let ExpressionKind::UnitConversion(inner, _) = &expression.kind else {
-            panic!("expected UnitConversion, got {:?}", expression.kind);
+        let ExpressionKind::UnitConversion(inner, _) = expression.root_kind() else {
+            panic!("expected UnitConversion, got {:?}", expression.root_kind());
         };
-        assert_multiply_range_side(inner, false, "pay");
+        assert_multiply_range_side(expression.at(*inner), false, "pay");
     }
 
     #[test]
@@ -898,17 +1187,16 @@ uses a: spec_a"#;
     }
 
     #[test]
-    fn parse_spec_name_with_trailing_dot_is_error() {
+    fn parse_spec_name_with_trailing_dot_is_opaque_name() {
         let input = "spec myspec.\ndata x: 1";
         let result = parse(
             input,
             crate::parsing::source::SourceType::Volatile,
             &ResourceLimits::default(),
-        );
-        assert!(
-            result.is_err(),
-            "Trailing dot after spec name should be a parse error"
-        );
+        )
+        .unwrap()
+        .into_flattened_specs();
+        assert_eq!(result[0].name, "myspec.");
     }
 
     #[test]
@@ -1348,7 +1636,7 @@ uses outer: other
     }
 
     #[test]
-    fn parse_deprecated_standalone_with_merges_into_import_bindings() {
+    fn parse_deprecated_standalone_with_is_error() {
         let input = r#"spec inner
 data x: number
 
@@ -1360,27 +1648,21 @@ rule r: i.x"#;
             input,
             crate::parsing::source::SourceType::Volatile,
             &ResourceLimits::default(),
-        )
-        .unwrap()
-        .into_flattened_specs();
-        let outer = result.iter().find(|s| s.name == "outer").unwrap();
-        let bindings = match &outer.data[0].value {
-            crate::parsing::ast::DataValue::Import { bindings, .. } => bindings,
-            other => panic!("expected Import, got: {:?}", other),
-        };
-        assert_eq!(bindings.len(), 1);
-        assert!(bindings[0].deprecated_standalone_with);
-        assert_eq!(bindings[0].path.name, "x");
-        match &bindings[0].rhs {
-            crate::parsing::ast::WithRhs::Literal(crate::parsing::ast::Value::Number(n)) => {
-                assert_eq!(n, &rust_decimal::Decimal::from(42));
+        );
+        match result {
+            Ok(_) => panic!("standalone with after uses must not parse"),
+            Err(err) => {
+                let msg = err.to_string();
+                assert!(
+                    msg.contains("with"),
+                    "error should mention with; got: {msg}"
+                );
             }
-            other => panic!("expected literal 42, got: {:?}", other),
         }
     }
 
     #[test]
-    fn parse_deprecated_standalone_with_before_uses_merges() {
+    fn parse_deprecated_standalone_with_before_uses_is_error() {
         let input = r#"spec inner
 data slot: number
 
@@ -1392,16 +1674,17 @@ rule r: i.slot"#;
             input,
             crate::parsing::source::SourceType::Volatile,
             &ResourceLimits::default(),
-        )
-        .unwrap()
-        .into_flattened_specs();
-        let outer = result.iter().find(|s| s.name == "outer").unwrap();
-        let bindings = match &outer.data[0].value {
-            crate::parsing::ast::DataValue::Import { bindings, .. } => bindings,
-            other => panic!("expected Import, got: {:?}", other),
-        };
-        assert_eq!(bindings.len(), 1);
-        assert!(bindings[0].deprecated_standalone_with);
+        );
+        match result {
+            Ok(_) => panic!("standalone with before uses must not parse"),
+            Err(err) => {
+                let msg = err.to_string();
+                assert!(
+                    msg.contains("with"),
+                    "error should mention with; got: {msg}"
+                );
+            }
+        }
     }
 
     #[test]
@@ -1417,8 +1700,8 @@ with outer.inner: 1"#,
             Err(err) => {
                 let msg = err.to_string();
                 assert!(
-                    msg.contains("uses") && msg.contains("outer"),
-                    "error should mention required uses; got: {msg}"
+                    msg.contains("with"),
+                    "error should mention with; got: {msg}"
                 );
             }
         }
@@ -1515,7 +1798,7 @@ data y: 2"#;
         )
         .unwrap();
         assert_eq!(parsed.repositories.len(), 1);
-        let (_repo, specs) = parsed.repositories.iter().next().unwrap();
+        let (_, specs) = parsed.repositories.iter().next().unwrap();
         assert_eq!(specs.len(), 0);
     }
 
@@ -2012,75 +2295,97 @@ data period: date range
         );
     }
 
-    fn prefix_kind(source: &str) -> ExpressionKind {
-        rule_expression(source, "out").kind
+    fn prefix_expression(source: &str) -> Expression {
+        rule_expression(source, "out")
+    }
+
+    fn prefix_parse_error(source: &str) -> String {
+        match parse(
+            source,
+            crate::parsing::source::SourceType::Volatile,
+            &ResourceLimits::default(),
+        ) {
+            Err(Error::Parsing(details)) => details.message,
+            other => panic!("expected parse Error, got {other:?}"),
+        }
     }
 
     #[test]
-    fn parse_prefix_operand_is_one_range_operand() {
-        let floor_plus = prefix_kind(
+    fn parse_prefix_operand_is_call_or_one_operand() {
+        for (body, operator) in [
+            ("floor x + 1", "+"),
+            ("floor x as gram", "as"),
+            ("sqrt x ^ 2", "^"),
+            ("lower p + 1", "+"),
+            ("not ok and ok", "and"),
+            ("not x > 1", ">"),
+        ] {
+            let message = prefix_parse_error(&format!(
+                "spec test\nuses lemma units\ndata x: 1\ndata p: number range\ndata ok: boolean\nrule out: {body}"
+            ));
+            assert!(
+                message.contains(&format!("found '{operator}' after it")),
+                "{body}: {message}"
+            );
+        }
+        let message = prefix_parse_error("spec test\nrule out: abs -1");
+        assert!(message.contains("`abs(...)`"), "{message}");
+
+        let floor_plus = prefix_expression(
             r#"spec test
 data x: 1
-rule out: floor x + 1"#,
+rule out: floor(x) + 1"#,
         );
-        let ExpressionKind::Arithmetic(left, ArithmeticComputation::Add, _) = &floor_plus else {
-            panic!("floor x + 1 must be add, got {floor_plus:?}");
+        let Some((left, ArithmeticComputation::Add, _)) = binary_arithmetic(floor_plus.root())
+        else {
+            panic!("floor(x) + 1 must be add, got {floor_plus}");
         };
-        assert!(
-            matches!(
-                left.kind,
-                ExpressionKind::MathematicalComputation(MathematicalComputation::Floor, _)
-            ),
-            "floor must bind tighter than +, got {floor_plus:?}"
-        );
+        assert!(matches!(
+            left.kind(),
+            ExpressionKind::MathematicalComputation(MathematicalComputation::Floor, _)
+        ));
 
-        let floor_sum = prefix_kind(
+        let floor_sum = prefix_expression(
             r#"spec test
 data x: 1
 rule out: floor (x + 1)"#,
         );
         let ExpressionKind::MathematicalComputation(MathematicalComputation::Floor, operand) =
-            &floor_sum
+            floor_sum.root_kind()
         else {
-            panic!("floor (x + 1) must be floor of a sum, got {floor_sum:?}");
+            panic!("floor (x + 1) must be floor of a sum, got {floor_sum}");
         };
-        assert!(matches!(operand.kind, ExpressionKind::Arithmetic(..)));
+        assert!(matches!(
+            floor_sum.at(*operand).kind(),
+            ExpressionKind::Arithmetic { .. }
+        ));
 
-        let floor_as = prefix_kind(
+        let floor_abs = prefix_expression(
             r#"spec test
-uses lemma units
 data x: 1
-rule out: floor x as gram"#,
+rule out: floor abs x"#,
         );
-        let ExpressionKind::UnitConversion(inner, _) = &floor_as else {
-            panic!("floor x as gram must convert the floored value, got {floor_as:?}");
+        let ExpressionKind::MathematicalComputation(MathematicalComputation::Floor, operand) =
+            floor_abs.root_kind()
+        else {
+            panic!("floor abs x must be floor of abs, got {floor_abs}");
         };
         assert!(matches!(
-            inner.kind,
-            ExpressionKind::MathematicalComputation(MathematicalComputation::Floor, _)
+            floor_abs.at(*operand).kind(),
+            ExpressionKind::MathematicalComputation(MathematicalComputation::Abs, _)
         ));
 
-        let sqrt_pow = prefix_kind(
-            r#"spec test
-data x: 4
-rule out: sqrt x ^ 2"#,
-        );
-        let ExpressionKind::Arithmetic(left, ArithmeticComputation::Power, _) = &sqrt_pow else {
-            panic!("sqrt x ^ 2 must be power, got {sqrt_pow:?}");
-        };
-        assert!(matches!(
-            left.kind,
-            ExpressionKind::MathematicalComputation(MathematicalComputation::Sqrt, _)
-        ));
-
-        let lower_range = prefix_kind(
+        let lower_range = prefix_expression(
             r#"spec test
 rule out: lower 5...10"#,
         );
-        let ExpressionKind::RangeBound(RangeBound::Lower, operand) = &lower_range else {
-            panic!("lower 5...10 must be lower of a range, got {lower_range:?}");
+        let ExpressionKind::RangeBound(RangeBound::Lower, operand) = lower_range.root_kind() else {
+            panic!("lower 5...10 must be lower of a range, got {lower_range}");
         };
-        assert!(matches!(operand.kind, ExpressionKind::RangeLiteral(..)));
+        assert!(matches!(
+            lower_range.at(*operand).kind(),
+            ExpressionKind::RangeLiteral(..)
+        ));
         assert_eq!(
             rule_expression(
                 r#"spec test
@@ -2091,34 +2396,36 @@ rule out: lower 5...10"#,
             "lower 5...10"
         );
 
-        let lower_extended = prefix_kind(
+        let lower_extended = prefix_expression(
             r#"spec test
 data a: 1
 data b: 2
 rule out: lower a...b + 1"#,
         );
-        let ExpressionKind::RangeBound(RangeBound::Lower, operand) = &lower_extended else {
-            panic!("expected lower of a range, got {lower_extended:?}");
+        let ExpressionKind::RangeBound(RangeBound::Lower, operand) = lower_extended.root_kind()
+        else {
+            panic!("expected lower of a range, got {lower_extended}");
         };
-        let ExpressionKind::RangeLiteral(_, right) = &operand.kind else {
-            panic!("+ must stay inside the range, got {operand:?}");
+        let operand = lower_extended.at(*operand);
+        let ExpressionKind::RangeLiteral(_, right) = operand.kind() else {
+            panic!("+ must stay inside the range, got {:?}", operand.kind());
         };
         assert!(matches!(
-            right.kind,
-            ExpressionKind::Arithmetic(_, ArithmeticComputation::Add, _)
+            binary_arithmetic(operand.child(*right)),
+            Some((_, ArithmeticComputation::Add, _))
         ));
 
-        let lower_plus = prefix_kind(
+        let not_comparison = prefix_expression(
             r#"spec test
-data p: number range
-rule out: lower p + 1"#,
+data x: 1
+rule out: not (x > 1)"#,
         );
-        let ExpressionKind::Arithmetic(left, ArithmeticComputation::Add, _) = &lower_plus else {
-            panic!("lower p + 1 must add outside lower, got {lower_plus:?}");
+        let ExpressionKind::LogicalNegation(operand, _) = not_comparison.root_kind() else {
+            panic!("not (x > 1) must negate the comparison, got {not_comparison}");
         };
         assert!(matches!(
-            left.kind,
-            ExpressionKind::RangeBound(RangeBound::Lower, _)
+            not_comparison.at(*operand).kind(),
+            ExpressionKind::Comparison(..)
         ));
     }
 
@@ -2126,7 +2433,7 @@ rule out: lower p + 1"#,
     fn format_prefix_operand_round_trips() {
         let source = r#"spec test
 data x: 1.00
-rule tight: (floor x) + 1
+rule tight: floor(x) + 1
 rule wide: floor (x + 1)
 rule ends: lower 5...10
 rule edge: (lower x)...(upper x)
@@ -2152,15 +2459,15 @@ rule edge: (lower x)...(upper x)
         }
 
         let tight = rule_expression(&formatted, "tight");
-        let ExpressionKind::Arithmetic(left, ArithmeticComputation::Add, _) = &tight.kind else {
-            panic!("(floor x) + 1 must stay an addition, got {}", tight);
+        let Some((left, ArithmeticComputation::Add, _)) = binary_arithmetic(tight.root()) else {
+            panic!("floor(x) + 1 must stay an addition, got {}", tight);
         };
         assert!(
             matches!(
-                left.kind,
+                left.kind(),
                 ExpressionKind::MathematicalComputation(MathematicalComputation::Floor, _)
             ),
-            "(floor x) + 1 must stay floor-then-add, got {tight}"
+            "floor(x) + 1 must stay floor-then-add, got {tight}"
         );
     }
 }

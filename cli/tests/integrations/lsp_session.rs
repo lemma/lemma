@@ -18,11 +18,6 @@ impl LspSession {
         Self::spawn_lemma_lsp_args(&["lsp"])
     }
 
-    /// Same as [`Self::spawn_lemma_lsp`], plus `--stdio` (vscode-languageclient flag).
-    pub fn spawn_lemma_lsp_with_stdio_flag() -> Self {
-        Self::spawn_lemma_lsp_args(&["lsp", "--stdio"])
-    }
-
     fn spawn_lemma_lsp_args(args: &[&str]) -> Self {
         let bin = env!("CARGO_BIN_EXE_lemma");
         let mut child = Command::new(bin)
@@ -39,25 +34,17 @@ impl LspSession {
         std::thread::spawn(move || {
             let mut reader = stdout;
             loop {
-                match read_lsp_message(&mut reader) {
-                    Ok(text) => {
-                        let value: Value = match serde_json::from_str(&text) {
-                            Ok(v) => v,
-                            Err(e) => {
-                                let _ = tx.send(Err(format!("invalid JSON: {e}: {text}")));
-                                break;
-                            }
-                        };
-                        if tx.send(Ok(value)).is_err() {
-                            break;
-                        }
-                    }
-                    Err(e) => {
-                        if e.kind() != std::io::ErrorKind::UnexpectedEof {
-                            let _ = tx.send(Err(format!("read error: {e}")));
-                        }
-                        break;
-                    }
+                let message: Result<Value, String> = match read_lsp_message(&mut reader) {
+                    Ok(text) => match serde_json::from_str::<Value>(&text) {
+                        Ok(value) => Ok(value),
+                        Err(e) => Err(format!("invalid JSON: {e}: {text}")),
+                    },
+                    Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
+                    Err(e) => Err(format!("read error: {e}")),
+                };
+                let failed = message.is_err();
+                if tx.send(message).is_err() || failed {
+                    break;
                 }
             }
         });
@@ -74,11 +61,12 @@ impl LspSession {
     pub fn initialize(&mut self, root_uri: Option<&str>) -> Value {
         self.next_id += 1;
         let id = self.next_id;
+        let workspace_folders = root_uri.map(|uri| json!([{ "uri": uri, "name": "workspace" }]));
         let params = json!({
             "processId": std::process::id(),
             "clientInfo": { "name": "lemma-lsp-test", "version": "1.0" },
             "capabilities": {},
-            "rootUri": root_uri
+            "workspaceFolders": workspace_folders
         });
         self.send_request(id, "initialize", params)
     }
@@ -91,6 +79,18 @@ impl LspSession {
         self.next_id += 1;
         let id = self.next_id;
         self.send_request(id, method, params)
+    }
+
+    pub fn request_message(&mut self, method: &str, params: Value) -> Value {
+        self.next_id += 1;
+        let id = self.next_id;
+        self.write_message(json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": method,
+            "params": params
+        }));
+        self.wait_message(id, Duration::from_secs(5))
     }
 
     pub fn send_notification(&mut self, method: &str, params: Value) {
@@ -154,7 +154,7 @@ impl LspSession {
                 "id": id,
                 "method": "shutdown"
             }));
-            let _ = self.wait_response(id, Duration::from_secs(5));
+            self.wait_message(id, Duration::from_secs(5));
             self.write_message(json!({
                 "jsonrpc": "2.0",
                 "method": "exit"
@@ -177,6 +177,16 @@ impl LspSession {
     }
 
     fn wait_response(&mut self, id: i64, timeout: Duration) -> Value {
+        let msg = self.wait_message(id, timeout);
+        assert!(
+            msg.get("error").is_none(),
+            "LSP error for request {id}: {}",
+            msg["error"]
+        );
+        msg["result"].clone()
+    }
+
+    fn wait_message(&mut self, id: i64, timeout: Duration) -> Value {
         let deadline = Instant::now() + timeout;
         while Instant::now() < deadline {
             let remaining = deadline.saturating_duration_since(Instant::now());
@@ -188,12 +198,7 @@ impl LspSession {
                 }
             };
             if msg.get("id") == Some(&json!(id)) {
-                assert!(
-                    msg.get("error").is_none(),
-                    "LSP error for request {id}: {}",
-                    msg["error"]
-                );
-                return msg["result"].clone();
+                return msg;
             }
         }
         panic!("timed out waiting for response id {id}");

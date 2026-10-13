@@ -1,5 +1,6 @@
 //! Fallible allocation helpers for vendored bigint digits.
 
+/// Allocation could not be satisfied. Only allocation failures use this type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AllocError;
 

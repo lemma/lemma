@@ -4,11 +4,11 @@
 //! ratios. Assertions use canonical `ValueKind` + `RationalInteger`, not display
 //! substrings alone.
 
+use indexmap::IndexMap;
 use lemma::DateTimeValue;
-use lemma::{Engine, LiteralValue};
+use lemma::{Engine, EvaluateDataValue, LemmaType, LiteralValue};
 use lemma::{TypeSpecification, ValueKind};
 use rust_decimal::Decimal;
-use std::collections::HashMap;
 use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -54,14 +54,22 @@ fn expect_load_error(code: &str, file: &str, fragments: &[&str]) {
     }
 }
 
-fn run_spec(engine: &Engine, spec: &str, data: HashMap<String, String>) -> lemma::Response {
+fn evaluate_spec(
+    engine: &Engine,
+    spec: &str,
+    data: IndexMap<String, EvaluateDataValue>,
+) -> lemma::Response {
     let now = DateTimeValue::now();
     engine
-        .run(None, spec, Some(&now), data, None, true)
+        .evaluate(None, spec, Some(&now), data, None, true)
         .unwrap_or_else(|e| panic!("run({spec}) failed: {e}"))
 }
 
 fn rule_value(response: &lemma::Response, rule: &str) -> LiteralValue {
+    rule_typed(response, rule).0
+}
+
+fn rule_typed(response: &lemma::Response, rule: &str) -> (LiteralValue, LemmaType) {
     let rr = response
         .results
         .get(rule)
@@ -72,16 +80,23 @@ fn rule_value(response: &lemma::Response, rule: &str) -> LiteralValue {
             rr.veto_reason.as_deref().unwrap_or("Vetoed")
         );
     }
-    rr.explanation
-        .as_ref()
-        .expect("explanation")
-        .result
-        .literal_value()
-        .expect("value")
+    let explanation = rr.explanation.as_ref().expect("explanation");
+    (
+        explanation.result.literal_value().expect("value"),
+        explanation.result_type.as_ref().clone(),
+    )
+}
+
+fn bound_ratio_unit(lemma_type: &LemmaType) -> Option<&str> {
+    match &lemma_type.specifications {
+        TypeSpecification::Ratio { unit, .. } => unit.as_deref(),
+        other => panic!("expected Ratio type, got {other:?}"),
+    }
 }
 
 fn assert_ratio_exact(
     lit: &LiteralValue,
+    lemma_type: &LemmaType,
     ctx: &str,
     expected_canonical: &str,
     expected_unit: Option<&str>,
@@ -95,7 +110,11 @@ fn assert_ratio_exact(
                 decimal_lit(expected_canonical),
                 "{ctx}: canonical magnitude"
             );
-            let _ = expected_unit; // binding unit lives on type / RuleResult.ratio, not LiteralValue
+            assert_eq!(
+                bound_ratio_unit(lemma_type),
+                expected_unit,
+                "{ctx}: bound unit"
+            );
         }
         other => panic!("{ctx}: expected ValueKind::Ratio, got {other:?}"),
     }
@@ -155,22 +174,14 @@ fn targets_spec_two_ratio_fields_load_and_run_defaults() {
     let mut engine = Engine::new();
     load_ok(&mut engine, TARGETS_SPEC, "targets.lemma");
 
-    let mut data = HashMap::new();
+    let mut data = IndexMap::new();
     data.insert("standard_margin_pct".to_string(), "15%".into());
     data.insert("default_credit_insurance_pct".to_string(), "1.5%".into());
-    let response = run_spec(&engine, "targets", data);
-    assert_ratio_exact(
-        &rule_value(&response, "margin"),
-        "margin default",
-        "0.15",
-        Some("percent"),
-    );
-    assert_ratio_exact(
-        &rule_value(&response, "insurance"),
-        "insurance default",
-        "0.015",
-        Some("percent"),
-    );
+    let response = evaluate_spec(&engine, "targets", data);
+    let (lit, ty) = rule_typed(&response, "margin");
+    assert_ratio_exact(&lit, &ty, "margin default", "0.15", Some("percent"));
+    let (lit, ty) = rule_typed(&response, "insurance");
+    assert_ratio_exact(&lit, &ty, "insurance default", "0.015", Some("percent"));
 }
 
 #[test]
@@ -208,23 +219,19 @@ spec rates
 data margin_pct: ratio -> suggest 10%
 data fee_pct: ratio -> suggest 2%
 data tax_pct: ratio -> suggest 1%
-rule sum: margin_pct + fee_pct + tax_pct
+rule added: margin_pct + fee_pct + tax_pct
 "#;
     let mut engine = Engine::new();
     load_ok(&mut engine, code, "three_ratio.lemma");
 
-    let mut data = HashMap::new();
+    let mut data = IndexMap::new();
     data.insert("margin_pct".to_string(), "10%".into());
     data.insert("fee_pct".to_string(), "2%".into());
     data.insert("tax_pct".to_string(), "1%".into());
-    let response = run_spec(&engine, "rates", data);
+    let response = evaluate_spec(&engine, "rates", data);
     // 0.10 + 0.02 + 0.01 = 0.13 (left-associative; operands carry percent from supplied values)
-    assert_ratio_exact(
-        &rule_value(&response, "sum"),
-        "sum",
-        "0.13",
-        Some("percent"),
-    );
+    let (lit, ty) = rule_typed(&response, "added");
+    assert_ratio_exact(&lit, &ty, "added", "0.13", Some("percent"));
 }
 
 // -----------------------------------------------------------------------------
@@ -238,14 +245,14 @@ data insurance_pct: ratio -> suggest 1.5%
 
 rule total_rate: margin_pct + insurance_pct
 rule margin_higher: margin_pct > insurance_pct
-rule product: margin_pct * insurance_pct
+rule multiplied: margin_pct * insurance_pct
 rule tier: "low"
     unless margin_pct > 10% then "mid"
     unless margin_pct > 20% then "high"
 "#;
 
-fn finance_suggested_inputs() -> HashMap<String, String> {
-    let mut data = HashMap::new();
+fn finance_suggested_inputs() -> IndexMap<String, EvaluateDataValue> {
+    let mut data = IndexMap::new();
     data.insert("margin_pct".to_string(), "15%".into());
     data.insert("insurance_pct".to_string(), "1.5%".into());
     data
@@ -256,13 +263,9 @@ fn cross_type_add_preserves_canonical_sum() {
     let mut engine = Engine::new();
     load_ok(&mut engine, FINANCE_SPEC, "finance_add.lemma");
 
-    let response = run_spec(&engine, "finance", finance_suggested_inputs());
-    assert_ratio_exact(
-        &rule_value(&response, "total_rate"),
-        "total_rate",
-        "0.165",
-        Some("percent"),
-    );
+    let response = evaluate_spec(&engine, "finance", finance_suggested_inputs());
+    let (lit, ty) = rule_typed(&response, "total_rate");
+    assert_ratio_exact(&lit, &ty, "total_rate", "0.165", Some("percent"));
 }
 
 #[test]
@@ -270,14 +273,14 @@ fn cross_type_add_result_carries_left_operand_type() {
     let mut engine = Engine::new();
     load_ok(&mut engine, FINANCE_SPEC, "finance_type.lemma");
 
-    let response = run_spec(&engine, "finance", finance_suggested_inputs());
+    let response = evaluate_spec(&engine, "finance", finance_suggested_inputs());
     let rr = response.results.get("total_rate").expect("total_rate");
     assert_eq!(
         rr.rule_type.as_str(),
         "margin_pct",
         "ratio + ratio must keep left named type"
     );
-    let _ = rule_value(&response, "total_rate");
+    rule_value(&response, "total_rate");
 }
 
 #[test]
@@ -285,7 +288,7 @@ fn cross_type_compare_with_defaults() {
     let mut engine = Engine::new();
     load_ok(&mut engine, FINANCE_SPEC, "finance_cmp.lemma");
 
-    let response = run_spec(&engine, "finance", finance_suggested_inputs());
+    let response = evaluate_spec(&engine, "finance", finance_suggested_inputs());
     assert_bool(
         &rule_value(&response, "margin_higher"),
         "margin_higher",
@@ -298,13 +301,9 @@ fn cross_type_multiply_canonical() {
     let mut engine = Engine::new();
     load_ok(&mut engine, FINANCE_SPEC, "finance_mul.lemma");
 
-    let response = run_spec(&engine, "finance", finance_suggested_inputs());
-    assert_ratio_exact(
-        &rule_value(&response, "product"),
-        "product",
-        "0.00225",
-        Some("percent"),
-    );
+    let response = evaluate_spec(&engine, "finance", finance_suggested_inputs());
+    let (lit, ty) = rule_typed(&response, "multiplied");
+    assert_ratio_exact(&lit, &ty, "multiplied", "0.00225", Some("percent"));
 }
 
 #[test]
@@ -312,7 +311,7 @@ fn cross_type_unless_branches() {
     let mut engine = Engine::new();
     load_ok(&mut engine, FINANCE_SPEC, "finance_tier.lemma");
 
-    let response = run_spec(&engine, "finance", finance_suggested_inputs());
+    let response = evaluate_spec(&engine, "finance", finance_suggested_inputs());
     match &rule_value(&response, "tier").value {
         ValueKind::Text(s) => assert_eq!(s, "mid", "15% > 10% but not > 20%"),
         other => panic!("tier must be Text, got {other:?}"),
@@ -330,11 +329,11 @@ rule margin_higher: margin_pct > insurance_pct
     let mut engine = Engine::new();
     load_ok(&mut engine, code, "finance_override.lemma");
 
-    let mut data = HashMap::new();
+    let mut data = IndexMap::new();
     data.insert("margin_pct".to_string(), "1%".into());
     data.insert("insurance_pct".to_string(), "2%".into());
 
-    let response = run_spec(&engine, "finance", data);
+    let response = evaluate_spec(&engine, "finance", data);
     assert_bool(
         &rule_value(&response, "margin_higher"),
         "margin_higher",
@@ -358,48 +357,69 @@ rule margin_as_pct: margin as percent
     let mut engine = Engine::new();
     load_ok(&mut engine, code, "as_percent_ok.lemma");
 
-    let mut data = HashMap::new();
+    let mut data = IndexMap::new();
     data.insert("margin".to_string(), "20%".into());
-    let response = run_spec(&engine, "s", data);
-    assert_ratio_exact(
-        &rule_value(&response, "margin_as_pct"),
-        "margin_as_pct",
-        "0.2",
-        Some("percent"),
-    );
+    let response = evaluate_spec(&engine, "s", data);
+    let (lit, ty) = rule_typed(&response, "margin_as_pct");
+    assert_ratio_exact(&lit, &ty, "margin_as_pct", "0.2", Some("percent"));
 }
 
 #[test]
-fn foreign_unit_as_basis_points_fails_plan() {
+fn foreign_unit_as_basis_points_ok_when_unique_in_scope() {
     let code = r#"
 spec s
 data margin: ratio -> suggest 20%
 data spread: ratio
   -> unit basis_points: 10000
-rule bad: margin as basis_points
+rule margin_as_bps: margin as basis_points
 "#;
-    expect_load_error(code, "foreign_bps.lemma", &["basis_points", "margin"]);
+    let mut engine = Engine::new();
+    load_ok(&mut engine, code, "foreign_bps.lemma");
+
+    let mut data = IndexMap::new();
+    data.insert("margin".to_string(), "20%".into());
+    let response = evaluate_spec(&engine, "s", data);
+    let (lit, ty) = rule_typed(&response, "margin_as_bps");
+    assert_ratio_exact(&lit, &ty, "margin_as_bps", "0.2", Some("basis_points"));
 }
 
 #[test]
-fn second_custom_ratio_unit_declarer_errors_at_load() {
+fn second_custom_ratio_unit_declarer_loads_and_qualified_use_picks_owner() {
+    let code = r#"
+spec s
+data spread_a: ratio
+  -> unit basis_points: 10000
+data spread_b: ratio
+  -> unit basis_points: 100
+rule from_a: 5 spread_a.basis_points
+rule from_b: 5 spread_b.basis_points
+"#;
+    let mut engine = Engine::new();
+    load_ok(&mut engine, code, "shared_bps.lemma");
+    let response = evaluate_spec(&engine, "s", IndexMap::new());
+    let (lit, ty) = rule_typed(&response, "from_a");
+    assert_ratio_exact(&lit, &ty, "from_a", "0.0005", Some("basis_points"));
+    let (lit, ty) = rule_typed(&response, "from_b");
+    assert_ratio_exact(&lit, &ty, "from_b", "0.05", Some("basis_points"));
+}
+
+#[test]
+fn bare_ratio_unit_with_two_declarers_must_be_qualified() {
     let code = r#"
 spec s
 data spread_a: ratio
   -> unit basis_points: 10000
 data spread_b: ratio
   -> unit basis_points: 10000
-rule out: spread_a
+rule out: 5 basis_points
 "#;
     expect_load_error(
         code,
-        "unique_bps.lemma",
+        "bare_shared_bps.lemma",
         &[
-            "spread_a",
-            "spread_b",
             "basis_points",
-            "defined on both",
-            "declared only once",
+            "spread_a.basis_points",
+            "spread_b.basis_points",
         ],
     );
 }
@@ -421,7 +441,7 @@ rule out: margin
 }
 
 #[test]
-fn second_custom_ratio_unit_declarer_among_three_types_errors() {
+fn ratio_unit_declared_on_three_types_qualifies_each() {
     let code = r#"
 spec s
 data a: ratio
@@ -430,17 +450,20 @@ data b: ratio
   -> unit thirds: 3
 data c: ratio
   -> unit thirds: 6
-rule out: a
+rule from_a: 3 a.thirds
+rule from_c: 3 c.thirds
 "#;
-    expect_load_error(
-        code,
-        "three_types_unique.lemma",
-        &["thirds", "defined on both", "declared only once"],
-    );
+    let mut engine = Engine::new();
+    load_ok(&mut engine, code, "three_types.lemma");
+    let response = evaluate_spec(&engine, "s", IndexMap::new());
+    let (lit, ty) = rule_typed(&response, "from_a");
+    assert_ratio_exact(&lit, &ty, "from_a", "1", Some("thirds"));
+    let (lit, ty) = rule_typed(&response, "from_c");
+    assert_ratio_exact(&lit, &ty, "from_c", "0.5", Some("thirds"));
 }
 
 #[test]
-fn second_custom_ratio_unit_declarer_reordered_errors() {
+fn bare_ratio_unit_on_three_types_lists_every_qualified_form() {
     let code = r#"
 spec s
 data c: ratio
@@ -449,12 +472,12 @@ data a: ratio
   -> unit thirds: 3
 data b: ratio
   -> unit thirds: 3
-rule out: a
+rule out: 3 thirds
 "#;
     expect_load_error(
         code,
-        "three_types_unique_reordered.lemma",
-        &["thirds", "defined on both", "declared only once"],
+        "three_types_bare.lemma",
+        &["thirds", "a.thirds", "b.thirds", "c.thirds"],
     );
 }
 
@@ -473,13 +496,9 @@ rule savings_ratio: (part / whole) as percent
     let mut engine = Engine::new();
     load_ok(&mut engine, code, "anon_div.lemma");
 
-    let response = run_spec(&engine, "calc", HashMap::new());
-    assert_ratio_exact(
-        &rule_value(&response, "savings_ratio"),
-        "savings_ratio",
-        "0.25",
-        Some("percent"),
-    );
+    let response = evaluate_spec(&engine, "calc", IndexMap::new());
+    let (lit, ty) = rule_typed(&response, "savings_ratio");
+    assert_ratio_exact(&lit, &ty, "savings_ratio", "0.25", Some("percent"));
 }
 
 #[test]
@@ -491,8 +510,9 @@ rule r: 15%
     let mut engine = Engine::new();
     load_ok(&mut engine, code, "literal_pct.lemma");
 
-    let response = run_spec(&engine, "s", HashMap::new());
-    assert_ratio_exact(&rule_value(&response, "r"), "r", "0.15", Some("percent"));
+    let response = evaluate_spec(&engine, "s", IndexMap::new());
+    let (lit, ty) = rule_typed(&response, "r");
+    assert_ratio_exact(&lit, &ty, "r", "0.15", Some("percent"));
 }
 
 #[test]
@@ -511,19 +531,11 @@ rule compared: plus_five > 25%
     let mut engine = Engine::new();
     load_ok(&mut engine, code, "anon_arith.lemma");
 
-    let response = run_spec(&engine, "finance", HashMap::new());
-    assert_ratio_exact(
-        &rule_value(&response, "pct"),
-        "pct",
-        "0.25",
-        Some("percent"),
-    );
-    assert_ratio_exact(
-        &rule_value(&response, "plus_five"),
-        "plus_five",
-        "0.30",
-        Some("percent"),
-    );
+    let response = evaluate_spec(&engine, "finance", IndexMap::new());
+    let (lit, ty) = rule_typed(&response, "pct");
+    assert_ratio_exact(&lit, &ty, "pct", "0.25", Some("percent"));
+    let (lit, ty) = rule_typed(&response, "plus_five");
+    assert_ratio_exact(&lit, &ty, "plus_five", "0.30", Some("percent"));
     assert_bool(&rule_value(&response, "compared"), "compared", true);
 }
 
@@ -538,9 +550,9 @@ rule anon: 0.25 as percent
     let mut engine = Engine::new();
     load_ok(&mut engine, code, "number_as_pct.lemma");
 
-    let response = run_spec(&engine, "finance", HashMap::new());
-    let lit = rule_value(&response, "anon");
-    assert_ratio_exact(&lit, "anon", "0.25", Some("percent"));
+    let response = evaluate_spec(&engine, "finance", IndexMap::new());
+    let (lit, ty) = rule_typed(&response, "anon");
+    assert_ratio_exact(&lit, &ty, "anon", "0.25", Some("percent"));
     assert!(
         matches!(lit.value, ValueKind::Ratio(_)),
         "result must remain ratio-typed, got {:?}",
@@ -669,8 +681,9 @@ rule band: allowed_band
 fn ratio_range_default_with_basis_points_endpoints_canonical() {
     let code = r#"
 spec policy
-data allowed_band: ratio range
+data bps: ratio
   -> unit basis_points: 10000
+data allowed_band: bps range
   -> suggest 200 basis_points...3500 basis_points
 rule band: allowed_band
 "#;
@@ -708,10 +721,10 @@ rule out_of_band: 5% in allowed_band
     let mut engine = Engine::new();
     load_ok(&mut engine, code, "ratio_range_default_runtime.lemma");
 
-    let mut data = HashMap::new();
+    let mut data = IndexMap::new();
     data.insert("allowed_band".to_string(), "10%...50%".into());
     data.insert("candidate".to_string(), "25%".into());
-    let response = run_spec(&engine, "policy", data);
+    let response = evaluate_spec(&engine, "policy", data);
     assert_bool(
         &rule_value(&response, "in_default_band"),
         "in_default_band",
@@ -732,9 +745,9 @@ rule below: margin_pct in 0%...10%
     let mut engine = Engine::new();
     load_ok(&mut engine, code, "in_band.lemma");
 
-    let mut data = HashMap::new();
+    let mut data = IndexMap::new();
     data.insert("margin_pct".to_string(), "15%".into());
-    let response = run_spec(&engine, "policy", data);
+    let response = evaluate_spec(&engine, "policy", data);
     assert_bool(&rule_value(&response, "in_band"), "in_band", true);
     assert_bool(&rule_value(&response, "below"), "below", false);
 }
@@ -748,23 +761,15 @@ fn runtime_input_each_ratio_field_independent() {
     let mut engine = Engine::new();
     load_ok(&mut engine, TARGETS_SPEC, "targets_runtime.lemma");
 
-    let mut data = HashMap::new();
+    let mut data = IndexMap::new();
     data.insert("standard_margin_pct".to_string(), "20%".into());
     data.insert("default_credit_insurance_pct".to_string(), "2%".into());
 
-    let response = run_spec(&engine, "targets", data);
-    assert_ratio_exact(
-        &rule_value(&response, "margin"),
-        "margin runtime",
-        "0.2",
-        Some("percent"),
-    );
-    assert_ratio_exact(
-        &rule_value(&response, "insurance"),
-        "insurance runtime",
-        "0.02",
-        Some("percent"),
-    );
+    let response = evaluate_spec(&engine, "targets", data);
+    let (lit, ty) = rule_typed(&response, "margin");
+    assert_ratio_exact(&lit, &ty, "margin runtime", "0.2", Some("percent"));
+    let (lit, ty) = rule_typed(&response, "insurance");
+    assert_ratio_exact(&lit, &ty, "insurance runtime", "0.02", Some("percent"));
 }
 
 #[test]
@@ -811,10 +816,10 @@ rule after_surcharge: base * (100% + surcharge)
     let mut engine = Engine::new();
     load_ok(&mut engine, code, "pricing_mix.lemma");
 
-    let mut data = HashMap::new();
+    let mut data = IndexMap::new();
     data.insert("discount".to_string(), "10%".into());
     data.insert("surcharge".to_string(), "5%".into());
-    let response = run_spec(&engine, "pricing", data);
+    let response = evaluate_spec(&engine, "pricing", data);
     assert_number_exact(
         &rule_value(&response, "after_discount"),
         "after_discount",

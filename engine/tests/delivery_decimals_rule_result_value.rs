@@ -1,6 +1,6 @@
+use indexmap::IndexMap;
 use lemma::{DateTimeValue, Engine, SourceType};
 use rust_decimal::Decimal;
-use std::collections::HashMap;
 use std::str::FromStr;
 
 #[test]
@@ -41,15 +41,15 @@ rule delivery_cost: 0.26 eur_per_km * distance
     };
 
     let response = engine
-        .run(
+        .evaluate(
             None,
             "delivery",
             Some(&effective),
-            HashMap::from([("distance".to_string(), "12 kilometer".into())]),
+            IndexMap::from([("distance".to_string(), "12 kilometer".into())]),
             None,
             false,
         )
-        .expect("run");
+        .expect("evaluate");
 
     let delivery_cost = response
         .results

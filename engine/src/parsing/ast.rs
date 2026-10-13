@@ -18,6 +18,16 @@ pub(crate) fn ascii_lowercase_logical_name(name: String) -> String {
     name.to_ascii_lowercase()
 }
 
+/// Canonical ASCII lowercase form of a logical identifier, borrowed when `name` is already
+/// canonical. Lookups use this so an already-lowercase request allocates nothing.
+pub(crate) fn canonical_logical_name(name: &str) -> std::borrow::Cow<'_, str> {
+    if name.bytes().any(|byte| byte.is_ascii_uppercase()) {
+        std::borrow::Cow::Owned(name.to_ascii_lowercase())
+    } else {
+        std::borrow::Cow::Borrowed(name)
+    }
+}
+
 /// Span representing a location in source code
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct Span {
@@ -74,13 +84,16 @@ impl Default for DepthTracker {
 // Spec, data, rule, expression and value types
 // -----------------------------------------------------------------------------
 
+use crate::formatting::expression::{
+    CommandSyntax, CommandView, PredicateView, Syntax, SyntaxNode, SyntaxView,
+};
+use crate::parsing::arena::{ExprKind, ExprRef};
 use crate::parsing::source::Source;
 use rust_decimal::Decimal;
 use serde::Serialize;
 use std::cmp::Ordering;
 use std::fmt;
 use std::hash::{Hash, Hasher};
-use std::sync::Arc;
 
 pub use crate::literals::{BooleanValue, DateTimeValue, TimeValue, TimezoneValue, Value};
 
@@ -309,34 +322,29 @@ pub struct LemmaRule {
 
 /// An expression that can be evaluated, with source location
 ///
-/// Expressions use semantic equality - two expressions with the same
-/// structure (kind) are equal regardless of source location.
-/// Hash is not implemented for AST Expression; use planning::semantics::Expression as map keys.
+/// Expressions use semantic equality: two expressions with the same structure are equal
+/// regardless of source location.
+pub type Expression = ExprTree<ExpressionKind>;
+
+pub use crate::parsing::arena::{ExprId, ExprTable, ExprTree};
+
+/// One operator step of a flat left-associative chain. `source_location` spans from the
+/// start of the chain through `operand`.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct Expression {
-    pub kind: ExpressionKind,
-    pub source_location: Option<Source>,
+pub struct ChainStep<Op> {
+    pub op: Op,
+    pub operand: ExprId,
+    pub source_location: Source,
 }
 
-impl Expression {
-    /// Create a new expression with kind and source location
-    #[must_use]
-    pub fn new(kind: ExpressionKind, source_location: Source) -> Self {
-        Self {
-            kind,
-            source_location: Some(source_location),
-        }
-    }
-}
-
-/// Semantic equality - compares expressions by structure only, ignoring source location
-impl PartialEq for Expression {
+/// Semantic equality as for [`Expression`]: the step's span is not part of its identity.
+impl<Op: PartialEq> PartialEq for ChainStep<Op> {
     fn eq(&self, other: &Self) -> bool {
-        self.kind == other.kind
+        self.op == other.op && self.operand == other.operand
     }
 }
 
-impl Eq for Expression {}
+impl<Op: Eq> Eq for ChainStep<Op> {}
 
 /// Whether a date is relative to `now` in the past or future direction.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
@@ -419,27 +427,247 @@ pub enum ExpressionKind {
     Now,
     /// Date-relative sugar: `<date_expr> in past` / `<date_expr> in future`
     /// Fields: (kind, date_expression)
-    DateRelative(DateRelativeKind, Arc<Expression>),
+    DateRelative(DateRelativeKind, ExprId),
     /// Calendar-period sugar: `<date_expr> in [past|future] calendar year|month|week`
     /// Fields: (kind, unit, date_expression)
-    DateCalendar(DateCalendarKind, CalendarPeriodUnit, Arc<Expression>),
+    DateCalendar(DateCalendarKind, CalendarPeriodUnit, ExprId),
     /// Range literal: `{left_expr}...{right_expr}`
-    RangeLiteral(Arc<Expression>, Arc<Expression>),
+    RangeLiteral(ExprId, ExprId),
     /// Relative date range: `past 7 day` / `future 30 day`
-    PastFutureRange(DateRelativeKind, Arc<Expression>),
+    PastFutureRange(DateRelativeKind, ExprId),
     /// Range containment: `{value_expr} in {range_expr}`
-    RangeContainment(Arc<Expression>, Arc<Expression>),
+    RangeContainment(ExprId, ExprId),
     /// Ordered endpoint of a range: `lower` (included) or `upper` (excluded).
-    RangeBound(RangeBound, Arc<Expression>),
-    LogicalAnd(Arc<Expression>, Arc<Expression>),
-    Arithmetic(Arc<Expression>, ArithmeticComputation, Arc<Expression>),
-    Comparison(Arc<Expression>, ComparisonComputation, Arc<Expression>),
-    UnitConversion(Arc<Expression>, ConversionTarget),
-    LogicalNegation(Arc<Expression>, NegationType),
-    MathematicalComputation(MathematicalComputation, Arc<Expression>),
+    RangeBound(RangeBound, ExprId),
+    /// `a and b and c`: one left fold, operands in source order.
+    LogicalAnd {
+        first: ExprId,
+        steps: Vec<ChainStep<()>>,
+    },
+    /// `a + b - c * d`: one left fold per precedence level, operands in source order.
+    Arithmetic {
+        first: ExprId,
+        steps: Vec<ChainStep<ArithmeticComputation>>,
+    },
+    Comparison(ExprId, ComparisonComputation, ExprId),
+    UnitConversion(ExprId, ConversionTarget),
+    LogicalNegation(ExprId, NegationType),
+    MathematicalComputation(MathematicalComputation, ExprId),
     Veto(VetoExpression),
     /// `expr is veto` / `veto is expr` — boolean: whether evaluating `expr` yields `OperationResult::Veto`.
-    ResultIsVeto(Arc<Expression>),
+    ResultIsVeto(ExprId),
+    /// Type in expression position: `text list`, `money list`, `money range list`.
+    ListType {
+        element: ParentType,
+    },
+    /// Postfix `->` list command: `fares -> sum`, `fares -> where >= 100 eur`.
+    ListCommand {
+        list: ExprId,
+        command: ListCommand,
+    },
+    /// Postfix member read on a parenthesised expression: `(staff -> find "ada").salary`.
+    Member {
+        base: ExprId,
+        path: Reference,
+    },
+}
+
+impl ExprKind for ExpressionKind {
+    fn for_each_child(&self, mut f: impl FnMut(ExprId)) {
+        match self {
+            ExpressionKind::Literal(_)
+            | ExpressionKind::Reference(_)
+            | ExpressionKind::Now
+            | ExpressionKind::Veto(_)
+            | ExpressionKind::ListType { .. } => {}
+            ExpressionKind::DateRelative(_, inner)
+            | ExpressionKind::DateCalendar(_, _, inner)
+            | ExpressionKind::PastFutureRange(_, inner)
+            | ExpressionKind::RangeBound(_, inner)
+            | ExpressionKind::UnitConversion(inner, _)
+            | ExpressionKind::LogicalNegation(inner, _)
+            | ExpressionKind::MathematicalComputation(_, inner)
+            | ExpressionKind::ResultIsVeto(inner)
+            | ExpressionKind::Member { base: inner, .. } => f(*inner),
+            ExpressionKind::RangeLiteral(left, right)
+            | ExpressionKind::RangeContainment(left, right)
+            | ExpressionKind::Comparison(left, _, right) => {
+                f(*left);
+                f(*right);
+            }
+            ExpressionKind::LogicalAnd { first, steps } => {
+                f(*first);
+                steps.iter().for_each(|step| f(step.operand));
+            }
+            ExpressionKind::Arithmetic { first, steps } => {
+                f(*first);
+                steps.iter().for_each(|step| f(step.operand));
+            }
+            ExpressionKind::ListCommand { list, command } => {
+                f(*list);
+                command.for_each_child(f);
+            }
+        }
+    }
+
+    fn children_mut(&mut self) -> Vec<&mut ExprId> {
+        match self {
+            ExpressionKind::Literal(_)
+            | ExpressionKind::Reference(_)
+            | ExpressionKind::Now
+            | ExpressionKind::Veto(_)
+            | ExpressionKind::ListType { .. } => Vec::new(),
+            ExpressionKind::DateRelative(_, inner)
+            | ExpressionKind::DateCalendar(_, _, inner)
+            | ExpressionKind::PastFutureRange(_, inner)
+            | ExpressionKind::RangeBound(_, inner)
+            | ExpressionKind::UnitConversion(inner, _)
+            | ExpressionKind::LogicalNegation(inner, _)
+            | ExpressionKind::MathematicalComputation(_, inner)
+            | ExpressionKind::ResultIsVeto(inner)
+            | ExpressionKind::Member { base: inner, .. } => vec![inner],
+            ExpressionKind::RangeLiteral(left, right)
+            | ExpressionKind::RangeContainment(left, right)
+            | ExpressionKind::Comparison(left, _, right) => vec![left, right],
+            ExpressionKind::LogicalAnd { first, steps } => std::iter::once(first)
+                .chain(steps.iter_mut().map(|step| &mut step.operand))
+                .collect(),
+            ExpressionKind::Arithmetic { first, steps } => std::iter::once(first)
+                .chain(steps.iter_mut().map(|step| &mut step.operand))
+                .collect(),
+            ExpressionKind::ListCommand { list, command } => std::iter::once(list)
+                .chain(command.children_mut())
+                .collect(),
+        }
+    }
+}
+
+impl ListCommand {
+    fn for_each_child(&self, mut f: impl FnMut(ExprId)) {
+        match self {
+            ListCommand::First | ListCommand::Last | ListCommand::Count => {}
+            ListCommand::Find { keys } => keys.iter().copied().for_each(f),
+            ListCommand::Sum { argument }
+            | ListCommand::Avg { argument }
+            | ListCommand::Product { argument }
+            | ListCommand::Min { argument }
+            | ListCommand::Max { argument }
+            | ListCommand::Sort { argument, .. } => argument.iter().copied().for_each(f),
+            ListCommand::Any { form } | ListCommand::All { form } | ListCommand::Where { form } => {
+                match form {
+                    ListPredicate::Value { right, .. } => f(*right),
+                    ListPredicate::Instance { expr } => f(*expr),
+                }
+            }
+            ListCommand::Top { n } => f(*n),
+            ListCommand::With { rows } => match rows {
+                ListWithRows::Values(values) => values.iter().copied().for_each(f),
+                ListWithRows::FieldPairs(pairs) => pairs.iter().for_each(|(_, value)| f(*value)),
+            },
+        }
+    }
+
+    fn children_mut(&mut self) -> Vec<&mut ExprId> {
+        match self {
+            ListCommand::First | ListCommand::Last | ListCommand::Count => Vec::new(),
+            ListCommand::Find { keys } => keys.iter_mut().collect(),
+            ListCommand::Sum { argument }
+            | ListCommand::Avg { argument }
+            | ListCommand::Product { argument }
+            | ListCommand::Min { argument }
+            | ListCommand::Max { argument }
+            | ListCommand::Sort { argument, .. } => argument.iter_mut().collect(),
+            ListCommand::Any { form } | ListCommand::All { form } | ListCommand::Where { form } => {
+                match form {
+                    ListPredicate::Value { right, .. } => vec![right],
+                    ListPredicate::Instance { expr } => vec![expr],
+                }
+            }
+            ListCommand::Top { n } => vec![n],
+            ListCommand::With { rows } => match rows {
+                ListWithRows::Values(values) => values.iter_mut().collect(),
+                ListWithRows::FieldPairs(pairs) => {
+                    pairs.iter_mut().map(|(_, value)| value).collect()
+                }
+            },
+        }
+    }
+}
+
+/// One postfix `->` command on a list-valued expression.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub enum ListCommand {
+    Find {
+        keys: Vec<ExprId>,
+    },
+    First,
+    Last,
+    Sum {
+        argument: Option<ExprId>,
+    },
+    Avg {
+        argument: Option<ExprId>,
+    },
+    Product {
+        argument: Option<ExprId>,
+    },
+    Count,
+    Min {
+        argument: Option<ExprId>,
+    },
+    Max {
+        argument: Option<ExprId>,
+    },
+    Any {
+        form: ListPredicate,
+    },
+    All {
+        form: ListPredicate,
+    },
+    Where {
+        form: ListPredicate,
+    },
+    Sort {
+        descending: bool,
+        argument: Option<ExprId>,
+    },
+    Top {
+        n: ExprId,
+    },
+    With {
+        rows: ListWithRows,
+    },
+}
+
+/// Operator of a value-list condition; the row value is the implicit left operand.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RowCondition {
+    Compare(ComparisonComputation),
+    In,
+}
+
+impl fmt::Display for RowCondition {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            RowCondition::Compare(op) => write!(f, "{op}"),
+            RowCondition::In => write!(f, "in"),
+        }
+    }
+}
+
+/// `where` / `any` / `all` argument: value-list comparison, or instance-list expression.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub enum ListPredicate {
+    Value { op: RowCondition, right: ExprId },
+    Instance { expr: ExprId },
+}
+
+/// `-> with` rows on a list expression.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub enum ListWithRows {
+    Values(Vec<ExprId>),
+    FieldPairs(Vec<(Reference, ExprId)>),
 }
 
 /// Unresolved reference from parser
@@ -799,7 +1027,7 @@ impl fmt::Display for CommandArg {
 pub enum TypeConstraintCommand {
     Help,
     Suggest,
-    Fill,
+    With,
     Unit,
     Trait,
     Minimum,
@@ -817,7 +1045,7 @@ impl fmt::Display for TypeConstraintCommand {
         let s = match self {
             TypeConstraintCommand::Help => "help",
             TypeConstraintCommand::Suggest => "suggest",
-            TypeConstraintCommand::Fill => "fill",
+            TypeConstraintCommand::With => "with",
             TypeConstraintCommand::Unit => "unit",
             TypeConstraintCommand::Trait => "trait",
             TypeConstraintCommand::Minimum => "minimum",
@@ -840,7 +1068,7 @@ pub fn try_parse_type_constraint_command(s: &str) -> Option<TypeConstraintComman
     match s.trim() {
         s if s.eq_ignore_ascii_case("help") => Some(TypeConstraintCommand::Help),
         s if s.eq_ignore_ascii_case("suggest") => Some(TypeConstraintCommand::Suggest),
-        s if s.eq_ignore_ascii_case("fill") => Some(TypeConstraintCommand::Fill),
+        s if s.eq_ignore_ascii_case("with") => Some(TypeConstraintCommand::With),
         s if s.eq_ignore_ascii_case("unit") => Some(TypeConstraintCommand::Unit),
         s if s.eq_ignore_ascii_case("trait") => Some(TypeConstraintCommand::Trait),
         s if s.eq_ignore_ascii_case("minimum") => Some(TypeConstraintCommand::Minimum),
@@ -855,11 +1083,12 @@ pub fn try_parse_type_constraint_command(s: &str) -> Option<TypeConstraintComman
     }
 }
 
-/// Whether a `->` continuation uses assignment shape (`key: value`) or space-separated args.
+/// Whether a `->` continuation uses assignment (`key: value`), one argument, or a comma list.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ContinuationShape {
     Assignment,
-    SpaceSeparated,
+    Single,
+    CommaSeparated,
 }
 
 impl TypeConstraintCommand {
@@ -867,9 +1096,11 @@ impl TypeConstraintCommand {
     pub fn continuation_shape(self) -> ContinuationShape {
         match self {
             TypeConstraintCommand::Unit => ContinuationShape::Assignment,
+            TypeConstraintCommand::With | TypeConstraintCommand::Options => {
+                ContinuationShape::CommaSeparated
+            }
             TypeConstraintCommand::Help
             | TypeConstraintCommand::Suggest
-            | TypeConstraintCommand::Fill
             | TypeConstraintCommand::Trait
             | TypeConstraintCommand::Minimum
             | TypeConstraintCommand::Maximum
@@ -877,9 +1108,30 @@ impl TypeConstraintCommand {
             | TypeConstraintCommand::Upper
             | TypeConstraintCommand::Decimals
             | TypeConstraintCommand::Option
-            | TypeConstraintCommand::Options
-            | TypeConstraintCommand::Length => ContinuationShape::SpaceSeparated,
+            | TypeConstraintCommand::Length => ContinuationShape::Single,
         }
+    }
+
+    pub const ALL: &[Self] = &[
+        Self::Help,
+        Self::Suggest,
+        Self::With,
+        Self::Unit,
+        Self::Trait,
+        Self::Minimum,
+        Self::Maximum,
+        Self::Lower,
+        Self::Upper,
+        Self::Decimals,
+        Self::Option,
+        Self::Options,
+        Self::Length,
+    ];
+
+    /// Data-declaration `->` commands (not list-expression postfix queries).
+    #[must_use]
+    pub fn is_data_constraint(self) -> bool {
+        true
     }
 }
 
@@ -941,8 +1193,6 @@ pub struct UsesBinding {
     pub path: Reference,
     pub rhs: WithRhs,
     pub source_location: Source,
-    /// Parsed from deprecated standalone `with alias.path: …` (removed in a future release).
-    pub deprecated_standalone_with: bool,
 }
 
 /// Prefix import alias onto a relative binding path (`pricing.tax_rate` under alias `line` → `line.pricing.tax_rate`).
@@ -976,6 +1226,38 @@ pub enum DataValue {
     Import {
         spec_ref: SpecRef,
         bindings: Vec<UsesBinding>,
+    },
+    /// `uses x: spec list`: instance list of `spec_ref` rows.
+    ImportList { spec_ref: SpecRef, list: UsesList },
+}
+
+/// Commands under a `uses x: spec list` declaration.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct UsesList {
+    pub key: Option<UsesListKey>,
+    pub rows: Vec<UsesListRow>,
+}
+
+/// `-> key a, b` under a `uses x: spec list`.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct UsesListKey {
+    pub fields: Vec<Reference>,
+    pub source_location: Source,
+}
+
+/// One `-> with` line under a `uses x: spec list`.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UsesListRow {
+    /// `-> with drink: "latte", price: 3.50 eur`: one row.
+    Fields {
+        bindings: Vec<UsesBinding>,
+        source_location: Source,
+    },
+    /// `-> with ada, grace`: one row per item.
+    Values {
+        values: Vec<WithRhs>,
+        source_location: Source,
     },
 }
 
@@ -1015,61 +1297,21 @@ impl DataValue {
                 constraints: None,
                 value: Some(v),
             } => !matches!(v, Value::NumberWithUnit(_, _)),
-            DataValue::Import { .. } | DataValue::Definition { .. } => false,
+            DataValue::Import { .. }
+            | DataValue::ImportList { .. }
+            | DataValue::Definition { .. } => false,
         }
     }
-}
 
-/// Render a chain of `-> command args ...` constraints for display purposes.
-/// Shared between [`DataValue::Definition`] constraint chains.
-fn format_constraint_chain(constraints: &[Constraint]) -> String {
-    constraints
-        .iter()
-        .map(|row| format_constraint_as_source(&row.command, &row.args))
-        .collect::<Vec<_>>()
-        .join(" -> ")
-}
-
-impl fmt::Display for DataValue {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    /// Spec named by a `uses` alias: a single import or an instance list's row spec.
+    /// Types and units read through either alias the same way.
+    #[must_use]
+    pub fn uses_spec_ref(&self) -> Option<&SpecRef> {
         match self {
-            DataValue::Definition {
-                base,
-                constraints,
-                value,
-            } => {
-                if base.is_none() && constraints.is_none() {
-                    return match value {
-                        Some(v) => write!(f, "{}", v),
-                        None => Ok(()),
-                    };
-                }
-                let base_str = match base.as_ref() {
-                    Some(b) => format!("{b}"),
-                    None => match value {
-                        Some(v) => {
-                            if let Some(ref constraints_vec) = constraints {
-                                let constraint_str = format_constraint_chain(constraints_vec);
-                                return write!(f, "{v} -> {constraint_str}");
-                            }
-                            return write!(f, "{v}");
-                        }
-                        None => String::new(),
-                    },
-                };
-                if let Some(ref constraints_vec) = constraints {
-                    let constraint_str = format_constraint_chain(constraints_vec);
-                    write!(f, "{base_str} -> {constraint_str}")
-                } else {
-                    write!(f, "{base_str}")
-                }
+            DataValue::Import { spec_ref, .. } | DataValue::ImportList { spec_ref, .. } => {
+                Some(spec_ref)
             }
-            DataValue::Import {
-                spec_ref,
-                bindings: _,
-            } => {
-                write!(f, "uses {}", spec_ref)
-            }
+            DataValue::Definition { .. } => None,
         }
     }
 }
@@ -1142,264 +1384,201 @@ impl LemmaSpec {
     }
 }
 
-impl fmt::Display for LemmaSpec {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "spec {}", self.name)?;
-        if let EffectiveDate::DateTimeValue(ref af) = self.effective_from {
-            write!(f, " {}", af)?;
-        }
-        writeln!(f)?;
-
-        if let Some(ref commentary) = self.commentary {
-            writeln!(f, "\"\"\"")?;
-            writeln!(f, "{}", commentary)?;
-            writeln!(f, "\"\"\"")?;
-        }
-
-        if !self.data.is_empty() {
-            writeln!(f)?;
-            for data in &self.data {
-                write!(f, "{}", data)?;
+fn value_starts_with_sign(value: &crate::literals::Value) -> bool {
+    let mut current = value;
+    loop {
+        match current {
+            crate::literals::Value::Number(n) | crate::literals::Value::NumberWithUnit(n, _) => {
+                return n.is_sign_negative()
             }
+            crate::literals::Value::Range(left, _) => current = left.as_ref(),
+            _ => return false,
         }
+    }
+}
 
-        if !self.rules.is_empty() {
-            writeln!(f)?;
-            for (index, rule) in self.rules.iter().enumerate() {
-                if index > 0 {
-                    writeln!(f)?;
+/// Leaf of a source expression, printed as Lemma source.
+#[derive(Clone, Copy)]
+pub(crate) enum AstAtom<'a> {
+    Literal(&'a crate::literals::Value),
+    Reference(&'a Reference),
+    Now,
+    Veto(&'a VetoExpression),
+    ListType(&'a ParentType),
+}
+
+impl fmt::Display for AstAtom<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            AstAtom::Literal(value) => write!(f, "{}", AsLemmaSource(*value)),
+            AstAtom::Reference(reference) => write!(f, "{reference}"),
+            AstAtom::Now => write!(f, "now"),
+            AstAtom::Veto(veto) => write!(f, "{veto}"),
+            AstAtom::ListType(element) => write!(f, "{element}"),
+        }
+    }
+}
+
+impl fmt::Display for VetoExpression {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match &self.message {
+            Some(msg) => write!(f, "veto {}", quote_lemma_text(msg)),
+            None => write!(f, "veto"),
+        }
+    }
+}
+
+impl<'a> SyntaxNode<'a> for ExprRef<'a, ExpressionKind> {
+    type Atom = AstAtom<'a>;
+
+    fn view(self) -> SyntaxView<'a, Self> {
+        let atom = |atom| SyntaxView::Atom {
+            atom,
+            starts_with_sign: false,
+        };
+        match self.kind() {
+            ExpressionKind::Literal(value) => SyntaxView::Atom {
+                atom: AstAtom::Literal(value),
+                starts_with_sign: value_starts_with_sign(value),
+            },
+            ExpressionKind::Reference(reference) => atom(AstAtom::Reference(reference)),
+            ExpressionKind::Now => atom(AstAtom::Now),
+            ExpressionKind::Veto(veto) => atom(AstAtom::Veto(veto)),
+            ExpressionKind::ListType { element } => atom(AstAtom::ListType(element)),
+            ExpressionKind::DateRelative(kind, date) => {
+                SyntaxView::DateRelative(kind, self.child(*date))
+            }
+            ExpressionKind::DateCalendar(kind, unit, date) => {
+                SyntaxView::DateCalendar(kind, unit, self.child(*date))
+            }
+            ExpressionKind::RangeLiteral(left, right) => {
+                SyntaxView::RangeLiteral(self.child(*left), self.child(*right))
+            }
+            ExpressionKind::PastFutureRange(kind, offset) => {
+                SyntaxView::PastFutureRange(kind, self.child(*offset))
+            }
+            ExpressionKind::RangeContainment(value, range) => {
+                SyntaxView::RangeContainment(self.child(*value), self.child(*range))
+            }
+            ExpressionKind::RangeBound(bound, operand) => {
+                SyntaxView::Prefix(bound, self.child(*operand))
+            }
+            ExpressionKind::LogicalAnd { first, steps } => SyntaxView::Conjunction(
+                std::iter::once(*first)
+                    .chain(steps.iter().map(|step| step.operand))
+                    .map(|id| self.child(id))
+                    .collect(),
+            ),
+            ExpressionKind::Arithmetic { first, steps } => {
+                let level = match steps.first() {
+                    Some(step) => &step.op,
+                    None => panic!("BUG: arithmetic chain without steps"),
+                };
+                SyntaxView::Chain {
+                    level,
+                    operands: std::iter::once(*first)
+                        .chain(steps.iter().map(|step| step.operand))
+                        .map(|id| self.child(id))
+                        .collect(),
+                    ops: steps.iter().map(|step| &step.op).collect(),
                 }
-                write!(f, "{}", rule)?;
             }
-        }
-
-        if !self.meta_fields.is_empty() {
-            writeln!(f)?;
-            for meta in &self.meta_fields {
-                writeln!(f, "{}", meta)?;
+            ExpressionKind::Comparison(left, op, right) => {
+                SyntaxView::Comparison(self.child(*left), op, self.child(*right))
             }
+            ExpressionKind::UnitConversion(value, target) => {
+                SyntaxView::UnitConversion(self.child(*value), target)
+            }
+            ExpressionKind::LogicalNegation(operand, NegationType::Not) => {
+                match self.child(*operand).kind() {
+                    ExpressionKind::ResultIsVeto(inner) => {
+                        SyntaxView::IsNotVeto(self.child(*inner))
+                    }
+                    _ => SyntaxView::Not(self.child(*operand)),
+                }
+            }
+            ExpressionKind::MathematicalComputation(op, operand) => {
+                SyntaxView::Prefix(op, self.child(*operand))
+            }
+            ExpressionKind::ResultIsVeto(operand) => SyntaxView::IsVeto(self.child(*operand)),
+            ExpressionKind::ListCommand { list, command } => SyntaxView::ListCommand {
+                list: self.child(*list),
+                command: command_view(self.table, command),
+            },
+            ExpressionKind::Member { base, path } => SyntaxView::Member {
+                base: self.child(*base),
+                path: AstAtom::Reference(path),
+                parenthesize_base: true,
+            },
         }
-
-        Ok(())
     }
 }
 
-impl fmt::Display for LemmaData {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        writeln!(f, "data {}: {}", self.reference, self.value)
+fn predicate_view<'a>(
+    table: &'a ExprTable<ExpressionKind>,
+    form: &'a ListPredicate,
+) -> PredicateView<'a, ExprRef<'a, ExpressionKind>> {
+    let child = |id: ExprId| ExprRef { table, id };
+    match form {
+        ListPredicate::Value { op, right } => PredicateView::Value {
+            op,
+            right: child(*right),
+        },
+        ListPredicate::Instance { expr } => PredicateView::Instance(child(*expr)),
     }
 }
 
-impl fmt::Display for LemmaRule {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "rule {}: {}", self.name, self.expression)?;
-        for unless_clause in &self.unless_clauses {
-            write!(
-                f,
-                "\n  unless {} then {}",
-                unless_clause.condition, unless_clause.result
-            )?;
+/// Renders a list command whose argument nodes live in `table`.
+pub(crate) fn display_list_command(
+    table: &ExprTable<ExpressionKind>,
+    command: &ListCommand,
+) -> String {
+    CommandSyntax(&command_view(table, command)).to_string()
+}
+
+fn command_view<'a>(
+    table: &'a ExprTable<ExpressionKind>,
+    command: &'a ListCommand,
+) -> CommandView<'a, ExprRef<'a, ExpressionKind>> {
+    let child = |id: &ExprId| ExprRef { table, id: *id };
+    match command {
+        ListCommand::Find { keys } => CommandView::Find(keys.iter().map(child).collect()),
+        ListCommand::First => CommandView::First,
+        ListCommand::Last => CommandView::Last,
+        ListCommand::Count => CommandView::Count,
+        ListCommand::Sum { argument } => CommandView::Reduce("sum", argument.as_ref().map(child)),
+        ListCommand::Avg { argument } => CommandView::Reduce("avg", argument.as_ref().map(child)),
+        ListCommand::Product { argument } => {
+            CommandView::Reduce("product", argument.as_ref().map(child))
         }
-        writeln!(f)?;
-        Ok(())
-    }
-}
-
-/// Precedence level for an expression kind.
-///
-/// Higher values bind tighter. Used by `Expression::Display` and the formatter
-/// to insert parentheses only where needed.
-///
-/// `...` binds tighter than prefix operators, so `lower 5...10` is `lower` of the
-/// range and prints without parentheses. A prefix that is itself a range endpoint
-/// prints in parentheses: `(lower start)...(upper start)`.
-/// Prefix operators bind tighter than `as` and arithmetic.
-/// Parser climb in [`crate::parsing::parser::Parser`] must match this table.
-pub fn expression_precedence(kind: &ExpressionKind) -> u8 {
-    match kind {
-        ExpressionKind::LogicalAnd(..) => 2,
-        ExpressionKind::LogicalNegation(..) => 3,
-        ExpressionKind::Comparison(..) | ExpressionKind::ResultIsVeto(..) => 4,
-        ExpressionKind::RangeContainment(..) => 4,
-        ExpressionKind::DateRelative(..) | ExpressionKind::DateCalendar(..) => 4,
-        ExpressionKind::Arithmetic(_, op, _) => arithmetic_precedence(op),
-        ExpressionKind::UnitConversion(..) => 8,
-        ExpressionKind::MathematicalComputation(..) | ExpressionKind::RangeBound(..) => 9,
-        ExpressionKind::RangeLiteral(..)
-        | ExpressionKind::PastFutureRange(..)
-        | ExpressionKind::Literal(..)
-        | ExpressionKind::Reference(..)
-        | ExpressionKind::Now
-        | ExpressionKind::Veto(..) => 10,
-    }
-}
-
-/// Precedence for an arithmetic operator. Must match [`expression_precedence`].
-pub fn arithmetic_precedence(op: &ArithmeticComputation) -> u8 {
-    match op {
-        ArithmeticComputation::Add | ArithmeticComputation::Subtract => 5,
-        ArithmeticComputation::Multiply
-        | ArithmeticComputation::Divide
-        | ArithmeticComputation::Modulo => 6,
-        ArithmeticComputation::Power => 7,
-    }
-}
-
-/// Operand position under a parent operator.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum OperandSide {
-    Left,
-    Right,
-}
-
-/// Associativity of a binary (or n-ary chain) operator.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Associativity {
-    Left,
-    Right,
-}
-
-/// Whether a child expression must be wrapped in parentheses when printed under a parent.
-///
-/// - `parent_assoc == None`: unary / prefix parent — wrap only when `child_prec < parent_prec`.
-/// - `Some(Left)`: wrap looser children, and same-prec **right** children.
-/// - `Some(Right)`: wrap looser children, and same-prec **left** children.
-pub fn operand_needs_parentheses(
-    child_prec: u8,
-    parent_prec: u8,
-    side: OperandSide,
-    parent_assoc: Option<Associativity>,
-) -> bool {
-    if child_prec < parent_prec {
-        return true;
-    }
-    if child_prec > parent_prec {
-        return false;
-    }
-    match parent_assoc {
-        None => false,
-        Some(Associativity::Left) => matches!(side, OperandSide::Right),
-        Some(Associativity::Right) => matches!(side, OperandSide::Left),
-    }
-}
-
-pub fn arithmetic_associativity(op: &ArithmeticComputation) -> Associativity {
-    match op {
-        ArithmeticComputation::Power => Associativity::Right,
-        ArithmeticComputation::Add
-        | ArithmeticComputation::Subtract
-        | ArithmeticComputation::Multiply
-        | ArithmeticComputation::Divide
-        | ArithmeticComputation::Modulo => Associativity::Left,
-    }
-}
-
-fn write_expression_child(
-    f: &mut fmt::Formatter<'_>,
-    child: &Expression,
-    parent_prec: u8,
-    side: OperandSide,
-    parent_assoc: Option<Associativity>,
-) -> fmt::Result {
-    let child_prec = expression_precedence(&child.kind);
-    if operand_needs_parentheses(child_prec, parent_prec, side, parent_assoc) {
-        write!(f, "({})", child)
-    } else {
-        write!(f, "{}", child)
+        ListCommand::Min { argument } => CommandView::Reduce("min", argument.as_ref().map(child)),
+        ListCommand::Max { argument } => CommandView::Reduce("max", argument.as_ref().map(child)),
+        ListCommand::Any { form } => CommandView::Predicate("any", predicate_view(table, form)),
+        ListCommand::All { form } => CommandView::Predicate("all", predicate_view(table, form)),
+        ListCommand::Where { form } => CommandView::Predicate("where", predicate_view(table, form)),
+        ListCommand::Sort {
+            descending,
+            argument,
+        } => CommandView::Sort {
+            descending: *descending,
+            argument: argument.as_ref().map(child),
+        },
+        ListCommand::Top { n } => CommandView::Top(child(n)),
+        ListCommand::With { rows } => CommandView::With(match rows {
+            ListWithRows::Values(values) => {
+                values.iter().map(|value| (None, child(value))).collect()
+            }
+            ListWithRows::FieldPairs(pairs) => pairs
+                .iter()
+                .map(|(name, value)| (Some(AstAtom::Reference(name)), child(value)))
+                .collect(),
+        }),
     }
 }
 
 impl fmt::Display for Expression {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match &self.kind {
-            ExpressionKind::Literal(lit) => write!(f, "{}", AsLemmaSource(lit)),
-            ExpressionKind::Reference(r) => write!(f, "{}", r),
-            ExpressionKind::Arithmetic(left, op, right) => {
-                let my_prec = expression_precedence(&self.kind);
-                let assoc = Some(arithmetic_associativity(op));
-                write_expression_child(f, left, my_prec, OperandSide::Left, assoc)?;
-                write!(f, " {} ", op)?;
-                write_expression_child(f, right, my_prec, OperandSide::Right, assoc)
-            }
-            ExpressionKind::Comparison(left, op, right) => {
-                let my_prec = expression_precedence(&self.kind);
-                write_expression_child(f, left, my_prec, OperandSide::Left, None)?;
-                write!(f, " {} ", op)?;
-                write_expression_child(f, right, my_prec, OperandSide::Right, None)
-            }
-            ExpressionKind::UnitConversion(value, target) => {
-                let my_prec = expression_precedence(&self.kind);
-                write_expression_child(f, value, my_prec, OperandSide::Left, None)?;
-                write!(f, " as {}", target)
-            }
-            ExpressionKind::LogicalNegation(expr, negation) => {
-                if let (NegationType::Not, ExpressionKind::ResultIsVeto(operand)) =
-                    (negation, &expr.kind)
-                {
-                    let my_prec = expression_precedence(&self.kind);
-                    write_expression_child(f, operand, my_prec, OperandSide::Left, None)?;
-                    write!(f, " is not veto")
-                } else {
-                    let my_prec = expression_precedence(&self.kind);
-                    write!(f, "not ")?;
-                    write_expression_child(f, expr, my_prec, OperandSide::Right, None)
-                }
-            }
-            ExpressionKind::ResultIsVeto(operand) => {
-                let my_prec = expression_precedence(&self.kind);
-                write_expression_child(f, operand, my_prec, OperandSide::Left, None)?;
-                write!(f, " is veto")
-            }
-            ExpressionKind::LogicalAnd(left, right) => {
-                let my_prec = expression_precedence(&self.kind);
-                let assoc = Some(Associativity::Left);
-                write_expression_child(f, left, my_prec, OperandSide::Left, assoc)?;
-                write!(f, " and ")?;
-                write_expression_child(f, right, my_prec, OperandSide::Right, assoc)
-            }
-            ExpressionKind::MathematicalComputation(op, operand) => {
-                let my_prec = expression_precedence(&self.kind);
-                write!(f, "{op} ")?;
-                write_expression_child(f, operand, my_prec, OperandSide::Right, None)
-            }
-            ExpressionKind::RangeBound(bound, operand) => {
-                let my_prec = expression_precedence(&self.kind);
-                write!(f, "{bound} ")?;
-                write_expression_child(f, operand, my_prec, OperandSide::Right, None)
-            }
-            ExpressionKind::Veto(veto) => match &veto.message {
-                Some(msg) => write!(f, "veto {}", quote_lemma_text(msg)),
-                None => write!(f, "veto"),
-            },
-            ExpressionKind::Now => write!(f, "now"),
-            ExpressionKind::DateRelative(kind, date_expr) => {
-                write!(f, "{} {}", date_expr, kind)?;
-                Ok(())
-            }
-            ExpressionKind::DateCalendar(kind, unit, date_expr) => {
-                write!(f, "{} {} {}", date_expr, kind, unit)
-            }
-            ExpressionKind::RangeLiteral(left, right) => {
-                let my_prec = expression_precedence(&self.kind);
-                write_expression_child(f, left, my_prec, OperandSide::Left, None)?;
-                write!(f, "...")?;
-                write_expression_child(f, right, my_prec, OperandSide::Right, None)
-            }
-            ExpressionKind::PastFutureRange(kind, offset_expr) => {
-                match kind {
-                    DateRelativeKind::InPast => write!(f, "past ")?,
-                    DateRelativeKind::InFuture => write!(f, "future ")?,
-                }
-                let my_prec = expression_precedence(&self.kind);
-                write_expression_child(f, offset_expr, my_prec, OperandSide::Right, None)
-            }
-            ExpressionKind::RangeContainment(value, range) => {
-                let my_prec = expression_precedence(&self.kind);
-                write_expression_child(f, value, my_prec, OperandSide::Left, None)?;
-                write!(f, " in ")?;
-                write_expression_child(f, range, my_prec, OperandSide::Right, None)
-            }
-        }
+        fmt::Display::fmt(&Syntax(self.root()), f)
     }
 }
 
@@ -1419,7 +1598,7 @@ impl fmt::Display for ArithmeticComputation {
             ArithmeticComputation::Subtract => write!(f, "-"),
             ArithmeticComputation::Multiply => write!(f, "*"),
             ArithmeticComputation::Divide => write!(f, "/"),
-            ArithmeticComputation::Modulo => write!(f, "%"),
+            ArithmeticComputation::Modulo => write!(f, "mod"),
             ArithmeticComputation::Power => write!(f, "^"),
         }
     }
@@ -1522,6 +1701,10 @@ pub enum ParentType {
     Ranged {
         inner: Box<ParentType>,
     },
+    /// List of an element type: `<inner> list` (e.g. `money list`, `money range list`).
+    List {
+        inner: Box<ParentType>,
+    },
 }
 
 impl std::fmt::Display for ParentType {
@@ -1533,6 +1716,7 @@ impl std::fmt::Display for ParentType {
                 write!(f, "{spec_alias}.{inner}")
             }
             ParentType::Ranged { inner } => write!(f, "{inner} range"),
+            ParentType::List { inner } => write!(f, "{inner} list"),
         }
     }
 }
@@ -1599,19 +1783,13 @@ impl<'a> fmt::Display for AsLemmaSource<'a, CommandArg> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         use crate::literals::Value;
         match self.0 {
-            CommandArg::Literal(Value::Text(s)) => write!(f, "{}", quote_lemma_text(s)),
             CommandArg::Literal(Value::Number(d)) => {
                 write!(f, "{}", group_digits(&d.to_string()))
             }
-            CommandArg::Literal(Value::Boolean(bv)) => write!(f, "{}", bv),
             CommandArg::Literal(Value::NumberWithUnit(d, unit)) => {
                 write!(f, "{} {}", group_digits(&d.to_string()), unit)
             }
-            CommandArg::Literal(value @ Value::Range(_, _)) => {
-                write!(f, "{}", AsLemmaSource(value))
-            }
-            CommandArg::Literal(Value::Date(dt)) => write!(f, "{}", dt),
-            CommandArg::Literal(Value::Time(t)) => write!(f, "{}", t),
+            CommandArg::Literal(value) => write!(f, "{}", AsLemmaSource(value)),
             CommandArg::Label(s) => write!(f, "{}", s),
             CommandArg::UnitExpr(unit_arg) => write!(f, "{}", unit_arg),
         }
@@ -1649,7 +1827,11 @@ pub(crate) fn format_constraint_as_source(
             .iter()
             .map(|a| format!("{}", AsLemmaSource(a)))
             .collect();
-        format!("{} {}", cmd, args_str.join(" "))
+        let sep = match cmd.continuation_shape() {
+            ContinuationShape::CommaSeparated => ", ",
+            ContinuationShape::Single | ContinuationShape::Assignment => " ",
+        };
+        format!("{} {}", cmd, args_str.join(sep))
     }
 }
 
@@ -1670,36 +1852,8 @@ impl<'a> fmt::Display for AsLemmaSource<'a, Value> {
         match self.0 {
             Value::Number(n) => write!(f, "{}", format_decimal_source(n)),
             Value::Text(s) => write!(f, "{}", quote_lemma_text(s)),
-            Value::Date(dt) => match dt.granularity {
-                crate::literals::DateGranularity::Year => write!(f, "{:04}", dt.year),
-                crate::literals::DateGranularity::YearMonth => {
-                    write!(f, "{:04}-{:02}", dt.year, dt.month)
-                }
-                crate::literals::DateGranularity::IsoWeek { iso_year, week } => {
-                    write!(f, "{:04}-W{:02}", iso_year, week)
-                }
-                crate::literals::DateGranularity::Full => {
-                    write!(f, "{:04}-{:02}-{:02}", dt.year, dt.month, dt.day)
-                }
-                crate::literals::DateGranularity::DateTime => {
-                    write!(
-                        f,
-                        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}",
-                        dt.year, dt.month, dt.day, dt.hour, dt.minute, dt.second
-                    )?;
-                    if let Some(tz) = &dt.timezone {
-                        write!(f, "{}", tz)?;
-                    }
-                    Ok(())
-                }
-            },
-            Value::Time(t) => {
-                write!(f, "{:02}:{:02}:{:02}", t.hour, t.minute, t.second)?;
-                if let Some(tz) = &t.timezone {
-                    write!(f, "{}", tz)?;
-                }
-                Ok(())
-            }
+            Value::Date(dt) => write!(f, "{dt}"),
+            Value::Time(t) => write!(f, "{t}"),
             Value::Boolean(b) => write!(f, "{}", b),
             Value::NumberWithUnit(n, u) => match u.as_str() {
                 "percent" => write!(f, "{}%", format_decimal_source(n)),
@@ -1760,6 +1914,9 @@ impl<'a> fmt::Display for AsLemmaSource<'a, DataValue> {
             } => {
                 write!(f, "uses {}", spec_ref)
             }
+            DataValue::ImportList { spec_ref, list: _ } => {
+                write!(f, "uses {} list", spec_ref)
+            }
         }
     }
 }
@@ -1785,18 +1942,20 @@ pub(crate) fn canonicalize_spec_ref(spec_ref: &mut SpecRef) {
 }
 
 pub(crate) fn canonicalize_parent_type(parent: &mut ParentType) {
-    match parent {
-        ParentType::Custom { name } => {
-            *name = ascii_lowercase_logical_name(std::mem::take(name));
+    let mut current = parent;
+    loop {
+        current = match current {
+            ParentType::Custom { name } => {
+                *name = ascii_lowercase_logical_name(std::mem::take(name));
+                return;
+            }
+            ParentType::Qualified { spec_alias, inner } => {
+                *spec_alias = ascii_lowercase_logical_name(std::mem::take(spec_alias));
+                inner.as_mut()
+            }
+            ParentType::Ranged { inner } | ParentType::List { inner } => inner.as_mut(),
+            ParentType::Primitive { .. } => return,
         }
-        ParentType::Qualified { spec_alias, inner } => {
-            *spec_alias = ascii_lowercase_logical_name(std::mem::take(spec_alias));
-            canonicalize_parent_type(inner);
-        }
-        ParentType::Ranged { inner } => {
-            canonicalize_parent_type(inner);
-        }
-        ParentType::Primitive { .. } => {}
     }
 }
 
@@ -1831,52 +1990,62 @@ pub(crate) fn canonicalize_constraints(constraints: &mut [Constraint]) {
 }
 
 pub(crate) fn canonicalize_expression(expression: &mut Expression) {
-    match &mut expression.kind {
+    for kind in expression.table.kinds_mut() {
+        canonicalize_expression_kind(kind);
+    }
+}
+
+/// Canonicalizes the payload a node owns. Child nodes are visited by the table sweep.
+fn canonicalize_expression_kind(kind: &mut ExpressionKind) {
+    match kind {
         ExpressionKind::Literal(value) => canonicalize_value(value),
         ExpressionKind::Reference(reference) => canonicalize_reference(reference),
-        ExpressionKind::Now => {}
-        ExpressionKind::DateRelative(_, expression) => {
-            canonicalize_expression(Arc::make_mut(expression));
-        }
-        ExpressionKind::DateCalendar(_, _, expression) => {
-            canonicalize_expression(Arc::make_mut(expression));
-        }
-        ExpressionKind::RangeLiteral(left, right) => {
-            canonicalize_expression(Arc::make_mut(left));
-            canonicalize_expression(Arc::make_mut(right));
-        }
-        ExpressionKind::PastFutureRange(_, expression) => {
-            canonicalize_expression(Arc::make_mut(expression));
-        }
-        ExpressionKind::RangeContainment(value, range) => {
-            canonicalize_expression(Arc::make_mut(value));
-            canonicalize_expression(Arc::make_mut(range));
-        }
-        ExpressionKind::LogicalAnd(left, right) => {
-            canonicalize_expression(Arc::make_mut(left));
-            canonicalize_expression(Arc::make_mut(right));
-        }
-        ExpressionKind::Arithmetic(left, _, right) => {
-            canonicalize_expression(Arc::make_mut(left));
-            canonicalize_expression(Arc::make_mut(right));
-        }
-        ExpressionKind::Comparison(left, _, right) => {
-            canonicalize_expression(Arc::make_mut(left));
-            canonicalize_expression(Arc::make_mut(right));
-        }
-        ExpressionKind::UnitConversion(expression, _) => {
-            canonicalize_expression(Arc::make_mut(expression));
-        }
-        ExpressionKind::LogicalNegation(expression, _) => {
-            canonicalize_expression(Arc::make_mut(expression));
-        }
-        ExpressionKind::MathematicalComputation(_, expression)
-        | ExpressionKind::RangeBound(_, expression) => {
-            canonicalize_expression(Arc::make_mut(expression));
-        }
-        ExpressionKind::Veto(_) => {}
-        ExpressionKind::ResultIsVeto(expression) => {
-            canonicalize_expression(Arc::make_mut(expression));
+        ExpressionKind::ListType { element } => canonicalize_parent_type(element),
+        ExpressionKind::Member { path, .. } => canonicalize_reference(path),
+        ExpressionKind::ListCommand { command, .. } => canonicalize_list_command(command),
+        ExpressionKind::Now
+        | ExpressionKind::DateRelative(..)
+        | ExpressionKind::DateCalendar(..)
+        | ExpressionKind::RangeLiteral(..)
+        | ExpressionKind::PastFutureRange(..)
+        | ExpressionKind::RangeContainment(..)
+        | ExpressionKind::RangeBound(..)
+        | ExpressionKind::LogicalAnd { .. }
+        | ExpressionKind::Arithmetic { .. }
+        | ExpressionKind::Comparison(..)
+        | ExpressionKind::UnitConversion(..)
+        | ExpressionKind::LogicalNegation(..)
+        | ExpressionKind::MathematicalComputation(..)
+        | ExpressionKind::Veto(_)
+        | ExpressionKind::ResultIsVeto(..) => {}
+    }
+}
+
+fn canonicalize_list_command(command: &mut ListCommand) {
+    match command {
+        ListCommand::First
+        | ListCommand::Last
+        | ListCommand::Count
+        | ListCommand::Find { .. }
+        | ListCommand::Sum { .. }
+        | ListCommand::Avg { .. }
+        | ListCommand::Product { .. }
+        | ListCommand::Min { .. }
+        | ListCommand::Max { .. }
+        | ListCommand::Any { .. }
+        | ListCommand::All { .. }
+        | ListCommand::Where { .. }
+        | ListCommand::Sort { .. }
+        | ListCommand::Top { .. }
+        | ListCommand::With {
+            rows: ListWithRows::Values(_),
+        } => {}
+        ListCommand::With {
+            rows: ListWithRows::FieldPairs(pairs),
+        } => {
+            for (name, _) in pairs {
+                canonicalize_reference(name);
+            }
         }
     }
 }
@@ -1905,14 +2074,40 @@ pub(crate) fn canonicalize_data_value(data_value: &mut DataValue) {
         }
         DataValue::Import { spec_ref, bindings } => {
             canonicalize_spec_ref(spec_ref);
-            for binding in bindings {
-                canonicalize_reference(&mut binding.path);
-                match &mut binding.rhs {
-                    WithRhs::Literal(value) => canonicalize_value(value),
-                    WithRhs::Reference { target } => canonicalize_reference(target),
+            canonicalize_uses_bindings(bindings);
+        }
+        DataValue::ImportList { spec_ref, list } => {
+            canonicalize_spec_ref(spec_ref);
+            if let Some(key) = &mut list.key {
+                for field in &mut key.fields {
+                    canonicalize_reference(field);
+                }
+            }
+            for row in &mut list.rows {
+                match row {
+                    UsesListRow::Fields { bindings, .. } => canonicalize_uses_bindings(bindings),
+                    UsesListRow::Values { values, .. } => {
+                        for value in values {
+                            canonicalize_with_rhs(value);
+                        }
+                    }
                 }
             }
         }
+    }
+}
+
+fn canonicalize_with_rhs(rhs: &mut WithRhs) {
+    match rhs {
+        WithRhs::Literal(value) => canonicalize_value(value),
+        WithRhs::Reference { target } => canonicalize_reference(target),
+    }
+}
+
+fn canonicalize_uses_bindings(bindings: &mut [UsesBinding]) {
+    for binding in bindings {
+        canonicalize_reference(&mut binding.path);
+        canonicalize_with_rhs(&mut binding.rhs);
     }
 }
 
@@ -1983,10 +2178,7 @@ mod tests {
             minute: 30,
             second: 45,
             microsecond: 0,
-            timezone: Some(TimezoneValue {
-                offset_hours: 1,
-                offset_minutes: 0,
-            }),
+            timezone: Some(TimezoneValue { offset_minutes: 60 }),
 
             granularity: DateGranularity::DateTime,
         };
@@ -2020,10 +2212,7 @@ mod tests {
             minute: 30,
             second: 45,
             microsecond: 123456,
-            timezone: Some(TimezoneValue {
-                offset_hours: 0,
-                offset_minutes: 0,
-            }),
+            timezone: Some(TimezoneValue { offset_minutes: 0 }),
 
             granularity: DateGranularity::DateTime,
         };
@@ -2430,6 +2619,37 @@ mod tests {
         assert_eq!(
             format!("{}", AsLemmaSource(&fv)),
             "measure -> unit eur: 1.00 -> unit usd: 0.91"
+        );
+    }
+
+    #[test]
+    fn as_lemma_source_time_keeps_microseconds() {
+        let time = Value::Time(crate::literals::TimeValue {
+            hour: 14,
+            minute: 30,
+            second: 45,
+            microsecond: 250,
+            timezone: None,
+        });
+        assert_eq!(format!("{}", AsLemmaSource(&time)), "14:30:45.000250");
+    }
+
+    #[test]
+    fn as_lemma_source_datetime_keeps_microseconds() {
+        let datetime = Value::Date(DateTimeValue {
+            year: 2024,
+            month: 1,
+            day: 15,
+            hour: 14,
+            minute: 30,
+            second: 0,
+            microsecond: 500000,
+            timezone: Some(crate::literals::TimezoneValue { offset_minutes: 0 }),
+            granularity: DateGranularity::DateTime,
+        });
+        assert_eq!(
+            format!("{}", AsLemmaSource(&datetime)),
+            "2024-01-15T14:30:00.500000Z"
         );
     }
 

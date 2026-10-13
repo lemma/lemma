@@ -5,16 +5,17 @@
 //! combinations produce the correct result type and that invalid
 //! combinations are rejected during validation.
 
-use lemma::DateTimeValue;
+use indexmap::IndexMap;
 use lemma::Engine;
+use lemma::{DateTimeValue, EvaluateDataValue};
 use rust_decimal::Decimal;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 
 fn eval_result(
     code: &str,
     spec_name: &str,
     rule_name: &str,
-    data: HashMap<String, String>,
+    data: IndexMap<String, EvaluateDataValue>,
 ) -> lemma::RuleResult {
     let mut engine = Engine::new();
     engine
@@ -22,7 +23,7 @@ fn eval_result(
         .expect("Should parse and plan");
     let now = DateTimeValue::now();
     let response = engine
-        .run(None, spec_name, Some(&now), data, None, false)
+        .evaluate(None, spec_name, Some(&now), data, None, false)
         .expect("Should evaluate");
     let result = response
         .results
@@ -41,7 +42,7 @@ fn eval_rule(
     code: &str,
     spec_name: &str,
     rule_name: &str,
-    data: HashMap<String, String>,
+    data: IndexMap<String, EvaluateDataValue>,
 ) -> String {
     eval_result(code, spec_name, rule_name, data)
         .result()
@@ -50,7 +51,7 @@ fn eval_rule(
 }
 
 fn eval_measure_map(code: &str, spec_name: &str, rule_name: &str) -> BTreeMap<String, Decimal> {
-    eval_result(code, spec_name, rule_name, HashMap::new())
+    eval_result(code, spec_name, rule_name, IndexMap::new())
         .result
         .expect("rule result value")
         .measure
@@ -86,7 +87,7 @@ uses lemma units
 data a: 10
 data b: 3
 rule result: a + b"#;
-    assert_eq!(eval_rule(code, "t", "result", HashMap::new()), "13");
+    assert_eq!(eval_rule(code, "t", "result", IndexMap::new()), "13");
 }
 
 #[test]
@@ -96,7 +97,7 @@ uses lemma units
 data a: 10
 data b: 3
 rule result: a - b"#;
-    assert_eq!(eval_rule(code, "t", "result", HashMap::new()), "7");
+    assert_eq!(eval_rule(code, "t", "result", IndexMap::new()), "7");
 }
 
 #[test]
@@ -106,7 +107,7 @@ uses lemma units
 data a: 10
 data b: 3
 rule result: a * b"#;
-    assert_eq!(eval_rule(code, "t", "result", HashMap::new()), "30");
+    assert_eq!(eval_rule(code, "t", "result", IndexMap::new()), "30");
 }
 
 #[test]
@@ -116,7 +117,7 @@ uses lemma units
 data a: 12
 data b: 4
 rule result: a / b"#;
-    assert_eq!(eval_rule(code, "t", "result", HashMap::new()), "3");
+    assert_eq!(eval_rule(code, "t", "result", IndexMap::new()), "3");
 }
 
 #[test]
@@ -125,8 +126,8 @@ fn number_modulo_number() {
 uses lemma units
 data a: 10
 data b: 3
-rule result: a % b"#;
-    assert_eq!(eval_rule(code, "t", "result", HashMap::new()), "1");
+rule result: a mod b"#;
+    assert_eq!(eval_rule(code, "t", "result", IndexMap::new()), "1");
 }
 
 #[test]
@@ -136,7 +137,7 @@ uses lemma units
 data a: 2
 data b: 3
 rule result: a ^ b"#;
-    assert_eq!(eval_rule(code, "t", "result", HashMap::new()), "8");
+    assert_eq!(eval_rule(code, "t", "result", IndexMap::new()), "8");
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -173,7 +174,7 @@ data money: measure -> unit eur: 1.00
 data price: 10 eur
 data n: 3
 rule result: price * n"#;
-    let val = eval_rule(code, "t", "result", HashMap::new());
+    let val = eval_rule(code, "t", "result", IndexMap::new());
     assert!(val.contains("30"), "Expected 30 eur, got: {}", val);
 }
 
@@ -185,7 +186,7 @@ data money: measure -> unit eur: 1.00
 data n: 3
 data price: 10 eur
 rule result: n * price"#;
-    let val = eval_rule(code, "t", "result", HashMap::new());
+    let val = eval_rule(code, "t", "result", IndexMap::new());
     assert!(val.contains("30"), "Expected 30 eur, got: {}", val);
 }
 
@@ -197,7 +198,7 @@ data money: measure -> unit eur: 1.00
 data price: 12 eur
 data n: 4
 rule result: price / n"#;
-    let val = eval_rule(code, "t", "result", HashMap::new());
+    let val = eval_rule(code, "t", "result", IndexMap::new());
     assert!(val.contains("3"), "Expected 3 eur, got: {}", val);
 }
 
@@ -208,8 +209,8 @@ uses lemma units
 data money: measure -> unit eur: 1.00
 data price: 10 eur
 data n: 3
-rule result: price % n"#;
-    let val = eval_rule(code, "t", "result", HashMap::new());
+rule result: price mod n"#;
+    let val = eval_rule(code, "t", "result", IndexMap::new());
     assert!(val.contains("1"), "Expected 1 eur, got: {}", val);
 }
 
@@ -221,7 +222,7 @@ uses lemma units
 data money: measure -> unit eur: 1.00
 data price: 2 eur
 rule result: price ^ 3"#;
-    let val = eval_rule(code, "t", "result", HashMap::new());
+    let val = eval_rule(code, "t", "result", IndexMap::new());
     assert!(val.contains("8"), "Expected 8 eur, got: {}", val);
 }
 
@@ -306,7 +307,7 @@ data money: measure -> unit eur: 1.00
 data price: 100 eur
 data rate: 50%
 rule result: price * rate"#;
-    let val = eval_rule(code, "t", "result", HashMap::new());
+    let val = eval_rule(code, "t", "result", IndexMap::new());
     assert!(val.contains("50"), "Expected 50 eur, got: {}", val);
 }
 
@@ -318,7 +319,7 @@ data money: measure -> unit eur: 1.00
 data price: 100 eur
 data rate: 50%
 rule result: price / rate"#;
-    let val = eval_rule(code, "t", "result", HashMap::new());
+    let val = eval_rule(code, "t", "result", IndexMap::new());
     assert!(val.contains("200"), "Expected 200 eur, got: {}", val);
 }
 
@@ -433,9 +434,9 @@ fn duration_modulo_number() {
 uses lemma units
 data d: 10 hour
 data n: 3
-rule result: d % n"#;
+rule result: d mod n"#;
     let map = eval_measure_map(code, "t", "result");
-    assert_eq!(map["hour"], Decimal::from(1), "10 hour % 3 = 1 hour");
+    assert_eq!(map["hour"], Decimal::from(1), "10 hour mod 3 = 1 hour");
 }
 
 #[test]
@@ -445,7 +446,7 @@ fn duration_power_number() {
 uses lemma units
 data d: 2 hour
 rule result: d ^ 3"#;
-    let val = eval_rule(code, "t", "result", HashMap::new());
+    let val = eval_rule(code, "t", "result", IndexMap::new());
     assert!(val.contains("8"), "Expected 8 hour, got: {}", val);
 }
 
@@ -594,7 +595,7 @@ uses lemma units
 data r: 50%
 data n: 200
 rule result: r * n"#;
-    assert_eq!(eval_rule(code, "t", "result", HashMap::new()), "100");
+    assert_eq!(eval_rule(code, "t", "result", IndexMap::new()), "100");
 }
 
 #[test]
@@ -639,7 +640,7 @@ data money: measure -> unit eur: 1.00
 data a: 4 eur
 data b: 5 eur
 rule result: a + b"#;
-    let val = eval_rule(code, "t", "result", HashMap::new());
+    let val = eval_rule(code, "t", "result", IndexMap::new());
     assert!(
         val.contains("9") && val.contains("eur"),
         "Expected 9 eur, got: {}",
@@ -655,7 +656,7 @@ data money: measure -> unit eur: 1.00
 data a: 10 eur
 data b: 3 eur
 rule result: a - b"#;
-    let val = eval_rule(code, "t", "result", HashMap::new());
+    let val = eval_rule(code, "t", "result", IndexMap::new());
     assert!(
         val.contains("7") && val.contains("eur"),
         "Expected 7 eur, got: {}",
@@ -674,7 +675,7 @@ data threshold: 8 eur
 rule total: a + b
 rule over_threshold: total > threshold"#;
     assert_eq!(
-        eval_rule(code, "t", "over_threshold", HashMap::new()),
+        eval_rule(code, "t", "over_threshold", IndexMap::new()),
         "true"
     );
 }
@@ -689,7 +690,7 @@ data b: 20 eur
 data c: 5 eur
 rule subtotal: a + b
 rule total: subtotal + c"#;
-    let val = eval_rule(code, "t", "total", HashMap::new());
+    let val = eval_rule(code, "t", "total", IndexMap::new());
     assert!(
         val.contains("35") && val.contains("eur"),
         "Expected 35 eur, got: {}",
@@ -708,7 +709,7 @@ uses lemma units
 data a: 10%
 data b: 5%
 rule result: a + b"#;
-    let val = eval_rule(code, "t", "result", HashMap::new());
+    let val = eval_rule(code, "t", "result", IndexMap::new());
     assert!(val.contains("15"), "Expected 15 percent, got: {}", val);
 }
 
@@ -719,7 +720,7 @@ uses lemma units
 data a: 25%
 data b: 10%
 rule result: a - b"#;
-    let val = eval_rule(code, "t", "result", HashMap::new());
+    let val = eval_rule(code, "t", "result", IndexMap::new());
     assert!(val.contains("15"), "Expected 15 percent, got: {}", val);
 }
 
@@ -733,7 +734,7 @@ data surcharge: 5%
 data price: 200 eur
 rule combined_rate: base_rate + surcharge
 rule discount: price * combined_rate"#;
-    let val = eval_rule(code, "t", "discount", HashMap::new());
+    let val = eval_rule(code, "t", "discount", IndexMap::new());
     assert!(
         val.contains("30"),
         "Expected 30 eur (200 * 15%), got: {}",
@@ -804,7 +805,7 @@ uses lemma units
 data d: 2024-01-01
 data dur: 7 day
 rule result: d + dur"#;
-    let val = eval_rule(code, "t", "result", HashMap::new());
+    let val = eval_rule(code, "t", "result", IndexMap::new());
     assert!(
         val.contains("2024-01-08"),
         "Expected 2024-01-08, got: {}",
@@ -819,7 +820,7 @@ uses lemma units
 data d: 2024-01-08
 data dur: 7 day
 rule result: d - dur"#;
-    let val = eval_rule(code, "t", "result", HashMap::new());
+    let val = eval_rule(code, "t", "result", IndexMap::new());
     assert!(
         val.contains("2024-01-01"),
         "Expected 2024-01-01, got: {}",
@@ -834,7 +835,7 @@ uses lemma units
 data dur: 7 day
 data d: 2024-01-01
 rule result: dur + d"#;
-    let val = eval_rule(code, "t", "result", HashMap::new());
+    let val = eval_rule(code, "t", "result", IndexMap::new());
     assert!(
         val.contains("2024-01-08"),
         "Expected 2024-01-08, got: {}",
@@ -855,7 +856,7 @@ data budget: money -> unit jpy: 160.00 -> minimum 0 eur
 data price: 10 eur
 data allowance: 5 eur
 rule result: price + allowance"#;
-    let val = eval_rule(code, "t", "result", HashMap::new());
+    let val = eval_rule(code, "t", "result", IndexMap::new());
     assert!(
         val.contains("15") && val.contains("eur"),
         "Expected 15 eur, got: {}",
@@ -873,7 +874,7 @@ data expense: money -> minimum 0 eur
 data salary: 3000 eur
 data rent: 1200 eur
 rule remaining: salary - rent"#;
-    let val = eval_rule(code, "t", "remaining", HashMap::new());
+    let val = eval_rule(code, "t", "remaining", IndexMap::new());
     assert!(
         val.contains("1800") && val.contains("eur"),
         "Expected 1800 eur, got: {}",
@@ -892,7 +893,7 @@ data fee: 5 eur
 data limit: 8 eur
 rule total: price + fee
 rule over_budget: total > limit"#;
-    assert_eq!(eval_rule(code, "t", "over_budget", HashMap::new()), "true");
+    assert_eq!(eval_rule(code, "t", "over_budget", IndexMap::new()), "true");
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -907,7 +908,7 @@ data money: measure -> unit eur: 1.00
 data total: 10 eur
 data unit_price: 5 eur
 rule price_ratio: total / unit_price"#;
-    let val = eval_rule(code, "t", "price_ratio", HashMap::new());
+    let val = eval_rule(code, "t", "price_ratio", IndexMap::new());
     assert_eq!(
         val, "2",
         "10 eur / 5 eur should be dimensionless 2, got: {val}"
@@ -928,7 +929,7 @@ data revenue: 100 eur
 data cost: 50 eur
 rule margin_factor: revenue / cost
 rule doubled: margin_factor * 10"#;
-    let val = eval_rule(code, "t", "doubled", HashMap::new());
+    let val = eval_rule(code, "t", "doubled", IndexMap::new());
     assert_eq!(val, "20", "margin_factor=2, doubled=20, got: {val}");
     assert!(
         !val.to_lowercase().contains("eur"),
@@ -946,10 +947,10 @@ fn number_divide_measure_returns_number() {
     let code = r#"spec t
 uses lemma units
 data money: measure -> unit eur: 1.00
-data count: 20
+data item_count: 20
 data price: 10 eur
-rule units_per_eur: count / price"#;
-    let val = eval_rule(code, "t", "units_per_eur", HashMap::new());
+rule units_per_eur: item_count / price"#;
+    let val = eval_rule(code, "t", "units_per_eur", IndexMap::new());
     assert_eq!(
         val, "2",
         "20 / 10 eur should be dimensionless 2, got: {val}"
@@ -973,7 +974,7 @@ fn measure_multiply_measure_rejected_at_plan_time() {
 data money: measure -> unit eur: 1.00
 data a: 10 eur
 data b: 5 eur
-rule product: a * b"#,
+rule multiplied: a * b"#,
         "anonymous intermediate",
     );
 }
@@ -985,8 +986,8 @@ uses lemma units
 data money: measure -> unit eur: 1.00
 data a: 10 eur
 data b: 5 eur
-rule product: (a as eur as number) * (b as eur as number)"#;
-    let val = eval_rule(code, "t", "product", HashMap::new());
+rule multiplied: (a as eur as number) * (b as eur as number)"#;
+    let val = eval_rule(code, "t", "multiplied", IndexMap::new());
     assert!(
         val.contains("50"),
         "(a as eur as number) * (b as eur as number) should be 50, got: {}",

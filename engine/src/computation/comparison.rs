@@ -27,14 +27,7 @@ pub fn comparison_operation(
                     "BUG: date range calendar comparison received non-date endpoints; planning should have rejected this"
                 );
             };
-            let calendar_unit =
-                crate::planning::semantics::semantic_calendar_unit_from_measure_type(right_type);
-            let measure = super::datetime::compute_date_calendar_difference(
-                left_date,
-                right_date,
-                &calendar_unit,
-                Arc::clone(right_type),
-            );
+            let measure = super::datetime::compute_date_calendar_difference(left_date, right_date);
             compare_with_operation_result(measure, right_type, op, right, right_type)
         }
 
@@ -48,14 +41,7 @@ pub fn comparison_operation(
                     "BUG: date range calendar comparison received non-date endpoints; planning should have rejected this"
                 );
             };
-            let calendar_unit =
-                crate::planning::semantics::semantic_calendar_unit_from_measure_type(left_type);
-            let measure = super::datetime::compute_date_calendar_difference(
-                left_date,
-                right_date,
-                &calendar_unit,
-                Arc::clone(left_type),
-            );
+            let measure = super::datetime::compute_date_calendar_difference(left_date, right_date);
             compare_with_right_result(left, left_type, op, measure, left_type)
         }
 
@@ -72,6 +58,20 @@ pub fn comparison_operation(
             compare_with_operation_result(measure, &span_type, op, right, right_type)
         }
 
+        _ => scalar_comparison(left, left_type, op, right, right_type),
+    }
+}
+
+/// Comparison on operands that are not ranges. Never re-enters [`comparison_operation`], so
+/// the range helpers that call it are not part of a cycle.
+fn scalar_comparison(
+    left: &ValueKind,
+    left_type: &Arc<LemmaType>,
+    op: &ComparisonComputation,
+    right: &ValueKind,
+    right_type: &Arc<LemmaType>,
+) -> OperationResult {
+    match (left, right) {
         (ValueKind::Number(l), ValueKind::Number(r)) => compare_stored_rationals(l, op, r),
 
         (ValueKind::Boolean(l), ValueKind::Boolean(r)) => match op {
@@ -213,13 +213,12 @@ fn compare_with_operation_result(
         OperationResult::Value(value) => value,
         OperationResult::Veto(reason) => return OperationResult::Veto(reason),
     };
-    comparison_operation(&left_value.value, left_type, op, right, right_type)
+    scalar_comparison(&left_value.value, left_type, op, right, right_type)
 }
 
-/// Endpoint type for runtime range span, with decomposition filled when units exist
-/// but planning left decomposition unset (anonymous measure ranges).
+/// Endpoint type for runtime range span.
 fn range_endpoint_type_for_runtime_span(range_type: &LemmaType) -> Arc<LemmaType> {
-    let mut element_spec = match range_type.specifications.element_from_range() {
+    let element_spec = match range_type.specifications.element_from_range() {
         Some(spec) => spec,
         None => return Arc::new(range_type.clone()),
     };
@@ -227,11 +226,13 @@ fn range_endpoint_type_for_runtime_span(range_type: &LemmaType) -> Arc<LemmaType
         units,
         decomposition,
         ..
-    } = &mut element_spec
+    } = &element_spec
     {
-        if decomposition.is_none() && !units.0.is_empty() {
-            *decomposition = Some([(range_type.name(), 1i32)].into_iter().collect());
-        }
+        assert!(
+            decomposition.is_some() || units.is_empty(),
+            "BUG: measure range '{}' with units must carry a decomposition after planning",
+            range_type.name()
+        );
     }
     Arc::new(LemmaType::primitive(element_spec))
 }
@@ -247,7 +248,7 @@ fn compare_with_right_result(
         OperationResult::Value(value) => value,
         OperationResult::Veto(reason) => return OperationResult::Veto(reason),
     };
-    comparison_operation(left, left_type, op, &right_value.value, right_type)
+    scalar_comparison(left, left_type, op, &right_value.value, right_type)
 }
 
 #[cfg(test)]

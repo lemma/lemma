@@ -1,8 +1,8 @@
 //! Integration tests for the tree evaluator (planning → NormalForm walk).
 
-use lemma::{DateTimeValue, Engine};
+use indexmap::IndexMap;
+use lemma::{DateTimeValue, Engine, EvaluateDataValue};
 use rust_decimal::Decimal;
-use std::collections::HashMap;
 
 const PRICING_SPEC: &str = r#"
 spec pricing
@@ -46,21 +46,21 @@ fn load_engine(code: &str, path: &str) -> Engine {
     engine
 }
 
-fn run_measure(engine: &Engine, measure: &str) -> lemma::Response {
+fn evaluate_measure(engine: &Engine, measure: &str) -> lemma::Response {
     let now = DateTimeValue::now();
-    let mut data = HashMap::new();
-    data.insert("quantity".to_string(), measure.to_string());
+    let mut data = IndexMap::new();
+    data.insert("quantity".to_string(), measure.into());
     engine
-        .run(None, "pricing", Some(&now), data, None, false)
-        .expect("run pricing")
+        .evaluate(None, "pricing", Some(&now), data, None, false)
+        .expect("evaluate pricing")
 }
 
-fn run_calc(data: HashMap<String, String>) -> lemma::Response {
+fn evaluate_calc(data: IndexMap<String, EvaluateDataValue>) -> lemma::Response {
     let engine = load_engine(CALC_SPEC, "calc.lemma");
     let now = DateTimeValue::now();
     engine
-        .run(None, "calc", Some(&now), data, None, false)
-        .expect("run calc")
+        .evaluate(None, "calc", Some(&now), data, None, false)
+        .expect("evaluate calc")
 }
 
 fn rule_number(response: &lemma::Response, rule: &str) -> Decimal {
@@ -96,7 +96,7 @@ fn rule_measure_display(response: &lemma::Response, rule: &str) -> String {
 #[test]
 fn discount_unless_measure_below_ten() {
     let engine = load_engine(PRICING_SPEC, "pricing.lemma");
-    let response = run_measure(&engine, "5");
+    let response = evaluate_measure(&engine, "5");
     assert_eq!(rule_number(&response, "discount"), Decimal::ZERO);
     assert_eq!(rule_number(&response, "total"), Decimal::from(50));
 }
@@ -104,21 +104,21 @@ fn discount_unless_measure_below_ten() {
 #[test]
 fn discount_unless_measure_ten() {
     let engine = load_engine(PRICING_SPEC, "pricing.lemma");
-    let response = run_measure(&engine, "10");
+    let response = evaluate_measure(&engine, "10");
     assert_eq!(rule_number(&response, "discount"), Decimal::from(5));
 }
 
 #[test]
 fn discount_unless_measure_fifty() {
     let engine = load_engine(PRICING_SPEC, "pricing.lemma");
-    let response = run_measure(&engine, "50");
+    let response = evaluate_measure(&engine, "50");
     assert_eq!(rule_number(&response, "discount"), Decimal::from(15));
 }
 
 #[test]
 fn discount_unless_measure_between_tiers() {
     let engine = load_engine(PRICING_SPEC, "pricing.lemma");
-    let response = run_measure(&engine, "25");
+    let response = evaluate_measure(&engine, "25");
     assert_eq!(rule_number(&response, "discount"), Decimal::from(5));
 }
 
@@ -134,20 +134,20 @@ rule total: base + offset
 "#;
     let engine = load_engine(code, "chain.lemma");
     let now = DateTimeValue::now();
-    let mut data = HashMap::new();
+    let mut data = IndexMap::new();
     data.insert("x".to_string(), "3".into());
     let response = engine
-        .run(None, "chain", Some(&now), data, None, false)
-        .expect("run");
+        .evaluate(None, "chain", Some(&now), data, None, false)
+        .expect("evaluate");
     assert_eq!(rule_number(&response, "total"), Decimal::from(7));
 }
 
 #[test]
 fn inlined_piecewise_subexpression_does_not_return_early_from_parent_rule() {
-    let mut data = HashMap::new();
+    let mut data = IndexMap::new();
     data.insert("is_rush".into(), "true".into());
     data.insert("is_super_rush".into(), "false".into());
-    let response = run_calc(data);
+    let response = evaluate_calc(data);
 
     assert_eq!(rule_display(&response, "total"), "4821.09 eur");
     assert_eq!(
@@ -174,18 +174,18 @@ rule check_step3: step3 is veto
 "#;
     let engine = load_engine(code, "deep_veto.lemma");
     let now = DateTimeValue::now();
-    let mut bad = HashMap::new();
+    let mut bad = IndexMap::new();
     bad.insert("input".to_string(), "-1".into());
     let resp = engine
-        .run(None, "deep_veto", Some(&now), bad, None, false)
-        .expect("run");
+        .evaluate(None, "deep_veto", Some(&now), bad, None, false)
+        .expect("evaluate");
     assert_eq!(rule_display(&resp, "check_step3"), "true");
 
-    let mut good = HashMap::new();
+    let mut good = IndexMap::new();
     good.insert("input".to_string(), "5".into());
     let resp = engine
-        .run(None, "deep_veto", Some(&now), good, None, false)
-        .expect("run");
+        .evaluate(None, "deep_veto", Some(&now), good, None, false)
+        .expect("evaluate");
     assert_eq!(rule_display(&resp, "check_step3"), "false");
 }
 
@@ -205,18 +205,18 @@ rule result: 0
 "#;
     let engine = load_engine(code, "unless_veto.lemma");
     let now = DateTimeValue::now();
-    let mut large = HashMap::new();
+    let mut large = IndexMap::new();
     large.insert("input".to_string(), "2000".into());
     let resp = engine
-        .run(None, "unless_veto_cond", Some(&now), large, None, false)
-        .expect("run");
+        .evaluate(None, "unless_veto_cond", Some(&now), large, None, false)
+        .expect("evaluate");
     assert_eq!(rule_display(&resp, "result"), "0");
 
-    let mut ok = HashMap::new();
+    let mut ok = IndexMap::new();
     ok.insert("input".to_string(), "100".into());
     let resp = engine
-        .run(None, "unless_veto_cond", Some(&now), ok, None, false)
-        .expect("run");
+        .evaluate(None, "unless_veto_cond", Some(&now), ok, None, false)
+        .expect("evaluate");
     assert_eq!(rule_display(&resp, "result"), "100");
 }
 
@@ -235,11 +235,11 @@ rule result: 0
 "#;
     let engine = load_engine(code, "unless_veto_prop.lemma");
     let now = DateTimeValue::now();
-    let mut large = HashMap::new();
+    let mut large = IndexMap::new();
     large.insert("input".to_string(), "2000".into());
     let resp = engine
-        .run(None, "unless_veto_prop", Some(&now), large, None, false)
-        .expect("run");
+        .evaluate(None, "unless_veto_prop", Some(&now), large, None, false)
+        .expect("evaluate");
     let result = resp.results.get("result").expect("result");
     assert!(
         result.vetoed,
@@ -250,10 +250,10 @@ rule result: 0
 
 #[test]
 fn calc_total_without_rush_is_not_zero_surcharge_path() {
-    let mut data = HashMap::new();
+    let mut data = IndexMap::new();
     data.insert("is_rush".into(), "false".into());
     data.insert("is_super_rush".into(), "false".into());
-    let response = run_calc(data);
+    let response = evaluate_calc(data);
     assert_eq!(rule_display(&response, "total"), "3856.88 eur");
     assert_eq!(
         rule_measure_display(&response, "rush_surcharge"),

@@ -2,9 +2,9 @@
 //! not normalized UTC instants. These tests document resolution behavior when two
 //! `effective_from` keys differ only in offset.
 
+use indexmap::IndexMap;
 use lemma::TimezoneValue;
 use lemma::{DateGranularity, DateTimeValue, Engine, SourceType};
-use std::collections::HashMap;
 
 fn utc_noon() -> DateTimeValue {
     DateTimeValue {
@@ -15,10 +15,7 @@ fn utc_noon() -> DateTimeValue {
         minute: 0,
         second: 0,
         microsecond: 0,
-        timezone: Some(TimezoneValue {
-            offset_hours: 0,
-            offset_minutes: 0,
-        }),
+        timezone: Some(TimezoneValue { offset_minutes: 0 }),
         granularity: DateGranularity::DateTime,
     }
 }
@@ -51,8 +48,15 @@ rule out: v
         .expect("parse specs with offset on effective_from");
 
     let r = engine
-        .run(None, "rate", Some(&utc_noon()), HashMap::new(), None, false)
-        .expect("run");
+        .evaluate(
+            None,
+            "rate",
+            Some(&utc_noon()),
+            IndexMap::new(),
+            None,
+            false,
+        )
+        .expect("evaluate");
     assert_rule_value(&r, "out", "1");
 }
 
@@ -74,7 +78,14 @@ rule out: 20
         .unwrap();
 
     let r = engine
-        .run(None, "rate", Some(&utc_noon()), HashMap::new(), None, false)
+        .evaluate(
+            None,
+            "rate",
+            Some(&utc_noon()),
+            IndexMap::new(),
+            None,
+            false,
+        )
         .unwrap();
     assert_rule_value(&r, "out", "10");
 }

@@ -11,7 +11,7 @@ State the rule in Lemma as soon as it is clear. Do not carry it in the conversat
 **Which guide to load**
 
 - **Authoring** (`guide` topic `full`, or `method` then `data`): capture rules as the user states them. See **Method**.
-- **Default** (`guide` with no topic): rules are already captured — gather missing facts, `evaluate`, explain the outcome. Do not redesign policy here.
+- **Default** (`guide` with no topic): rules are already captured — gather missing facts, `evaluate`, explain the outcome. Do not redesign policy here. User phrasing **ask Lemma** or **evaluate** means call tool `evaluate`.
 
 
 ---
@@ -40,7 +40,7 @@ A handbook, statute, or SOP with more than one policy: list the policies you fou
 
 Narrative (SOP prose, code with retries and logging): distill to principle + exceptions. Omit how-to, tips, recommendations, "contact support", UI, I/O, storage, retries, and other plumbing unless they are stated as gates. Do not copy every sentence, or every code branch, into a rule.
 
-Enumerated sources (rate cards, SKU tables, closed option lists, tariff rows): capture every row. Dropping a row is a silent policy change. Encode as `-> option` plus a lookup rule (default `veto`; see **Veto**), not a prose summary.
+Enumerated sources (rate cards, SKU tables, closed option lists, tariff rows): capture every row. Dropping a row is a silent policy change. Encode rows of several columns as an instance list with `-> key` and one `-> with` per row, read with `find` (see **Data**: Lists). A single closed choice mapped to one value can stay `-> option` plus a lookup rule (default `veto`; see **Veto**). Never a prose summary.
 
 Distill is not invent. If you cannot tell what the rule is, stop and ask. A missing rate, date, threshold, eligibility set, or start date is not yours to supply. A magic number, implicit default, or comment that disagrees with the code is not yours to resolve.
 
@@ -52,7 +52,7 @@ Someone can read the spec as: in principle X; unless Y, then Z. Facts of the sit
 
 Do not emit `spec` / `data` / `rule`. Do not call `check` / `add_spec` / `update_spec`. A spec in the same turn as open policy questions is a bug.
 
-`list` / `show` first. If that policy is already loaded, `update_spec` it. Do not invent spec names.
+`specs` / `show` first. If that policy is already loaded, `update_spec` it. Do not invent spec names.
 
 Stop when any of these is true:
 
@@ -148,7 +148,7 @@ See **Data**, **Rules**, **Veto**, **Anti-patterns**. In short:
 
 **After capture**
 
-User gives facts and wants a result → evaluate guide (`evaluate`, verify, stop). Do not edit the spec.
+User gives facts and wants a result, or says **ask Lemma** → evaluate guide (`evaluate`, verify, stop). Do not edit the spec.
 User changes the rule → `update_spec`, verify again.
 
 
@@ -171,6 +171,9 @@ Commentary after `uses` or `data` is invalid. Optional `meta key: value` after c
 
 - No `or` operator. Disjunction via `unless` chains or separate boolean rules.
 - Constraints (`-> help`, `-> option`, `-> minimum`, etc.) apply to `data` only. Rules have no constraints.
+- Comma is only a list separator: `1,000` is invalid (write `1_000` or `1000`). `-> options "a", "b"` and `-> with qty: 3, sku: "latte"` use commas between items; space-separated options or field pairs are invalid.
+- Remainder is `mod` (`value mod 7`, floored, sign of the divisor). `%` is the percent suffix only: `50%` is a ratio literal, `7 % 3` is invalid.
+- List keywords are reserved in any case and cannot be data, rule, spec, alias, or unit names: `list`, `key`, `find`, `first`, `last`, `sum`, `avg`, `product`, `count`, `min`, `max`, `any`, `all`, `where`, `sort`, `top`, `asc`, `desc`. Also reserved: `lower`, `upper` (see **Units**), `is`, `mod`, `past`, `future`, `permille`.
 
 
 ---
@@ -190,7 +193,6 @@ spec base_config
 
 data tax_rate:          21%
 data standard_discount: 5%
-
 data price: measure
   -> unit eur: 1.00
   -> decimals 2
@@ -220,7 +222,6 @@ data qty: number
   -> minimum 0
   -> suggest 10
 
-
 rule line_total:
   pricing.final_price * qty
 
@@ -230,8 +231,9 @@ rule has_discount:
 
 - `uses alias: target_spec`: imports spec in same file.
 - Reference members: `alias.field` or `alias.rule_name`.
-- Under `uses`, `  -> with path: value` sets imported data (path relative to imported spec). Do not use `data alias.field`. Standalone `with alias.field: …` is deprecated (still parses; `quality` recommends block form). Local slots use `data`.
-- A rule may return a `uses` alias (`rule chosen: basic unless flag then higher`). Dot on that rule reads the chosen instance (`chosen.rate`). All `unless` branches must be the same spec and resolved version. Do not add, compare, or `with` a spec instance; `is veto` is allowed. The result JSON includes `spec` (name, effective, instance path, `data` run-data texts, `rules`). Feeding `data` back into that spec at the same effective instant reproduces the rules. A bare alias reads the whole imported spec for unpinned drift checks.
+- Imported types need the alias: `data country: iso.code`, not bare `code`. A bare name that an import declares is a planning error naming the qualified form(s). Prefer `units.mass` / `units.duration` after `uses lemma units` (see **Units**).
+- Under `uses`, `  -> with path: value` sets imported data (path relative to imported spec). Several pairs on one line are comma-separated (`-> with qty: 3, sku: "latte"`). Do not use `data alias.field`. Standalone `with alias.field: …` is a parse error; nest under `uses`. Local slots use `data`.
+- A rule may return a `uses` alias (`rule chosen: basic unless flag then higher`). Dot on that rule reads the chosen instance (`chosen.rate`). All `unless` branches must be the same spec and resolved version. Do not add, compare, or `with` a spec instance; `is veto` is allowed. The result JSON includes `spec` (name, effective, instance path, `data` evaluation-data texts, `rules`). Feeding `data` back into that spec at the same effective instant reproduces the rules. A bare alias reads the whole imported spec for unpinned drift checks.
 
 **LemmaBase: shared repositories**
 
@@ -248,7 +250,6 @@ data price: measure
   -> unit eur: 1
 
 data country: iso.code
-
 
 rule tariff:
   0 eur
@@ -296,7 +297,6 @@ data due_date: date
 data return_date: date
   -> help "When was the book returned?"
 
-
 rule overdue:
   due_date...return_date as day
 ```
@@ -320,7 +320,6 @@ data money: measure
 data order_total: money
   -> help "What is the order total?"
 
-
 rule free_shipping:
   order_total >= 50 eur
 ```
@@ -335,6 +334,7 @@ Declare a **named measure parent** once, then extend it on input slots:
 
 ```lemma
 spec invoice
+
 data money: measure
   -> unit eur: 1.00
   -> decimals 2
@@ -362,14 +362,14 @@ Primitives: `boolean`, `number`, `text`, `measure`, `ratio`, `date`, `time`, and
 
 | Type | `->` commands |
 |------|----------------|
-| `boolean` | `help`, `fill`, `suggest` |
-| `number` | `decimals`, `minimum`, `maximum`, `help`, `fill`, `suggest` |
-| `measure` | `unit`, `decimals`, `minimum`, `maximum`, `help`, `fill`, `suggest` (see **Measure**, **Units**) |
-| `ratio` | `unit`, `minimum`, `maximum`, `help`, `fill`, `suggest` |
-| `text` | `option`, `options`, `length`, `help`, `fill`, `suggest` |
-| `date`, `time` | `minimum`, `maximum`, `help`, `fill`, `suggest` |
-| `number range`, `date range`, `time range`, `ratio range` | `lower`, `upper`, `minimum`, `maximum`, `help`, `fill`, `suggest` |
-| `measure range` | above + `unit` |
+| `boolean` | `help`, `with`, `suggest` |
+| `number` | `decimals`, `minimum`, `maximum`, `help`, `with`, `suggest` |
+| `measure` | `unit`, `decimals`, `minimum`, `maximum`, `help`, `with`, `suggest` (see **Measure**, **Units**) |
+| `ratio` | `unit`, `minimum`, `maximum`, `help`, `with`, `suggest` |
+| `text` | `option`, `options`, `length`, `help`, `with`, `suggest` |
+| `date`, `time` | `minimum`, `maximum`, `help`, `with`, `suggest` |
+| `number range`, `date range`, `time range`, `ratio range` | `lower`, `upper`, `minimum`, `maximum`, `help`, `with`, `suggest` |
+| `measure range` | above |
 
 On range types, `lower` / `upper` bound endpoints; `minimum` / `maximum` bound **span width**, not endpoints.
 
@@ -377,12 +377,52 @@ On range types, `lower` / `upper` bound endpoints; `minimum` / `maximum` bound *
 
 - Chain `->` rows on `data` only (rules have no constraints; see **Syntax**).
 - `-> help` = spoken question (CS ask string).
-- `-> fill` = commit a value on a typed slot (callers may override); cannot combine with `suggest` on the same declaration.
+- `-> with` = commit a value on a typed slot (callers may override); cannot combine with `suggest` on the same declaration.
 - `-> suggest` = UI hint; does not fill or commit.
 - Prefer `-> option` for closed text sets.
 - Bounded domain on constraints (`-> minimum 0`), not veto (see **Veto**).
 - Examples: type catalog [01_coffee_order.lemma](https://raw.githubusercontent.com/lemma/lemma/main/engine/documentation/examples/01_coffee_order.lemma); fee policy [02_library_fees.lemma](https://raw.githubusercontent.com/lemma/lemma/main/engine/documentation/examples/02_library_fees.lemma).
 - Edge cases (compound units, qualifying units, calendar ranges): **Units** and [Reference](https://lemma.run/reference#data-commands).
+
+**Lists**
+
+A list is ordered rows of one type. `data fares: money list` holds values; `uses staff: employee list` holds instances of spec `employee`, whose `data` are the columns and whose rules are computed per row. No list literals: each `-> with` adds rows, comma-separated. A list without rows is empty, never missing data. Evaluation data replaces a whole list with one JSON array (strings for values, objects keyed by row data names for instances). Do not name data, rules, specs, aliases, or units after list keywords (see **Syntax**).
+
+Use a list when rows are uniform and combined (summed, searched, filtered, counted, or their number varies). Use named `uses` instances when each has its own role (`buyer`, `seller`).
+
+```lemma
+spec menu_item
+
+data drink: text
+  -> options "espresso", "latte"
+
+data price: measure
+  -> unit eur: 1.00
+  -> decimals 2
+
+
+spec coffee_order
+
+uses menu: menu_item list
+  -> key drink
+  -> with drink: "espresso", price: 2.50 eur
+  -> with drink: "latte",    price: 3.50 eur
+
+data ordered:  menu.drink
+data quantity: number
+
+rule selected_drink:
+  menu -> find ordered
+
+rule total:
+  selected_drink.price * quantity
+```
+
+- `-> key drink` identifies rows by field; without it rows are numbered `1` to `n`. Duplicate source keys are planning errors; a row key must be an allowed option when the field has options; `find` with no row vetoes.
+- `menu.drink` in a type position reuses the row spec's type.
+- A row reads only its own data. A value the row needs from the enclosing spec is supplied per row (`-> with band: 0 eur...38000 eur, rate: 36%, income: income`).
+- A spec may hold a list of its own rows (`uses components: part list` inside `spec part`); rows come from evaluation data only.
+- List commands (`find`, `sum`, `where`, ...) are rule expressions, never `data` commands (see **Rules**).
 
 
 ---
@@ -403,7 +443,6 @@ data package_weight: 12 kilogram
 data shift_length:   8 hour
 data route_distance: 45 kilometer
 
-
 rule is_heavy:
   package_weight > 20 kilogram
 
@@ -413,9 +452,13 @@ rule is_long_shift:
 
 Prefer `units.mass`, `units.duration`, `units.length` over redefining units. Convert in family: `as <unit>`. Strip unit: `amount as eur as number`. Cross-family relabel: `5 eur as kg` -> `5 kg`. Name the concept, not the unit (see **Anti-patterns**).
 
+**Qualifying units**
+
+Bare unit when exactly one declarer is in scope (`5 kilogram`, `5 eur`). When two or more types declare the same name (local type beside `uses lemma units`, or two imports), bare use is a planning error: write `Type.unit` or `alias.Type.unit` (not `alias.unit`), e.g. `units.mass.kilogram`, `crate_weight.kilogram`. Same rule for each factor in a compound unit. Builtin `percent` / `permille` (`%` / `%%`) are always bare primitives; `as percent` / `as permille` always works.
+
 **Ranges: half-open intervals**
 
-Ranges: lower bound inclusive, upper bound exclusive (`lo...hi`). Test with `in`. Width: `lo...hi as <unit>` (duration/measure). Add `as number` only when a bare number is required. Bare `as number` on date/measure ranges fails. Read an endpoint with `lower` / `upper` (`lower 5...10`, `upper period`). `lower` is included; `upper` is excluded. `...` binds tighter than those operators. `-> lower` / `-> upper` still constrain a range slot; they are not the operators. `lower` and `upper` are reserved names. Typedefs: `number range`, `date range`, `measure range`, `ratio range`. Month/year intervals: `uses lemma units` and inline literals (`18 year...67 year`) or `units.calendar range`. Prefix operators (`floor`, `sqrt`, `lower`, …) take one range operand: `floor x + 1` is `(floor x) + 1`.
+Ranges: lower bound inclusive, upper bound exclusive (`lo...hi`). Test with `in`. Width: `lo...hi as <unit>` (duration/measure). Add `as number` only when a bare number is required. Bare `as number` on date/measure ranges fails. Read an endpoint with `lower` / `upper` (`lower 5...10`, `upper period`). `lower` is included; `upper` is excluded. `...` binds tighter than those operators. `-> lower` / `-> upper` still constrain a range slot; they are not the operators. `lower` and `upper` are reserved names. Typedefs: `number range`, `date range`, `measure range`, `ratio range`. Month/year intervals: `uses lemma units` and inline literals (`18 year...67 year`) or `units.calendar range`. Prefix operators (`floor`, `sqrt`, `lower`, …) and `not` take `floor(x)` or one bare operand: `floor(x) + 1` adds to the result, `floor (x + 1)` floors the sum, `floor x + 1` is a parse error.
 
 The snippet below is a syntax sample, not one policy.
 
@@ -429,14 +472,13 @@ data employee_age: 42 year
 data eligible_band: units.calendar range
   -> suggest 18 year...67 year
 
-
 rule is_working_age:
   employee_age in eligible_band
 ```
 
 Upper bound exclusive: `67 year` is NOT inside `18 year...67 year`.
 
-Custom measure types can declare their own `measure range` without importing SI; see Reference.
+Custom measure types can declare their own range (`data band: <type> range`) without importing SI; see Reference.
 
 **Derived measures: compound units**
 
@@ -456,7 +498,6 @@ data wage_rate: measure
 data time_worked: 120 hour
 data wage: wage_rate
   -> suggest 85 eur_per_hour
-
 
 rule total:
   wage * time_worked
@@ -485,7 +526,6 @@ uses lemma units
 data event_date: date
   -> help "When did the event happen?"
 
-
 rule recent:
   event_date in past 7 day
 
@@ -511,7 +551,7 @@ Default is not "prefer yes/no." It is the answer **in principle for this rule's 
 
 Examples by domain: shipping often earned (`no` unless grant); discount often `0%`; fees use the policy's usual fee, not "free unless expensive."
 
-Forbidden: double denial (`yes` / `unless not … then no`); fail-each-check cascades; invented `*_compliant` default-yes helpers; a single `no` / `unless … then yes` when the condition is the whole answer (see **Anti-patterns**). In `and` chains, do not mix a bare name with `not` / `is false` (WRONG: `x and not y`); use parallel probes (`not x and y is true`, or `x is false and y is true`) or parentheses. Unary `not x` alone is fine.
+Forbidden: double denial (`yes` / `unless not … then no`); fail-each-check cascades; invented `*_compliant` default-yes helpers; a single `no` / `unless … then yes` when the condition is the whole answer (see **Anti-patterns**). In `and` chains, do not mix a bare name with `is false` (WRONG: `x and y is false`); use parallel probes (`x is false and y is true`) or parentheses. `not` before `and` takes the call form: `not(x) and y`.
 
 **Overlapping unless (last wins)**
 
@@ -526,7 +566,6 @@ data is_vip: boolean
   -> suggest false
   -> help "Is the customer a VIP?"
 
-
 rule discount:
   0%
   unless qty >= 10 then 10%
@@ -535,6 +574,19 @@ rule discount:
 ```
 
 VIP ordering 75 items gets **25%** (not 20%): both `qty >= 50` and `is_vip` match; bottommost wins.
+
+**List commands**
+
+Postfix `->` in rule expressions: `staff -> sum bonus`, `menu -> find ordered`, `staff -> sort salary desc -> first`. One operand is bare; anything wider takes parentheses (`lines -> sum(qty * price)`). `->` binds tighter than operators: `items -> count > 0`.
+
+- Reduce: `sum`, `avg`, `product`, `min`, `max`, `count`, `any`, `all`.
+- Transform (same list type): `where`, `sort ... asc|desc`, `top n`, `with`.
+- One row: `find`, `first`, `last`. Read a row with a dot: `(staff -> first).bonus`.
+- Value lists take no expression; conditions start with the operator: `fares -> where >= 100 eur`.
+- A name on both the row and the enclosing spec must be qualified with the list name (`components.quantity`).
+- Those command words are reserved names (see **Syntax**); do not reuse them for data or rules.
+- Empty: `sum` 0, `count` 0, `any` false, `all` true; `avg`, `product`, `min`, `max`, `first`, `last` veto. Any vetoed row vetoes the reduction. Guard compounding with `count`, not `is veto`.
+- Not expressible: running balances, row-to-row comparison on a flat list, group-by over unknown groups. Say so; do not fake them with `unless` chains.
 
 
 ---
@@ -570,19 +622,18 @@ data money: measure
   -> unit eur: 1.00
   -> decimals 2
 
-data product: text
+data drink: text
   -> option "espresso"
   -> option "latte"
   -> option "cappuccino"
   -> option "mocha"
 
-
 rule base_price:
   veto "Unknown type of coffee"
-  unless product is "espresso"   then 2.5 eur
-  unless product is "latte"      then 3.5 eur
-  unless product is "cappuccino" then 3.5 eur
-  unless product is "mocha"      then 4 eur
+  unless drink is "espresso"   then 2.5 eur
+  unless drink is "latte"      then 3.5 eur
+  unless drink is "cappuccino" then 3.5 eur
+  unless drink is "mocha"      then 4 eur
 ```
 
 If `base_price` vetoes, dependents that need its value veto too (propagates). Full example: [01_coffee_order.lemma](https://raw.githubusercontent.com/lemma/lemma/main/engine/documentation/examples/01_coffee_order.lemma).
@@ -605,7 +656,6 @@ data customer_age: number
   -> minimum 0
   -> maximum 120
   -> help "How old is the customer?"
-
 
 rule is_adult:
   customer_age >= 18
@@ -715,4 +765,4 @@ RIGHT: `rule can_ship: in_stock and address_complete`. When one `unless … then
   - [05_weather_clothing.lemma](https://raw.githubusercontent.com/lemma/lemma/main/engine/documentation/examples/05_weather_clothing.lemma)
   - [nl/tax/net_salary.lemma](https://raw.githubusercontent.com/lemma/lemma/main/engine/documentation/examples/nl/tax/net_salary.lemma)
 
-Decimals at JSON boundaries: pass as strings. Detail: [Numeric precision](https://lemma.run/learn/precision).
+Decimals at JSON boundaries: pass as strings (`pass as string: "84"`). JS `number`, Java floats, and Elixir floats are rejected; `bigint`, Java integers/`BigDecimal`, and Elixir integers are exact. Detail: [Numeric precision](https://lemma.run/learn/precision).

@@ -30,20 +30,30 @@ fn lsp_initialize_reports_capabilities() {
         caps.get("documentLinkProvider").is_some(),
         "missing documentLinkProvider: {caps}"
     );
+    assert!(
+        caps.get("completionProvider").is_some(),
+        "missing completionProvider: {caps}"
+    );
 
     session.shutdown();
 }
 
 #[test]
-fn lsp_stdio_flag_initializes() {
-    let mut session = LspSession::spawn_lemma_lsp_with_stdio_flag();
-    let result = session.initialize(None);
-    session.initialized();
+fn lsp_rejects_removed_stdio_flag() {
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_lemma"))
+        .args(["lsp", "--stdio"])
+        .stdin(std::process::Stdio::null())
+        .output()
+        .expect("run lemma lsp --stdio");
     assert!(
-        result.get("capabilities").is_some(),
-        "lemma lsp --stdio must initialize: {result}"
+        !output.status.success(),
+        "lemma lsp --stdio must be rejected"
     );
-    session.shutdown();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("unexpected argument '--stdio'"),
+        "expected clap unexpected-argument error, got: {stderr}"
+    );
 }
 
 #[test]
@@ -283,6 +293,61 @@ fn lsp_workspace_missing_ref_diagnostic() {
 }
 
 #[test]
+fn lsp_initialize_rejects_multi_root_workspace() {
+    let first = tempfile::tempdir().expect("tempdir");
+    let second = tempfile::tempdir().expect("tempdir");
+    let mut session = LspSession::spawn_lemma_lsp();
+
+    let response = session.request_message(
+        "initialize",
+        json!({
+            "processId": null,
+            "capabilities": {},
+            "workspaceFolders": [
+                { "uri": path_to_uri(first.path()), "name": "first" },
+                { "uri": path_to_uri(second.path()), "name": "second" }
+            ]
+        }),
+    );
+
+    assert_eq!(response["error"]["code"], -32602, "got: {response}");
+    let message = response["error"]["message"]
+        .as_str()
+        .expect("error message");
+    assert!(
+        message.contains("multi-root workspaces are not supported"),
+        "got: {message}"
+    );
+
+    session.shutdown();
+}
+
+#[test]
+fn lsp_initialize_rejects_non_file_workspace_folder() {
+    let mut session = LspSession::spawn_lemma_lsp();
+
+    let response = session.request_message(
+        "initialize",
+        json!({
+            "processId": null,
+            "capabilities": {},
+            "workspaceFolders": [{ "uri": "untitled:Untitled-1", "name": "scratch" }]
+        }),
+    );
+
+    assert_eq!(response["error"]["code"], -32602, "got: {response}");
+    let message = response["error"]["message"]
+        .as_str()
+        .expect("error message");
+    assert!(
+        message.contains("workspace folder must be a file URI"),
+        "got: {message}"
+    );
+
+    session.shutdown();
+}
+
+#[test]
 fn lsp_duplicate_spec_reports_conflict_on_discovered_files() {
     let dir = tempfile::tempdir().expect("tempdir");
     let path_a = write_lemma_file(dir.path(), "a.lemma", "spec conflict_test\ndata x: 1");
@@ -326,6 +391,143 @@ fn lsp_duplicate_spec_reports_conflict_on_discovered_files() {
     assert!(
         message_b.contains("conflict_test") && message_b.contains("also declared"),
         "expected conflict message on second file, got: {message_b}"
+    );
+
+    session.shutdown();
+}
+
+fn completion_labels(result: &serde_json::Value) -> Vec<String> {
+    let items = result
+        .get("items")
+        .and_then(|v| v.as_array())
+        .or_else(|| result.as_array())
+        .expect("completion items");
+    items
+        .iter()
+        .filter_map(|item| {
+            item.get("label")
+                .and_then(|l| l.as_str())
+                .map(str::to_string)
+        })
+        .collect()
+}
+
+#[test]
+fn lsp_completion_type_keywords_after_data_colon() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let source = "spec pricing\ndata qty: \n";
+    let path = write_lemma_file(dir.path(), "pricing.lemma", source);
+    let uri = path_to_uri(&path);
+
+    let mut session = LspSession::spawn_lemma_lsp();
+    session.initialize(None);
+    session.initialized();
+    session.did_open(&uri, source);
+    session.wait_for_diagnostics(&uri);
+
+    let result = session.request(
+        "textDocument/completion",
+        json!({
+            "textDocument": { "uri": uri },
+            "position": { "line": 1, "character": 10 }
+        }),
+    );
+    let labels = completion_labels(&result);
+    assert!(
+        labels.iter().any(|l| l == "number"),
+        "expected number type keyword, got: {labels:?}"
+    );
+
+    session.shutdown();
+}
+
+#[test]
+fn lsp_completion_arrow_commands_after_arrow() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let source = "spec pricing\ndata qty: number\n  -> \n";
+    let path = write_lemma_file(dir.path(), "pricing.lemma", source);
+    let uri = path_to_uri(&path);
+
+    let mut session = LspSession::spawn_lemma_lsp();
+    session.initialize(None);
+    session.initialized();
+    session.did_open(&uri, source);
+    session.wait_for_diagnostics(&uri);
+
+    let result = session.request(
+        "textDocument/completion",
+        json!({
+            "textDocument": { "uri": uri },
+            "position": { "line": 2, "character": 5 }
+        }),
+    );
+    let labels = completion_labels(&result);
+    assert!(
+        labels.iter().any(|l| l == "minimum"),
+        "expected minimum command, got: {labels:?}"
+    );
+
+    session.shutdown();
+}
+
+#[test]
+fn lsp_completion_local_name_in_rule_expression() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let source = "spec pricing\ndata qty: number\nrule total: qty\n";
+    let path = write_lemma_file(dir.path(), "pricing.lemma", source);
+    let uri = path_to_uri(&path);
+
+    let mut session = LspSession::spawn_lemma_lsp();
+    session.initialize(None);
+    session.initialized();
+    session.did_open(&uri, source);
+    session.wait_for_diagnostics(&uri);
+
+    let result = session.request(
+        "textDocument/completion",
+        json!({
+            "textDocument": { "uri": uri },
+            "position": { "line": 2, "character": 12 }
+        }),
+    );
+    let labels = completion_labels(&result);
+    assert!(
+        labels.iter().any(|l| l == "qty"),
+        "expected local data qty, got: {labels:?}"
+    );
+
+    session.shutdown();
+}
+
+#[test]
+fn lsp_completion_uses_target_from_specs() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let units = "spec mass_src\ndata mass: measure\n  -> unit kg: 1.0\n";
+    let consumer = "spec pricing\nuses \n";
+    let mass_path = write_lemma_file(dir.path(), "mass_src.lemma", units);
+    let path = write_lemma_file(dir.path(), "pricing.lemma", consumer);
+    let uri = path_to_uri(&path);
+    let mass_uri = path_to_uri(&mass_path);
+
+    let mut session = LspSession::spawn_lemma_lsp();
+    session.initialize(None);
+    session.initialized();
+    session.did_open(&mass_uri, units);
+    session.wait_for_diagnostics(&mass_uri);
+    session.did_open(&uri, consumer);
+    session.wait_for_diagnostics(&uri);
+
+    let result = session.request(
+        "textDocument/completion",
+        json!({
+            "textDocument": { "uri": uri },
+            "position": { "line": 1, "character": 5 }
+        }),
+    );
+    let labels = completion_labels(&result);
+    assert!(
+        labels.iter().any(|l| l == "mass_src" || l == "units"),
+        "expected uses target from specs(), got: {labels:?}"
     );
 
     session.shutdown();

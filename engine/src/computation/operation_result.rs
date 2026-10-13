@@ -12,13 +12,16 @@ use serde::Serialize;
 ///
 /// JSON serialization is a single string (see [`fmt::Display`]). There is intentionally no
 /// `Deserialize` implementation: veto payloads are engine output only.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum VetoType {
     /// Evaluation needed a data that was not provided
     MissingData {
         data: DataPath,
         suggestion: Option<String>,
     },
+    /// Evaluation needed a field of a list row that was not provided
+    /// (`key` is the row path, e.g. `menu.2.price`).
+    MissingRowData { key: String },
     /// Explicit `veto "reason"` in Lemma source
     UserDefined { message: Option<String> },
     /// Runtime domain failure (division by zero, date overflow, bad Data override, etc.)
@@ -36,6 +39,7 @@ impl fmt::Display for VetoType {
                 data,
                 suggestion: None,
             } => write!(f, "Missing data: {data}"),
+            VetoType::MissingRowData { key } => write!(f, "Missing data: {key}"),
             VetoType::UserDefined { message: Some(msg) } => write!(f, "{msg}"),
             VetoType::UserDefined { message: None } => write!(f, "Vetoed"),
             VetoType::Computation { message } => write!(f, "{message}"),
@@ -67,7 +71,7 @@ impl Serialize for VetoType {
 }
 
 /// Result of evaluating a rule, expression, or data leaf.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum OperationResult {
     /// Operation produced a value (canonical magnitude + optional written unit)
@@ -90,10 +94,13 @@ impl OperationResult {
         matches!(self, OperationResult::Veto(_))
     }
 
-    /// True when this result is a [`VetoType::MissingData`] veto.
+    /// True when this result is a [`VetoType::MissingData`] or [`VetoType::MissingRowData`] veto.
     #[must_use]
     pub fn is_missing_data(&self) -> bool {
-        matches!(self, OperationResult::Veto(VetoType::MissingData { .. }))
+        matches!(
+            self,
+            OperationResult::Veto(VetoType::MissingData { .. } | VetoType::MissingRowData { .. })
+        )
     }
 
     #[must_use]

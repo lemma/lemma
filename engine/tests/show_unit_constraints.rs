@@ -1,6 +1,7 @@
 //! Per-unit minimum/maximum/default magnitudes on measure and ratio show units.
 //! Same-type alias units (e.g. eur/euro) are allowed; cross-type unit clashes are covered in graph unit tests.
 
+use indexmap::IndexMap;
 use lemma::DateTimeValue;
 use lemma::Engine;
 use lemma::{MeasureUnit, RatioUnit, TypeSpecification};
@@ -130,14 +131,7 @@ rule out: price
 
     let now = DateTimeValue::now();
     let response = engine
-        .run(
-            None,
-            "s",
-            Some(&now),
-            std::collections::HashMap::new(),
-            None,
-            false,
-        )
+        .evaluate(None, "s", Some(&now), IndexMap::new(), None, false)
         .expect("eval");
     let result = response
         .results
@@ -274,10 +268,19 @@ rule r: mass
     load(&mut engine, code, "roundtrip.lemma");
     let now = DateTimeValue::now();
     let show = engine.show(None, "s", Some(&now)).expect("show");
-    let api_show = lemma::api::Show::from(&show);
-    let json = serde_json::to_string(&api_show).expect("serialize");
-    let round_tripped: lemma::api::Show = serde_json::from_str(&json).expect("deserialize");
-    assert_eq!(api_show, round_tripped);
+    let document = lemma::api::show_document(&engine, &show);
+    let rule_json = document["x-lemma-rules"]["r"].clone();
+    let rule: lemma::api::ShowRule =
+        serde_json::from_value(rule_json.clone()).expect("deserialize ShowRule");
+    assert_eq!(serde_json::to_value(&rule).expect("serialize"), rule_json);
+    let units = document["properties"]["mass"]["x-lemma-type"]["units"]
+        .as_array()
+        .expect("mass units");
+    let gram_json = units
+        .iter()
+        .find(|unit| unit["name"] == "gram")
+        .expect("gram unit");
+    assert_eq!(gram_json["minimum"], "1000");
     let entry = show.data.get("mass").expect("mass");
     let gram = quantity_unit(&entry.lemma_type.specifications, "gram");
     assert_eq!(gram.minimum_decimal(), Some(decimal_lit("1000")));
@@ -383,10 +386,6 @@ uses lemma units
 data money: measure
   -> unit eur: 1
   -> unit usd: 0.91
-
-data mass: measure
-  -> unit kilogram: 1
-  -> unit tonne: 1000
 
 data storage_cost: measure
   -> unit eur_per_kilo_hour: eur/kilogram/hour

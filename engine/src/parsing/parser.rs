@@ -2,57 +2,15 @@ use crate::error::Error;
 use crate::limits::ResourceLimits;
 use crate::parsing::ast::{try_parse_type_constraint_command, *};
 use crate::parsing::lexer::{
-    can_be_label, can_be_repository_qualifier_segment, is_boolean_keyword, is_keyword,
-    is_math_function, is_spec_body_keyword, token_is_calendar_period_marker,
-    token_kind_to_boolean_value, token_kind_to_primitive, Lexer, LexerCheckpoint, Token, TokenKind,
+    can_be_label, can_be_spec_name_spelling, can_be_unit_name, is_boolean_keyword, is_keyword,
+    is_math_function, is_reserved_repository_name, is_spec_body_keyword,
+    token_is_calendar_period_marker, token_kind_to_boolean_value, token_kind_to_primitive, Lexer,
+    LexerCheckpoint, Token, TokenKind,
 };
 use crate::parsing::source::Source;
 use indexmap::IndexMap;
 use rust_decimal::Decimal;
 use std::sync::Arc;
-
-#[derive(Debug)]
-struct DeprecatedStandaloneWith {
-    path: Reference,
-    rhs: WithRhs,
-    source_location: Source,
-}
-
-fn merge_deprecated_standalone_with(
-    data: &mut [LemmaData],
-    pending: Vec<DeprecatedStandaloneWith>,
-) -> Result<(), Error> {
-    for item in pending {
-        let alias = item.path.segments[0].clone();
-        let relative = Reference {
-            segments: item.path.segments[1..].to_vec(),
-            name: item.path.name.clone(),
-        };
-        let import = data.iter_mut().find(|datum| {
-            datum.reference.is_local()
-                && datum.reference.name == alias
-                && matches!(&datum.value, DataValue::Import { .. })
-        });
-        if import.is_none() {
-            return Err(Error::parsing(
-                format!("`uses {alias}: …` is required for standalone `with {alias}.…`"),
-                item.source_location,
-                Some(format!("Add `uses {alias}: <spec_name>` in this spec")),
-            ));
-        }
-        let datum = import.expect("BUG: import row exists after is_none check");
-        let DataValue::Import { bindings, .. } = &mut datum.value else {
-            unreachable!("BUG: matched Import arm in find predicate");
-        };
-        bindings.push(UsesBinding {
-            path: relative,
-            rhs: item.rhs,
-            source_location: item.source_location,
-            deprecated_standalone_with: true,
-        });
-    }
-    Ok(())
-}
 
 #[derive(Debug)]
 pub struct ParseResult {
@@ -153,6 +111,13 @@ fn canonicalize_parse_result(result: &mut ParseResult) {
     result.repositories = new_map;
 }
 
+/// Parser position to rewind to after a speculative parse.
+struct ParserCheckpoint {
+    lexer: LexerCheckpoint,
+    expression_count: usize,
+    table_len: usize,
+}
+
 struct Parser {
     lexer: Lexer,
     source_type: crate::parsing::source::SourceType,
@@ -163,6 +128,19 @@ struct Parser {
     max_data_name_length: usize,
     max_rule_name_length: usize,
     last_span: Span,
+    /// Parsing a bare command argument: `->` ends the operand instead of chaining onto it.
+    bare_operand: bool,
+    /// Nesting depth of comma-separated call arguments (`find(a, b)`).
+    call_argument_depth: usize,
+    /// Operand starts of the bound chain that last completed without `...`.
+    bound_chain_starts: Vec<usize>,
+    /// Operand starts whose bound chain is known to end without `...`, under the flags
+    /// they were parsed with. Such an operand is a suffix of an already-scanned chain.
+    no_range_at: std::collections::HashMap<usize, ExprFlags>,
+    table: ExprTable<ExpressionKind>,
+    /// Continuation stack of the expression machine, kept for its capacity. Empty between
+    /// runs; a run nested in another starts from a fresh stack.
+    expr_frames: Vec<ExprCont>,
 }
 
 impl Parser {
@@ -186,6 +164,12 @@ impl Parser {
                 line: 1,
                 col: 0,
             },
+            bare_operand: false,
+            call_argument_depth: 0,
+            bound_chain_starts: Vec::new(),
+            no_range_at: std::collections::HashMap::new(),
+            expr_frames: Vec::new(),
+            table: ExprTable::default(),
         }
     }
 
@@ -212,13 +196,19 @@ impl Parser {
         Ok(kinds.contains(current))
     }
 
-    fn checkpoint(&self) -> (LexerCheckpoint, usize) {
-        (self.lexer.checkpoint(), self.expression_count)
+    fn checkpoint(&self) -> ParserCheckpoint {
+        ParserCheckpoint {
+            lexer: self.lexer.checkpoint(),
+            expression_count: self.expression_count,
+            table_len: self.table.len(),
+        }
     }
 
-    fn restore(&mut self, checkpoint: (LexerCheckpoint, usize)) {
-        self.lexer.restore(checkpoint.0);
-        self.expression_count = checkpoint.1;
+    /// Rewinds to `checkpoint`, dropping every expression node parsed since.
+    fn restore(&mut self, checkpoint: ParserCheckpoint) {
+        self.lexer.restore(checkpoint.lexer);
+        self.expression_count = checkpoint.expression_count;
+        self.table.truncate(checkpoint.table_len);
     }
 
     fn expect(&mut self, kind: &TokenKind) -> Result<Token, Error> {
@@ -384,7 +374,6 @@ impl Parser {
         let mut data = Vec::new();
         let mut rules = Vec::new();
         let mut meta_fields = Vec::new();
-        let mut pending_deprecated_with: Vec<DeprecatedStandaloneWith> = Vec::new();
 
         loop {
             let peek_kind = self.peek()?.kind.clone();
@@ -392,9 +381,6 @@ impl Parser {
                 TokenKind::Data => {
                     let datum = self.parse_data()?;
                     data.push(datum);
-                }
-                TokenKind::With => {
-                    pending_deprecated_with.push(self.parse_deprecated_standalone_with()?);
                 }
                 TokenKind::Rule => {
                     let rule = self.parse_rule()?;
@@ -409,6 +395,14 @@ impl Parser {
                     data.push(uses_data);
                 }
                 TokenKind::Spec | TokenKind::Repo | TokenKind::Eof => break,
+                TokenKind::With => {
+                    let token = self.next()?;
+                    return Err(self.error_at_token_with_suggestion(
+                        &token,
+                        "Standalone `with alias.field: value` is not allowed".to_string(),
+                        "Use `uses alias: spec -> with field: value`",
+                    ));
+                }
                 _ => {
                     let token = self.next()?;
                     return Err(self.error_at_token_with_suggestion(
@@ -423,8 +417,6 @@ impl Parser {
             }
         }
 
-        merge_deprecated_standalone_with(&mut data, pending_deprecated_with)?;
-
         for data in data {
             spec = spec.add_data(data);
         }
@@ -438,216 +430,75 @@ impl Parser {
         Ok(spec)
     }
 
+    fn next_logical_name(&mut self) -> Result<Token, Error> {
+        let token = self.lexer.next_logical_name()?;
+        self.last_span = token.span.clone();
+        Ok(token)
+    }
+
     fn parse_spec_name(&mut self) -> Result<(String, Span), Error> {
-        if self.at(&TokenKind::At)? {
-            let at_tok = self.next()?;
+        let tok = self.next_logical_name()?;
+        if tok.text.starts_with('@') {
             return Err(Error::parsing(
                 "'@' is not allowed in spec names; it is valid for repository names (`repo @org/name`) and qualifiers (`uses @org/name`)",
-                self.make_source(at_tok.span),
+                self.make_source(tok.span),
                 Some(
                     "Write `spec my_spec`, then reference registry specs as `uses alias: @org/repo spec_name` or `data x: alias.TypeName` after importing with `uses`.",
                 ),
             ));
         }
-
-        let first = self.next()?;
-        if !can_be_label(&first.kind) {
-            return Err(self.error_at_token(
-                &first,
-                format!("Expected a spec name, found {}", first.kind),
-            ));
+        if !can_be_spec_name_spelling(&tok.text) {
+            return Err(
+                self.error_at_token(&tok, format!("Expected a spec name, found '{}'", tok.text))
+            );
         }
-        let mut name = first.text.clone();
-        let start_span = first.span.clone();
-        let mut end_span = first.span.clone();
-
-        loop {
-            if self.at(&TokenKind::Slash)? {
-                self.next()?;
-                let seg = self.next()?;
-                if !can_be_label(&seg.kind) {
-                    return Err(self.error_at_token(
-                        &seg,
-                        format!(
-                            "Expected identifier after '/' in spec name, found {}",
-                            seg.kind
-                        ),
-                    ));
-                }
-                name.push('/');
-                name.push_str(&seg.text);
-                end_span = seg.span.clone();
-            } else if self.at(&TokenKind::Dot)? {
-                self.next()?;
-                let seg = self.next()?;
-                if !can_be_label(&seg.kind) {
-                    return Err(self.error_at_token(
-                        &seg,
-                        format!(
-                            "Expected identifier after '.' in spec name, found {}",
-                            seg.kind
-                        ),
-                    ));
-                }
-                name.push('.');
-                name.push_str(&seg.text);
-                end_span = seg.span.clone();
-            } else if self.at(&TokenKind::Minus)? {
-                let minus_span = self.peek()?.span.clone();
-                self.next()?;
-                let peeked = self.peek()?;
-                if !can_be_label(&peeked.kind) {
-                    let span = self.span_covering(&start_span, &minus_span);
-                    return Err(Error::parsing(
-                        "Trailing '-' after spec name",
-                        self.make_source(span),
-                        None::<String>,
-                    ));
-                }
-                let seg = self.next()?;
-                name.push('-');
-                name.push_str(&seg.text);
-                end_span = seg.span.clone();
-            } else {
-                break;
-            }
-        }
-
-        let full_span = self.span_covering(&start_span, &end_span);
-        Ok((name, full_span))
+        Ok((tok.text, tok.span))
     }
 
-    /// Parse a repository qualifier: `[@] identifier ((Slash | Dot | Minus) identifier)*`.
-    ///
-    /// The `@` prefix, when present, is included in the name string (e.g. `"@org/repo"`).
-    /// Slashes, dots and minuses between segments are stitched into the name verbatim
-    /// so the qualifier round-trips exactly.
-    ///
-    /// Used in `repo` declarations and registry qualifiers (`uses`).
+    /// Parse a repository qualifier as one opaque [`TokenKind::LogicalName`].
     fn parse_repository_qualifier(&mut self) -> Result<(RepositoryQualifier, Span), Error> {
-        let has_at = self.at(&TokenKind::At)?;
-        let start_span = if has_at {
-            let at_tok = self.next()?;
-            at_tok.span.clone()
-        } else {
-            Span {
-                start: 0,
-                end: 0,
-                line: 0,
-                col: 0,
-            }
-        };
-
-        let first = self.next()?;
-        if !can_be_repository_qualifier_segment(&first.kind) {
+        let tok = self.next_logical_name()?;
+        if !tok.text.starts_with('@') && is_reserved_repository_name(&tok.text) {
             return Err(self.error_at_token(
-                &first,
-                format!(
-                    "Expected a repository qualifier segment, found {}",
-                    first.kind
-                ),
-            ));
-        }
-        if !has_at && is_keyword(&first.kind) {
-            return Err(self.error_at_token(
-                &first,
+                &tok,
                 format!(
                     "'{}' is a reserved keyword and cannot be used as a repository name",
-                    first.text
+                    tok.text.to_ascii_lowercase()
                 ),
             ));
         }
-        let start_span = if has_at {
-            start_span
-        } else {
-            first.span.clone()
-        };
-        let mut name = first.text.clone();
-
-        loop {
-            let next_kind = self.peek()?.kind.clone();
-            match next_kind {
-                TokenKind::Slash => {
-                    self.next()?;
-                    name.push('/');
-                    let seg = self.next()?;
-                    if !can_be_repository_qualifier_segment(&seg.kind) {
-                        return Err(self.error_at_token(
-                            &seg,
-                            format!(
-                                "Expected identifier after '/' in repository qualifier segment, found {}",
-                                seg.kind
-                            ),
-                        ));
-                    }
-                    name.push_str(&seg.text);
-                }
-                TokenKind::Dot => {
-                    self.next()?;
-                    name.push('.');
-                    let seg = self.next()?;
-                    if !can_be_repository_qualifier_segment(&seg.kind) {
-                        return Err(self.error_at_token(
-                            &seg,
-                            format!(
-                                "Expected identifier after '.' in repository qualifier segment, found {}",
-                                seg.kind
-                            ),
-                        ));
-                    }
-                    name.push_str(&seg.text);
-                }
-                TokenKind::Minus => {
-                    let minus_text_peek = self.lexer.peek_second()?;
-                    if !can_be_repository_qualifier_segment(&minus_text_peek.kind) {
-                        break;
-                    }
-                    self.next()?;
-                    name.push('-');
-                    let seg = self.next()?;
-                    name.push_str(&seg.text);
-                }
-                _ => break,
-            }
-        }
-
-        if has_at {
-            name.insert(0, '@');
-        }
-
-        let full_span = self.span_covering(&start_span, &self.last_span);
-        Ok((RepositoryQualifier { name }, full_span))
+        Ok((RepositoryQualifier { name: tok.text }, tok.span))
     }
 
     /// Parses `[<repository_qualifier>] <spec> [<effective>]`
     pub fn parse_spec_ref_target(&mut self) -> Result<SpecRef, Error> {
+        let first = self.next_logical_name()?;
         let mut repository = None;
         let mut repository_span = None;
-
-        if self.at(&TokenKind::At)? {
-            let (q, span) = self.parse_repository_qualifier()?;
-            repository = Some(q);
-            repository_span = Some(span);
-        } else {
-            // Speculative first stitch: if another label follows, the first stitch is a
-            // repository qualifier (`uses accounting invoice`). Otherwise rewind and treat
-            // the stitch as the spec name (`uses finance/units`).
-            let saved_state = self.lexer.clone();
-            if let Ok((potential_name, span)) = self.parse_spec_name() {
-                if can_be_label(&self.peek()?.kind) {
-                    repository = Some(RepositoryQualifier {
-                        name: potential_name,
-                    });
-                    repository_span = Some(span);
-                } else {
-                    self.lexer = saved_state;
-                }
-            } else {
-                self.lexer = saved_state;
+        let (spec_name, spec_name_span) = if first.text.starts_with('@') {
+            repository = Some(RepositoryQualifier {
+                name: first.text.clone(),
+            });
+            repository_span = Some(first.span.clone());
+            self.parse_spec_name()?
+        } else if can_be_label(&self.peek()?.kind) {
+            if is_reserved_repository_name(&first.text) {
+                return Err(self.error_at_token(
+                    &first,
+                    format!(
+                        "'{}' is a reserved keyword and cannot be used as a repository name",
+                        first.text.to_ascii_lowercase()
+                    ),
+                ));
             }
-        }
-
-        let (spec_name, spec_name_span) = self.parse_spec_name()?;
+            repository = Some(RepositoryQualifier {
+                name: first.text.clone(),
+            });
+            repository_span = Some(first.span.clone());
+            self.parse_spec_name()?
+        } else {
+            (first.text, first.span)
+        };
         let effective = self.parse_spec_ref_trailing_effective()?;
         let target_span = self.span_covering(&spec_name_span, &self.last_span);
 
@@ -798,27 +649,6 @@ impl Parser {
         ) || is_boolean_keyword(kind)
     }
 
-    fn parse_deprecated_standalone_with(&mut self) -> Result<DeprecatedStandaloneWith, Error> {
-        let with_token = self.expect(&TokenKind::With)?;
-        let start_span = with_token.span.clone();
-        let path = self.parse_reference()?;
-        if path.segments.is_empty() {
-            return Err(self.error_at_token_with_suggestion(
-                &with_token,
-                "Standalone `with` must target an imported spec path (`with alias.field: …`).",
-                "Use `data name: …` for local slots, or nest under `uses` with `  -> with path: …`.",
-            ));
-        }
-        let (rhs, _) =
-            self.parse_assignment_after_key(|parser| parser.parse_with_rhs(), "with", false)?;
-        let span = self.span_covering(&start_span, &self.last_span);
-        Ok(DeprecatedStandaloneWith {
-            path,
-            rhs,
-            source_location: self.make_source(span),
-        })
-    }
-
     fn parse_with_rhs(&mut self) -> Result<WithRhs, Error> {
         let peek_kind = self.peek()?.kind.clone();
 
@@ -860,7 +690,7 @@ impl Parser {
                 &first,
                 format!(
                     "'{}' is a reserved keyword and cannot be used as a name",
-                    first.text
+                    first.text.to_ascii_lowercase()
                 ),
                 "Choose a different name that is not a reserved keyword",
             ));
@@ -924,12 +754,25 @@ impl Parser {
     /// Parse a single `uses` item: `[alias ':']` then [`Self::parse_spec_ref_target`] (optional
     /// repository qualifier, spec name, optional effective date pin).
     fn parse_uses_item(&mut self, start_span: &Span) -> Result<LemmaData, Error> {
-        let explicit_alias = if can_be_label(&self.peek()?.kind)
-            && self.lexer.peek_second()?.kind == TokenKind::Colon
-        {
-            let alias_tok = self.next()?;
-            self.expect(&TokenKind::Colon)?;
-            Some(alias_tok)
+        let explicit_alias = if self.lexer.peek_second()?.kind == TokenKind::Colon {
+            let peek = self.peek()?.clone();
+            if is_keyword(&peek.kind) {
+                return Err(self.error_at_token_with_suggestion(
+                    &peek,
+                    format!(
+                        "'{}' is a reserved keyword and cannot be used as a name",
+                        peek.text.to_ascii_lowercase()
+                    ),
+                    "Choose a different name that is not a reserved keyword",
+                ));
+            }
+            if can_be_label(&peek.kind) {
+                let alias_tok = self.next()?;
+                self.expect(&TokenKind::Colon)?;
+                Some(alias_tok)
+            } else {
+                None
+            }
         } else {
             None
         };
@@ -967,6 +810,17 @@ impl Parser {
             implicit
         };
 
+        if self.at(&TokenKind::List)? {
+            self.next()?;
+            let list = self.parse_uses_list(&alias)?;
+            let span = self.span_covering(start_span, &self.last_span);
+            return Ok(LemmaData::new(
+                Reference::local(alias),
+                DataValue::ImportList { spec_ref, list },
+                self.make_source(span),
+            ));
+        }
+
         let mut bindings = Vec::new();
         while self.at(&TokenKind::Arrow)? {
             if self.lexer.peek_second()?.kind != TokenKind::With {
@@ -979,8 +833,117 @@ impl Parser {
             }
             self.next()?; // ->
             let with_token = self.expect(&TokenKind::With)?;
-            let binding_start_span = with_token.span.clone();
+            bindings.extend(self.parse_uses_field_pairs(&alias, &with_token)?);
+        }
 
+        let span = self.span_covering(start_span, &self.last_span);
+        Ok(LemmaData::new(
+            Reference::local(alias),
+            DataValue::Import { spec_ref, bindings },
+            self.make_source(span),
+        ))
+    }
+
+    /// `-> key`, `-> with` rows; query commands under `uses x: spec list` are a parse Error.
+    fn parse_uses_list(&mut self, alias: &str) -> Result<UsesList, Error> {
+        let mut list = UsesList {
+            key: None,
+            rows: Vec::new(),
+        };
+        while self.at(&TokenKind::Arrow)? {
+            let arrow = self.next()?;
+            let name_tok = self.next()?;
+            match name_tok.kind {
+                TokenKind::Key => {
+                    if list.key.is_some() {
+                        return Err(self.error_at_token(
+                            &name_tok,
+                            format!("`{alias}` declares `-> key` twice; list every key field in one `-> key`"),
+                        ));
+                    }
+                    let mut fields = vec![self.parse_reference()?];
+                    while self.at(&TokenKind::Comma)? {
+                        self.next()?;
+                        fields.push(self.parse_reference()?);
+                    }
+                    let span = self.span_covering(&arrow.span, &self.last_span);
+                    list.key = Some(UsesListKey {
+                        fields,
+                        source_location: self.make_source(span),
+                    });
+                }
+                TokenKind::With => {
+                    let row = if self.at_uses_field_pair()? {
+                        let bindings = self.parse_uses_field_pairs(alias, &name_tok)?;
+                        let span = self.span_covering(&arrow.span, &self.last_span);
+                        UsesListRow::Fields {
+                            bindings,
+                            source_location: self.make_source(span),
+                        }
+                    } else {
+                        let values = self.parse_uses_list_values()?;
+                        let span = self.span_covering(&arrow.span, &self.last_span);
+                        UsesListRow::Values {
+                            values,
+                            source_location: self.make_source(span),
+                        }
+                    };
+                    list.rows.push(row);
+                }
+                _ => {
+                    let command = self.parse_list_command_body(name_tok)?;
+                    let command = display_list_command(&self.table, &command);
+                    return Err(self.error_at_token(
+                        &arrow,
+                        format!(
+                            "data supplies values; `-> {command}` is a query on `{alias}`, write it in a rule"
+                        ),
+                    ));
+                }
+            }
+        }
+        Ok(list)
+    }
+
+    /// `-> with ada, grace` under `uses x: spec list`: references to instances (literals are
+    /// rejected at planning with the row spec's name).
+    fn parse_uses_list_values(&mut self) -> Result<Vec<WithRhs>, Error> {
+        let mut values = Vec::new();
+        loop {
+            values.push(self.parse_with_rhs()?);
+            if !self.at(&TokenKind::Comma)? {
+                break;
+            }
+            self.next()?;
+            if self.at_command_terminator()? || self.at(&TokenKind::Comma)? {
+                let tok = self.peek()?.clone();
+                return Err(self.error_at_token_with_suggestion(
+                    &tok,
+                    "Trailing or empty comma in list".to_string(),
+                    "Remove the extra comma, or add the missing row",
+                ));
+            }
+        }
+        if self.at_uses_field_pair()? {
+            let tok = self.peek()?.clone();
+            return Err(self.error_at_token_with_suggestion(
+                &tok,
+                "A `-> with` line holds either references or field pairs, not both".to_string(),
+                "Put the field pairs on their own `-> with` line",
+            ));
+        }
+        Ok(values)
+    }
+
+    /// Comma-separated `path: value` pairs after `-> with` in a `uses` block.
+    fn parse_uses_field_pairs(
+        &mut self,
+        alias: &str,
+        with_token: &Token,
+    ) -> Result<Vec<UsesBinding>, Error> {
+        let mut bindings = Vec::new();
+        let mut binding_start_span = with_token.span.clone();
+        loop {
             let path = self.parse_reference()?;
             for segment in path.segments.iter().chain(std::iter::once(&path.name)) {
                 crate::limits::check_max_length(
@@ -993,10 +956,10 @@ impl Parser {
             if path
                 .segments
                 .first()
-                .is_some_and(|segment| segment == &alias)
+                .is_some_and(|segment| segment == alias)
             {
                 return Err(self.error_at_token_with_suggestion(
-                    &with_token,
+                    with_token,
                     format!(
                         "Binding path must be relative to the imported spec, not prefixed with import alias `{alias}`."
                     ),
@@ -1011,20 +974,80 @@ impl Parser {
                 self.parse_assignment_after_key(|parser| parser.parse_with_rhs(), "with", false)?;
 
             let binding_span = self.span_covering(&binding_start_span, &self.last_span);
-            bindings.push(crate::parsing::ast::UsesBinding {
+            bindings.push(UsesBinding {
                 path,
                 rhs,
                 source_location: self.make_source(binding_span),
-                deprecated_standalone_with: false,
             });
-        }
 
-        let span = self.span_covering(start_span, &self.last_span);
-        Ok(LemmaData::new(
-            Reference::local(alias),
-            DataValue::Import { spec_ref, bindings },
-            self.make_source(span),
-        ))
+            if self.at(&TokenKind::Comma)? {
+                self.next()?;
+                if self.at_command_terminator()? || self.at(&TokenKind::Comma)? {
+                    let tok = self.peek()?.clone();
+                    return Err(self.error_at_token_with_suggestion(
+                        &tok,
+                        "Trailing or empty comma in list".to_string(),
+                        "Remove the extra comma, or add the missing field pair",
+                    ));
+                }
+                if !self.at_uses_field_pair()? {
+                    let tok = self.peek()?.clone();
+                    return Err(self.error_at_token_with_suggestion(
+                        &tok,
+                        "Expected a field pair after comma".to_string(),
+                        "Remove the extra comma, or add `path: value`",
+                    ));
+                }
+                binding_start_span = self.peek()?.span.clone();
+                continue;
+            }
+
+            if self.at_uses_field_pair()? {
+                let tok = self.peek()?.clone();
+                return Err(self.error_at_token_with_suggestion(
+                    &tok,
+                    "Expected a comma between field pairs".to_string(),
+                    "Separate field pairs with commas, for example `-> with qty: 3, sku: \"latte\"`",
+                ));
+            }
+            return Ok(bindings);
+        }
+    }
+
+    fn at_uses_field_pair(&mut self) -> Result<bool, Error> {
+        if self.at_command_terminator()? {
+            return Ok(false);
+        }
+        self.at_path_then_colon()
+    }
+
+    /// True when the next tokens are `label (. label)* :`, the start of a field pair.
+    /// Does not consume input.
+    fn at_path_then_colon(&mut self) -> Result<bool, Error> {
+        if !can_be_label(&self.peek()?.kind) {
+            return Ok(false);
+        }
+        let checkpoint = self.checkpoint();
+        let result = self.scan_path_then_colon();
+        self.restore(checkpoint);
+        result
+    }
+
+    fn scan_path_then_colon(&mut self) -> Result<bool, Error> {
+        self.next()?;
+        loop {
+            match self.peek()?.kind {
+                TokenKind::Colon => return Ok(true),
+                TokenKind::Dot => {
+                    self.next()?;
+                    if !can_be_label(&self.peek()?.kind) {
+                        return Ok(false);
+                    }
+                    self.next()?;
+                }
+                _ => return Ok(false),
+            }
+        }
     }
 
     fn parse_uses_statement(&mut self) -> Result<LemmaData, Error> {
@@ -1047,7 +1070,7 @@ impl Parser {
                 &name_tok,
                 format!(
                     "'{}' is a reserved keyword and cannot be used as a rule name",
-                    name_tok.text
+                    name_tok.text.to_ascii_lowercase()
                 ),
                 "Choose a different name that is not a reserved keyword",
             ));
@@ -1069,11 +1092,13 @@ impl Parser {
         self.expect(&TokenKind::Colon)?;
 
         // Parse the base expression or veto result (`veto "msg"`). `veto is …` is an expression.
-        let expression = if self.at(&TokenKind::Veto)? && !self.at_bare_veto_followed_by_is()? {
+        let root = if self.at(&TokenKind::Veto)? && !self.at_bare_veto_followed_by_is()? {
             self.parse_veto_expression()?
         } else {
             self.parse_expression()?
         };
+
+        let expression = self.finish_expression(root);
 
         // Parse unless clauses
         let mut unless_clauses = Vec::new();
@@ -1083,7 +1108,7 @@ impl Parser {
 
         let end_span = if let Some(last_unless) = unless_clauses.last() {
             last_unless.source_location.span.clone()
-        } else if let Some(ref loc) = expression.source_location {
+        } else if let Some(loc) = expression.root_source() {
             loc.span.clone()
         } else {
             start_span.clone()
@@ -1098,7 +1123,7 @@ impl Parser {
         })
     }
 
-    fn parse_veto_expression(&mut self) -> Result<Expression, Error> {
+    fn parse_veto_expression(&mut self) -> Result<ExprId, Error> {
         let veto_tok = self.expect(&TokenKind::Veto)?;
         let start_span = veto_tok.span.clone();
 
@@ -1120,22 +1145,22 @@ impl Parser {
         let unless_tok = self.expect(&TokenKind::Unless)?;
         let start_span = unless_tok.span.clone();
 
-        let condition = self.parse_expression()?;
+        let condition_root = self.parse_expression()?;
+        let condition = self.finish_expression(condition_root);
 
         self.expect(&TokenKind::Then)?;
 
-        let result = if self.at(&TokenKind::Veto)? {
+        let result_root = if self.at(&TokenKind::Veto)? {
             self.parse_veto_expression()?
         } else {
             self.parse_expression()?
         };
 
-        let end_span = result
-            .source_location
-            .as_ref()
-            .map(|s| s.span.clone())
+        let end_span = self
+            .expr_span(result_root)
             .unwrap_or_else(|| start_span.clone());
         let span = self.span_covering(&start_span, &end_span);
+        let result = self.finish_expression(result_root);
 
         Ok(UnlessClause {
             condition,
@@ -1144,34 +1169,11 @@ impl Parser {
         })
     }
 
-    fn parse_leaf_parent_type(&mut self) -> Result<ParentType, Error> {
-        let name_tok = self.next()?;
-        self.parse_leaf_parent_type_from_first_token(name_tok)
-    }
-
-    fn parse_leaf_parent_type_from_first_token(
-        &mut self,
-        name_tok: Token,
-    ) -> Result<ParentType, Error> {
-        if let Some(kind) = token_kind_to_primitive(&name_tok.kind) {
-            Ok(ParentType::Primitive { primitive: kind })
-        } else if can_be_label(&name_tok.kind) {
-            Ok(ParentType::Custom {
-                name: name_tok.text.clone(),
-            })
-        } else {
-            Err(self.error_at_token(
-                &name_tok,
-                format!("Expected a type name, found {}", name_tok.kind),
-            ))
-        }
-    }
-
     /// Parse a type arrow chain: [`ParentType`] followed by `(-> command)*`.
     fn parse_type_arrow_chain(&mut self) -> Result<(ParentType, Option<Vec<Constraint>>), Error> {
         let peek_kind = self.peek()?.kind.clone();
         let base = if let Some(primitive) = token_kind_to_primitive(&peek_kind) {
-            let _ = self.next()?;
+            self.next()?;
             if self.at(&TokenKind::Dot)? {
                 let dot_tok = self.peek()?.clone();
                 return Err(self.error_at_token_with_suggestion(
@@ -1183,15 +1185,7 @@ impl Parser {
             ParentType::Primitive { primitive }
         } else {
             let (name, _) = self.parse_spec_name()?;
-            if self.at(&TokenKind::Dot)? {
-                // Trailing `.` + primitive keyword (e.g. `finance.text`) — label stitch stopped.
-                self.next()?;
-                let inner = self.parse_leaf_parent_type()?;
-                ParentType::Qualified {
-                    spec_alias: name,
-                    inner: Box::new(inner),
-                }
-            } else if let Some((alias, type_name)) = name.rsplit_once('.') {
+            if let Some((alias, type_name)) = name.rsplit_once('.') {
                 ParentType::Qualified {
                     spec_alias: alias.to_string(),
                     inner: Box::new(ParentType::Custom {
@@ -1206,6 +1200,15 @@ impl Parser {
         let base = if self.at(&TokenKind::Identifier)? && self.peek()?.text == "range" {
             self.next()?;
             ParentType::Ranged {
+                inner: Box::new(base),
+            }
+        } else {
+            base
+        };
+
+        let base = if self.at(&TokenKind::List)? {
+            self.next()?;
+            ParentType::List {
                 inner: Box::new(base),
             }
         } else {
@@ -1243,8 +1246,40 @@ impl Parser {
         &mut self,
     ) -> Result<(TypeConstraintCommand, Vec<CommandArg>, bool), Error> {
         let name_tok = self.next()?;
+        if matches!(name_tok.kind, TokenKind::Key) {
+            return Err(self.error_at_token(
+                &name_tok,
+                "value lists are numbered; `-> key` is for instance lists".to_string(),
+            ));
+        }
+        if matches!(
+            name_tok.kind,
+            TokenKind::Find
+                | TokenKind::First
+                | TokenKind::Last
+                | TokenKind::Sum
+                | TokenKind::Avg
+                | TokenKind::Product
+                | TokenKind::Count
+                | TokenKind::Min
+                | TokenKind::Max
+                | TokenKind::Any
+                | TokenKind::All
+                | TokenKind::Where
+                | TokenKind::Sort
+                | TokenKind::Top
+        ) {
+            return Err(self.error_at_token(
+                &name_tok,
+                "data supplies values; query commands belong on rules, not data declarations"
+                    .to_string(),
+            ));
+        }
         if !can_be_label(&name_tok.kind)
-            && !matches!(name_tok.kind, TokenKind::Lower | TokenKind::Upper)
+            && !matches!(
+                name_tok.kind,
+                TokenKind::Lower | TokenKind::Upper | TokenKind::With
+            )
         {
             return Err(self.error_at_token(
                 &name_tok,
@@ -1255,7 +1290,7 @@ impl Parser {
             self.error_at_token(
                 &name_tok,
                 format!(
-                    "Unknown constraint command '{}'. Valid commands: help, suggest, fill, unit, trait, minimum, maximum, lower, upper, decimals, option, options, length",
+                    "Unknown constraint command '{}'. Valid commands: help, suggest, with, unit, trait, minimum, maximum, lower, upper, decimals, option, options, length",
                     name_tok.text
                 ),
             )
@@ -1266,8 +1301,9 @@ impl Parser {
                 let (args, deprecated_without_colon) = self.parse_unit_as_assignment()?;
                 Ok((cmd, args, deprecated_without_colon))
             }
-            ContinuationShape::SpaceSeparated => {
-                Ok((cmd, self.parse_generic_command_args()?, false))
+            ContinuationShape::Single => Ok((cmd, self.parse_single_command_arg(cmd)?, false)),
+            ContinuationShape::CommaSeparated => {
+                Ok((cmd, self.parse_comma_separated_command_args()?, false))
             }
         }
     }
@@ -1302,6 +1338,17 @@ impl Parser {
         }
 
         let peek_kind = self.peek()?.kind.clone();
+        if is_keyword(&peek_kind) {
+            let tok = self.peek()?.clone();
+            return Err(self.error_at_token_with_suggestion(
+                &tok,
+                format!(
+                    "'{}' is a reserved keyword and cannot be used as a unit name",
+                    tok.text.to_ascii_lowercase()
+                ),
+                "Choose a different name that is not a reserved keyword",
+            ));
+        }
         if !can_be_label(&peek_kind) {
             return Ok((Vec::new(), false));
         }
@@ -1338,7 +1385,7 @@ impl Parser {
 
         let peek_kind_after_prefix = self.peek()?.kind.clone();
         let has_compound_expr =
-            can_be_label(&peek_kind_after_prefix) && !self.at_command_terminator()?;
+            can_be_unit_name(&peek_kind_after_prefix) && !self.at_command_terminator()?;
 
         if has_compound_expr {
             let factors = self.parse_unit_factors()?;
@@ -1356,39 +1403,113 @@ impl Parser {
         }
     }
 
-    /// Parse arguments for a generic (non-unit) constraint command.
-    fn parse_generic_command_args(&mut self) -> Result<Vec<CommandArg>, Error> {
+    fn parse_single_command_arg(
+        &mut self,
+        cmd: TypeConstraintCommand,
+    ) -> Result<Vec<CommandArg>, Error> {
+        let Some(arg) = self.try_parse_one_command_arg()? else {
+            return Ok(Vec::new());
+        };
+        if self.at(&TokenKind::Comma)? || self.command_arg_starts_without_comma()? {
+            let tok = self.peek()?.clone();
+            return Err(self.error_at_token_with_suggestion(
+                &tok,
+                format!("`-> {cmd}` takes one value"),
+                format!("Write `-> {cmd}` with a single argument"),
+            ));
+        }
+        Ok(vec![arg])
+    }
+
+    fn try_parse_one_command_arg(&mut self) -> Result<Option<CommandArg>, Error> {
+        if self.at(&TokenKind::Arrow)?
+            || self.at(&TokenKind::Eof)?
+            || is_spec_body_keyword(&self.peek()?.kind)
+            || self.at(&TokenKind::Spec)?
+            || self.at(&TokenKind::Comma)?
+        {
+            return Ok(None);
+        }
+
+        let peek_kind = self.peek()?.kind.clone();
+        match peek_kind {
+            TokenKind::NumberLit | TokenKind::Minus | TokenKind::Plus | TokenKind::StringLit => {
+                let value = self.parse_literal_value()?;
+                Ok(Some(CommandArg::Literal(value)))
+            }
+            ref k if is_boolean_keyword(k) => {
+                let value = self.parse_literal_value()?;
+                Ok(Some(CommandArg::Literal(value)))
+            }
+            ref k if can_be_label(k) => {
+                let tok = self.next()?;
+                Ok(Some(CommandArg::Label(tok.text)))
+            }
+            _ => Ok(None),
+        }
+    }
+
+    fn parse_comma_separated_command_args(&mut self) -> Result<Vec<CommandArg>, Error> {
         let mut args = Vec::new();
+        if self.at_command_terminator()? {
+            return Ok(args);
+        }
+        if self.at(&TokenKind::Comma)? {
+            let tok = self.next()?;
+            return Err(self.error_at_token_with_suggestion(
+                &tok,
+                "Unexpected comma".to_string(),
+                "Remove the extra comma, or put a value before it",
+            ));
+        }
+
         loop {
-            if self.at(&TokenKind::Arrow)?
-                || self.at(&TokenKind::Eof)?
-                || is_spec_body_keyword(&self.peek()?.kind)
-                || self.at(&TokenKind::Spec)?
-            {
-                break;
+            let Some(arg) = self.try_parse_one_command_arg()? else {
+                let tok = self.peek()?.clone();
+                return Err(self.error_at_token_with_suggestion(
+                    &tok,
+                    "Expected a value after comma".to_string(),
+                    "Remove the extra comma, or add the missing value",
+                ));
+            };
+            args.push(arg);
+
+            if self.at(&TokenKind::Comma)? {
+                self.next()?;
+                if self.at_command_terminator()? || self.at(&TokenKind::Comma)? {
+                    let tok = self.peek()?.clone();
+                    return Err(self.error_at_token_with_suggestion(
+                        &tok,
+                        "Trailing or empty comma in list".to_string(),
+                        "Remove the extra comma, or add the missing value",
+                    ));
+                }
+                continue;
             }
 
-            let peek_kind = self.peek()?.kind.clone();
-            match peek_kind {
-                TokenKind::NumberLit
-                | TokenKind::Minus
-                | TokenKind::Plus
-                | TokenKind::StringLit => {
-                    let value = self.parse_literal_value()?;
-                    args.push(CommandArg::Literal(value));
-                }
-                ref k if is_boolean_keyword(k) => {
-                    let value = self.parse_literal_value()?;
-                    args.push(CommandArg::Literal(value));
-                }
-                ref k if can_be_label(k) => {
-                    let tok = self.next()?;
-                    args.push(CommandArg::Label(tok.text));
-                }
-                _ => break,
+            if self.command_arg_starts_without_comma()? {
+                let tok = self.peek()?.clone();
+                return Err(self.error_at_token_with_suggestion(
+                    &tok,
+                    "Expected a comma between items".to_string(),
+                    "Separate items with commas, for example `-> options \"a\", \"b\"`",
+                ));
             }
+            break;
         }
         Ok(args)
+    }
+
+    fn command_arg_starts_without_comma(&mut self) -> Result<bool, Error> {
+        if self.at_command_terminator()? || self.at(&TokenKind::Comma)? {
+            return Ok(false);
+        }
+        let peek_kind = self.peek()?.kind.clone();
+        Ok(matches!(
+            peek_kind,
+            TokenKind::NumberLit | TokenKind::Minus | TokenKind::Plus | TokenKind::StringLit
+        ) || is_boolean_keyword(&peek_kind)
+            || can_be_label(&peek_kind))
     }
 
     fn parse_scalar_literal_value(&mut self) -> Result<Value, Error> {
@@ -1442,6 +1563,8 @@ impl Parser {
     /// - `meter / second * kg`     → `[{meter, +1}, {second, -1}, {kg, +1}]`
     fn parse_unit_factors(&mut self) -> Result<Vec<UnitFactor>, Error> {
         let mut factors: Vec<UnitFactor> = Vec::new();
+        let mut summed_exponents: std::collections::BTreeMap<String, i32> =
+            std::collections::BTreeMap::new();
         let mut denominator_mode = false;
         // Tracks whether the loop is sitting immediately after an operator (* or /).
         // On the first iteration there is an implicit "we just started", so we allow
@@ -1491,7 +1614,7 @@ impl Parser {
 
             // A label is a measure reference.
             let peek_kind = self.peek()?.kind.clone();
-            if !can_be_label(&peek_kind) {
+            if !can_be_unit_name(&peek_kind) {
                 break;
             }
 
@@ -1502,7 +1625,7 @@ impl Parser {
             }
             operator_just_consumed = false;
 
-            let (measure_ref, _end_span) = self.parse_unit_path()?;
+            let (measure_ref, measure_span) = self.parse_unit_path()?;
 
             // Optional exponent: `^` followed by an optional `-` and an integer.
             let explicit_exp: Option<i32> = if self.at(&TokenKind::Caret)? {
@@ -1556,6 +1679,24 @@ impl Parser {
                 (None, true) => -1,
                 (None, false) => 1,
             };
+
+            let summed = summed_exponents
+                .entry(crate::parsing::ast::canonical_logical_name(&measure_ref).into_owned())
+                .or_insert(0i32);
+            *summed = summed
+                .checked_add(final_exp)
+                .filter(|sum| sum.unsigned_abs() <= crate::limits::MAX_UNIT_EXPONENT.unsigned_abs())
+                .ok_or_else(|| {
+                    Error::parsing(
+                        format!(
+                            "Unit '{}' exceeds the maximum unit exponent of {} in this unit expression",
+                            measure_ref,
+                            crate::limits::MAX_UNIT_EXPONENT
+                        ),
+                        Source::new(self.source_type(), measure_span),
+                        None::<String>,
+                    )
+                })?;
 
             factors.push(UnitFactor {
                 measure_ref,
@@ -1648,6 +1789,25 @@ impl Parser {
         let num_text = &num_tok.text;
         let num_span = num_tok.span.clone();
 
+        if self.at(&TokenKind::Comma)? {
+            let comma = self.peek()?.clone();
+            let next = self.lexer.peek_second()?.clone();
+            let digits_grouped = next.kind == TokenKind::NumberLit
+                && comma.span.start == num_span.end
+                && next.span.start == comma.span.end;
+            if digits_grouped {
+                let grouped = format!("{}_{}", num_text, next.text);
+                return Err(self.error_at_token_with_suggestion(
+                    &comma,
+                    format!(
+                        "`,` is a list separator, not a digit separator. Write `{grouped}` instead of `{num_text},{}`",
+                        next.text
+                    ),
+                    format!("Use `{grouped}`"),
+                ));
+            }
+        }
+
         // Check if followed by - which could make it a date (YYYY-MM-DD)
         if num_text.len() == 4
             && num_text.chars().all(|c| c.is_ascii_digit())
@@ -1712,8 +1872,9 @@ impl Parser {
             return Ok(Value::NumberWithUnit(decimal, "permille".to_string()));
         }
 
-        if can_be_label(&peeked.kind) {
-            let (unit_path, _end_span) = self.parse_unit_path()?;
+        let starts_unit = can_be_unit_name(&peeked.kind);
+        if starts_unit && !self.at_path_then_colon()? {
+            let (unit_path, _) = self.parse_unit_path()?;
             let decimal = parse_decimal_string(num_text, &num_span, self)?;
             return Ok(Value::NumberWithUnit(decimal, unit_path));
         }
@@ -1726,7 +1887,7 @@ impl Parser {
     /// One or more labels separated by `.` (bare unit or qualified unit path).
     fn parse_unit_path(&mut self) -> Result<(String, Span), Error> {
         let first = self.next()?;
-        if !can_be_label(&first.kind) {
+        if !can_be_unit_name(&first.kind) {
             return Err(self.error_at_token(
                 &first,
                 format!("Expected a unit name, found {}", first.kind),
@@ -1737,7 +1898,7 @@ impl Parser {
         while self.at(&TokenKind::Dot)? {
             self.next()?;
             let seg = self.next()?;
-            if !can_be_label(&seg.kind) {
+            if !can_be_unit_name(&seg.kind) {
                 return Err(self.error_at_token(
                     &seg,
                     format!("Expected a unit path segment after '.', found {}", seg.kind),
@@ -1905,14 +2066,23 @@ impl Parser {
     }
 
     // ========================================================================
-    // Expression parsing (Pratt parser / precedence climbing)
+    // Expression grammar
     // ========================================================================
 
-    fn new_expression(
-        &mut self,
-        kind: ExpressionKind,
-        source: Source,
-    ) -> Result<Expression, Error> {
+    fn expr_span(&self, id: ExprId) -> Option<Span> {
+        self.table.source(id).map(|source| source.span.clone())
+    }
+
+    fn expr_source(&self, id: ExprId) -> Option<Source> {
+        self.table.source(id).cloned()
+    }
+
+    /// Ends one top-level expression: its nodes move into a fresh table owned by the result.
+    fn finish_expression(&mut self, root: ExprId) -> Expression {
+        ExprTree::new(self.table.take_compact(), root)
+    }
+
+    fn new_expression(&mut self, kind: ExpressionKind, source: Source) -> Result<ExprId, Error> {
         self.expression_count += 1;
         if self.expression_count > self.max_expression_count {
             return Err(Error::resource_limit_exceeded(
@@ -1925,7 +2095,7 @@ impl Parser {
                 None,
             ));
         }
-        Ok(Expression::new(kind, source))
+        Ok(self.table.push(kind, Some(source)))
     }
 
     fn check_depth(&mut self) -> Result<(), Error> {
@@ -1943,37 +2113,6 @@ impl Parser {
             ));
         }
         Ok(())
-    }
-
-    fn parse_expression(&mut self) -> Result<Expression, Error> {
-        self.check_depth()?;
-        let result = self.parse_and_expression();
-        self.depth_tracker.pop_depth();
-        result
-    }
-
-    fn parse_and_expression(&mut self) -> Result<Expression, Error> {
-        let start_span = self.peek()?.span.clone();
-        let mut left = self.parse_and_operand()?;
-
-        while self.at(&TokenKind::And)? {
-            self.next()?; // consume 'and'
-            let right = self.parse_and_operand()?;
-            let span = self.span_covering(
-                &start_span,
-                &right
-                    .source_location
-                    .as_ref()
-                    .map(|s| s.span.clone())
-                    .unwrap_or_else(|| start_span.clone()),
-            );
-            left = self.new_expression(
-                ExpressionKind::LogicalAnd(Arc::new(left), Arc::new(right)),
-                self.make_source(span),
-            )?;
-        }
-
-        Ok(left)
     }
 
     fn at_bare_veto_token(&mut self) -> Result<bool, Error> {
@@ -2020,25 +2159,23 @@ impl Parser {
 
     fn wrap_result_is_veto_expression(
         &mut self,
-        operand: Expression,
+        operand: ExprId,
         operator_is_not: bool,
         keyword_was_negated: bool,
         start_span: Span,
-    ) -> Result<Expression, Error> {
+    ) -> Result<ExprId, Error> {
         let negate = operator_is_not ^ keyword_was_negated;
-        let end_span = operand
-            .source_location
-            .as_ref()
-            .map(|source| source.span.clone())
+        let end_span = self
+            .expr_span(operand)
             .unwrap_or_else(|| start_span.clone());
         let span = self.span_covering(&start_span, &end_span);
         let core = self.new_expression(
-            ExpressionKind::ResultIsVeto(Arc::new(operand)),
+            ExpressionKind::ResultIsVeto(operand),
             self.make_source(span.clone()),
         )?;
         if negate {
             self.new_expression(
-                ExpressionKind::LogicalNegation(Arc::new(core), NegationType::Not),
+                ExpressionKind::LogicalNegation(core, NegationType::Not),
                 self.make_source(span),
             )
         } else {
@@ -2046,168 +2183,206 @@ impl Parser {
         }
     }
 
-    fn parse_veto_status_lhs_is_comparison(&mut self) -> Result<Expression, Error> {
-        let start_span = self.peek()?.span.clone();
-        let keyword_was_negated = if self.at(&TokenKind::Not)? {
+    fn next_is_list_type_suffix(&mut self) -> Result<bool, Error> {
+        let checkpoint = self.checkpoint();
+        self.next()?;
+        let list_after_range = if self.at(&TokenKind::Identifier)? && self.peek()?.text == "range" {
             self.next()?;
-            true
+            self.at(&TokenKind::List)?
         } else {
-            false
+            self.at(&TokenKind::List)?
         };
-        self.expect(&TokenKind::Veto)?;
-        if self.at(&TokenKind::StringLit)? {
-            let tok = self.peek()?.clone();
-            return Err(self.error_at_token(
-                &tok,
-                "veto with a message is only valid as a rule or unless result, not in `is veto` comparisons",
-            ));
-        }
-        let operator = self.parse_comparison_operator()?;
-        let operator_is_not = matches!(operator, ComparisonComputation::IsNot);
-        if !matches!(
-            operator,
-            ComparisonComputation::Is | ComparisonComputation::IsNot
-        ) {
-            let tok = self.peek()?.clone();
-            return Err(self.error_at_token(
-                &tok,
-                "Expected `is` or `is not` after `veto` in a veto-status comparison",
-            ));
-        }
-        let operand = self.parse_range_expression()?;
-        self.wrap_result_is_veto_expression(
-            operand,
-            operator_is_not,
-            keyword_was_negated,
-            start_span,
-        )
+        self.restore(checkpoint);
+        Ok(list_after_range)
     }
 
-    fn parse_and_operand(&mut self) -> Result<Expression, Error> {
-        if self.at_not_bare_veto_followed_by_is()? || self.at_bare_veto_followed_by_is()? {
-            return self.parse_veto_status_lhs_is_comparison();
-        }
-
-        // not expression
-        if self.at(&TokenKind::Not)? {
-            return self.parse_not_expression();
-        }
-
-        // repository_with_suffix: repository_expression followed by optional suffix
-        self.parse_repository_with_suffix()
-    }
-
-    fn parse_not_expression(&mut self) -> Result<Expression, Error> {
-        let not_tok = self.expect(&TokenKind::Not)?;
-        let start_span = not_tok.span.clone();
-
-        self.check_depth()?;
-        let operand = self.parse_and_operand()?;
-        self.depth_tracker.pop_depth();
-
-        let end_span = operand
-            .source_location
-            .as_ref()
-            .map(|s| s.span.clone())
-            .unwrap_or_else(|| start_span.clone());
-        let span = self.span_covering(&start_span, &end_span);
-
-        self.new_expression(
-            ExpressionKind::LogicalNegation(Arc::new(operand), NegationType::Not),
-            self.make_source(span),
-        )
-    }
-
-    fn parse_repository_with_suffix(&mut self) -> Result<Expression, Error> {
-        let start_span = self.peek()?.span.clone();
-        let repository = self.parse_range_expression()?;
-        self.continue_repository_operand(repository, start_span)
-    }
-
-    /// Postfix suffixes on a completed repository/range expression (`in`, calendar, comparison, `as`).
-    fn continue_repository_operand(
-        &mut self,
-        mut expr: Expression,
-        start_span: Span,
-    ) -> Result<Expression, Error> {
-        loop {
-            let peeked = self.peek()?;
-
-            if is_comparison_operator(&peeked.kind) {
-                return self.parse_comparison_suffix(expr, start_span);
-            }
-
-            if peeked.kind == TokenKind::Not {
-                expr = self.parse_not_in_calendar_suffix(expr, start_span.clone())?;
-                continue;
-            }
-
-            if peeked.kind == TokenKind::In {
-                expr = self.parse_in_suffix(expr, start_span.clone())?;
-                continue;
-            }
-
-            if peeked.kind == TokenKind::As {
-                expr = self.parse_as_chain(expr, start_span.clone())?;
-                continue;
-            }
-
-            break;
-        }
-
-        if self.at_expression_suffix_end()? {
+    fn wrap_list_type_suffix(&mut self, expr: ExprId, start_span: Span) -> Result<ExprId, Error> {
+        if !self.at_list_type_suffix()? {
             return Ok(expr);
         }
-
-        let tok = self.peek()?.clone();
-        Err(self.error_at_token(
-            &tok,
-            format!("Unexpected token '{}' after expression", tok.text),
-        ))
-    }
-
-    fn parse_comparison_suffix(
-        &mut self,
-        left: Expression,
-        start_span: Span,
-    ) -> Result<Expression, Error> {
-        let operator = self.parse_comparison_operator()?;
-        let operator_is_not = matches!(operator, ComparisonComputation::IsNot);
-
-        if matches!(
-            operator,
-            ComparisonComputation::Is | ComparisonComputation::IsNot
-        ) && self.at_bare_veto_token()?
-        {
-            self.expect(&TokenKind::Veto)?;
-            if self.at(&TokenKind::StringLit)? {
-                let tok = self.peek()?.clone();
-                return Err(self.error_at_token(
-                    &tok,
-                    "veto with a message is only valid as a rule or unless result, not in `is veto` comparisons",
-                ));
-            }
-            return self.wrap_result_is_veto_expression(left, operator_is_not, false, start_span);
-        }
-
-        // Right side can be: not_expr | range/repository expression (term-level `as` included)
-        let right = if self.at(&TokenKind::Not)? {
-            self.parse_not_expression()?
-        } else {
-            self.parse_range_expression()?
+        let ExpressionKind::Reference(reference) = self.table.kind(expr).clone() else {
+            return Ok(expr);
         };
-
-        let end_span = right
-            .source_location
-            .as_ref()
-            .map(|s| s.span.clone())
-            .unwrap_or_else(|| start_span.clone());
-        let span = self.span_covering(&start_span, &end_span);
-
+        let mut parent = parent_type_from_reference(&reference);
+        if self.at(&TokenKind::Identifier)? && self.peek()?.text == "range" {
+            self.next()?;
+            parent = ParentType::Ranged {
+                inner: Box::new(parent),
+            };
+        }
+        self.expect(&TokenKind::List)?;
+        parent = ParentType::List {
+            inner: Box::new(parent),
+        };
+        let span = self.span_covering(&start_span, &self.last_span);
         self.new_expression(
-            ExpressionKind::Comparison(Arc::new(left), operator, Arc::new(right)),
+            ExpressionKind::ListType { element: parent },
             self.make_source(span),
         )
+    }
+
+    fn at_list_type_suffix(&mut self) -> Result<bool, Error> {
+        if self.at(&TokenKind::List)? {
+            return Ok(true);
+        }
+        if self.at(&TokenKind::Identifier)? && self.peek()?.text == "range" {
+            let checkpoint = self.checkpoint();
+            self.next()?;
+            let list = self.at(&TokenKind::List)?;
+            self.restore(checkpoint);
+            return Ok(list);
+        }
+        Ok(false)
+    }
+
+    fn parse_expression_parent_type(&mut self) -> Result<ParentType, Error> {
+        let peek_kind = self.peek()?.kind.clone();
+        let base = if let Some(primitive) = token_kind_to_primitive(&peek_kind) {
+            self.next()?;
+            ParentType::Primitive { primitive }
+        } else {
+            let (name, _) = self.parse_spec_name()?;
+            if let Some((alias, type_name)) = name.rsplit_once('.') {
+                ParentType::Qualified {
+                    spec_alias: alias.to_string(),
+                    inner: Box::new(ParentType::Custom {
+                        name: type_name.to_string(),
+                    }),
+                }
+            } else {
+                ParentType::Custom { name }
+            }
+        };
+        let base = if self.at(&TokenKind::Identifier)? && self.peek()?.text == "range" {
+            self.next()?;
+            ParentType::Ranged {
+                inner: Box::new(base),
+            }
+        } else {
+            base
+        };
+        self.expect(&TokenKind::List)?;
+        Ok(ParentType::List {
+            inner: Box::new(base),
+        })
+    }
+
+    /// A token that starts a bare (unparenthesised) command argument. Never a sign:
+    /// after a command, `+` / `-` is the binary operator. Never `is`: `items -> count is 0`.
+    fn at_bare_operand_start(&mut self) -> Result<bool, Error> {
+        let kind = self.peek()?.kind.clone();
+        if kind == TokenKind::Is {
+            return Ok(false);
+        }
+        Ok(matches!(
+            kind,
+            TokenKind::NumberLit
+                | TokenKind::StringLit
+                | TokenKind::Now
+                | TokenKind::Past
+                | TokenKind::Future
+                | TokenKind::Lower
+                | TokenKind::Upper
+        ) || is_boolean_keyword(&kind)
+            || is_math_function(&kind)
+            || can_be_label(&kind)
+            || token_kind_to_primitive(&kind).is_some())
+    }
+
+    fn at_command_argument_start(&mut self) -> Result<bool, Error> {
+        Ok(self.at(&TokenKind::LParen)? || self.at_bare_operand_start()?)
+    }
+
+    /// Tokens that may follow a bare argument. Anything else (an operator) is ambiguous.
+    fn at_bare_argument_end(&mut self) -> Result<bool, Error> {
+        Ok(self.at_any(&[
+            TokenKind::Arrow,
+            TokenKind::Then,
+            TokenKind::Unless,
+            TokenKind::RParen,
+            TokenKind::Comma,
+            TokenKind::Eof,
+            TokenKind::Spec,
+            TokenKind::Repo,
+            TokenKind::Uses,
+        ])? || is_spec_body_keyword(&self.peek()?.kind))
+    }
+
+    fn bare_argument_error(&mut self, command: &str) -> Error {
+        let tok = match self.peek() {
+            Ok(tok) => tok.clone(),
+            Err(error) => return error,
+        };
+        self.error_at_token(
+            &tok,
+            format!(
+                "`{command}` without parentheses takes one operand, found '{}' after it; \
+                 write `{command}(...)` around the whole argument, or `(list -> {command} ...)` \
+                 to use the result",
+                tok.text
+            ),
+        )
+    }
+
+    fn reject_comma_after_call(&mut self, command: &str) -> Result<(), Error> {
+        if self.call_argument_depth == 0 && self.at(&TokenKind::Comma)? {
+            let tok = self.peek()?.clone();
+            return Err(self.error_at_token(
+                &tok,
+                format!(
+                    "`,` after `{command}(...)`: put all arguments inside the parentheses, \
+                     `{command}(a, b)`"
+                ),
+            ));
+        }
+        Ok(())
+    }
+
+    fn reject_command_argument(&mut self, command: &str) -> Result<(), Error> {
+        if self.at_command_argument_start()? {
+            let tok = self.peek()?.clone();
+            return Err(self.error_at_token(&tok, format!("`{command}` takes no argument")));
+        }
+        Ok(())
+    }
+
+    fn at_row_condition_operator(&mut self) -> Result<bool, Error> {
+        Ok(is_comparison_operator(&self.peek()?.kind) || self.at(&TokenKind::In)?)
+    }
+
+    fn parse_row_condition_operator(&mut self) -> Result<RowCondition, Error> {
+        if self.at(&TokenKind::In)? {
+            self.next()?;
+            return Ok(RowCondition::In);
+        }
+        Ok(RowCondition::Compare(self.parse_comparison_operator()?))
+    }
+
+    fn condition_error(&mut self, command: &str) -> Error {
+        let tok = match self.peek() {
+            Ok(tok) => tok.clone(),
+            Err(error) => return error,
+        };
+        self.error_at_token(
+            &tok,
+            format!(
+                "`{command}` condition without parentheses is one comparison between single \
+                 operands, found '{}'; write `{command}(...)` around the whole condition",
+                tok.text
+            ),
+        )
+    }
+
+    /// `asc` when omitted.
+    fn parse_sort_direction(&mut self) -> Result<bool, Error> {
+        if self.at(&TokenKind::Desc)? {
+            self.next()?;
+            return Ok(true);
+        }
+        if self.at(&TokenKind::Asc)? {
+            self.next()?;
+        }
+        Ok(false)
     }
 
     fn parse_comparison_operator(&mut self) -> Result<ComparisonComputation, Error> {
@@ -2235,9 +2410,9 @@ impl Parser {
 
     fn parse_not_in_calendar_suffix(
         &mut self,
-        repository: Expression,
+        repository: ExprId,
         start_span: Span,
-    ) -> Result<Expression, Error> {
+    ) -> Result<ExprId, Error> {
         self.expect(&TokenKind::Not)?;
         self.expect(&TokenKind::In)?;
         self.expect_calendar_period_marker()?;
@@ -2245,108 +2420,12 @@ impl Parser {
         let end = self.peek()?.span.clone();
         let span = self.span_covering(&start_span, &end);
         self.new_expression(
-            ExpressionKind::DateCalendar(DateCalendarKind::NotIn, unit, Arc::new(repository)),
+            ExpressionKind::DateCalendar(DateCalendarKind::NotIn, unit, repository),
             self.make_source(span),
         )
     }
 
-    fn parse_in_suffix(
-        &mut self,
-        repository: Expression,
-        start_span: Span,
-    ) -> Result<Expression, Error> {
-        self.expect(&TokenKind::In)?;
-
-        let peeked = self.peek()?;
-
-        // "in past calendar <unit>" or "in future calendar <unit>"
-        if peeked.kind == TokenKind::Past || peeked.kind == TokenKind::Future {
-            let direction = self.next()?;
-            let rel_kind = if direction.kind == TokenKind::Past {
-                DateRelativeKind::InPast
-            } else {
-                DateRelativeKind::InFuture
-            };
-
-            // Check for "calendar" keyword
-            if self.at_calendar_period_marker()? {
-                self.next_calendar_period_marker()?;
-                let cal_kind = if direction.kind == TokenKind::Past {
-                    DateCalendarKind::Past
-                } else {
-                    DateCalendarKind::Future
-                };
-                let unit = self.parse_calendar_unit()?;
-                let end = self.peek()?.span.clone();
-                let span = self.span_covering(&start_span, &end);
-                return self.new_expression(
-                    ExpressionKind::DateCalendar(cal_kind, unit, Arc::new(repository)),
-                    self.make_source(span),
-                );
-            }
-
-            if self.at(&TokenKind::And)?
-                || self.at(&TokenKind::Unless)?
-                || self.at(&TokenKind::Then)?
-                || self.at(&TokenKind::RParen)?
-                || self.at(&TokenKind::Eof)?
-                || is_comparison_operator(&self.peek()?.kind)
-            {
-                let end = self.peek()?.span.clone();
-                let span = self.span_covering(&start_span, &end);
-                return self.new_expression(
-                    ExpressionKind::DateRelative(rel_kind, Arc::new(repository)),
-                    self.make_source(span),
-                );
-            }
-
-            let offset = self.parse_repository_expression()?;
-            let offset_end_span = offset
-                .source_location
-                .as_ref()
-                .map(|s| s.span.clone())
-                .unwrap_or_else(|| start_span.clone());
-            let range = self.new_expression(
-                ExpressionKind::PastFutureRange(rel_kind, Arc::new(offset)),
-                self.make_source(self.span_covering(&direction.span, &offset_end_span)),
-            )?;
-            let span = self.span_covering(&start_span, &offset_end_span);
-            return self.new_expression(
-                ExpressionKind::RangeContainment(Arc::new(repository), Arc::new(range)),
-                self.make_source(span),
-            );
-        }
-
-        // "in calendar <unit>"
-        if token_is_calendar_period_marker(peeked) {
-            self.next_calendar_period_marker()?;
-            let unit = self.parse_calendar_unit()?;
-            let end = self.peek()?.span.clone();
-            let span = self.span_covering(&start_span, &end);
-            return self.new_expression(
-                ExpressionKind::DateCalendar(DateCalendarKind::Current, unit, Arc::new(repository)),
-                self.make_source(span),
-            );
-        }
-
-        let range = self.parse_range_expression()?;
-        let end_span = range
-            .source_location
-            .as_ref()
-            .map(|s| s.span.clone())
-            .unwrap_or_else(|| start_span.clone());
-        let span = self.span_covering(&start_span, &end_span);
-        self.new_expression(
-            ExpressionKind::RangeContainment(Arc::new(repository), Arc::new(range)),
-            self.make_source(span),
-        )
-    }
-
-    fn parse_as_chain(
-        &mut self,
-        mut expr: Expression,
-        start_span: Span,
-    ) -> Result<Expression, Error> {
+    fn parse_as_chain(&mut self, mut expr: ExprId, start_span: Span) -> Result<ExprId, Error> {
         while self.at(&TokenKind::As)? {
             self.expect(&TokenKind::As)?;
             let target_tok = self.next()?;
@@ -2376,7 +2455,7 @@ impl Parser {
                     unit_name: unit_path,
                 };
                 expr = self.new_expression(
-                    ExpressionKind::UnitConversion(Arc::new(expr), target),
+                    ExpressionKind::UnitConversion(expr, target),
                     self.make_source(self.span_covering(&start_span, &end_span)),
                 )?;
                 continue;
@@ -2390,19 +2469,22 @@ impl Parser {
                 ));
             };
             expr = self.new_expression(
-                ExpressionKind::UnitConversion(Arc::new(expr), target),
+                ExpressionKind::UnitConversion(expr, target),
                 self.make_source(self.span_covering(&start_span, &target_tok.span)),
             )?;
         }
         Ok(expr)
     }
 
-    fn is_plain_number_literal(expr: &Expression) -> bool {
-        matches!(expr.kind, ExpressionKind::Literal(Value::Number(_)))
+    fn is_plain_number_literal(&self, id: ExprId) -> bool {
+        matches!(
+            self.table.kind(id),
+            ExpressionKind::Literal(Value::Number(_))
+        )
     }
 
-    fn is_unit_conversion(expr: &Expression) -> bool {
-        matches!(expr.kind, ExpressionKind::UnitConversion(..))
+    fn is_unit_conversion(&self, id: ExprId) -> bool {
+        matches!(self.table.kind(id), ExpressionKind::UnitConversion(..))
     }
 
     /// True when the next token can follow a completed suffix expression (no further operands).
@@ -2415,6 +2497,8 @@ impl Parser {
             || self.at(&TokenKind::Then)?
             || self.at(&TokenKind::RParen)?
             || self.at(&TokenKind::Eof)?
+            || self.at(&TokenKind::Arrow)?
+            || self.at(&TokenKind::Comma)?
             || self.at(&TokenKind::Spec)?
             || self.at(&TokenKind::Repo)?
             || self.at(&TokenKind::Uses)?
@@ -2433,415 +2517,23 @@ impl Parser {
     }
 
     // ========================================================================
-    // Arithmetic expressions (precedence climbing)
+    // Arithmetic and range operands
     // ========================================================================
 
-    fn parse_range_expression(&mut self) -> Result<Expression, Error> {
-        self.parse_repository_expression()
-    }
-
-    /// Atom or range-typed value: `...` binds before `^`, `*`, `/`, `%` on the same operand.
-    /// Both endpoints use [`Self::parse_range_ellipsis_bound`] (`+`/`-` only) so
-    /// `now - 7 day...now` and `start...start + length` are valid, and
-    /// `rate * period_start...period_end` keeps `*` outside the range.
-    fn parse_range_operand(&mut self) -> Result<Expression, Error> {
-        let start_span = self.peek()?.span.clone();
-        let checkpoint = self.checkpoint();
-        let left = self.parse_range_ellipsis_bound()?;
-        if !self.at(&TokenKind::Ellipsis)? {
-            self.restore(checkpoint);
-            return self.parse_factor();
-        }
-
-        self.next()?;
-        let right = self.parse_range_ellipsis_bound()?;
-        let end_span = right
-            .source_location
-            .as_ref()
-            .map(|s| s.span.clone())
-            .unwrap_or_else(|| start_span.clone());
-        let span = self.span_covering(&start_span, &end_span);
-        self.new_expression(
-            ExpressionKind::RangeLiteral(Arc::new(left), Arc::new(right)),
-            self.make_source(span),
-        )
-    }
-
-    /// One side of `...`: `+`/`-` between powers only (no `*`/`/`/`%` — those bind outside the range).
-    fn parse_range_ellipsis_bound(&mut self) -> Result<Expression, Error> {
-        let start_span = self.peek()?.span.clone();
-        let mut left = self.parse_power_for_range_bound()?;
-
-        while self.at_any(&[TokenKind::Plus, TokenKind::Minus])? {
-            let op_tok = self.next()?;
-            let operation = match op_tok.kind {
-                TokenKind::Plus => ArithmeticComputation::Add,
-                TokenKind::Minus => ArithmeticComputation::Subtract,
-                _ => unreachable!("BUG: only + and - should reach here"),
-            };
-
-            let right = self.parse_power_for_range_bound()?;
-            let end_span = right
-                .source_location
-                .as_ref()
-                .map(|s| s.span.clone())
-                .unwrap_or_else(|| start_span.clone());
-            let span = self.span_covering(&start_span, &end_span);
-
-            left = self.new_expression(
-                ExpressionKind::Arithmetic(Arc::new(left), operation, Arc::new(right)),
-                self.make_source(span),
-            )?;
-        }
-
-        Ok(left)
-    }
-
-    fn parse_power_for_range_bound(&mut self) -> Result<Expression, Error> {
-        let start_span = self.peek()?.span.clone();
-        let left = self.parse_factor()?;
-
-        if self.at(&TokenKind::Caret)? {
-            self.next()?;
-            self.check_depth()?;
-            let right = self.parse_power_for_range_bound()?;
-            self.depth_tracker.pop_depth();
-            let end_span = right
-                .source_location
-                .as_ref()
-                .map(|s| s.span.clone())
-                .unwrap_or_else(|| start_span.clone());
-            let span = self.span_covering(&start_span, &end_span);
-
-            return self.new_expression(
-                ExpressionKind::Arithmetic(
-                    Arc::new(left),
-                    ArithmeticComputation::Power,
-                    Arc::new(right),
-                ),
-                self.make_source(span),
-            );
-        }
-
-        Ok(left)
-    }
-
-    fn parse_repository_expression(&mut self) -> Result<Expression, Error> {
-        let start_span = self.peek()?.span.clone();
-        let mut left = self.parse_term()?;
-
-        while self.at_any(&[TokenKind::Plus, TokenKind::Minus])? {
-            // Check if this minus is really a binary operator or could be part of something else
-            // In "X not in calendar year", we don't want to consume "not" as an operator
-            let op_tok = self.next()?;
-            let operation = match op_tok.kind {
-                TokenKind::Plus => ArithmeticComputation::Add,
-                TokenKind::Minus => ArithmeticComputation::Subtract,
-                _ => unreachable!("BUG: only + and - should reach here"),
-            };
-
-            let right = self.parse_term()?;
-            if Self::is_plain_number_literal(&left) && Self::is_unit_conversion(&right) {
-                let source = right
-                    .source_location
-                    .clone()
-                    .unwrap_or_else(|| self.make_source(start_span.clone()));
-                return Err(Error::parsing(
-                    "Cannot add a plain number to a converted value; convert each operand before \
-                     '+' (e.g. '5 as usd + c as usd')",
-                    source,
-                    None::<String>,
-                ));
-            }
-
-            let end_span = right
-                .source_location
-                .as_ref()
-                .map(|s| s.span.clone())
-                .unwrap_or_else(|| start_span.clone());
-            let span = self.span_covering(&start_span, &end_span);
-
-            left = self.new_expression(
-                ExpressionKind::Arithmetic(Arc::new(left), operation, Arc::new(right)),
-                self.make_source(span),
-            )?;
-        }
-
-        Ok(left)
-    }
-
-    fn parse_term(&mut self) -> Result<Expression, Error> {
-        self.parse_term_with_as(true)
-    }
-
-    fn parse_term_with_as(&mut self, allow_as: bool) -> Result<Expression, Error> {
-        let start_span = self.peek()?.span.clone();
-        let mut left = self.parse_power()?;
-        if allow_as {
-            left = self.parse_as_chain(left, start_span.clone())?;
-        }
-
-        while self.at_any(&[TokenKind::Star, TokenKind::Slash, TokenKind::Percent])? {
-            // Be careful: % could be a percent literal suffix (e.g. 50%)
-            // But here in term context, it's modulo since we already parsed the number
-            let op_tok = self.next()?;
-            let operation = match op_tok.kind {
-                TokenKind::Star => ArithmeticComputation::Multiply,
-                TokenKind::Slash => ArithmeticComputation::Divide,
-                TokenKind::Percent => ArithmeticComputation::Modulo,
-                _ => unreachable!("BUG: only *, /, % should reach here"),
-            };
-
-            let right_start_span = self.peek()?.span.clone();
-            let mut right = self.parse_power()?;
-            if allow_as {
-                right = self.parse_as_chain(right, right_start_span)?;
-            }
-            let end_span = right
-                .source_location
-                .as_ref()
-                .map(|s| s.span.clone())
-                .unwrap_or_else(|| start_span.clone());
-            let span = self.span_covering(&start_span, &end_span);
-
-            left = self.new_expression(
-                ExpressionKind::Arithmetic(Arc::new(left), operation, Arc::new(right)),
-                self.make_source(span),
-            )?;
-        }
-
-        Ok(left)
-    }
-
-    fn parse_power(&mut self) -> Result<Expression, Error> {
-        let start_span = self.peek()?.span.clone();
-        let left = self.parse_range_operand()?;
-
-        if self.at(&TokenKind::Caret)? {
-            self.next()?;
-            self.check_depth()?;
-            let right = self.parse_power()?;
-            self.depth_tracker.pop_depth();
-            let end_span = right
-                .source_location
-                .as_ref()
-                .map(|s| s.span.clone())
-                .unwrap_or_else(|| start_span.clone());
-            let span = self.span_covering(&start_span, &end_span);
-
-            return self.new_expression(
-                ExpressionKind::Arithmetic(
-                    Arc::new(left),
-                    ArithmeticComputation::Power,
-                    Arc::new(right),
-                ),
-                self.make_source(span),
-            );
-        }
-
-        Ok(left)
-    }
-
-    fn parse_factor(&mut self) -> Result<Expression, Error> {
-        let peeked = self.peek()?;
-        let start_span = peeked.span.clone();
-
-        if peeked.kind == TokenKind::Minus {
-            self.next()?;
-            let operand = self.parse_primary_or_math()?;
-            let end_span = operand
-                .source_location
-                .as_ref()
-                .map(|s| s.span.clone())
-                .unwrap_or_else(|| start_span.clone());
-            let span = self.span_covering(&start_span, &end_span);
-
-            if let ExpressionKind::Literal(value) = &operand.kind {
-                if let Ok(negated) = try_negate_numeric_literal(value.clone()) {
-                    return self
-                        .new_expression(ExpressionKind::Literal(negated), self.make_source(span));
-                }
-            }
-
-            let zero = self.new_expression(
-                ExpressionKind::Literal(Value::Number(Decimal::ZERO)),
-                self.make_source(start_span),
-            )?;
-            return self.new_expression(
-                ExpressionKind::Arithmetic(
-                    Arc::new(zero),
-                    ArithmeticComputation::Subtract,
-                    Arc::new(operand),
-                ),
-                self.make_source(span),
-            );
-        }
-
-        if peeked.kind == TokenKind::Plus {
-            self.next()?;
-            return self.parse_primary_or_math();
-        }
-
-        self.parse_primary_or_math()
-    }
-
-    fn parse_primary_or_math(&mut self) -> Result<Expression, Error> {
-        let peeked = self.peek()?;
-
-        if is_math_function(&peeked.kind) {
-            return self.parse_math_function();
-        }
-        if matches!(peeked.kind, TokenKind::Lower | TokenKind::Upper) {
-            return self.parse_range_bound();
-        }
-
-        self.parse_primary()
-    }
-
-    fn parse_math_function(&mut self) -> Result<Expression, Error> {
-        let func_tok = self.next()?;
-        let start_span = func_tok.span.clone();
-
-        let operator = match func_tok.kind {
-            TokenKind::Sqrt => MathematicalComputation::Sqrt,
-            TokenKind::Sin => MathematicalComputation::Sin,
-            TokenKind::Cos => MathematicalComputation::Cos,
-            TokenKind::Tan => MathematicalComputation::Tan,
-            TokenKind::Asin => MathematicalComputation::Asin,
-            TokenKind::Acos => MathematicalComputation::Acos,
-            TokenKind::Atan => MathematicalComputation::Atan,
-            TokenKind::Log => MathematicalComputation::Log,
-            TokenKind::Exp => MathematicalComputation::Exp,
-            TokenKind::Abs => MathematicalComputation::Abs,
-            TokenKind::Floor => MathematicalComputation::Floor,
-            TokenKind::Ceil => MathematicalComputation::Ceil,
-            TokenKind::Round => MathematicalComputation::Round,
-            _ => unreachable!("BUG: only math functions should reach here"),
+    /// One left fold over `steps`. Without steps the operand itself is the result.
+    fn arithmetic_chain(
+        &mut self,
+        first: ExprId,
+        steps: Vec<ChainStep<ArithmeticComputation>>,
+    ) -> Result<ExprId, Error> {
+        let source = match steps.last() {
+            None => return Ok(first),
+            Some(last) => last.source_location.clone(),
         };
-
-        self.check_depth()?;
-        let operand = self.parse_range_operand()?;
-        self.depth_tracker.pop_depth();
-
-        let end_span = operand
-            .source_location
-            .as_ref()
-            .map(|s| s.span.clone())
-            .unwrap_or_else(|| start_span.clone());
-        let span = self.span_covering(&start_span, &end_span);
-
-        self.new_expression(
-            ExpressionKind::MathematicalComputation(operator, Arc::new(operand)),
-            self.make_source(span),
-        )
+        self.new_expression(ExpressionKind::Arithmetic { first, steps }, source)
     }
 
-    fn parse_range_bound(&mut self) -> Result<Expression, Error> {
-        let bound_tok = self.next()?;
-        let start_span = bound_tok.span.clone();
-        let bound = match bound_tok.kind {
-            TokenKind::Lower => RangeBound::Lower,
-            TokenKind::Upper => RangeBound::Upper,
-            _ => unreachable!("BUG: only lower and upper should reach parse_range_bound"),
-        };
-
-        self.check_depth()?;
-        let operand = self.parse_range_operand()?;
-        self.depth_tracker.pop_depth();
-
-        let end_span = operand
-            .source_location
-            .as_ref()
-            .map(|s| s.span.clone())
-            .unwrap_or_else(|| start_span.clone());
-        let span = self.span_covering(&start_span, &end_span);
-
-        self.new_expression(
-            ExpressionKind::RangeBound(bound, Arc::new(operand)),
-            self.make_source(span),
-        )
-    }
-
-    fn parse_primary(&mut self) -> Result<Expression, Error> {
-        let peeked = self.peek()?;
-        let start_span = peeked.span.clone();
-
-        match &peeked.kind {
-            // Parenthesized expression
-            TokenKind::LParen => {
-                self.next()?; // consume (
-                let inner = self.parse_expression()?;
-                self.expect(&TokenKind::RParen)?;
-                Ok(inner)
-            }
-
-            // Now keyword
-            TokenKind::Now => {
-                let tok = self.next()?;
-                self.new_expression(ExpressionKind::Now, self.make_source(tok.span))
-            }
-
-            TokenKind::Past | TokenKind::Future => {
-                let tok = self.next()?;
-                let kind = if tok.kind == TokenKind::Past {
-                    DateRelativeKind::InPast
-                } else {
-                    DateRelativeKind::InFuture
-                };
-                let offset = self.parse_repository_expression()?;
-                let span = self.span_covering(
-                    &start_span,
-                    &offset
-                        .source_location
-                        .as_ref()
-                        .map(|s| s.span.clone())
-                        .unwrap_or(start_span.clone()),
-                );
-                self.new_expression(
-                    ExpressionKind::PastFutureRange(kind, Arc::new(offset)),
-                    self.make_source(span),
-                )
-            }
-
-            // String literal
-            TokenKind::StringLit => {
-                let tok = self.next()?;
-                self.new_expression(
-                    ExpressionKind::Literal(Value::Text(tok.text)),
-                    self.make_source(tok.span),
-                )
-            }
-
-            // Boolean literals
-            k if is_boolean_keyword(k) => {
-                let tok = self.next()?;
-                self.new_expression(
-                    ExpressionKind::Literal(Value::Boolean(token_kind_to_boolean_value(&tok.kind))),
-                    self.make_source(tok.span),
-                )
-            }
-
-            // Number literal (could be: plain number, date, time, duration, percent, unit)
-            TokenKind::NumberLit => self.parse_number_expression(),
-
-            // Reference (identifier, type keyword)
-            k if can_be_label(k) => {
-                let reference = self.parse_expression_reference()?;
-                let span = self.span_covering(&start_span, &self.last_span);
-                self.new_expression(ExpressionKind::Reference(reference), self.make_source(span))
-            }
-
-            _ => {
-                let tok = self.next()?;
-                Err(self.error_at_token(
-                    &tok,
-                    format!("Expected an expression, found '{}'", tok.text),
-                ))
-            }
-        }
-    }
-
-    fn parse_number_expression(&mut self) -> Result<Expression, Error> {
+    fn parse_number_expression(&mut self) -> Result<ExprId, Error> {
         let num_tok = self.next()?;
         let num_text = num_tok.text.clone();
         let start_span = num_tok.span.clone();
@@ -2907,7 +2599,7 @@ impl Parser {
                 if next_peek.kind == TokenKind::NumberLit || next_peek.kind == TokenKind::Percent {
                     return Err(self.error_at_token(
                         &pct_tok,
-                        "Percent literal cannot be followed by a digit",
+                        "Percent literal cannot be followed by a digit (use 'mod' for remainder)",
                     ));
                 }
             }
@@ -2928,7 +2620,7 @@ impl Parser {
             );
         }
 
-        if can_be_label(&self.peek()?.kind) {
+        if can_be_unit_name(&self.peek()?.kind) {
             let (unit_path, end_span) = self.parse_unit_path()?;
             let decimal = parse_decimal_string(&num_text, &start_span, self)?;
             return self.new_expression(
@@ -2964,6 +2656,1889 @@ impl Parser {
         }
 
         Ok(Reference::from_path(segments))
+    }
+    fn parse_expression(&mut self) -> Result<ExprId, Error> {
+        Ok(expr_of(self.run_expression_machine(ExprTask::Expression)?))
+    }
+
+    fn parse_list_command_body(&mut self, name_tok: Token) -> Result<ListCommand, Error> {
+        Ok(command_of(self.run_expression_machine(
+            ExprTask::ListCommandBody { name: name_tok },
+        )?))
+    }
+
+    fn save_flags(&self) -> ExprFlags {
+        ExprFlags {
+            bare_operand: self.bare_operand,
+            call_argument_depth: self.call_argument_depth,
+        }
+    }
+
+    fn run_expression_machine(&mut self, root: ExprTask) -> Result<ExprVal, Error> {
+        let mut frames = std::mem::take(&mut self.expr_frames);
+        let result = self.drive_expression_machine(root, &mut frames);
+        self.expr_frames = frames;
+        result
+    }
+
+    fn drive_expression_machine(
+        &mut self,
+        root: ExprTask,
+        frames: &mut Vec<ExprCont>,
+    ) -> Result<ExprVal, Error> {
+        let mut step = ExprStep::Enter(root);
+        loop {
+            let next = match step {
+                ExprStep::Enter(task) => self.enter_expression(task, frames),
+                ExprStep::Yield(value) => match frames.pop() {
+                    None => return Ok(value),
+                    Some(cont) => self.resume_expression(cont, value, frames),
+                },
+            };
+            match next {
+                Ok(next_step) => step = next_step,
+                Err(error) => {
+                    self.unwind_expression(frames);
+                    return Err(error);
+                }
+            }
+        }
+    }
+
+    fn unwind_expression(&mut self, frames: &mut Vec<ExprCont>) {
+        while let Some(cont) = frames.pop() {
+            match cont {
+                ExprCont::Restore(flags) => {
+                    self.bare_operand = flags.bare_operand;
+                    self.call_argument_depth = flags.call_argument_depth;
+                }
+                ExprCont::PopDepth => self.depth_tracker.pop_depth(),
+                _ => {}
+            }
+        }
+    }
+
+    fn enter_expression(
+        &mut self,
+        task: ExprTask,
+        frames: &mut Vec<ExprCont>,
+    ) -> Result<ExprStep, Error> {
+        match task {
+            ExprTask::Expression => {
+                self.check_depth()?;
+                frames.push(ExprCont::PopDepth);
+                Ok(ExprStep::Enter(ExprTask::AndExpression))
+            }
+            ExprTask::AndExpression => {
+                let start_span = self.peek()?.span.clone();
+                frames.push(ExprCont::AndFirst { start_span });
+                Ok(ExprStep::Enter(ExprTask::AndOperand))
+            }
+            ExprTask::AndOperand => {
+                if self.at_not_bare_veto_followed_by_is()? || self.at_bare_veto_followed_by_is()? {
+                    Ok(ExprStep::Enter(ExprTask::VetoStatus))
+                } else if self.at(&TokenKind::Not)? {
+                    Ok(ExprStep::Enter(ExprTask::NotExpression))
+                } else {
+                    Ok(ExprStep::Enter(ExprTask::RepositoryWithSuffix))
+                }
+            }
+            ExprTask::VetoStatus => {
+                let start_span = self.peek()?.span.clone();
+                let keyword_was_negated = if self.at(&TokenKind::Not)? {
+                    self.next()?;
+                    true
+                } else {
+                    false
+                };
+                self.expect(&TokenKind::Veto)?;
+                if self.at(&TokenKind::StringLit)? {
+                    let tok = self.peek()?.clone();
+                    return Err(self.error_at_token(
+                        &tok,
+                        "veto with a message is only valid as a rule or unless result, not in `is veto` comparisons",
+                    ));
+                }
+                let operator = self.parse_comparison_operator()?;
+                let operator_is_not = matches!(operator, ComparisonComputation::IsNot);
+                if !matches!(
+                    operator,
+                    ComparisonComputation::Is | ComparisonComputation::IsNot
+                ) {
+                    let tok = self.peek()?.clone();
+                    return Err(self.error_at_token(
+                        &tok,
+                        "Expected `is` or `is not` after `veto` in a veto-status comparison",
+                    ));
+                }
+                frames.push(ExprCont::VetoStatus {
+                    operator_is_not,
+                    keyword_was_negated,
+                    start_span,
+                });
+                Ok(ExprStep::Enter(ExprTask::RepositoryExpression))
+            }
+            ExprTask::NotExpression => {
+                let not_tok = self.expect(&TokenKind::Not)?;
+                frames.push(ExprCont::Negation {
+                    start_span: not_tok.span,
+                });
+                Ok(ExprStep::Enter(ExprTask::PrefixArgument {
+                    keyword: "not".to_string(),
+                }))
+            }
+            ExprTask::RepositoryWithSuffix => {
+                let start_span = self.peek()?.span.clone();
+                frames.push(ExprCont::RepositorySuffix { start_span });
+                Ok(ExprStep::Enter(ExprTask::RepositoryExpression))
+            }
+            ExprTask::ComparisonSuffix { left, start_span } => {
+                self.enter_comparison_suffix(left, start_span, frames)
+            }
+            ExprTask::InSuffix {
+                repository,
+                start_span,
+            } => self.enter_in_suffix(repository, start_span, frames),
+            ExprTask::RepositoryExpression => {
+                let start_span = self.peek()?.span.clone();
+                frames.push(ExprCont::RepositoryFirst { start_span });
+                Ok(ExprStep::Enter(ExprTask::Term { allow_as: true }))
+            }
+            ExprTask::Term { allow_as } => {
+                let start_span = self.peek()?.span.clone();
+                frames.push(ExprCont::TermFirst {
+                    allow_as,
+                    start_span,
+                });
+                Ok(ExprStep::Enter(ExprTask::Power))
+            }
+            ExprTask::Power => {
+                let start_span = self.peek()?.span.clone();
+                frames.push(ExprCont::PowerLeft {
+                    start_span,
+                    range_bound: false,
+                });
+                Ok(ExprStep::Enter(ExprTask::RangeOperand))
+            }
+            ExprTask::RangeOperand => {
+                let start_span = self.peek()?.span.clone();
+                let flags = self.save_flags();
+                if self.no_range_at.get(&start_span.start) == Some(&flags) {
+                    return Ok(ExprStep::Enter(ExprTask::Factor));
+                }
+                frames.push(ExprCont::RangeFactor { start_span, flags });
+                Ok(ExprStep::Enter(ExprTask::Factor))
+            }
+            ExprTask::RangeEllipsisBound => {
+                let start_span = self.peek()?.span.clone();
+                frames.push(ExprCont::EllipsisFirst { start_span });
+                Ok(ExprStep::Enter(ExprTask::PowerForRangeBound))
+            }
+            ExprTask::PowerForRangeBound => {
+                let start_span = self.peek()?.span.clone();
+                frames.push(ExprCont::PowerLeft {
+                    start_span,
+                    range_bound: true,
+                });
+                Ok(ExprStep::Enter(ExprTask::Factor))
+            }
+            ExprTask::Factor => {
+                let peeked = self.peek()?;
+                let start_span = peeked.span.clone();
+                let kind = peeked.kind.clone();
+                if kind == TokenKind::Minus {
+                    self.next()?;
+                    frames.push(ExprCont::FactorNegate { start_span });
+                    return Ok(ExprStep::Enter(ExprTask::PrimaryOrMath));
+                }
+                if kind == TokenKind::Plus {
+                    self.next()?;
+                }
+                Ok(ExprStep::Enter(ExprTask::PrimaryOrMath))
+            }
+            ExprTask::PrimaryOrMath => {
+                let peeked = self.peek()?;
+                let start_span = peeked.span.clone();
+                let kind = peeked.kind.clone();
+                frames.push(ExprCont::PrimaryOrMathSuffix { start_span });
+                if is_math_function(&kind) {
+                    return Ok(ExprStep::Enter(ExprTask::MathFunction));
+                }
+                if matches!(kind, TokenKind::Lower | TokenKind::Upper) {
+                    return Ok(ExprStep::Enter(ExprTask::LowerUpper));
+                }
+                Ok(ExprStep::Enter(ExprTask::Primary))
+            }
+            ExprTask::MathFunction => {
+                let func_tok = self.next()?;
+                let start_span = func_tok.span.clone();
+                let operator = match func_tok.kind {
+                    TokenKind::Sqrt => MathematicalComputation::Sqrt,
+                    TokenKind::Sin => MathematicalComputation::Sin,
+                    TokenKind::Cos => MathematicalComputation::Cos,
+                    TokenKind::Tan => MathematicalComputation::Tan,
+                    TokenKind::Asin => MathematicalComputation::Asin,
+                    TokenKind::Acos => MathematicalComputation::Acos,
+                    TokenKind::Atan => MathematicalComputation::Atan,
+                    TokenKind::Log => MathematicalComputation::Log,
+                    TokenKind::Exp => MathematicalComputation::Exp,
+                    TokenKind::Abs => MathematicalComputation::Abs,
+                    TokenKind::Floor => MathematicalComputation::Floor,
+                    TokenKind::Ceil => MathematicalComputation::Ceil,
+                    TokenKind::Round => MathematicalComputation::Round,
+                    _ => unreachable!("BUG: only math functions should reach here"),
+                };
+                frames.push(ExprCont::Math {
+                    operator,
+                    start_span,
+                });
+                Ok(ExprStep::Enter(ExprTask::PrefixArgument {
+                    keyword: func_tok.text,
+                }))
+            }
+            ExprTask::LowerUpper => {
+                let bound_tok = self.next()?;
+                let start_span = bound_tok.span.clone();
+                let bound = match bound_tok.kind {
+                    TokenKind::Lower => RangeBound::Lower,
+                    TokenKind::Upper => RangeBound::Upper,
+                    _ => unreachable!("BUG: only lower and upper should reach parse_range_bound"),
+                };
+                frames.push(ExprCont::LowerUpperEnd { bound, start_span });
+                Ok(ExprStep::Enter(ExprTask::PrefixArgument {
+                    keyword: bound_tok.text,
+                }))
+            }
+            ExprTask::PrefixArgument { keyword } => self.enter_prefix_argument(keyword, frames),
+            ExprTask::Primary => self.enter_primary(frames),
+            ExprTask::ListCommandSuffix { list, start_span } => {
+                self.expect(&TokenKind::Arrow)?;
+                let name = self.next()?;
+                frames.push(ExprCont::ListCommandDone { list, start_span });
+                Ok(ExprStep::Enter(ExprTask::ListCommandBody { name }))
+            }
+            ExprTask::ListCommandBody { name } => self.enter_list_command_body(name, frames),
+            ExprTask::FindKeys => {
+                if self.at(&TokenKind::LParen)? {
+                    return Ok(ExprStep::Enter(ExprTask::CallArguments { command: "find" }));
+                }
+                if !self.at_bare_operand_start()? {
+                    let tok = self.peek()?.clone();
+                    return Err(self.error_at_token(&tok, "`find` needs a key"));
+                }
+                frames.push(ExprCont::FindKey { keys: Vec::new() });
+                Ok(ExprStep::Enter(ExprTask::BareArgument { command: "find" }))
+            }
+            ExprTask::CallArguments { command } => {
+                self.expect(&TokenKind::LParen)?;
+                let saved = self.save_flags();
+                self.bare_operand = false;
+                self.call_argument_depth += 1;
+                frames.push(ExprCont::CallArgumentsEnd { command });
+                frames.push(ExprCont::Restore(saved));
+                frames.push(ExprCont::CallArgumentItems {
+                    arguments: Vec::new(),
+                });
+                Ok(ExprStep::Enter(ExprTask::Expression))
+            }
+            ExprTask::SingleCallArgument { command } => {
+                frames.push(ExprCont::SingleCallArgumentCheck { command });
+                Ok(ExprStep::Enter(ExprTask::CallArguments { command }))
+            }
+            ExprTask::OptionalArgument { command } => {
+                if self.at(&TokenKind::LParen)? {
+                    frames.push(ExprCont::WrapSome);
+                    return Ok(ExprStep::Enter(ExprTask::SingleCallArgument { command }));
+                }
+                if self.at_bare_operand_start()? {
+                    frames.push(ExprCont::WrapSome);
+                    return Ok(ExprStep::Enter(ExprTask::BareArgument { command }));
+                }
+                Ok(ExprStep::Yield(ExprVal::Optional(None)))
+            }
+            ExprTask::RequiredArgument { command } => {
+                if self.at(&TokenKind::LParen)? {
+                    return Ok(ExprStep::Enter(ExprTask::SingleCallArgument { command }));
+                }
+                if self.at_bare_operand_start()? {
+                    return Ok(ExprStep::Enter(ExprTask::BareArgument { command }));
+                }
+                let tok = self.peek()?.clone();
+                Err(self.error_at_token(&tok, format!("`{command}` needs an argument")))
+            }
+            ExprTask::BareArgument { command } => {
+                frames.push(ExprCont::BareArgumentEnd { command });
+                Ok(ExprStep::Enter(ExprTask::BareOperand))
+            }
+            ExprTask::BareOperand => {
+                let saved = self.save_flags();
+                self.bare_operand = true;
+                frames.push(ExprCont::Restore(saved));
+                Ok(ExprStep::Enter(ExprTask::RangeOperand))
+            }
+            ExprTask::ListPredicate { command } => self.enter_list_predicate(command, frames),
+            ExprTask::CallListPredicate { command } => {
+                let checkpoint = self.checkpoint();
+                self.expect(&TokenKind::LParen)?;
+                if !self.at_row_condition_operator()? {
+                    self.restore(checkpoint);
+                    frames.push(ExprCont::WrapInstance);
+                    return Ok(ExprStep::Enter(ExprTask::SingleCallArgument { command }));
+                }
+                let saved = self.save_flags();
+                self.bare_operand = false;
+                frames.push(ExprCont::CallPredicateEnd { command });
+                frames.push(ExprCont::Restore(saved));
+                Ok(ExprStep::Enter(ExprTask::ValuePredicateInParentheses {
+                    command,
+                }))
+            }
+            ExprTask::ValuePredicateInParentheses { command } => {
+                let op = self.parse_row_condition_operator()?;
+                frames.push(ExprCont::ValuePredicateEnd { op, command });
+                Ok(ExprStep::Enter(ExprTask::RepositoryExpression))
+            }
+            ExprTask::SortCommand => {
+                if self.at(&TokenKind::LParen)? {
+                    frames.push(ExprCont::SortArgument { check_bare: false });
+                    return Ok(ExprStep::Enter(ExprTask::SingleCallArgument {
+                        command: "sort",
+                    }));
+                }
+                if self.at_bare_operand_start()? {
+                    frames.push(ExprCont::SortArgument { check_bare: true });
+                    return Ok(ExprStep::Enter(ExprTask::BareOperand));
+                }
+                let descending = self.parse_sort_direction()?;
+                Ok(ExprStep::Yield(ExprVal::Command(ListCommand::Sort {
+                    descending,
+                    argument: None,
+                })))
+            }
+            ExprTask::ListWithCommand => {
+                if !self.at(&TokenKind::LParen)? {
+                    return Ok(ExprStep::Enter(ExprTask::ListWithRows));
+                }
+                self.next()?;
+                let saved = self.save_flags();
+                self.call_argument_depth += 1;
+                frames.push(ExprCont::ListWithEnd);
+                frames.push(ExprCont::Restore(saved));
+                Ok(ExprStep::Enter(ExprTask::ListWithRows))
+            }
+            ExprTask::ListWithRows => {
+                if self.at_path_then_colon()? {
+                    return self.enter_pair_field(Vec::new(), frames);
+                }
+                frames.push(ExprCont::ValueItem { values: Vec::new() });
+                Ok(ExprStep::Enter(ExprTask::BareArgument { command: "with" }))
+            }
+        }
+    }
+
+    fn resume_expression(
+        &mut self,
+        cont: ExprCont,
+        value: ExprVal,
+        frames: &mut Vec<ExprCont>,
+    ) -> Result<ExprStep, Error> {
+        match cont {
+            ExprCont::Restore(flags) => {
+                self.bare_operand = flags.bare_operand;
+                self.call_argument_depth = flags.call_argument_depth;
+                Ok(ExprStep::Yield(value))
+            }
+            ExprCont::PopDepth => {
+                self.depth_tracker.pop_depth();
+                Ok(ExprStep::Yield(value))
+            }
+            ExprCont::AndFirst { start_span } => {
+                self.and_chain(expr_of(value), Vec::new(), start_span, frames)
+            }
+            ExprCont::AndOperand {
+                first,
+                mut steps,
+                start_span,
+            } => {
+                let operand = expr_of(value);
+                let end_span = self
+                    .expr_span(operand)
+                    .unwrap_or_else(|| start_span.clone());
+                let span = self.span_covering(&start_span, &end_span);
+                steps.push(ChainStep {
+                    op: (),
+                    operand,
+                    source_location: self.make_source(span),
+                });
+                self.and_chain(first, steps, start_span, frames)
+            }
+            ExprCont::VetoStatus {
+                operator_is_not,
+                keyword_was_negated,
+                start_span,
+            } => expr_step(self.wrap_result_is_veto_expression(
+                expr_of(value),
+                operator_is_not,
+                keyword_was_negated,
+                start_span,
+            )),
+            ExprCont::Negation { start_span } => {
+                let operand = expr_of(value);
+                let end_span = self
+                    .expr_span(operand)
+                    .unwrap_or_else(|| start_span.clone());
+                let span = self.span_covering(&start_span, &end_span);
+                expr_step(self.new_expression(
+                    ExpressionKind::LogicalNegation(operand, NegationType::Not),
+                    self.make_source(span),
+                ))
+            }
+            ExprCont::RepositorySuffix { start_span } => {
+                self.continue_repository(expr_of(value), start_span, frames)
+            }
+            ExprCont::ContinueRepository { start_span } => {
+                self.continue_repository(expr_of(value), start_span, frames)
+            }
+            ExprCont::ComparisonRight {
+                left,
+                operator,
+                start_span,
+            } => {
+                let right = expr_of(value);
+                let end_span = self.expr_span(right).unwrap_or_else(|| start_span.clone());
+                let span = self.span_covering(&start_span, &end_span);
+                expr_step(self.new_expression(
+                    ExpressionKind::Comparison(left, operator, right),
+                    self.make_source(span),
+                ))
+            }
+            ExprCont::InOffset {
+                direction,
+                rel_kind,
+                repository,
+                start_span,
+            } => {
+                let offset = expr_of(value);
+                let offset_end_span = self.expr_span(offset).unwrap_or_else(|| start_span.clone());
+                let range = self.new_expression(
+                    ExpressionKind::PastFutureRange(rel_kind, offset),
+                    self.make_source(self.span_covering(&direction, &offset_end_span)),
+                )?;
+                let span = self.span_covering(&start_span, &offset_end_span);
+                expr_step(self.new_expression(
+                    ExpressionKind::RangeContainment(repository, range),
+                    self.make_source(span),
+                ))
+            }
+            ExprCont::InRange {
+                repository,
+                start_span,
+            } => {
+                let range = expr_of(value);
+                let end_span = self.expr_span(range).unwrap_or_else(|| start_span.clone());
+                let span = self.span_covering(&start_span, &end_span);
+                expr_step(self.new_expression(
+                    ExpressionKind::RangeContainment(repository, range),
+                    self.make_source(span),
+                ))
+            }
+            ExprCont::RepositoryFirst { start_span } => {
+                self.repository_chain(expr_of(value), Vec::new(), start_span, frames)
+            }
+            ExprCont::RepositoryOperand {
+                first,
+                mut steps,
+                start_span,
+                operation,
+            } => {
+                let operand = expr_of(value);
+                if steps.is_empty()
+                    && self.is_plain_number_literal(first)
+                    && self.is_unit_conversion(operand)
+                {
+                    let source = self
+                        .expr_source(operand)
+                        .unwrap_or_else(|| self.make_source(start_span.clone()));
+                    return Err(Error::parsing(
+                        "Cannot add a plain number to a converted value; convert each operand before \
+                         '+' (e.g. '5 as usd + c as usd')",
+                        source,
+                        None::<String>,
+                    ));
+                }
+                let end_span = self
+                    .expr_span(operand)
+                    .unwrap_or_else(|| start_span.clone());
+                let span = self.span_covering(&start_span, &end_span);
+                steps.push(ChainStep {
+                    op: operation,
+                    operand,
+                    source_location: self.make_source(span),
+                });
+                self.repository_chain(first, steps, start_span, frames)
+            }
+            ExprCont::TermFirst {
+                allow_as,
+                start_span,
+            } => {
+                let mut first = expr_of(value);
+                if allow_as {
+                    first = self.parse_as_chain(first, start_span.clone())?;
+                }
+                self.term_chain(first, Vec::new(), allow_as, start_span, frames)
+            }
+            ExprCont::TermOperand {
+                first,
+                mut steps,
+                allow_as,
+                start_span,
+                operation,
+                right_start_span,
+            } => {
+                let mut operand = expr_of(value);
+                if allow_as {
+                    operand = self.parse_as_chain(operand, right_start_span)?;
+                }
+                let end_span = self
+                    .expr_span(operand)
+                    .unwrap_or_else(|| start_span.clone());
+                let span = self.span_covering(&start_span, &end_span);
+                steps.push(ChainStep {
+                    op: operation,
+                    operand,
+                    source_location: self.make_source(span),
+                });
+                self.term_chain(first, steps, allow_as, start_span, frames)
+            }
+            ExprCont::PowerLeft {
+                start_span,
+                range_bound,
+            } => self.power_tail(expr_of(value), start_span, range_bound, frames),
+            ExprCont::PowerRight { left, start_span } => {
+                let right = expr_of(value);
+                let end_span = self.expr_span(right).unwrap_or_else(|| start_span.clone());
+                let span = self.span_covering(&start_span, &end_span);
+                let step = ChainStep {
+                    op: ArithmeticComputation::Power,
+                    operand: right,
+                    source_location: self.make_source(span),
+                };
+                expr_step(self.arithmetic_chain(left, vec![step]))
+            }
+            ExprCont::RangeFactor { start_span, flags } => {
+                let factor = expr_of(value);
+                if self.at(&TokenKind::Ellipsis)? {
+                    self.next()?;
+                    frames.push(ExprCont::RangeRight {
+                        left: factor,
+                        start_span,
+                    });
+                    return Ok(ExprStep::Enter(ExprTask::RangeEllipsisBound));
+                }
+                if !self.at_any(&[TokenKind::Caret, TokenKind::Plus, TokenKind::Minus])? {
+                    return Ok(ExprStep::Yield(ExprVal::Expr(factor)));
+                }
+                frames.push(ExprCont::RangeLeft {
+                    factor,
+                    start_span: start_span.clone(),
+                    checkpoint: Box::new(self.checkpoint()),
+                    flags,
+                });
+                frames.push(ExprCont::EllipsisFirst {
+                    start_span: start_span.clone(),
+                });
+                self.power_tail(factor, start_span, true, frames)
+            }
+            ExprCont::RangeLeft {
+                factor,
+                start_span,
+                checkpoint,
+                flags,
+            } => {
+                let left = expr_of(value);
+                let starts = std::mem::take(&mut self.bound_chain_starts);
+                if !self.at(&TokenKind::Ellipsis)? {
+                    for start in starts {
+                        self.no_range_at.insert(start, flags);
+                    }
+                    self.restore(*checkpoint);
+                    return Ok(ExprStep::Yield(ExprVal::Expr(factor)));
+                }
+                self.next()?;
+                frames.push(ExprCont::RangeRight { left, start_span });
+                Ok(ExprStep::Enter(ExprTask::RangeEllipsisBound))
+            }
+            ExprCont::RangeRight { left, start_span } => {
+                let right = expr_of(value);
+                let end_span = self.expr_span(right).unwrap_or_else(|| start_span.clone());
+                let span = self.span_covering(&start_span, &end_span);
+                expr_step(self.new_expression(
+                    ExpressionKind::RangeLiteral(left, right),
+                    self.make_source(span),
+                ))
+            }
+            ExprCont::EllipsisFirst { start_span } => {
+                let starts = vec![start_span.start];
+                self.ellipsis_chain(expr_of(value), Vec::new(), start_span, starts, frames)
+            }
+            ExprCont::EllipsisOperand {
+                first,
+                mut steps,
+                start_span,
+                operation,
+                starts,
+            } => {
+                let operand = expr_of(value);
+                let end_span = self
+                    .expr_span(operand)
+                    .unwrap_or_else(|| start_span.clone());
+                let span = self.span_covering(&start_span, &end_span);
+                steps.push(ChainStep {
+                    op: operation,
+                    operand,
+                    source_location: self.make_source(span),
+                });
+                self.ellipsis_chain(first, steps, start_span, starts, frames)
+            }
+            ExprCont::FactorNegate { start_span } => {
+                let operand = expr_of(value);
+                let end_span = self
+                    .expr_span(operand)
+                    .unwrap_or_else(|| start_span.clone());
+                let span = self.span_covering(&start_span, &end_span);
+                if let ExpressionKind::Literal(literal) = self.table.kind(operand) {
+                    if let Ok(negated) = try_negate_numeric_literal(literal.clone()) {
+                        return expr_step(self.new_expression(
+                            ExpressionKind::Literal(negated),
+                            self.make_source(span),
+                        ));
+                    }
+                }
+                let zero = self.new_expression(
+                    ExpressionKind::Literal(Value::Number(Decimal::ZERO)),
+                    self.make_source(start_span),
+                )?;
+                let step = ChainStep {
+                    op: ArithmeticComputation::Subtract,
+                    operand,
+                    source_location: self.make_source(span),
+                };
+                expr_step(self.arithmetic_chain(zero, vec![step]))
+            }
+            ExprCont::PrimaryOrMathSuffix { start_span } => {
+                let expr = expr_of(value);
+                if !self.bare_operand && self.at(&TokenKind::Arrow)? {
+                    frames.push(ExprCont::PrimaryOrMathSuffix {
+                        start_span: start_span.clone(),
+                    });
+                    return Ok(ExprStep::Enter(ExprTask::ListCommandSuffix {
+                        list: expr,
+                        start_span,
+                    }));
+                }
+                Ok(ExprStep::Yield(ExprVal::Expr(expr)))
+            }
+            ExprCont::ListCommandDone { list, start_span } => {
+                let command = command_of(value);
+                let span = self.span_covering(&start_span, &self.last_span);
+                expr_step(self.new_expression(
+                    ExpressionKind::ListCommand { list, command },
+                    self.make_source(span),
+                ))
+            }
+            ExprCont::Command(builder) => Ok(ExprStep::Yield(ExprVal::Command(build_command(
+                builder, value,
+            )))),
+            ExprCont::FindKey { mut keys } => {
+                keys.push(expr_of(value));
+                self.find_key_next(keys, frames)
+            }
+            ExprCont::CallArgumentsEnd { command } => {
+                self.expect(&TokenKind::RParen)?;
+                self.reject_comma_after_call(command)?;
+                Ok(ExprStep::Yield(value))
+            }
+            ExprCont::CallArgumentItems { mut arguments } => {
+                arguments.push(expr_of(value));
+                self.call_argument_items(arguments, frames)
+            }
+            ExprCont::SingleCallArgumentCheck { command } => {
+                let mut arguments = exprs_of(value);
+                if arguments.len() != 1 {
+                    let tok = self.peek()?.clone();
+                    return Err(self.error_at_token(
+                        &tok,
+                        format!("`{command}` takes one argument, got {}", arguments.len()),
+                    ));
+                }
+                Ok(ExprStep::Yield(ExprVal::Expr(arguments.remove(0))))
+            }
+            ExprCont::WrapSome => Ok(ExprStep::Yield(ExprVal::Optional(Some(expr_of(value))))),
+            ExprCont::BareArgumentEnd { command } => {
+                let argument = expr_of(value);
+                if !self.at_bare_argument_end()? {
+                    return Err(self.bare_argument_error(command));
+                }
+                Ok(ExprStep::Yield(ExprVal::Expr(argument)))
+            }
+            ExprCont::ParenEnd { start_span } => {
+                let mut inner = expr_of(value);
+                self.expect(&TokenKind::RParen)?;
+                if self.at(&TokenKind::Dot)? {
+                    self.next()?;
+                    let path = self.parse_reference()?;
+                    let span = self.span_covering(&start_span, &self.last_span);
+                    inner = self.new_expression(
+                        ExpressionKind::Member { base: inner, path },
+                        self.make_source(span),
+                    )?;
+                }
+                Ok(ExprStep::Yield(ExprVal::Expr(inner)))
+            }
+            ExprCont::PastFuture { kind, start_span } => {
+                let offset = expr_of(value);
+                let offset_span = self.expr_span(offset).unwrap_or_else(|| start_span.clone());
+                let span = self.span_covering(&start_span, &offset_span);
+                expr_step(self.new_expression(
+                    ExpressionKind::PastFutureRange(kind, offset),
+                    self.make_source(span),
+                ))
+            }
+            ExprCont::Math {
+                operator,
+                start_span,
+            } => {
+                let operand = expr_of(value);
+                let end_span = self
+                    .expr_span(operand)
+                    .unwrap_or_else(|| start_span.clone());
+                let span = self.span_covering(&start_span, &end_span);
+                expr_step(self.new_expression(
+                    ExpressionKind::MathematicalComputation(operator, operand),
+                    self.make_source(span),
+                ))
+            }
+            ExprCont::LowerUpperEnd { bound, start_span } => {
+                let operand = expr_of(value);
+                let end_span = self
+                    .expr_span(operand)
+                    .unwrap_or_else(|| start_span.clone());
+                let span = self.span_covering(&start_span, &end_span);
+                expr_step(self.new_expression(
+                    ExpressionKind::RangeBound(bound, operand),
+                    self.make_source(span),
+                ))
+            }
+            ExprCont::PrefixArgumentEnd { keyword } => {
+                let argument = expr_of(value);
+                if !self.at_bare_argument_end()? {
+                    let tok = self.peek()?.clone();
+                    return Err(self.error_at_token(
+                        &tok,
+                        format!(
+                            "`{keyword}` without parentheses takes one operand, found '{op}' after it; \
+                             write `{keyword}(a {op} b)` or `{keyword}(a) {op} b`",
+                            op = tok.text
+                        ),
+                    ));
+                }
+                Ok(ExprStep::Yield(ExprVal::Expr(argument)))
+            }
+            ExprCont::PredicateValueRight { op, command } => {
+                let right = expr_of(value);
+                if !self.at_bare_argument_end()? {
+                    return Err(self.condition_error(command));
+                }
+                Ok(ExprStep::Yield(ExprVal::Predicate(ListPredicate::Value {
+                    op,
+                    right,
+                })))
+            }
+            ExprCont::PredicateLeft {
+                start_span,
+                command,
+            } => {
+                let left = expr_of(value);
+                if self.at_row_condition_operator()? {
+                    let op = self.parse_row_condition_operator()?;
+                    frames.push(ExprCont::PredicateRight {
+                        left,
+                        op,
+                        start_span,
+                        command,
+                    });
+                    return Ok(ExprStep::Enter(ExprTask::BareOperand));
+                }
+                self.predicate_instance_end(left, command)
+            }
+            ExprCont::PredicateRight {
+                left,
+                op,
+                start_span,
+                command,
+            } => {
+                let right = expr_of(value);
+                let span = self.span_covering(&start_span, &self.last_span);
+                let kind = match op {
+                    RowCondition::Compare(op) => ExpressionKind::Comparison(left, op, right),
+                    RowCondition::In => ExpressionKind::RangeContainment(left, right),
+                };
+                let expr = self.new_expression(kind, self.make_source(span))?;
+                self.predicate_instance_end(expr, command)
+            }
+            ExprCont::WrapInstance => Ok(ExprStep::Yield(ExprVal::Predicate(
+                ListPredicate::Instance {
+                    expr: expr_of(value),
+                },
+            ))),
+            ExprCont::ValuePredicateEnd { op, command } => {
+                let right = expr_of(value);
+                if !self.at(&TokenKind::RParen)? {
+                    let tok = self.peek()?.clone();
+                    return Err(self.error_at_token(
+                        &tok,
+                        format!(
+                            "a value-list `{command}` condition is one comparison, found '{}'; chain \
+                             `where` or use `in` with a range",
+                            tok.text
+                        ),
+                    ));
+                }
+                Ok(ExprStep::Yield(ExprVal::Predicate(ListPredicate::Value {
+                    op,
+                    right,
+                })))
+            }
+            ExprCont::CallPredicateEnd { command } => {
+                self.expect(&TokenKind::RParen)?;
+                self.reject_comma_after_call(command)?;
+                Ok(ExprStep::Yield(value))
+            }
+            ExprCont::SortArgument { check_bare } => {
+                let argument = expr_of(value);
+                if check_bare
+                    && !self.at_any(&[TokenKind::Asc, TokenKind::Desc])?
+                    && !self.at_bare_argument_end()?
+                {
+                    return Err(self.bare_argument_error("sort"));
+                }
+                let descending = self.parse_sort_direction()?;
+                Ok(ExprStep::Yield(ExprVal::Command(ListCommand::Sort {
+                    descending,
+                    argument: Some(argument),
+                })))
+            }
+            ExprCont::ListWithEnd => {
+                let rows = rows_of(value);
+                self.expect(&TokenKind::RParen)?;
+                self.reject_comma_after_call("with")?;
+                Ok(ExprStep::Yield(ExprVal::Rows(rows)))
+            }
+            ExprCont::PairValue { path, mut pairs } => {
+                pairs.push((path, expr_of(value)));
+                self.pair_value_next(pairs, frames)
+            }
+            ExprCont::ValueItem { mut values } => {
+                values.push(expr_of(value));
+                self.value_item_next(values, frames)
+            }
+        }
+    }
+
+    fn and_chain(
+        &mut self,
+        first: ExprId,
+        steps: Vec<ChainStep<()>>,
+        start_span: Span,
+        frames: &mut Vec<ExprCont>,
+    ) -> Result<ExprStep, Error> {
+        if !self.at(&TokenKind::And)? {
+            return match steps.last() {
+                None => Ok(ExprStep::Yield(ExprVal::Expr(first))),
+                Some(last) => {
+                    let source = last.source_location.clone();
+                    expr_step(
+                        self.new_expression(ExpressionKind::LogicalAnd { first, steps }, source),
+                    )
+                }
+            };
+        }
+        self.next()?;
+        frames.push(ExprCont::AndOperand {
+            first,
+            steps,
+            start_span,
+        });
+        Ok(ExprStep::Enter(ExprTask::AndOperand))
+    }
+
+    fn continue_repository(
+        &mut self,
+        mut expr: ExprId,
+        start_span: Span,
+        frames: &mut Vec<ExprCont>,
+    ) -> Result<ExprStep, Error> {
+        loop {
+            let kind = self.peek()?.kind.clone();
+            if is_comparison_operator(&kind) {
+                return Ok(ExprStep::Enter(ExprTask::ComparisonSuffix {
+                    left: expr,
+                    start_span,
+                }));
+            }
+            if kind == TokenKind::Not {
+                expr = self.parse_not_in_calendar_suffix(expr, start_span.clone())?;
+                continue;
+            }
+            if kind == TokenKind::In {
+                frames.push(ExprCont::ContinueRepository {
+                    start_span: start_span.clone(),
+                });
+                return Ok(ExprStep::Enter(ExprTask::InSuffix {
+                    repository: expr,
+                    start_span,
+                }));
+            }
+            if kind == TokenKind::As {
+                expr = self.parse_as_chain(expr, start_span.clone())?;
+                continue;
+            }
+            break;
+        }
+
+        if self.at_expression_suffix_end()? {
+            return expr_step(Ok(expr));
+        }
+
+        let tok = self.peek()?.clone();
+        Err(self.error_at_token(
+            &tok,
+            format!("Unexpected token '{}' after expression", tok.text),
+        ))
+    }
+
+    fn enter_comparison_suffix(
+        &mut self,
+        left: ExprId,
+        start_span: Span,
+        frames: &mut Vec<ExprCont>,
+    ) -> Result<ExprStep, Error> {
+        let operator = self.parse_comparison_operator()?;
+        let operator_is_not = matches!(operator, ComparisonComputation::IsNot);
+
+        if matches!(
+            operator,
+            ComparisonComputation::Is | ComparisonComputation::IsNot
+        ) && self.at_bare_veto_token()?
+        {
+            self.expect(&TokenKind::Veto)?;
+            if self.at(&TokenKind::StringLit)? {
+                let tok = self.peek()?.clone();
+                return Err(self.error_at_token(
+                    &tok,
+                    "veto with a message is only valid as a rule or unless result, not in `is veto` comparisons",
+                ));
+            }
+            return expr_step(self.wrap_result_is_veto_expression(
+                left,
+                operator_is_not,
+                false,
+                start_span,
+            ));
+        }
+
+        let right = if self.at(&TokenKind::Not)? {
+            ExprTask::NotExpression
+        } else {
+            ExprTask::RepositoryExpression
+        };
+        frames.push(ExprCont::ComparisonRight {
+            left,
+            operator,
+            start_span,
+        });
+        Ok(ExprStep::Enter(right))
+    }
+
+    fn enter_in_suffix(
+        &mut self,
+        repository: ExprId,
+        start_span: Span,
+        frames: &mut Vec<ExprCont>,
+    ) -> Result<ExprStep, Error> {
+        self.expect(&TokenKind::In)?;
+
+        let peeked = self.peek()?.clone();
+        if peeked.kind == TokenKind::Past || peeked.kind == TokenKind::Future {
+            let direction = self.next()?;
+            let rel_kind = if direction.kind == TokenKind::Past {
+                DateRelativeKind::InPast
+            } else {
+                DateRelativeKind::InFuture
+            };
+
+            if self.at_calendar_period_marker()? {
+                self.next_calendar_period_marker()?;
+                let cal_kind = if direction.kind == TokenKind::Past {
+                    DateCalendarKind::Past
+                } else {
+                    DateCalendarKind::Future
+                };
+                let unit = self.parse_calendar_unit()?;
+                let end = self.peek()?.span.clone();
+                let span = self.span_covering(&start_span, &end);
+                return expr_step(self.new_expression(
+                    ExpressionKind::DateCalendar(cal_kind, unit, repository),
+                    self.make_source(span),
+                ));
+            }
+
+            if self.at(&TokenKind::And)?
+                || self.at(&TokenKind::Unless)?
+                || self.at(&TokenKind::Then)?
+                || self.at(&TokenKind::RParen)?
+                || self.at(&TokenKind::Eof)?
+                || self.at(&TokenKind::Spec)?
+                || is_spec_body_keyword(&self.peek()?.kind)
+                || is_comparison_operator(&self.peek()?.kind)
+            {
+                let end = self.peek()?.span.clone();
+                let span = self.span_covering(&start_span, &end);
+                return expr_step(self.new_expression(
+                    ExpressionKind::DateRelative(rel_kind, repository),
+                    self.make_source(span),
+                ));
+            }
+
+            frames.push(ExprCont::InOffset {
+                direction: direction.span,
+                rel_kind,
+                repository,
+                start_span,
+            });
+            return Ok(ExprStep::Enter(ExprTask::RepositoryExpression));
+        }
+
+        if token_is_calendar_period_marker(&peeked) {
+            self.next_calendar_period_marker()?;
+            let unit = self.parse_calendar_unit()?;
+            let end = self.peek()?.span.clone();
+            let span = self.span_covering(&start_span, &end);
+            return expr_step(self.new_expression(
+                ExpressionKind::DateCalendar(DateCalendarKind::Current, unit, repository),
+                self.make_source(span),
+            ));
+        }
+
+        frames.push(ExprCont::InRange {
+            repository,
+            start_span,
+        });
+        Ok(ExprStep::Enter(ExprTask::RepositoryExpression))
+    }
+
+    fn enter_prefix_argument(
+        &mut self,
+        keyword: String,
+        frames: &mut Vec<ExprCont>,
+    ) -> Result<ExprStep, Error> {
+        if self.at(&TokenKind::LParen)? {
+            return Ok(ExprStep::Enter(ExprTask::Primary));
+        }
+        if !self.at_bare_operand_start()? {
+            let tok = self.peek()?.clone();
+            return Err(self.error_at_token(
+                &tok,
+                format!(
+                    "`{keyword}` takes one operand or `{keyword}(...)`, found '{}'",
+                    tok.text
+                ),
+            ));
+        }
+        self.check_depth()?;
+        frames.push(ExprCont::PrefixArgumentEnd { keyword });
+        frames.push(ExprCont::PopDepth);
+        Ok(ExprStep::Enter(ExprTask::RangeOperand))
+    }
+
+    fn enter_primary(&mut self, frames: &mut Vec<ExprCont>) -> Result<ExprStep, Error> {
+        let start_span = self.peek()?.span.clone();
+        let kind = self.peek()?.kind.clone();
+        match &kind {
+            TokenKind::LParen => {
+                self.next()?;
+                let saved = self.save_flags();
+                self.bare_operand = false;
+                self.call_argument_depth = 0;
+                frames.push(ExprCont::ParenEnd { start_span });
+                frames.push(ExprCont::Restore(saved));
+                Ok(ExprStep::Enter(ExprTask::Expression))
+            }
+            TokenKind::Now => {
+                let tok = self.next()?;
+                expr_step(self.new_expression(ExpressionKind::Now, self.make_source(tok.span)))
+            }
+            TokenKind::Past | TokenKind::Future => {
+                let tok = self.next()?;
+                let rel_kind = if tok.kind == TokenKind::Past {
+                    DateRelativeKind::InPast
+                } else {
+                    DateRelativeKind::InFuture
+                };
+                frames.push(ExprCont::PastFuture {
+                    kind: rel_kind,
+                    start_span,
+                });
+                Ok(ExprStep::Enter(ExprTask::RepositoryExpression))
+            }
+            TokenKind::StringLit => {
+                let tok = self.next()?;
+                expr_step(self.new_expression(
+                    ExpressionKind::Literal(Value::Text(tok.text)),
+                    self.make_source(tok.span),
+                ))
+            }
+            k if is_boolean_keyword(k) => {
+                let tok = self.next()?;
+                expr_step(self.new_expression(
+                    ExpressionKind::Literal(Value::Boolean(token_kind_to_boolean_value(&tok.kind))),
+                    self.make_source(tok.span),
+                ))
+            }
+            TokenKind::NumberLit => expr_step(self.parse_number_expression()),
+            k if can_be_label(k) => {
+                let reference = self.parse_expression_reference()?;
+                let span = self.span_covering(&start_span, &self.last_span);
+                let expr = self
+                    .new_expression(ExpressionKind::Reference(reference), self.make_source(span))?;
+                expr_step(self.wrap_list_type_suffix(expr, start_span))
+            }
+            k if token_kind_to_primitive(k).is_some() => {
+                if !self.next_is_list_type_suffix()? {
+                    let tok = self.next()?;
+                    return Err(self.error_at_token(
+                        &tok,
+                        format!("Expected an expression, found '{}'", tok.text),
+                    ));
+                }
+                let parent = self.parse_expression_parent_type()?;
+                let span = self.span_covering(&start_span, &self.last_span);
+                expr_step(self.new_expression(
+                    ExpressionKind::ListType { element: parent },
+                    self.make_source(span),
+                ))
+            }
+            _ => {
+                let tok = self.next()?;
+                Err(self.error_at_token(
+                    &tok,
+                    format!("Expected an expression, found '{}'", tok.text),
+                ))
+            }
+        }
+    }
+
+    fn enter_list_command_body(
+        &mut self,
+        name: Token,
+        frames: &mut Vec<ExprCont>,
+    ) -> Result<ExprStep, Error> {
+        match name.kind {
+            TokenKind::Find => {
+                frames.push(ExprCont::Command(CommandBuild::Find));
+                Ok(ExprStep::Enter(ExprTask::FindKeys))
+            }
+            TokenKind::First => {
+                self.reject_command_argument("first")?;
+                Ok(ExprStep::Yield(ExprVal::Command(ListCommand::First)))
+            }
+            TokenKind::Last => {
+                self.reject_command_argument("last")?;
+                Ok(ExprStep::Yield(ExprVal::Command(ListCommand::Last)))
+            }
+            TokenKind::Count => {
+                self.reject_command_argument("count")?;
+                Ok(ExprStep::Yield(ExprVal::Command(ListCommand::Count)))
+            }
+            TokenKind::Sum => {
+                frames.push(ExprCont::Command(CommandBuild::Sum));
+                Ok(ExprStep::Enter(ExprTask::OptionalArgument {
+                    command: "sum",
+                }))
+            }
+            TokenKind::Avg => {
+                frames.push(ExprCont::Command(CommandBuild::Avg));
+                Ok(ExprStep::Enter(ExprTask::OptionalArgument {
+                    command: "avg",
+                }))
+            }
+            TokenKind::Product => {
+                frames.push(ExprCont::Command(CommandBuild::Product));
+                Ok(ExprStep::Enter(ExprTask::OptionalArgument {
+                    command: "product",
+                }))
+            }
+            TokenKind::Min => {
+                frames.push(ExprCont::Command(CommandBuild::Min));
+                Ok(ExprStep::Enter(ExprTask::OptionalArgument {
+                    command: "min",
+                }))
+            }
+            TokenKind::Max => {
+                frames.push(ExprCont::Command(CommandBuild::Max));
+                Ok(ExprStep::Enter(ExprTask::OptionalArgument {
+                    command: "max",
+                }))
+            }
+            TokenKind::Any => {
+                frames.push(ExprCont::Command(CommandBuild::Any));
+                Ok(ExprStep::Enter(ExprTask::ListPredicate { command: "any" }))
+            }
+            TokenKind::All => {
+                frames.push(ExprCont::Command(CommandBuild::All));
+                Ok(ExprStep::Enter(ExprTask::ListPredicate { command: "all" }))
+            }
+            TokenKind::Where => {
+                frames.push(ExprCont::Command(CommandBuild::Where));
+                Ok(ExprStep::Enter(ExprTask::ListPredicate {
+                    command: "where",
+                }))
+            }
+            TokenKind::Sort => Ok(ExprStep::Enter(ExprTask::SortCommand)),
+            TokenKind::Top => {
+                frames.push(ExprCont::Command(CommandBuild::Top));
+                Ok(ExprStep::Enter(ExprTask::RequiredArgument {
+                    command: "top",
+                }))
+            }
+            TokenKind::With => {
+                frames.push(ExprCont::Command(CommandBuild::With));
+                Ok(ExprStep::Enter(ExprTask::ListWithCommand))
+            }
+            _ => Err(self.error_at_token(&name, format!("Unknown list command '{}'", name.text))),
+        }
+    }
+
+    fn enter_list_predicate(
+        &mut self,
+        command: &'static str,
+        frames: &mut Vec<ExprCont>,
+    ) -> Result<ExprStep, Error> {
+        if self.at(&TokenKind::LParen)? {
+            return Ok(ExprStep::Enter(ExprTask::CallListPredicate { command }));
+        }
+        if self.at_row_condition_operator()? {
+            let op = self.parse_row_condition_operator()?;
+            frames.push(ExprCont::PredicateValueRight { op, command });
+            return Ok(ExprStep::Enter(ExprTask::BareOperand));
+        }
+        if !self.at_bare_operand_start()? {
+            let tok = self.peek()?.clone();
+            return Err(self.error_at_token(
+                &tok,
+                format!("`{command}` needs a condition; write `{command}(...)`"),
+            ));
+        }
+        let start_span = self.peek()?.span.clone();
+        frames.push(ExprCont::PredicateLeft {
+            start_span,
+            command,
+        });
+        Ok(ExprStep::Enter(ExprTask::BareOperand))
+    }
+
+    fn predicate_instance_end(
+        &mut self,
+        expr: ExprId,
+        command: &'static str,
+    ) -> Result<ExprStep, Error> {
+        if !self.at_bare_argument_end()? {
+            return Err(self.condition_error(command));
+        }
+        Ok(ExprStep::Yield(ExprVal::Predicate(
+            ListPredicate::Instance { expr },
+        )))
+    }
+
+    fn enter_pair_field(
+        &mut self,
+        pairs: Vec<(Reference, ExprId)>,
+        frames: &mut Vec<ExprCont>,
+    ) -> Result<ExprStep, Error> {
+        let path = self.parse_reference()?;
+        self.expect(&TokenKind::Colon)?;
+        frames.push(ExprCont::PairValue { path, pairs });
+        Ok(ExprStep::Enter(ExprTask::BareArgument { command: "with" }))
+    }
+
+    fn pair_value_next(
+        &mut self,
+        pairs: Vec<(Reference, ExprId)>,
+        frames: &mut Vec<ExprCont>,
+    ) -> Result<ExprStep, Error> {
+        if !self.at(&TokenKind::Comma)? {
+            return Ok(ExprStep::Yield(ExprVal::Rows(ListWithRows::FieldPairs(
+                pairs,
+            ))));
+        }
+        self.next()?;
+        if !self.at_path_then_colon()? {
+            let tok = self.peek()?.clone();
+            return Err(self.error_at_token_with_suggestion(
+                &tok,
+                "Expected a field pair after comma".to_string(),
+                "Remove the extra comma, or add `field: value`",
+            ));
+        }
+        self.enter_pair_field(pairs, frames)
+    }
+
+    fn value_item_next(
+        &mut self,
+        values: Vec<ExprId>,
+        frames: &mut Vec<ExprCont>,
+    ) -> Result<ExprStep, Error> {
+        if !self.at(&TokenKind::Comma)? {
+            return Ok(ExprStep::Yield(ExprVal::Rows(ListWithRows::Values(values))));
+        }
+        self.next()?;
+        if self.at_expression_suffix_end()? || self.at(&TokenKind::Comma)? {
+            let tok = self.peek()?.clone();
+            return Err(self.error_at_token_with_suggestion(
+                &tok,
+                "Trailing or empty comma in list".to_string(),
+                "Remove the extra comma, or add the missing value",
+            ));
+        }
+        frames.push(ExprCont::ValueItem { values });
+        Ok(ExprStep::Enter(ExprTask::BareArgument { command: "with" }))
+    }
+
+    fn find_key_next(
+        &mut self,
+        keys: Vec<ExprId>,
+        frames: &mut Vec<ExprCont>,
+    ) -> Result<ExprStep, Error> {
+        if self.at(&TokenKind::Comma)? && self.call_argument_depth == 0 {
+            self.next()?;
+            frames.push(ExprCont::FindKey { keys });
+            return Ok(ExprStep::Enter(ExprTask::BareArgument { command: "find" }));
+        }
+        Ok(ExprStep::Yield(ExprVal::Exprs(keys)))
+    }
+
+    fn call_argument_items(
+        &mut self,
+        arguments: Vec<ExprId>,
+        frames: &mut Vec<ExprCont>,
+    ) -> Result<ExprStep, Error> {
+        if self.at(&TokenKind::Comma)? {
+            self.next()?;
+            frames.push(ExprCont::CallArgumentItems { arguments });
+            return Ok(ExprStep::Enter(ExprTask::Expression));
+        }
+        Ok(ExprStep::Yield(ExprVal::Exprs(arguments)))
+    }
+
+    fn repository_chain(
+        &mut self,
+        first: ExprId,
+        steps: Vec<ChainStep<ArithmeticComputation>>,
+        start_span: Span,
+        frames: &mut Vec<ExprCont>,
+    ) -> Result<ExprStep, Error> {
+        if !self.at_any(&[TokenKind::Plus, TokenKind::Minus])? {
+            return expr_step(self.arithmetic_chain(first, steps));
+        }
+        let op_tok = self.next()?;
+        let operation = match op_tok.kind {
+            TokenKind::Plus => ArithmeticComputation::Add,
+            TokenKind::Minus => ArithmeticComputation::Subtract,
+            _ => unreachable!("BUG: only + and - should reach here"),
+        };
+        frames.push(ExprCont::RepositoryOperand {
+            first,
+            steps,
+            start_span,
+            operation,
+        });
+        Ok(ExprStep::Enter(ExprTask::Term { allow_as: true }))
+    }
+
+    fn term_chain(
+        &mut self,
+        first: ExprId,
+        steps: Vec<ChainStep<ArithmeticComputation>>,
+        allow_as: bool,
+        start_span: Span,
+        frames: &mut Vec<ExprCont>,
+    ) -> Result<ExprStep, Error> {
+        if self.at(&TokenKind::Percent)? {
+            let pct_tok = self.next()?;
+            return Err(self.error_at_token(
+                &pct_tok,
+                "'%' is percent only; use 'mod' for remainder (e.g. 'value mod 7')",
+            ));
+        }
+        if !self.at_any(&[TokenKind::Star, TokenKind::Slash, TokenKind::Mod])? {
+            return expr_step(self.arithmetic_chain(first, steps));
+        }
+        let op_tok = self.next()?;
+        let operation = match op_tok.kind {
+            TokenKind::Star => ArithmeticComputation::Multiply,
+            TokenKind::Slash => ArithmeticComputation::Divide,
+            TokenKind::Mod => ArithmeticComputation::Modulo,
+            _ => unreachable!("BUG: only *, /, mod should reach here"),
+        };
+        let right_start_span = self.peek()?.span.clone();
+        frames.push(ExprCont::TermOperand {
+            first,
+            steps,
+            allow_as,
+            start_span,
+            operation,
+            right_start_span,
+        });
+        Ok(ExprStep::Enter(ExprTask::Power))
+    }
+
+    fn power_tail(
+        &mut self,
+        left: ExprId,
+        start_span: Span,
+        range_bound: bool,
+        frames: &mut Vec<ExprCont>,
+    ) -> Result<ExprStep, Error> {
+        if !self.at(&TokenKind::Caret)? {
+            return Ok(ExprStep::Yield(ExprVal::Expr(left)));
+        }
+        self.next()?;
+        self.check_depth()?;
+        frames.push(ExprCont::PowerRight { left, start_span });
+        frames.push(ExprCont::PopDepth);
+        Ok(ExprStep::Enter(if range_bound {
+            ExprTask::PowerForRangeBound
+        } else {
+            ExprTask::Power
+        }))
+    }
+
+    fn ellipsis_chain(
+        &mut self,
+        first: ExprId,
+        steps: Vec<ChainStep<ArithmeticComputation>>,
+        start_span: Span,
+        mut starts: Vec<usize>,
+        frames: &mut Vec<ExprCont>,
+    ) -> Result<ExprStep, Error> {
+        if !self.at_any(&[TokenKind::Plus, TokenKind::Minus])? {
+            self.bound_chain_starts = starts;
+            return expr_step(self.arithmetic_chain(first, steps));
+        }
+        let op_tok = self.next()?;
+        let operation = match op_tok.kind {
+            TokenKind::Plus => ArithmeticComputation::Add,
+            TokenKind::Minus => ArithmeticComputation::Subtract,
+            _ => unreachable!("BUG: only + and - should reach here"),
+        };
+        starts.push(self.peek()?.span.start);
+        frames.push(ExprCont::EllipsisOperand {
+            first,
+            steps,
+            start_span,
+            operation,
+            starts,
+        });
+        Ok(ExprStep::Enter(ExprTask::PowerForRangeBound))
+    }
+}
+
+/// Expression grammar state saved and restored around nested parses.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct ExprFlags {
+    bare_operand: bool,
+    call_argument_depth: usize,
+}
+
+/// A grammar nonterminal the expression machine can enter.
+enum ExprTask {
+    Expression,
+    AndExpression,
+    AndOperand,
+    VetoStatus,
+    NotExpression,
+    RepositoryWithSuffix,
+    ComparisonSuffix {
+        left: ExprId,
+        start_span: Span,
+    },
+    InSuffix {
+        repository: ExprId,
+        start_span: Span,
+    },
+    RepositoryExpression,
+    Term {
+        allow_as: bool,
+    },
+    Power,
+    RangeOperand,
+    RangeEllipsisBound,
+    PowerForRangeBound,
+    Factor,
+    PrimaryOrMath,
+    MathFunction,
+    LowerUpper,
+    PrefixArgument {
+        keyword: String,
+    },
+    Primary,
+    ListCommandSuffix {
+        list: ExprId,
+        start_span: Span,
+    },
+    ListCommandBody {
+        name: Token,
+    },
+    FindKeys,
+    CallArguments {
+        command: &'static str,
+    },
+    SingleCallArgument {
+        command: &'static str,
+    },
+    OptionalArgument {
+        command: &'static str,
+    },
+    RequiredArgument {
+        command: &'static str,
+    },
+    BareArgument {
+        command: &'static str,
+    },
+    BareOperand,
+    ListPredicate {
+        command: &'static str,
+    },
+    CallListPredicate {
+        command: &'static str,
+    },
+    ValuePredicateInParentheses {
+        command: &'static str,
+    },
+    SortCommand,
+    ListWithCommand,
+    ListWithRows,
+}
+
+/// Command whose argument values are collected before the `ListCommand` is built.
+#[derive(Clone, Copy)]
+enum CommandBuild {
+    Find,
+    Sum,
+    Avg,
+    Product,
+    Min,
+    Max,
+    Any,
+    All,
+    Where,
+    Top,
+    With,
+}
+
+/// Continuation: what to do with the value a nested nonterminal yields.
+enum ExprCont {
+    Restore(ExprFlags),
+    PopDepth,
+    AndFirst {
+        start_span: Span,
+    },
+    AndOperand {
+        first: ExprId,
+        steps: Vec<ChainStep<()>>,
+        start_span: Span,
+    },
+    VetoStatus {
+        operator_is_not: bool,
+        keyword_was_negated: bool,
+        start_span: Span,
+    },
+    Negation {
+        start_span: Span,
+    },
+    RepositorySuffix {
+        start_span: Span,
+    },
+    ContinueRepository {
+        start_span: Span,
+    },
+    ComparisonRight {
+        left: ExprId,
+        operator: ComparisonComputation,
+        start_span: Span,
+    },
+    InOffset {
+        direction: Span,
+        rel_kind: DateRelativeKind,
+        repository: ExprId,
+        start_span: Span,
+    },
+    InRange {
+        repository: ExprId,
+        start_span: Span,
+    },
+    RepositoryFirst {
+        start_span: Span,
+    },
+    RepositoryOperand {
+        first: ExprId,
+        steps: Vec<ChainStep<ArithmeticComputation>>,
+        start_span: Span,
+        operation: ArithmeticComputation,
+    },
+    TermFirst {
+        allow_as: bool,
+        start_span: Span,
+    },
+    TermOperand {
+        first: ExprId,
+        steps: Vec<ChainStep<ArithmeticComputation>>,
+        allow_as: bool,
+        start_span: Span,
+        operation: ArithmeticComputation,
+        right_start_span: Span,
+    },
+    PowerLeft {
+        start_span: Span,
+        range_bound: bool,
+    },
+    PowerRight {
+        left: ExprId,
+        start_span: Span,
+    },
+    /// Factor of a range operand is parsed; a range bound may continue it.
+    RangeFactor {
+        start_span: Span,
+        flags: ExprFlags,
+    },
+    /// Bound continuing `factor` is parsed speculatively from `checkpoint`, taken right after
+    /// `factor`. Without a following `...` the parser rewinds there and yields `factor`.
+    RangeLeft {
+        factor: ExprId,
+        start_span: Span,
+        checkpoint: Box<ParserCheckpoint>,
+        flags: ExprFlags,
+    },
+    RangeRight {
+        left: ExprId,
+        start_span: Span,
+    },
+    EllipsisFirst {
+        start_span: Span,
+    },
+    EllipsisOperand {
+        first: ExprId,
+        steps: Vec<ChainStep<ArithmeticComputation>>,
+        start_span: Span,
+        operation: ArithmeticComputation,
+        starts: Vec<usize>,
+    },
+    FactorNegate {
+        start_span: Span,
+    },
+    PrimaryOrMathSuffix {
+        start_span: Span,
+    },
+    ListCommandDone {
+        list: ExprId,
+        start_span: Span,
+    },
+    Command(CommandBuild),
+    FindKey {
+        keys: Vec<ExprId>,
+    },
+    CallArgumentsEnd {
+        command: &'static str,
+    },
+    CallArgumentItems {
+        arguments: Vec<ExprId>,
+    },
+    SingleCallArgumentCheck {
+        command: &'static str,
+    },
+    WrapSome,
+    BareArgumentEnd {
+        command: &'static str,
+    },
+    ParenEnd {
+        start_span: Span,
+    },
+    PastFuture {
+        kind: DateRelativeKind,
+        start_span: Span,
+    },
+    Math {
+        operator: MathematicalComputation,
+        start_span: Span,
+    },
+    LowerUpperEnd {
+        bound: RangeBound,
+        start_span: Span,
+    },
+    PrefixArgumentEnd {
+        keyword: String,
+    },
+    PredicateValueRight {
+        op: RowCondition,
+        command: &'static str,
+    },
+    PredicateLeft {
+        start_span: Span,
+        command: &'static str,
+    },
+    PredicateRight {
+        left: ExprId,
+        op: RowCondition,
+        start_span: Span,
+        command: &'static str,
+    },
+    WrapInstance,
+    ValuePredicateEnd {
+        op: RowCondition,
+        command: &'static str,
+    },
+    CallPredicateEnd {
+        command: &'static str,
+    },
+    SortArgument {
+        check_bare: bool,
+    },
+    ListWithEnd,
+    PairValue {
+        path: Reference,
+        pairs: Vec<(Reference, ExprId)>,
+    },
+    ValueItem {
+        values: Vec<ExprId>,
+    },
+}
+
+/// Value a finished nonterminal yields to its continuation.
+enum ExprVal {
+    Expr(ExprId),
+    Optional(Option<ExprId>),
+    Exprs(Vec<ExprId>),
+    Command(ListCommand),
+    Predicate(ListPredicate),
+    Rows(ListWithRows),
+}
+
+enum ExprStep {
+    Enter(ExprTask),
+    Yield(ExprVal),
+}
+
+fn expr_of(value: ExprVal) -> ExprId {
+    match value {
+        ExprVal::Expr(expr) => expr,
+        _ => panic!("BUG: expression machine expected an expression value"),
+    }
+}
+
+fn optional_of(value: ExprVal) -> Option<ExprId> {
+    match value {
+        ExprVal::Optional(argument) => argument,
+        _ => panic!("BUG: expression machine expected an optional argument"),
+    }
+}
+
+fn exprs_of(value: ExprVal) -> Vec<ExprId> {
+    match value {
+        ExprVal::Exprs(exprs) => exprs,
+        _ => panic!("BUG: expression machine expected an argument list"),
+    }
+}
+
+fn predicate_of(value: ExprVal) -> ListPredicate {
+    match value {
+        ExprVal::Predicate(predicate) => predicate,
+        _ => panic!("BUG: expression machine expected a list predicate"),
+    }
+}
+
+fn rows_of(value: ExprVal) -> ListWithRows {
+    match value {
+        ExprVal::Rows(rows) => rows,
+        _ => panic!("BUG: expression machine expected list rows"),
+    }
+}
+
+fn command_of(value: ExprVal) -> ListCommand {
+    match value {
+        ExprVal::Command(command) => command,
+        _ => panic!("BUG: expression machine expected a list command"),
+    }
+}
+
+fn expr_step(result: Result<ExprId, Error>) -> Result<ExprStep, Error> {
+    result.map(|expr| ExprStep::Yield(ExprVal::Expr(expr)))
+}
+
+fn build_command(builder: CommandBuild, value: ExprVal) -> ListCommand {
+    match builder {
+        CommandBuild::Find => ListCommand::Find {
+            keys: exprs_of(value),
+        },
+        CommandBuild::Sum => ListCommand::Sum {
+            argument: optional_of(value),
+        },
+        CommandBuild::Avg => ListCommand::Avg {
+            argument: optional_of(value),
+        },
+        CommandBuild::Product => ListCommand::Product {
+            argument: optional_of(value),
+        },
+        CommandBuild::Min => ListCommand::Min {
+            argument: optional_of(value),
+        },
+        CommandBuild::Max => ListCommand::Max {
+            argument: optional_of(value),
+        },
+        CommandBuild::Any => ListCommand::Any {
+            form: predicate_of(value),
+        },
+        CommandBuild::All => ListCommand::All {
+            form: predicate_of(value),
+        },
+        CommandBuild::Where => ListCommand::Where {
+            form: predicate_of(value),
+        },
+        CommandBuild::Top => ListCommand::Top { n: expr_of(value) },
+        CommandBuild::With => ListCommand::With {
+            rows: rows_of(value),
+        },
+    }
+}
+
+fn parent_type_from_reference(reference: &Reference) -> ParentType {
+    if reference.segments.is_empty() {
+        return ParentType::Custom {
+            name: reference.name.clone(),
+        };
+    }
+    if reference.segments.len() == 1 {
+        return ParentType::Qualified {
+            spec_alias: reference.segments[0].clone(),
+            inner: Box::new(ParentType::Custom {
+                name: reference.name.clone(),
+            }),
+        };
+    }
+    ParentType::Qualified {
+        spec_alias: reference.segments[0].clone(),
+        inner: Box::new(ParentType::Custom {
+            name: reference.name.clone(),
+        }),
     }
 }
 

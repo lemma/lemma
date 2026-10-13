@@ -1,10 +1,12 @@
 //! Map key order in the API output is part of the contract.
 //!
-//! `Show.data`, `Show.rules`, `Show.meta`, and `Response.results` are all `IndexMap` in Rust,
-//! preserving declaration/dependency order instead of `HashMap` randomization.
+//! `Show.data`, `Show.rules`, `Show.meta`, `Response.results`, and
+//! `Response.rows` / nested `SpecResult` `data`/`rules` are `IndexMap` in Rust,
+//! preserving declaration/dependency order instead of alphabetical `BTreeMap`
+//! or `HashMap` randomization.
 
+use indexmap::IndexMap;
 use lemma::{DateTimeValue, Engine};
-use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -70,9 +72,9 @@ fn show_meta_iterates_in_declaration_order() {
         "meta must preserve declaration order, not HashMap randomization"
     );
 
-    let json = serde_json::to_value(lemma::api::Show::from(&show)).expect("Show JSON");
+    let json = lemma::api::show_document(&engine, &show);
     assert_eq!(
-        json_object_keys(&json["meta"]),
+        json_object_keys(&json["x-lemma-meta"]),
         vec!["zebra", "yankee", "xray", "whiskey", "victor", "uniform"]
     );
 }
@@ -84,9 +86,9 @@ fn show_data_iterates_in_declaration_order() {
     let show = engine.show(None, "data_order", Some(&now)).expect("show");
     let keys: Vec<_> = show.data.keys().cloned().collect();
     assert_eq!(keys, vec!["zebra", "yankee", "alpha"]);
-    let json = serde_json::to_value(lemma::api::Show::from(&show)).expect("Show JSON");
+    let json = lemma::api::show_document(&engine, &show);
     assert_eq!(
-        json_object_keys(&json["data"]),
+        json_object_keys(&json["properties"]),
         vec!["zebra", "yankee", "alpha"]
     );
 }
@@ -116,19 +118,67 @@ fn response_results_follow_same_order_as_local_show_rules() {
         .map(|(name, _)| name.clone())
         .collect();
     let response = engine
-        .run(
+        .evaluate(
             None,
             "topo",
             Some(&now),
-            HashMap::from([("n".to_string(), "1".into())]),
+            IndexMap::from([("n".to_string(), "1".into())]),
             None,
             false,
         )
-        .expect("run");
+        .expect("evaluate");
     let result_keys: Vec<_> = response.results.keys().cloned().collect();
     assert_eq!(result_keys, show_keys);
     let json = serde_json::to_value(lemma::api::Response::from(&response)).expect("Response JSON");
     assert_eq!(json_object_keys(&json["results"]), show_keys);
+}
+
+const ROW_MEMBER_ORDER_SPEC: &str = r#"
+spec xx
+data z: number
+data type: text
+rule late: z
+rule early: late + 1
+
+spec test
+uses zz: xx list
+  -> key z
+  -> with z: 5
+  -> with z: 7, type: "hi"
+
+rule x:
+  zz -> find 7
+"#;
+
+#[test]
+fn response_row_data_and_rules_follow_plan_order() {
+    let engine = load(ROW_MEMBER_ORDER_SPEC, "row_order.lemma");
+    let now = DateTimeValue::now();
+    let response = engine
+        .evaluate(None, "test", Some(&now), IndexMap::new(), None, false)
+        .expect("evaluate");
+    let row = response.rows.first().expect("one found row");
+    let data_keys: Vec<_> = row.data.keys().cloned().collect();
+    assert_eq!(
+        data_keys,
+        vec!["z".to_string(), "type".to_string()],
+        "row data must follow declaration order; alphabetical would be type, z"
+    );
+    let rule_keys: Vec<_> = row.rules.keys().cloned().collect();
+    assert_eq!(
+        rule_keys,
+        vec!["late".to_string(), "early".to_string()],
+        "row rules must follow plan order; alphabetical would be early, late"
+    );
+    let json = serde_json::to_value(lemma::api::Response::from(&response)).expect("Response JSON");
+    assert_eq!(
+        json_object_keys(&json["rows"][0]["data"]),
+        vec!["z", "type"]
+    );
+    assert_eq!(
+        json_object_keys(&json["rows"][0]["rules"]),
+        vec!["late", "early"]
+    );
 }
 
 #[test]
@@ -175,7 +225,7 @@ rule r: a
 "#;
     let engine = load(SPEC, "multi.lemma");
     let now = DateTimeValue::now();
-    let data = HashMap::from([
+    let data = IndexMap::from([
         ("a".to_string(), "bad".into()),
         ("b".to_string(), "1".into()),
         ("c".to_string(), "bad".into()),
@@ -183,7 +233,7 @@ rule r: a
         ("e".to_string(), "bad".into()),
     ]);
     let response = engine
-        .run(None, "multi", Some(&now), data, None, false)
+        .evaluate(None, "multi", Some(&now), data, None, false)
         .expect("invalid data values must Veto, not Error");
     let rule_result = response.results.get("r").expect("rule 'r' present");
     assert!(

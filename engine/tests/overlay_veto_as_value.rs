@@ -1,9 +1,9 @@
 //! Overlay binds bad overrides as Veto values; evaluation still completes.
 
+use indexmap::IndexMap;
 use lemma::DateTimeValue;
 use lemma::Engine;
 use lemma::ErrorKind;
-use std::collections::HashMap;
 
 fn load(engine: &mut Engine, code: &str) {
     engine
@@ -29,17 +29,23 @@ rule total: p.amount
 "#,
     );
     let now = DateTimeValue::now();
-    let mut data = HashMap::new();
+    let mut data = IndexMap::new();
     data.insert("p".to_string(), "42".into());
     let response = engine
-        .run(None, "outer", Some(&now), data, None, false)
+        .evaluate(None, "outer", Some(&now), data, None, false)
         .expect("import alias ignored; run completes");
     let total = response.results.get("total").expect("total");
     assert!(total.vetoed, "p.amount still missing");
-    let reason = total.veto_reason.as_deref().expect("veto reason");
-    assert!(
-        reason.contains("Missing data") && reason.contains("amount"),
-        "got: {reason}"
+    assert_eq!(
+        total.missing_data(),
+        &["p.amount"],
+        "unbound leaf under import alias"
+    );
+    assert_eq!(
+        total.veto_reason.as_deref(),
+        Some("Missing data: p.amount"),
+        "got: {:?}",
+        total.veto_reason
     );
 }
 
@@ -55,10 +61,10 @@ rule r: age
 "#,
     );
     let now = DateTimeValue::now();
-    let mut data = HashMap::new();
+    let mut data = IndexMap::new();
     data.insert("agge".to_string(), "1".into());
     let response = engine
-        .run(None, "s", Some(&now), data, None, false)
+        .evaluate(None, "s", Some(&now), data, None, false)
         .expect("typo ignored; run completes");
     let reason = response
         .results
@@ -85,12 +91,12 @@ rule r: age
 "#,
     );
     let now = DateTimeValue::now();
-    let mut data = HashMap::new();
+    let mut data = IndexMap::new();
     data.insert("age".to_string(), "1".into());
     data.insert("agge".to_string(), "2".into());
     let response = engine
-        .run(None, "s", Some(&now), data, None, false)
-        .expect("run");
+        .evaluate(None, "s", Some(&now), data, None, false)
+        .expect("evaluate");
     let r = response.results.get("r").expect("r");
     assert!(!r.vetoed, "age bound");
     assert_eq!(r.result(), Some("1"));
@@ -108,11 +114,11 @@ rule r: age
 "#,
     );
     let now = DateTimeValue::now();
-    let mut data = HashMap::new();
+    let mut data = IndexMap::new();
     data.insert("Age".to_string(), "1".into());
     data.insert("age".to_string(), "2".into());
     let err = engine
-        .run(None, "s", Some(&now), data, None, false)
+        .evaluate(None, "s", Some(&now), data, None, false)
         .expect_err("duplicate canonical keys");
     assert_eq!(err.kind(), ErrorKind::Request);
     assert!(err.to_string().contains("Duplicate data key"), "got: {err}");
@@ -132,11 +138,11 @@ rule uses_y: y * 2
 "#,
     );
     let now = DateTimeValue::now();
-    let mut data = HashMap::new();
+    let mut data = IndexMap::new();
     data.insert("x".to_string(), "42".into());
     data.insert("y".to_string(), "3".into());
     let response = engine
-        .run(None, "s", Some(&now), data, None, false)
+        .evaluate(None, "s", Some(&now), data, None, false)
         .expect("constraint failure must not abort run");
     let uses_x = response.results.get("uses_x").expect("uses_x");
     assert!(uses_x.vetoed, "x over maximum vetoes uses_x");
@@ -162,10 +168,10 @@ rule r: age
 "#,
     );
     let now = DateTimeValue::now();
-    let mut data = HashMap::new();
+    let mut data = IndexMap::new();
     data.insert("age".to_string(), "thirty".into());
     let response = engine
-        .run(None, "s", Some(&now), data, None, false)
+        .evaluate(None, "s", Some(&now), data, None, false)
         .expect("parse failure completes with veto");
     let r = response.results.get("r").expect("r");
     assert!(r.vetoed);
@@ -186,7 +192,7 @@ rule r: age
     );
     let now = DateTimeValue::now();
     let response = engine
-        .run(None, "s", Some(&now), HashMap::new(), None, false)
+        .evaluate(None, "s", Some(&now), IndexMap::new(), None, false)
         .expect("unbound default still runs");
     let r = response.results.get("r").expect("r");
     assert!(r.vetoed, "-> suggest must not commit");
@@ -210,10 +216,10 @@ rule r: age
 "#,
     );
     let now = DateTimeValue::now();
-    let mut data = HashMap::new();
+    let mut data = IndexMap::new();
     data.insert("agge".to_string(), "99".into());
     let response = engine
-        .run(None, "s", Some(&now), data, None, false)
+        .evaluate(None, "s", Some(&now), data, None, false)
         .expect("typo ignored; run completes");
     let reason = response
         .results
@@ -240,10 +246,10 @@ rule r: age
 "#,
     );
     let now = DateTimeValue::now();
-    let mut data = HashMap::new();
+    let mut data = IndexMap::new();
     data.insert("Agge".to_string(), "1".into());
     let response = engine
-        .run(None, "s", Some(&now), data, None, false)
+        .evaluate(None, "s", Some(&now), data, None, false)
         .expect("typo ignored; run completes");
     let reason = response
         .results

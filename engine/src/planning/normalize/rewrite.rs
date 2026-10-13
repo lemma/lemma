@@ -8,13 +8,13 @@
 //! rule reference, and never re-intern an unchanged cell.
 
 use super::{
-    literal_from_folded_rational, normalization_error, Cells, LeafKind, NormalFormId,
-    NormalFormKind, NormalizeContext,
+    literal_from_folded_rational, normalization_error, ArithmeticTerm, Cells, DispatchRegion,
+    LeafKind, NormalFormId, NormalFormKind,
 };
 use crate::computation::comparison::comparison_operation;
 use crate::computation::rational::{
     rational_is_zero, rational_new, rational_one, rational_operation, rational_zero,
-    NumericOperation, RationalInteger,
+    NumericFailure, NumericOperation, RationalInteger,
 };
 use crate::parsing::ast::PrimitiveKind;
 use crate::planning::ordered_dispatch::{
@@ -22,25 +22,26 @@ use crate::planning::ordered_dispatch::{
     sorted_unique_boundaries, DispatchClass, DispatchKeyBuildError,
 };
 use crate::planning::semantics::{
-    mirrored_comparison, negated_comparison, primitive_number_arc, ComparisonComputation,
-    LemmaType, LiteralValue, MathematicalComputation, SemanticConversionTarget, Source, ValueKind,
+    mirrored_comparison, negated_comparison, ComparisonComputation, LemmaType, LiteralValue,
+    MathematicalComputation, SemanticConversionTarget, Source, ValueKind,
 };
 use crate::Error;
 use indexmap::IndexMap;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 /// Normalize `root`: every reachable cell, children first, through [`PASSES`].
 pub(super) fn normalize(
     root: NormalFormId,
     cells: Cells<'_>,
-    _ctx: &NormalizeContext<'_>,
     source: Option<Source>,
 ) -> Result<NormalFormId, Error> {
     let mut normalizer = Normalizer {
         cells,
         source,
         normalized: HashMap::new(),
+        numeric: HashMap::new(),
+        in_progress: HashSet::new(),
     };
     normalizer.normalize(root)
 }
@@ -52,81 +53,235 @@ struct Normalizer<'a> {
     /// Pre-image → normalized result for this walk. Scoped to one rule: the
     /// cells is shared across rules and temporal slices, whose contexts differ.
     normalized: HashMap<NormalFormId, NormalFormId>,
+    /// Memo for [`numeric_only`]. Cell ids are immutable, so an answer stays valid
+    /// for the whole walk.
+    numeric: HashMap<NormalFormId, bool>,
+    /// Cells visited and not yet normalized. Meeting one again means a pass
+    /// builds its own pre-image back: a cycle, which must not loop.
+    in_progress: HashSet<NormalFormId>,
+}
+
+/// Work item of the normalization walk. Explicit so that nesting depth costs heap,
+/// not Rust stack.
+enum Task {
+    /// Normalize the cell: unnormalized children first, then [`Task::Rebuild`].
+    Visit(NormalFormId),
+    /// Children are normalized: run the passes over the cell.
+    Rebuild(NormalFormId),
+    /// A pass built fresh children: resume the cell with its next pass once they
+    /// are normalized.
+    Resume {
+        origin: NormalFormId,
+        rewritten: NormalFormId,
+        children: Vec<NormalFormId>,
+        first_fresh: usize,
+        next_pass: usize,
+    },
 }
 
 /// One local rewrite. `Ok(None)`: pattern does not apply, cell untouched.
-type Pass = fn(&mut Normalizer<'_>, NormalFormId) -> Result<Option<NormalFormId>, Error>;
+#[derive(Clone, Copy)]
+enum Pass {
+    ExpandNumericSubtractDivide,
+    FlattenAssociative,
+    FlattenConjunction,
+    PowerLaws,
+    EliminateIdentities,
+    DoubleNegateReciprocal,
+    MathIdentities,
+    ConstantFold,
+    FoldNumberConversion,
+    NegatedComparisons,
+    LogicalIdempotency,
+    CollapsePiecewise,
+    CanonicalOrder,
+    OrderedDispatch,
+}
+
+impl Pass {
+    fn apply(
+        self,
+        normalizer: &mut Normalizer<'_>,
+        id: NormalFormId,
+    ) -> Result<Option<NormalFormId>, Error> {
+        match self {
+            Pass::ExpandNumericSubtractDivide => expand_numeric_subtract_divide(normalizer, id),
+            Pass::FlattenAssociative => flatten_associative(normalizer, id),
+            Pass::FlattenConjunction => flatten_conjunction(normalizer, id),
+            Pass::PowerLaws => power_laws(normalizer, id),
+            Pass::EliminateIdentities => eliminate_identities(normalizer, id),
+            Pass::DoubleNegateReciprocal => double_negate_reciprocal(normalizer, id),
+            Pass::MathIdentities => math_identities(normalizer, id),
+            Pass::ConstantFold => constant_fold(normalizer, id),
+            Pass::FoldNumberConversion => fold_number_conversion(normalizer, id),
+            Pass::NegatedComparisons => negated_comparisons(normalizer, id),
+            Pass::LogicalIdempotency => logical_idempotency(normalizer, id),
+            Pass::CollapsePiecewise => collapse_piecewise(normalizer, id),
+            Pass::CanonicalOrder => canonical_order(normalizer, id),
+            Pass::OrderedDispatch => ordered_dispatch(normalizer, id),
+        }
+    }
+}
 
 /// Rewrites applied at every cell, in this order, once each.
-const PASSES: [Pass; 13] = [
-    expand_numeric_subtract_divide,
-    flatten_associative,
-    power_laws,
-    eliminate_identities,
-    double_negate_reciprocal,
-    math_identities,
-    constant_fold,
-    fold_number_conversion,
-    negated_comparisons,
-    logical_idempotency,
-    collapse_piecewise,
-    canonical_order,
-    ordered_dispatch,
+const PASSES: [Pass; 14] = [
+    Pass::ExpandNumericSubtractDivide,
+    Pass::FlattenAssociative,
+    Pass::FlattenConjunction,
+    Pass::PowerLaws,
+    Pass::EliminateIdentities,
+    Pass::DoubleNegateReciprocal,
+    Pass::MathIdentities,
+    Pass::ConstantFold,
+    Pass::FoldNumberConversion,
+    Pass::NegatedComparisons,
+    Pass::LogicalIdempotency,
+    Pass::CollapsePiecewise,
+    Pass::CanonicalOrder,
+    Pass::OrderedDispatch,
 ];
 
 impl Normalizer<'_> {
-    fn normalize(&mut self, id: NormalFormId) -> Result<NormalFormId, Error> {
-        // A rule reference shares the referenced body's Kind, normalized when
-        // that rule completed. Entering it would rebuild without `rule_ref` and
-        // re-walk the body (Θ(2ⁿ) on `r and not r` chains).
+    /// Normalized form of `id` if this walk already has it. A rule reference is its
+    /// own normal form: its body was normalized when that rule completed.
+    fn normalized_form(&self, id: NormalFormId) -> Option<NormalFormId> {
         if self.cells.get(id).rule_ref.is_some() {
-            return Ok(id);
+            return Some(id);
         }
-        if let Some(&result) = self.normalized.get(&id) {
-            return Ok(result);
-        }
-        let children = self.cells.get(id).kind.children();
-        let with_children = self.with_normalized_children(id, children, |_| true)?;
-        let result = self.rewrite(with_children)?;
-        self.normalized.insert(id, result);
-        self.normalized.insert(result, result);
-        Ok(result)
+        self.normalized.get(&id).copied()
     }
 
-    fn rewrite(&mut self, id: NormalFormId) -> Result<NormalFormId, Error> {
-        let mut current = id;
-        for pass in PASSES {
-            let first_fresh = self.cells.len();
-            if let Some(rewritten) = pass(self, current)? {
-                // Cells the pass built under its result have not been walked.
-                let children = self.cells.get(rewritten).kind.children();
-                current = self.with_normalized_children(rewritten, children, |child| {
-                    child.index() >= first_fresh
-                })?;
+    /// Post-order walk over the graph under `root`: every child is normalized before
+    /// its parent's passes run. Passes that build unnormalized children suspend their
+    /// cell (see [`Task::Resume`]), so nesting depth lives on the heap.
+    fn normalize(&mut self, root: NormalFormId) -> Result<NormalFormId, Error> {
+        let mut tasks = vec![Task::Visit(root)];
+        while let Some(task) = tasks.pop() {
+            match task {
+                Task::Visit(id) => {
+                    if self.normalized_form(id).is_some() {
+                        continue;
+                    }
+                    assert!(
+                        self.in_progress.insert(id),
+                        "BUG: normalization revisits cell {id:?} before it completes"
+                    );
+                    tasks.push(Task::Rebuild(id));
+                    self.cells.get(id).kind.for_each_child(|child| {
+                        if self.normalized_form(child).is_none() {
+                            tasks.push(Task::Visit(child));
+                        }
+                    });
+                }
+                Task::Rebuild(id) => {
+                    let children = self.cells.get(id).kind.children();
+                    let with_children = self.rebuild_normalized(id, children);
+                    self.advance(&mut tasks, id, with_children, 0)?;
+                }
+                Task::Resume {
+                    origin,
+                    rewritten,
+                    children,
+                    first_fresh,
+                    next_pass,
+                } => {
+                    let replaced = self.replace_fresh(&children, first_fresh);
+                    let current = self.rebuild_with_children(rewritten, children, replaced);
+                    self.advance(&mut tasks, origin, current, next_pass)?;
+                }
             }
         }
-        Ok(current)
+        Ok(self
+            .normalized_form(root)
+            .expect("BUG: root not normalized after post-order walk"))
     }
 
-    /// `id` with every child accepted by `select` normalized. Returns `id`
-    /// itself when no child changed; otherwise a rebuilt cell carrying `id`'s
-    /// source and origin.
-    fn with_normalized_children(
+    /// Runs passes `next_pass..` on `current`. When they all apply, `origin` is
+    /// normalized to the result. A pass that builds unnormalized children suspends
+    /// `origin`: those children are queued, then `origin` resumes after them.
+    fn advance(
+        &mut self,
+        tasks: &mut Vec<Task>,
+        origin: NormalFormId,
+        mut current: NormalFormId,
+        next_pass: usize,
+    ) -> Result<(), Error> {
+        for (pass_index, &pass) in PASSES.iter().enumerate().skip(next_pass) {
+            let first_fresh = self.cells.len();
+            let Some(rewritten) = pass.apply(self, current)? else {
+                continue;
+            };
+            let children = self.cells.get(rewritten).kind.children();
+            let pending: Vec<NormalFormId> = children
+                .iter()
+                .copied()
+                .filter(|child| {
+                    child.index() >= first_fresh && self.normalized_form(*child).is_none()
+                })
+                .collect();
+            if !pending.is_empty() {
+                tasks.push(Task::Resume {
+                    origin,
+                    rewritten,
+                    children,
+                    first_fresh,
+                    next_pass: pass_index + 1,
+                });
+                tasks.extend(pending.into_iter().map(Task::Visit));
+                return Ok(());
+            }
+            let replaced = self.replace_fresh(&children, first_fresh);
+            current = self.rebuild_with_children(rewritten, children, replaced);
+        }
+        self.in_progress.remove(&origin);
+        self.normalized.insert(origin, current);
+        self.normalized.insert(current, current);
+        Ok(())
+    }
+
+    /// `children` with each cell built by the current pass replaced by its normalized
+    /// form. Older children were normalized before the pass ran.
+    fn replace_fresh(&self, children: &[NormalFormId], first_fresh: usize) -> Vec<NormalFormId> {
+        children
+            .iter()
+            .map(|child| {
+                if child.index() >= first_fresh {
+                    self.normalized_form(*child)
+                        .expect("BUG: fresh child not normalized before its parent resumes")
+                } else {
+                    *child
+                }
+            })
+            .collect()
+    }
+
+    /// `id` with every child replaced by its normalized form. Children are
+    /// normalized by [`Self::normalize`] before their parent is visited.
+    fn rebuild_normalized(
         &mut self,
         id: NormalFormId,
         children: Vec<NormalFormId>,
-        select: impl Fn(NormalFormId) -> bool,
-    ) -> Result<NormalFormId, Error> {
-        let mut replaced = Vec::with_capacity(children.len());
-        for child in &children {
-            replaced.push(if select(*child) {
-                self.normalize(*child)?
-            } else {
-                *child
-            });
-        }
+    ) -> NormalFormId {
+        let replaced: Vec<NormalFormId> = children
+            .iter()
+            .map(|child| {
+                self.normalized_form(*child)
+                    .expect("BUG: child not normalized before its parent")
+            })
+            .collect();
+        self.rebuild_with_children(id, children, replaced)
+    }
+
+    /// `id` rebuilt over `replaced` when any child changed; otherwise `id` itself.
+    /// The rebuilt cell keeps `id`'s source and origin.
+    fn rebuild_with_children(
+        &mut self,
+        id: NormalFormId,
+        children: Vec<NormalFormId>,
+        replaced: Vec<NormalFormId>,
+    ) -> NormalFormId {
         if replaced == children {
-            return Ok(id);
+            return id;
         }
         let cell = self.cells.get(id);
         let mut replacement = replaced.into_iter();
@@ -141,7 +296,7 @@ impl Normalizer<'_> {
         );
         let source = cell.source.clone();
         let origin = cell.origin;
-        Ok(self.cells.rebuild(kind, source, origin))
+        self.cells.rebuild(kind, source, origin)
     }
 }
 
@@ -151,43 +306,85 @@ fn expand_numeric_subtract_divide(
 ) -> Result<Option<NormalFormId>, Error> {
     let rewritten = match &n.cells.get(id).kind {
         NormalFormKind::Subtract(a, b)
-            if is_numeric_only(&n.cells, *a) && is_numeric_only(&n.cells, *b) =>
+            if numeric_only(&n.cells, &mut n.numeric, *a)
+                && numeric_only(&n.cells, &mut n.numeric, *b) =>
         {
             let (a, b) = (*a, *b);
-            let negate_b = n.cells.rebuild(NormalFormKind::Negate(b), None, None);
-            n.cells
-                .fold_into(NormalFormKind::Sum(vec![a, negate_b]), id)
+            n.cells.fold_into(
+                NormalFormKind::Sum(vec![ArithmeticTerm::direct(a), ArithmeticTerm::inverted(b)]),
+                id,
+            )
         }
         NormalFormKind::Divide(a, b)
-            if is_numeric_only(&n.cells, *a) && is_numeric_only(&n.cells, *b) =>
+            if numeric_only(&n.cells, &mut n.numeric, *a)
+                && numeric_only(&n.cells, &mut n.numeric, *b) =>
         {
             let (a, b) = (*a, *b);
-            let reciprocal_b = n.cells.rebuild(NormalFormKind::Reciprocal(b), None, None);
-            n.cells
-                .fold_into(NormalFormKind::Product(vec![a, reciprocal_b]), id)
+            n.cells.fold_into(
+                NormalFormKind::Product(vec![
+                    ArithmeticTerm::direct(a),
+                    ArithmeticTerm::inverted(b),
+                ]),
+                id,
+            )
         }
         _ => return Ok(None),
     };
     Ok(Some(rewritten))
 }
 
-fn is_numeric_only(cells: &Cells<'_>, id: NormalFormId) -> bool {
-    if cells.get(id).rule_ref.is_some() {
-        return false;
-    }
-    match &cells.get(id).kind {
-        NormalFormKind::Leaf(LeafKind::Literal(literal)) => {
-            matches!(literal.value, ValueKind::Number(_))
+/// Whether `root` is a tree of numeric literals under sum, product, subtract,
+/// divide, power, negate, reciprocal. Iterative; answers are memoized in `memo`.
+pub(super) fn numeric_only(
+    cells: &Cells<'_>,
+    memo: &mut HashMap<NormalFormId, bool>,
+    root: NormalFormId,
+) -> bool {
+    let mut stack = vec![(root, false)];
+    while let Some((id, operands_done)) = stack.pop() {
+        if memo.contains_key(&id) {
+            continue;
         }
-        NormalFormKind::Sum(children) | NormalFormKind::Product(children) => {
-            children.iter().all(|c| is_numeric_only(cells, *c))
+        let cell = cells.get(id);
+        let operands: Vec<NormalFormId> = if cell.rule_ref.is_some() {
+            memo.insert(id, false);
+            continue;
+        } else {
+            match &cell.kind {
+                NormalFormKind::Leaf(LeafKind::Literal(literal)) => {
+                    memo.insert(id, matches!(literal.value, ValueKind::Number(_)));
+                    continue;
+                }
+                NormalFormKind::Sum(terms) | NormalFormKind::Product(terms) => {
+                    terms.iter().map(|term| term.operand).collect()
+                }
+                NormalFormKind::Subtract(a, b)
+                | NormalFormKind::Divide(a, b)
+                | NormalFormKind::Power(a, b) => vec![*a, *b],
+                NormalFormKind::Negate(x) | NormalFormKind::Reciprocal(x) => vec![*x],
+                _ => {
+                    memo.insert(id, false);
+                    continue;
+                }
+            }
+        };
+        if operands_done {
+            let all = operands.iter().all(|operand| {
+                *memo
+                    .get(operand)
+                    .expect("BUG: numeric operand not decided before its parent")
+            });
+            memo.insert(id, all);
+        } else {
+            stack.push((id, true));
+            for operand in operands {
+                if !memo.contains_key(&operand) {
+                    stack.push((operand, false));
+                }
+            }
         }
-        NormalFormKind::Subtract(a, b)
-        | NormalFormKind::Divide(a, b)
-        | NormalFormKind::Power(a, b) => is_numeric_only(cells, *a) && is_numeric_only(cells, *b),
-        NormalFormKind::Negate(x) | NormalFormKind::Reciprocal(x) => is_numeric_only(cells, *x),
-        _ => false,
     }
+    *memo.get(&root).expect("BUG: numeric_only root not decided")
 }
 
 /// Merge a nested Sum into its Sum parent (same for Product).
@@ -202,34 +399,62 @@ fn flatten_associative(
     n: &mut Normalizer<'_>,
     id: NormalFormId,
 ) -> Result<Option<NormalFormId>, Error> {
-    let Some((operator, children)) = Associative::split(&n.cells.get(id).kind) else {
+    let Some((operator, terms)) = Associative::split(&n.cells.get(id).kind) else {
         return Ok(None);
     };
-    let children = children.to_vec();
-    let mut flat = Vec::with_capacity(children.len());
+    let terms = terms.to_vec();
+    let mut flat = Vec::with_capacity(terms.len());
     let mut flattened = false;
-    for child in children {
-        let cell = n.cells.get(child);
+    for term in terms {
+        let cell = n.cells.get(term.operand);
         match Associative::split(&cell.kind) {
             Some((inner_operator, inner))
                 if inner_operator == operator && cell.rule_ref.is_none() =>
             {
-                flat.extend_from_slice(inner);
+                splice_nested_terms(&mut flat, inner, term.inverse);
                 flattened = true;
             }
-            _ => match folded_associative_operands(&n.cells, child, operator) {
+            _ => match folded_associative_operands(&n.cells, term.operand, operator) {
                 Some(inner) => {
-                    flat.extend_from_slice(inner);
+                    splice_nested_terms(&mut flat, inner, term.inverse);
                     flattened = true;
                 }
-                None => flat.push(child),
+                None => flat.push(term),
             },
         }
     }
     if !flattened {
         return Ok(None);
     }
+    leading_term_direct(&mut n.cells, operator, &mut flat);
     Ok(Some(n.cells.intern_empty(operator.wrap(flat))))
+}
+
+/// Merge a nested `and` operand into its `and` parent. Operand order is kept.
+fn flatten_conjunction(
+    n: &mut Normalizer<'_>,
+    id: NormalFormId,
+) -> Result<Option<NormalFormId>, Error> {
+    let NormalFormKind::And(children) = &n.cells.get(id).kind else {
+        return Ok(None);
+    };
+    let children = children.clone();
+    let mut flat = Vec::with_capacity(children.len());
+    let mut flattened = false;
+    for child in children {
+        let cell = n.cells.get(child);
+        match &cell.kind {
+            NormalFormKind::And(inner) if cell.rule_ref.is_none() => {
+                flat.extend_from_slice(inner);
+                flattened = true;
+            }
+            _ => flat.push(child),
+        }
+    }
+    if !flattened {
+        return Ok(None);
+    }
+    Ok(Some(n.cells.intern_empty(NormalFormKind::And(flat))))
 }
 
 /// Operands of a same-operator Sum/Product that exists only as this cell's fold
@@ -240,7 +465,7 @@ fn folded_associative_operands<'a>(
     cells: &'a Cells<'_>,
     child: NormalFormId,
     operator: Associative,
-) -> Option<&'a [NormalFormId]> {
+) -> Option<&'a [ArithmeticTerm]> {
     let cell = cells.get(child);
     if cell.rule_ref.is_some() {
         return None;
@@ -265,20 +490,50 @@ enum Associative {
 }
 
 impl Associative {
-    fn split(kind: &NormalFormKind) -> Option<(Self, &[NormalFormId])> {
+    fn split(kind: &NormalFormKind) -> Option<(Self, &[ArithmeticTerm])> {
         match kind {
-            NormalFormKind::Sum(children) => Some((Associative::Sum, children)),
-            NormalFormKind::Product(children) => Some((Associative::Product, children)),
+            NormalFormKind::Sum(terms) => Some((Associative::Sum, terms)),
+            NormalFormKind::Product(terms) => Some((Associative::Product, terms)),
             _ => None,
         }
     }
 
-    fn wrap(self, children: Vec<NormalFormId>) -> NormalFormKind {
+    fn wrap(self, terms: Vec<ArithmeticTerm>) -> NormalFormKind {
         match self {
-            Associative::Sum => NormalFormKind::Sum(children),
-            Associative::Product => NormalFormKind::Product(children),
+            Associative::Sum => NormalFormKind::Sum(terms),
+            Associative::Product => NormalFormKind::Product(terms),
         }
     }
+
+    /// The unary inverse of an operand: `-x` for Sum, `1/x` for Product.
+    fn inverse_of(self, operand: NormalFormId) -> NormalFormKind {
+        match self {
+            Associative::Sum => NormalFormKind::Negate(operand),
+            Associative::Product => NormalFormKind::Reciprocal(operand),
+        }
+    }
+}
+
+/// Makes the first term of `terms` direct. A Sum/Product whose first term is inverse
+/// (its direct operands were eliminated) starts with the unary inverse of that operand.
+fn leading_term_direct(cells: &mut Cells<'_>, operator: Associative, terms: &mut [ArithmeticTerm]) {
+    let Some(first) = terms.first_mut() else {
+        return;
+    };
+    if first.inverse {
+        let inverse = cells.intern_empty(operator.inverse_of(first.operand));
+        *first = ArithmeticTerm::direct(inverse);
+    }
+}
+
+/// Appends the terms of a nested same-operator cell that is reached through a term
+/// with flag `inverse`. Operand `t` of the nested cell is subtracted (divided) when
+/// its own flag differs from `inverse`, so the nested cell's sign is carried over.
+fn splice_nested_terms(flat: &mut Vec<ArithmeticTerm>, nested: &[ArithmeticTerm], inverse: bool) {
+    flat.extend(nested.iter().map(|term| ArithmeticTerm {
+        operand: term.operand,
+        inverse: term.inverse != inverse,
+    }));
 }
 
 fn power_laws(n: &mut Normalizer<'_>, id: NormalFormId) -> Result<Option<NormalFormId>, Error> {
@@ -301,9 +556,9 @@ fn power_laws(n: &mut Normalizer<'_>, id: NormalFormId) -> Result<Option<NormalF
                     .fold_into(NormalFormKind::Power(inner_base, new_exp), id),
             ))
         }
-        NormalFormKind::Product(children) => {
-            let children = children.clone();
-            Ok(collect_like_base_powers(&mut n.cells, children, id))
+        NormalFormKind::Product(terms) => {
+            let terms = terms.clone();
+            Ok(collect_like_base_powers(&mut n.cells, terms, id))
         }
         _ => Ok(None),
     }
@@ -341,19 +596,20 @@ fn like_base_merge_preserves_domain(
 /// `x^a * x^b` → `x^(a+b)` for literal exponents. `None` when no pair merges.
 fn collect_like_base_powers(
     cells: &mut Cells<'_>,
-    children: Vec<NormalFormId>,
+    terms: Vec<ArithmeticTerm>,
     destroyed_id: NormalFormId,
 ) -> Option<NormalFormId> {
     let mut powers: Vec<(NormalFormId, NormalFormId, Option<Source>)> = Vec::new();
-    let mut other = Vec::new();
+    let mut other: Vec<ArithmeticTerm> = Vec::new();
     let mut merged = false;
-    for c in children {
+    for term in terms {
+        let c = term.operand;
         let power_shape = match &cells.get(c).kind {
-            NormalFormKind::Power(base, exp) => Some((*base, *exp)),
+            NormalFormKind::Power(base, exp) if !term.inverse => Some((*base, *exp)),
             _ => None,
         };
         let Some((base_val, exp_val)) = power_shape else {
-            other.push(c);
+            other.push(term);
             continue;
         };
         if let Some((_, stored_exp, _)) = powers.iter_mut().find(|(b, _, _)| *b == base_val) {
@@ -373,15 +629,19 @@ fn collect_like_base_powers(
         return None;
     }
     for (base, exp, factor_source) in powers {
-        other.push(cells.rebuild(NormalFormKind::Power(base, exp), factor_source, None));
+        let power = cells.rebuild(NormalFormKind::Power(base, exp), factor_source, None);
+        other.push(ArithmeticTerm::direct(power));
     }
     Some(match other.len() {
         0 => unreachable!("BUG: merged powers leave at least one factor"),
         1 => {
-            let survivor = other.into_iter().next().expect("BUG: single product term");
+            let survivor = other.first().expect("BUG: single product term").operand;
             cells.fold_into_survivor(survivor, destroyed_id)
         }
-        _ => cells.fold_into(NormalFormKind::Product(other), destroyed_id),
+        _ => {
+            leading_term_direct(cells, Associative::Product, &mut other);
+            cells.fold_into(NormalFormKind::Product(other), destroyed_id)
+        }
     })
 }
 
@@ -417,46 +677,59 @@ fn eliminate_identities(
 ) -> Result<Option<NormalFormId>, Error> {
     let cells = &mut n.cells;
     let rewritten = match &cells.get(id).kind {
-        NormalFormKind::Sum(children) => {
-            let kept: Vec<NormalFormId> = children
+        NormalFormKind::Sum(terms) => {
+            let terms = terms.clone();
+            let mut kept: Vec<ArithmeticTerm> = terms
                 .iter()
                 .copied()
-                .filter(|c| !is_numeric_zero(cells, *c))
+                .filter(|term| !is_numeric_zero(cells, term.operand))
                 .collect();
-            if kept.len() == children.len() {
+            if kept.len() == terms.len() {
                 return Ok(None);
             }
-            match kept.len() {
-                0 => cells.fold_into(
+            leading_term_direct(cells, Associative::Sum, &mut kept);
+            match kept.as_slice() {
+                [] => cells.fold_into(
                     NormalFormKind::Leaf(LeafKind::Literal(LiteralValue::number(rational_zero()))),
                     id,
                 ),
-                1 => cells.fold_into_survivor(kept[0], id),
+                [only] => cells.fold_into_survivor(only.operand, id),
                 _ => cells.fold_into(NormalFormKind::Sum(kept), id),
             }
         }
-        NormalFormKind::Product(children) => {
-            let children = children.clone();
-            if children.iter().any(|c| is_numeric_zero(cells, *c)) {
-                if let Some(zero) = typed_product_zero(cells, &children) {
+        NormalFormKind::Product(terms) => {
+            let terms = terms.clone();
+            // A zero factor decides the product unless a divisor is zero too: division
+            // by zero stays for evaluation.
+            let zero_divisor = terms
+                .iter()
+                .any(|term| term.inverse && is_numeric_zero(cells, term.operand));
+            if !zero_divisor
+                && terms
+                    .iter()
+                    .any(|term| is_numeric_zero(cells, term.operand))
+            {
+                let operands: Vec<NormalFormId> = terms.iter().map(|term| term.operand).collect();
+                if let Some(zero) = typed_product_zero(cells, &operands) {
                     let zero_kind = cells.get(zero).kind.clone();
                     return Ok(Some(cells.fold_into(zero_kind, id)));
                 }
             }
-            let kept: Vec<NormalFormId> = children
+            let mut kept: Vec<ArithmeticTerm> = terms
                 .iter()
                 .copied()
-                .filter(|c| !is_numeric_one(cells, *c))
+                .filter(|term| !is_numeric_one(cells, term.operand))
                 .collect();
-            if kept.len() == children.len() {
+            if kept.len() == terms.len() {
                 return Ok(None);
             }
-            match kept.len() {
-                0 => cells.fold_into(
+            leading_term_direct(cells, Associative::Product, &mut kept);
+            match kept.as_slice() {
+                [] => cells.fold_into(
                     NormalFormKind::Leaf(LeafKind::Literal(LiteralValue::number(rational_one()))),
                     id,
                 ),
-                1 => cells.fold_into_survivor(kept[0], id),
+                [only] => cells.fold_into_survivor(only.operand, id),
                 _ => cells.fold_into(NormalFormKind::Product(kept), id),
             }
         }
@@ -500,25 +773,32 @@ fn eliminate_identities(
                 return Ok(None);
             }
         }
-        NormalFormKind::And(left, right) => {
-            let (left, right) = (*left, *right);
-            // Left `false` decides before the right can veto.
-            if is_literal_bool(cells, left, false) {
-                cells.fold_into(
+        NormalFormKind::And(children) => {
+            let children = children.clone();
+            if children
+                .iter()
+                .any(|child| is_literal_bool(cells, *child, false))
+            {
+                return Ok(Some(cells.fold_into(
                     NormalFormKind::Leaf(LeafKind::Literal(LiteralValue::from_bool(false))),
                     id,
-                )
-            } else if is_literal_bool(cells, left, true) {
-                cells.fold_into_survivor(right, id)
-            } else if is_literal_bool(cells, right, true) {
-                cells.fold_into_survivor(left, id)
-            } else if is_literal_bool(cells, right, false) && is_total(cells, left) {
-                cells.fold_into(
-                    NormalFormKind::Leaf(LeafKind::Literal(LiteralValue::from_bool(false))),
-                    id,
-                )
-            } else {
+                )));
+            }
+            let kept: Vec<NormalFormId> = children
+                .iter()
+                .copied()
+                .filter(|child| !is_literal_bool(cells, *child, true))
+                .collect();
+            if kept.len() == children.len() {
                 return Ok(None);
+            }
+            match kept.len() {
+                0 => cells.fold_into(
+                    NormalFormKind::Leaf(LeafKind::Literal(LiteralValue::from_bool(true))),
+                    id,
+                ),
+                1 => cells.fold_into_survivor(kept[0], id),
+                _ => cells.fold_into(NormalFormKind::And(kept), id),
             }
         }
         NormalFormKind::Not(inner) => {
@@ -571,10 +851,7 @@ fn typed_product_zero(cells: &mut Cells<'_>, children: &[NormalFormId]) -> Optio
         )))),
         Some(child) => {
             let measure_type = Arc::clone(cells.result_type(child));
-            Some(cells.intern_literal_leaf(
-                LiteralValue::measure_with_signature(rational_zero(), Arc::clone(&measure_type)),
-                measure_type,
-            ))
+            Some(cells.intern_literal_leaf(LiteralValue::measure(rational_zero()), measure_type))
         }
     }
 }
@@ -676,20 +953,32 @@ fn math_identities(
     Ok(Some(rewritten))
 }
 
+/// Constants that cannot be computed are planning errors, like `1 / 0`.
+fn fold_constant_operation(
+    left: &RationalInteger,
+    operation: NumericOperation,
+    right: &RationalInteger,
+    source: &Option<Source>,
+    context: &str,
+) -> Result<RationalInteger, Error> {
+    rational_operation(left, operation, right)
+        .map_err(|failure| normalization_error(source.clone(), failure, context))
+}
+
 fn constant_fold(n: &mut Normalizer<'_>, id: NormalFormId) -> Result<Option<NormalFormId>, Error> {
     let source = n.source.clone();
     let cells = &mut n.cells;
     let rewritten = match &cells.get(id).kind {
-        NormalFormKind::Sum(children) => {
-            if !children
+        NormalFormKind::Sum(terms) => {
+            if !terms
                 .iter()
-                .all(|c| as_rational_literal(cells, *c).is_some())
+                .all(|term| as_rational_literal(cells, term.operand).is_some())
             {
                 return Ok(None);
             }
-            let mut sorted = children.clone();
+            let mut sorted = terms.clone();
             let mut compare_failure: Option<crate::computation::rational::NumericFailure> = None;
-            sorted.sort_by(|a, b| match canonical_numeric_cmp(cells, *a, *b) {
+            sorted.sort_by(|a, b| match canonical_term_cmp(cells, *a, *b) {
                 Ok(ordering) => ordering,
                 Err(failure) => {
                     compare_failure.get_or_insert(failure);
@@ -704,32 +993,54 @@ fn constant_fold(n: &mut Normalizer<'_>, id: NormalFormId) -> Result<Option<Norm
                 ));
             }
             let mut acc = rational_new(0, 1);
-            for child in &sorted {
-                let rational = as_rational_literal(cells, *child).expect("BUG: all numeric");
-                acc = rational_operation(&acc, NumericOperation::Add, &rational).map_err(
-                    |failure| normalization_error(source.clone(), failure, "constant fold sum"),
+            for term in &sorted {
+                let rational = as_rational_literal(cells, term.operand).expect("BUG: all numeric");
+                let operation = if term.inverse {
+                    NumericOperation::Subtract
+                } else {
+                    NumericOperation::Add
+                };
+                let next = fold_constant_operation(
+                    &acc,
+                    operation,
+                    &rational,
+                    &source,
+                    "constant fold sum",
                 )?;
+                acc = next;
             }
             // The sorted sum is the recorded pre-image so explain reads terms
             // in canonical order.
             let cell = cells.get(id);
             let (cell_source, origin) = (cell.source.clone(), cell.origin);
-            let destroyed_id = cells.rebuild(NormalFormKind::Sum(sorted), cell_source, origin);
+            let mut pre_image = sorted;
+            leading_term_direct(cells, Associative::Sum, &mut pre_image);
+            let destroyed_id = cells.rebuild(NormalFormKind::Sum(pre_image), cell_source, origin);
             fold_number(cells, acc, destroyed_id)
         }
-        NormalFormKind::Product(children) => {
-            if !children
+        NormalFormKind::Product(terms) => {
+            if !terms
                 .iter()
-                .all(|c| as_rational_literal(cells, *c).is_some())
+                .all(|term| as_rational_literal(cells, term.operand).is_some())
             {
                 return Ok(None);
             }
             let mut acc = rational_new(1, 1);
-            for child in children {
-                let rational = as_rational_literal(cells, *child).expect("BUG: all numeric");
-                acc = rational_operation(&acc, NumericOperation::Multiply, &rational).map_err(
-                    |failure| normalization_error(source.clone(), failure, "constant fold product"),
+            for term in terms {
+                let rational = as_rational_literal(cells, term.operand).expect("BUG: all numeric");
+                let operation = if term.inverse {
+                    NumericOperation::Divide
+                } else {
+                    NumericOperation::Multiply
+                };
+                let next = fold_constant_operation(
+                    &acc,
+                    operation,
+                    &rational,
+                    &source,
+                    "constant fold product",
                 )?;
+                acc = next;
             }
             fold_number(cells, acc, id)
         }
@@ -740,36 +1051,45 @@ fn constant_fold(n: &mut Normalizer<'_>, id: NormalFormId) -> Result<Option<Norm
             ) else {
                 return Ok(None);
             };
-            // A power the rational domain cannot express (fractional exponent
-            // of a non-perfect power) stays for evaluation.
-            let Ok(rational) =
-                rational_operation(&base_rational, NumericOperation::Power, &exp_rational)
-            else {
-                return Ok(None);
-            };
+            // Irrational powers stay for evaluation, which approximates them.
+            let rational =
+                match rational_operation(&base_rational, NumericOperation::Power, &exp_rational) {
+                    Ok(rational) => rational,
+                    Err(NumericFailure::Irrational) => return Ok(None),
+                    Err(failure) => {
+                        return Err(normalization_error(
+                            source.clone(),
+                            failure,
+                            "constant fold power",
+                        ))
+                    }
+                };
             fold_number(cells, rational, id)
         }
         NormalFormKind::Negate(x) => {
             let Some(rational) = as_rational_literal(cells, *x) else {
                 return Ok(None);
             };
-            let negated =
-                rational_operation(&rational_new(0, 1), NumericOperation::Subtract, &rational)
-                    .map_err(|failure| {
-                        normalization_error(source.clone(), failure, "constant fold negate")
-                    })?;
+            let negated = fold_constant_operation(
+                &rational_new(0, 1),
+                NumericOperation::Subtract,
+                &rational,
+                &source,
+                "constant fold negate",
+            )?;
             fold_number(cells, negated, id)
         }
         NormalFormKind::Reciprocal(x) => {
             let Some(rational) = as_rational_literal(cells, *x) else {
                 return Ok(None);
             };
-            let reciprocal =
-                rational_operation(&rational_one(), NumericOperation::Divide, &rational).map_err(
-                    |failure| {
-                        normalization_error(source.clone(), failure, "constant fold reciprocal")
-                    },
-                )?;
+            let reciprocal = fold_constant_operation(
+                &rational_one(),
+                NumericOperation::Divide,
+                &rational,
+                &source,
+                "constant fold reciprocal",
+            )?;
             fold_number(cells, reciprocal, id)
         }
         NormalFormKind::Divide(left, right) => {
@@ -779,11 +1099,13 @@ fn constant_fold(n: &mut Normalizer<'_>, id: NormalFormId) -> Result<Option<Norm
             ) else {
                 return Ok(None);
             };
-            let quotient =
-                rational_operation(&left_rational, NumericOperation::Divide, &right_rational)
-                    .map_err(|failure| {
-                        normalization_error(source.clone(), failure, "constant fold divide")
-                    })?;
+            let quotient = fold_constant_operation(
+                &left_rational,
+                NumericOperation::Divide,
+                &right_rational,
+                &source,
+                "constant fold divide",
+            )?;
             fold_number(cells, quotient, id)
         }
         NormalFormKind::Subtract(left, right) => {
@@ -793,11 +1115,13 @@ fn constant_fold(n: &mut Normalizer<'_>, id: NormalFormId) -> Result<Option<Norm
             ) else {
                 return Ok(None);
             };
-            let difference =
-                rational_operation(&left_rational, NumericOperation::Subtract, &right_rational)
-                    .map_err(|failure| {
-                        normalization_error(source.clone(), failure, "constant fold subtract")
-                    })?;
+            let difference = fold_constant_operation(
+                &left_rational,
+                NumericOperation::Subtract,
+                &right_rational,
+                &source,
+                "constant fold subtract",
+            )?;
             fold_number(cells, difference, id)
         }
         NormalFormKind::Modulo(left, right) => {
@@ -807,11 +1131,13 @@ fn constant_fold(n: &mut Normalizer<'_>, id: NormalFormId) -> Result<Option<Norm
             ) else {
                 return Ok(None);
             };
-            let remainder =
-                rational_operation(&left_rational, NumericOperation::Modulo, &right_rational)
-                    .map_err(|failure| {
-                        normalization_error(source.clone(), failure, "constant fold modulo")
-                    })?;
+            let remainder = fold_constant_operation(
+                &left_rational,
+                NumericOperation::Modulo,
+                &right_rational,
+                &source,
+                "constant fold modulo",
+            )?;
             fold_number(cells, remainder, id)
         }
         NormalFormKind::Not(x) => {
@@ -941,10 +1267,7 @@ fn fold_number_conversion(
     };
     let number = number.clone();
     Ok(Some(cells.fold_into(
-        NormalFormKind::Leaf(LeafKind::Literal(LiteralValue::number_with_type(
-            number,
-            primitive_number_arc().clone(),
-        ))),
+        NormalFormKind::Leaf(LeafKind::Literal(LiteralValue::number(number))),
         id,
     )))
 }
@@ -972,16 +1295,25 @@ fn logical_idempotency(
     id: NormalFormId,
 ) -> Result<Option<NormalFormId>, Error> {
     let cells = &mut n.cells;
-    let NormalFormKind::And(left, right) = &cells.get(id).kind else {
+    let NormalFormKind::And(children) = &cells.get(id).kind else {
         return Ok(None);
     };
     // Id equality only: Kind equality would collapse distinct rule references
-    // that share body Kind after cons.
-    if left != right {
+    // that share body Kind after cons. A repeated operand is already known true
+    // when reached again, so only its first occurrence is kept.
+    let mut seen = HashSet::with_capacity(children.len());
+    let unique: Vec<NormalFormId> = children
+        .iter()
+        .copied()
+        .filter(|child| seen.insert(*child))
+        .collect();
+    if unique.len() == children.len() {
         return Ok(None);
     }
-    let left = *left;
-    Ok(Some(cells.fold_into_survivor(left, id)))
+    match unique.as_slice() {
+        [only] => Ok(Some(cells.fold_into_survivor(*only, id))),
+        _ => Ok(Some(cells.fold_into(NormalFormKind::And(unique), id))),
+    }
 }
 
 /// Last-match-wins collapse of Piecewise arms with statically decided conditions.
@@ -1071,19 +1403,19 @@ fn force_unless_condition_static_false(id: NormalFormId, cells: &mut Cells<'_>) 
 }
 
 fn unless_condition_contains_literal_false(cells: &Cells<'_>, id: NormalFormId) -> bool {
-    if cells.get(id).rule_ref.is_some() {
-        return false;
-    }
-    if is_literal_bool(cells, id, false) {
-        return true;
-    }
-    match &cells.get(id).kind {
-        NormalFormKind::And(left, right) => {
-            unless_condition_contains_literal_false(cells, *left)
-                || unless_condition_contains_literal_false(cells, *right)
+    let mut pending = vec![id];
+    while let Some(current) = pending.pop() {
+        if cells.get(current).rule_ref.is_some() {
+            continue;
         }
-        _ => false,
+        if is_literal_bool(cells, current, false) {
+            return true;
+        }
+        if let NormalFormKind::And(children) = &cells.get(current).kind {
+            pending.extend(children.iter().copied());
+        }
     }
+    false
 }
 
 /// Sort the terms of an all-numeric Sum / Product: literals first, ascending.
@@ -1091,17 +1423,20 @@ fn canonical_order(
     n: &mut Normalizer<'_>,
     id: NormalFormId,
 ) -> Result<Option<NormalFormId>, Error> {
-    let cells = &mut n.cells;
-    let Some((operator, children)) = Associative::split(&cells.get(id).kind) else {
+    let Some((operator, terms)) = Associative::split(&n.cells.get(id).kind) else {
         return Ok(None);
     };
-    let children = children.to_vec();
-    if !children.iter().all(|c| is_numeric_only(cells, *c)) {
+    let terms = terms.to_vec();
+    if !terms
+        .iter()
+        .all(|term| numeric_only(&n.cells, &mut n.numeric, term.operand))
+    {
         return Ok(None);
     }
-    let mut sorted = children.clone();
+    let cells = &mut n.cells;
+    let mut sorted = terms.clone();
     let mut compare_failure: Option<crate::computation::rational::NumericFailure> = None;
-    sorted.sort_by(|a, b| match canonical_numeric_cmp(cells, *a, *b) {
+    sorted.sort_by(|a, b| match canonical_term_cmp(cells, *a, *b) {
         Ok(ordering) => ordering,
         Err(failure) => {
             compare_failure.get_or_insert(failure);
@@ -1115,10 +1450,24 @@ fn canonical_order(
             "canonical order",
         ));
     }
-    if sorted == children {
+    if sorted == terms {
         return Ok(None);
     }
+    leading_term_direct(cells, operator, &mut sorted);
     Ok(Some(cells.fold_into(operator.wrap(sorted), id)))
+}
+
+/// Direct terms before inverse terms, then by canonical numeric order of the operand.
+/// A canonically sorted Sum/Product therefore starts with a direct term whenever one exists.
+fn canonical_term_cmp(
+    cells: &Cells<'_>,
+    a: ArithmeticTerm,
+    b: ArithmeticTerm,
+) -> Result<std::cmp::Ordering, crate::computation::rational::NumericFailure> {
+    match a.inverse.cmp(&b.inverse) {
+        std::cmp::Ordering::Equal => canonical_numeric_cmp(cells, a.operand, b.operand),
+        ordering => Ok(ordering),
+    }
 }
 
 fn canonical_numeric_cmp(
@@ -1149,7 +1498,7 @@ fn sort_key(cells: &Cells<'_>, id: NormalFormId) -> u8 {
 /// Also folds conjunctive-key LUTs (`unless key is K and residual then body`):
 /// partitions arms by the shared `Is` key into per-key sub-Piecewise cells, then
 /// builds an outer point-dispatch. Fresh sub-Piecewise cells are normalized by
-/// the rewrite driver and recursively fold when residuals are themselves
+/// the rewrite driver and fold again when residuals are themselves
 /// single-scrutinee comparisons (or further conjunctive LUTs).
 ///
 /// Runs last, after `collapse_piecewise` has dropped statically dead arms and left
@@ -1196,7 +1545,11 @@ fn try_single_scrutinee_dispatch(
         Some(ty) => ty.clone(),
         None => return Ok(None),
     };
-    let bodies: Vec<NormalFormId> = arms.iter().skip(1).map(|(_, body)| *body).collect();
+    let bodies: Vec<DispatchRegion> = arms
+        .iter()
+        .skip(1)
+        .map(|(_, body)| DispatchRegion::Body(*body))
+        .collect();
     build_ordered_dispatch(
         cells,
         DispatchBuild {
@@ -1220,7 +1573,7 @@ fn try_conjunctive_key_dispatch(
     arms: &[(NormalFormId, NormalFormId)],
 ) -> Result<Option<NormalFormId>, Error> {
     let source = n.source.clone();
-    let Some(partition) = scan_conjunctive_key_arms(&n.cells, arms) else {
+    let Some(partition) = scan_conjunctive_key_arms(&mut n.cells, arms) else {
         return Ok(None);
     };
     let scrutinee_type = match dispatch_scrutinee_type(&n.cells, partition.scrutinee) {
@@ -1235,7 +1588,7 @@ fn try_conjunctive_key_dispatch(
         None,
     );
 
-    let mut group_bodies = Vec::with_capacity(partition.groups.len());
+    let mut group_bodies: Vec<DispatchRegion> = Vec::with_capacity(partition.groups.len());
     let mut keys = Vec::with_capacity(partition.groups.len());
     let mut operators = Vec::with_capacity(partition.groups.len());
     for (key, group_arms) in &partition.groups {
@@ -1245,7 +1598,7 @@ fn try_conjunctive_key_dispatch(
         let group_cell = n
             .cells
             .rebuild(NormalFormKind::Piecewise(piecewise_arms), None, None);
-        group_bodies.push(group_cell);
+        group_bodies.push(DispatchRegion::Conjunctive(group_cell));
         keys.push(key.clone());
         operators.push(ComparisonComputation::Is);
     }
@@ -1274,7 +1627,7 @@ struct DispatchBuild<'a> {
     operators: &'a [ComparisonComputation],
     key_literals: &'a [LiteralValue],
     default_body: NormalFormId,
-    bodies: &'a [NormalFormId],
+    bodies: &'a [DispatchRegion],
 }
 
 /// Shared table build for single-scrutinee and conjunctive outer folds.
@@ -1350,7 +1703,11 @@ fn build_ordered_dispatch(
         let boundary_index = (region - 1) / 2;
         paint_arms.push((operator.clone(), boundary_index, bodies[index]));
     }
-    let regions = paint_dispatch_regions(boundaries.len(), default_body, &paint_arms);
+    let regions = paint_dispatch_regions(
+        boundaries.len(),
+        DispatchRegion::Body(default_body),
+        &paint_arms,
+    );
 
     Ok(Some(cells.fold_into(
         NormalFormKind::OrderedDispatch {
@@ -1426,7 +1783,7 @@ struct EqualityConjunct {
 }
 
 fn scan_conjunctive_key_arms(
-    cells: &Cells<'_>,
+    cells: &mut Cells<'_>,
     arms: &[(NormalFormId, NormalFormId)],
 ) -> Option<ConjunctiveKeyPartition> {
     let mut arm_peels: Vec<(Vec<EqualityConjunct>, NormalFormId)> =
@@ -1484,30 +1841,37 @@ fn scan_conjunctive_key_arms(
 }
 
 /// Every `Is` / literal comparison that is one conjunct of an `And`, paired with
-/// the other conjunct as residual. Empty when the condition is not an `And` of
-/// that shape (including rule-ref cells).
-fn equality_conjuncts(cells: &Cells<'_>, condition: NormalFormId) -> Vec<EqualityConjunct> {
+/// the conjunction of the other conjuncts as residual. Empty when the condition is
+/// not an `And` (including rule-ref cells).
+fn equality_conjuncts(cells: &mut Cells<'_>, condition: NormalFormId) -> Vec<EqualityConjunct> {
     let cell = cells.get(condition);
     if cell.rule_ref.is_some() {
         return Vec::new();
     }
-    let NormalFormKind::And(left, right) = &cell.kind else {
+    let NormalFormKind::And(children) = &cell.kind else {
         return Vec::new();
     };
-    let (left, right) = (*left, *right);
+    let children = children.clone();
     let mut out = Vec::new();
-    if let Some((scrutinee, key)) = is_equality_against_literal(cells, left) {
+    for (index, child) in children.iter().enumerate() {
+        let Some((scrutinee, key)) = is_equality_against_literal(cells, *child) else {
+            continue;
+        };
+        let rest: Vec<NormalFormId> = children
+            .iter()
+            .enumerate()
+            .filter(|(other, _)| *other != index)
+            .map(|(_, id)| *id)
+            .collect();
+        let residual = match rest.as_slice() {
+            [] => unreachable!("BUG: And has at least two operands"),
+            [only] => *only,
+            _ => cells.intern_empty(NormalFormKind::And(rest)),
+        };
         out.push(EqualityConjunct {
             scrutinee,
             key,
-            residual: right,
-        });
-    }
-    if let Some((scrutinee, key)) = is_equality_against_literal(cells, right) {
-        out.push(EqualityConjunct {
-            scrutinee,
-            key,
-            residual: left,
+            residual,
         });
     }
     out

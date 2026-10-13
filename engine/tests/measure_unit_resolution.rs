@@ -1,8 +1,9 @@
-//! Unique unit names: one declaring owner per unit name in scope.
+//! Unit names resolve to their declarer in scope. A bare name declared by more than one
+//! type must be qualified (`Type.unit`, `alias.Type.unit`).
 //! Extensions inherit; bare binds the declarer / family root; qualified/cast bind the extension.
 
+use indexmap::IndexMap;
 use lemma::{DateTimeValue, Engine, SourceType};
-use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -26,7 +27,7 @@ fn load_and_run(code: &str, spec: &str) -> lemma::Response {
         });
     let now = DateTimeValue::now();
     engine
-        .run(None, spec, Some(&now), HashMap::new(), None, true)
+        .evaluate(None, spec, Some(&now), IndexMap::new(), None, true)
         .unwrap_or_else(|e| panic!("run({spec}) failed: {e}"))
 }
 
@@ -160,126 +161,168 @@ rule r: 5 units.mass.kilogram
 }
 
 #[test]
-fn second_local_eur_declarer_rejected() {
+fn two_local_eur_declarers_qualify_at_use() {
+    let response = load_and_run(
+        r#"spec test
+data money_a: measure -> unit eur: 1
+data money_b: measure -> unit eur: 2
+rule a: 5 money_a.eur
+rule b: 5 money_b.eur
+"#,
+        "test",
+    );
+    assert_eq!(rule_type(&response, "a").name.as_deref(), Some("money_a"));
+    assert_eq!(rule_type(&response, "b").name.as_deref(), Some("money_b"));
+}
+
+#[test]
+fn bare_eur_with_two_local_declarers_must_be_qualified() {
     let msg = expect_load_error(
         r#"spec test
 data money_a: measure -> unit eur: 1
 data money_b: measure -> unit eur: 2
+rule r: 5 eur
 "#,
     );
     assert!(
-        msg.contains("eur")
-            && (msg.contains("money_a") || msg.contains("money_b"))
-            && (msg.to_lowercase().contains("defined on both")
-                || msg.to_lowercase().contains("declared only once")
-                || msg.to_lowercase().contains("ambiguous")
-                || msg.to_lowercase().contains("multiple")
-                || msg.contains("Defined in")),
-        "second independent eur declarer must Error at definition, got: {msg}"
-    );
-    assert!(
-        !msg.contains("Qualify") && !msg.to_lowercase().contains("qualify as"),
-        "must not be bare-use qualify-at-use Error, got: {msg}"
+        msg.contains("money_a.eur") && msg.contains("money_b.eur"),
+        "bare eur must list the qualified forms, got: {msg}"
     );
 }
 
 #[test]
-fn second_kilogram_declarer_vs_stdlib_rejected() {
+fn local_kilogram_beside_stdlib_qualifies_at_use() {
+    let response = load_and_run(
+        r#"spec test
+uses lemma units
+data bag: measure -> unit kilogram: 999
+rule local: 5 bag.kilogram
+rule stdlib: 5 units.kilogram
+rule stdlib_alias: 5 units.mass.kilogram
+"#,
+        "test",
+    );
+    assert_eq!(rule_type(&response, "local").name.as_deref(), Some("bag"));
+    assert_eq!(rule_type(&response, "stdlib").name.as_deref(), Some("mass"));
+    assert_eq!(
+        rule_type(&response, "stdlib_alias").name.as_deref(),
+        Some("mass")
+    );
+}
+
+#[test]
+fn bare_kilogram_beside_stdlib_must_be_qualified() {
     let msg = expect_load_error(
         r#"spec test
 uses lemma units
 data bag: measure -> unit kilogram: 999
+rule r: 5 kilogram
 "#,
     );
     assert!(
-        msg.contains("kilogram")
-            && (msg.to_lowercase().contains("defined on both")
-                || msg.to_lowercase().contains("declared only once")
-                || msg.to_lowercase().contains("ambiguous")
-                || msg.to_lowercase().contains("multiple")
-                || msg.contains("Defined in")
-                || msg.contains("mass")
-                || msg.contains("bag")),
-        "local bag + stdlib mass both declaring kilogram must Error, got: {msg}"
-    );
-    assert!(
-        !msg.to_lowercase().contains("qualify as"),
-        "must be duplicate declarer Error, not bare ambiguous list, got: {msg}"
+        msg.contains("bag.kilogram") && msg.contains("units.mass.kilogram"),
+        "bare kilogram must list the qualified forms, got: {msg}"
     );
 }
 
 #[test]
-fn extension_new_unit_ok_duplicate_inherited_name_rejected() {
-    let mut engine = Engine::new();
-    engine
-        .load([(
-            path_source("ok.lemma"),
-            r#"spec test
+fn extension_new_unit_beside_independent_inherited_name_declarer() {
+    let response = load_and_run(
+        r#"spec test
 uses lemma units
 data weight: units.mass -> unit kg: 1
-rule r: 5 kg
-"#
-            .to_string(),
-        )])
-        .expect("new unit kg on extension must load");
+data other: measure -> unit kilogram: 1
+rule new_unit: 5 kg
+rule inherited: 5 weight.kilogram
+rule independent: 5 other.kilogram
+"#,
+        "test",
+    );
+    assert_eq!(
+        rule_type(&response, "new_unit").name.as_deref(),
+        Some("weight")
+    );
+    assert_eq!(
+        rule_type(&response, "inherited").name.as_deref(),
+        Some("weight")
+    );
+    assert_eq!(
+        rule_type(&response, "independent").name.as_deref(),
+        Some("other")
+    );
 
     let msg = expect_load_error(
         r#"spec test
 uses lemma units
 data weight: units.mass -> unit kg: 1
 data other: measure -> unit kilogram: 1
+rule r: 5 kilogram
 "#,
     );
     assert!(
-        msg.contains("kilogram"),
-        "second kilogram declarer must Error, got: {msg}"
+        msg.contains("other.kilogram"),
+        "bare kilogram must list the qualified forms, got: {msg}"
     );
 }
 
 #[test]
-fn two_deps_both_declaring_kilogram_rejected() {
+fn two_deps_both_declaring_kilogram_qualify_at_use() {
     let mut engine = Engine::new();
     engine
         .load([(
-            path_source("left.lemma"),
+            path_source("deps.lemma"),
             r#"spec left
 data mass: measure -> unit kilogram: 1
-"#
-            .to_string(),
-        )])
-        .expect("left alone must load");
-    engine
-        .load([(
-            path_source("right.lemma"),
-            r#"spec right
+
+spec right
 data bag: measure -> unit kilogram: 999
 "#
             .to_string(),
         )])
-        .expect("right alone must load");
-
-    let err = engine
+        .expect("deps must load");
+    engine
         .load([(
             path_source("consumer.lemma"),
             r#"spec consumer
 uses left
 uses right
+rule from_left: 5 left.mass.kilogram
+rule from_right: 5 right.bag.kilogram
 "#
             .to_string(),
         )])
-        .expect_err("consumer merging two kilogram declarers must Error");
+        .expect("consumer of two kilogram declarers must load");
+    let now = DateTimeValue::now();
+    let response = engine
+        .evaluate(None, "consumer", Some(&now), IndexMap::new(), None, false)
+        .expect("evaluate consumer");
+    assert_eq!(
+        rule_type(&response, "from_left").name.as_deref(),
+        Some("mass")
+    );
+    assert_eq!(
+        rule_type(&response, "from_right").name.as_deref(),
+        Some("bag")
+    );
 
+    let err = engine
+        .load([(
+            path_source("bare.lemma"),
+            r#"spec bare_consumer
+uses left
+uses right
+rule r: 5 kilogram
+"#
+            .to_string(),
+        )])
+        .expect_err("bare kilogram from two imports must be qualified");
     let joined = err
         .iter()
         .map(ToString::to_string)
         .collect::<Vec<_>>()
         .join("; ");
     assert!(
-        joined.contains("kilogram"),
-        "two imported declarers of kilogram must Error, got: {joined}"
-    );
-    assert!(
-        !joined.to_lowercase().contains("qualify as"),
-        "must be duplicate declarer Error, not bare qualify-at-use, got: {joined}"
+        joined.contains("left.mass.kilogram") && joined.contains("right.bag.kilogram"),
+        "bare kilogram must list the qualified forms, got: {joined}"
     );
 }

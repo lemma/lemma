@@ -25,7 +25,8 @@ data application_fee:       345 eur
 rule min_annual_salary_30_plus:
   threshold_age_30_plus * 12
 
-rule min_annual_salary_under_30: threshold_under_30 * 12
+rule min_annual_salary_under_30:
+  threshold_under_30 * 12
 
 
 spec kennismigrant 2025-01-01
@@ -46,7 +47,8 @@ data application_fee:       365 eur
 rule min_annual_salary_30_plus:
   threshold_age_30_plus * 12
 
-rule min_annual_salary_under_30: threshold_under_30 * 12
+rule min_annual_salary_under_30:
+  threshold_under_30 * 12
 
 
 spec kennismigrant_aanvraag 2024-01-01
@@ -60,6 +62,7 @@ version active at evaluation time is used automatically.
 """
 
 uses money
+
 uses kennismigrant
 
 data salary: money.salary
@@ -69,7 +72,8 @@ data applicant_age: number
 
 data gross_monthly_salary: salary
 
-rule eligible: meets_salary_requirement
+rule eligible:
+  meets_salary_requirement
 
 rule required_monthly_salary:
   kennismigrant.threshold_age_30_plus
@@ -82,4 +86,5 @@ rule meets_salary_requirement:
 rule salary_surplus:
   gross_monthly_salary - required_monthly_salary
 
-rule application_fee: kennismigrant.application_fee
+rule application_fee:
+  kennismigrant.application_fee

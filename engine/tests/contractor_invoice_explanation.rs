@@ -1,7 +1,7 @@
 //! Structural explanation trees for the contractor invoice spec.
 
-use lemma::{format_explanation, DateTimeValue, Engine};
-use std::collections::HashMap;
+use indexmap::IndexMap;
+use lemma::{format_explanation, DateTimeValue, Engine, EvaluateDataValue};
 
 const CALC_SPEC: &str = r#"
 spec calc
@@ -24,14 +24,14 @@ rule vat: subtotal * 21%
 rule total: subtotal + vat
 "#;
 
-fn run_calc(data: HashMap<String, String>) -> lemma::Explanation {
+fn evaluate_calc(data: IndexMap<String, EvaluateDataValue>) -> lemma::Explanation {
     let mut engine = Engine::new();
     engine
         .load([(lemma::SourceType::Volatile, CALC_SPEC.to_string())])
         .expect("calc spec loads");
     let now = DateTimeValue::now();
     let response = engine
-        .run(None, "calc", Some(&now), data, None, true)
+        .evaluate(None, "calc", Some(&now), data, None, true)
         .expect("calc eval succeeds");
     response
         .results
@@ -57,15 +57,7 @@ total: 3856.88 eur
    │        └─ is_super_rush is false
    └─ vat: 669.38 eur
       └─ subtotal * 21%
-         └─ subtotal: 3187.50 eur
-            └─ labor + rush_surcharge
-               ├─ labor: 3187.50 eur
-               │  └─ hourly_rate * hours_worked
-               │     ├─ hourly_rate: 85.00 eur
-               │     └─ hours_worked: 37.5
-               └─ rush_surcharge: 0.00 eur
-                  ├─ is_rush is false
-                  └─ is_super_rush is false";
+         └─ subtotal: 3187.50 eur (see above)";
 
 const IS_RUSH_ONLY: &str = "\
 total: 4821.09 eur
@@ -80,26 +72,10 @@ total: 4821.09 eur
    │        ├─ is_super_rush is false
    │        ├─ is_rush
    │        └─ labor * 25%
-   │           └─ labor: 3187.50 eur
-   │              └─ hourly_rate * hours_worked
-   │                 ├─ hourly_rate: 85.00 eur
-   │                 └─ hours_worked: 37.5
+   │           └─ labor: 3187.50 eur (see above)
    └─ vat: 836.72 eur
       └─ subtotal * 21%
-         └─ subtotal: 3984.38 eur
-            └─ labor + rush_surcharge
-               ├─ labor: 3187.50 eur
-               │  └─ hourly_rate * hours_worked
-               │     ├─ hourly_rate: 85.00 eur
-               │     └─ hours_worked: 37.5
-               └─ rush_surcharge: 796.88 eur
-                  ├─ is_super_rush is false
-                  ├─ is_rush
-                  └─ labor * 25%
-                     └─ labor: 3187.50 eur
-                        └─ hourly_rate * hours_worked
-                           ├─ hourly_rate: 85.00 eur
-                           └─ hours_worked: 37.5";
+         └─ subtotal: 3984.38 eur (see above)";
 
 const IS_SUPER_RUSH: &str = "\
 total: 5785.31 eur
@@ -113,49 +89,34 @@ total: 5785.31 eur
    │     └─ rush_surcharge: 1593.75 eur
    │        ├─ is_super_rush
    │        └─ labor * 50%
-   │           └─ labor: 3187.50 eur
-   │              └─ hourly_rate * hours_worked
-   │                 ├─ hourly_rate: 85.00 eur
-   │                 └─ hours_worked: 37.5
+   │           └─ labor: 3187.50 eur (see above)
    └─ vat: 1004.06 eur
       └─ subtotal * 21%
-         └─ subtotal: 4781.25 eur
-            └─ labor + rush_surcharge
-               ├─ labor: 3187.50 eur
-               │  └─ hourly_rate * hours_worked
-               │     ├─ hourly_rate: 85.00 eur
-               │     └─ hours_worked: 37.5
-               └─ rush_surcharge: 1593.75 eur
-                  ├─ is_super_rush
-                  └─ labor * 50%
-                     └─ labor: 3187.50 eur
-                        └─ hourly_rate * hours_worked
-                           ├─ hourly_rate: 85.00 eur
-                           └─ hours_worked: 37.5";
+         └─ subtotal: 4781.25 eur (see above)";
 
 #[test]
 fn contractor_invoice_neither_unless_matches() {
-    let mut data = HashMap::new();
+    let mut data = IndexMap::new();
     data.insert("is_rush".into(), "false".into());
     data.insert("is_super_rush".into(), "false".into());
-    let explanation = run_calc(data);
+    let explanation = evaluate_calc(data);
     assert_eq!(format_explanation(&explanation), NEITHER_UNLESS_MATCHES);
 }
 
 #[test]
 fn contractor_invoice_is_rush_only() {
-    let mut data = HashMap::new();
+    let mut data = IndexMap::new();
     data.insert("is_rush".into(), "true".into());
     data.insert("is_super_rush".into(), "false".into());
-    let explanation = run_calc(data);
+    let explanation = evaluate_calc(data);
     assert_eq!(format_explanation(&explanation), IS_RUSH_ONLY);
 }
 
 #[test]
 fn contractor_invoice_is_super_rush() {
-    let mut data = HashMap::new();
+    let mut data = IndexMap::new();
     data.insert("is_rush".into(), "true".into());
     data.insert("is_super_rush".into(), "true".into());
-    let explanation = run_calc(data);
+    let explanation = evaluate_calc(data);
     assert_eq!(format_explanation(&explanation), IS_SUPER_RUSH);
 }

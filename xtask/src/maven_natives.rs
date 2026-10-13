@@ -5,7 +5,7 @@ use std::path::Path;
 use std::process::Command;
 
 pub fn run(root: &Path) -> Result<(), String> {
-    let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
+    let cargo = crate::cargo_bin();
     let target_dir = std::env::var("CARGO_TARGET_DIR")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|_| root.join("target"));

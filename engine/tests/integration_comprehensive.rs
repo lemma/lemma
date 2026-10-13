@@ -1,7 +1,7 @@
+use indexmap::IndexMap;
 use lemma::DateTimeValue;
 use lemma::Engine;
 use rust_decimal::Decimal;
-use std::collections::HashMap;
 use std::str::FromStr;
 
 fn decimal_lit(d: &str) -> Decimal {
@@ -50,11 +50,11 @@ rule contract_valid: is_salary_valid and vacation_days_ok and is_adult
 
     let now = DateTimeValue::now();
     let response = engine
-        .run(
+        .evaluate(
             None,
             "employment_terms",
             Some(&now),
-            HashMap::new(),
+            IndexMap::new(),
             None,
             true,
         )
@@ -98,8 +98,12 @@ rule contract_valid: is_salary_valid and vacation_days_ok and is_adult
         Some(true)
     );
 
-    let _ = engine.remove(None, "employment_terms", Some(&now));
-    let _ = engine.remove(None, "base_contract", Some(&now));
+    engine
+        .remove(None, "employment_terms", Some(&now))
+        .expect("BUG: employment_terms loaded in this test");
+    engine
+        .remove(None, "base_contract", Some(&now))
+        .expect("BUG: base_contract loaded in this test");
 }
 
 #[test]
@@ -136,11 +140,11 @@ rule effective_rate: (tax_amount / income) * 100%
 
     let now = DateTimeValue::now();
     let response = engine
-        .run(
+        .evaluate(
             None,
             "tax_calculation",
             Some(&now),
-            HashMap::new(),
+            IndexMap::new(),
             None,
             true,
         )
@@ -206,7 +210,9 @@ rule effective_rate: (tax_amount / income) * 100%
         other => panic!("Expected Ratio for tax_rate, got {:?}", other),
     }
 
-    let _ = engine.remove(None, "tax_calculation", Some(&now));
+    engine
+        .remove(None, "tax_calculation", Some(&now))
+        .expect("BUG: tax_calculation loaded in this test");
 }
 
 #[test]
@@ -229,13 +235,13 @@ rule status: "LOW"
         .load([(lemma::SourceType::Volatile, config_spec.to_string())])
         .unwrap();
 
-    let mut data = std::collections::HashMap::new();
+    let mut data = IndexMap::new();
     data.insert("threshold".to_string(), "500".into());
     data.insert("multiplier".to_string(), "2".into());
 
     let now = DateTimeValue::now();
     let response = engine
-        .run(None, "dynamic_config", Some(&now), data, None, true)
+        .evaluate(None, "dynamic_config", Some(&now), data, None, true)
         .unwrap();
 
     let calculated = response
@@ -252,11 +258,11 @@ rule status: "LOW"
         .unwrap();
     assert_eq!(status.result().expect("result").to_string(), "LOW");
 
-    let mut data2 = std::collections::HashMap::new();
+    let mut data2 = IndexMap::new();
     data2.insert("threshold".to_string(), "150".into());
     data2.insert("multiplier".to_string(), "2".into());
     let response2 = engine
-        .run(None, "dynamic_config", Some(&now), data2, None, true)
+        .evaluate(None, "dynamic_config", Some(&now), data2, None, true)
         .unwrap();
 
     let status2 = response2
@@ -266,7 +272,9 @@ rule status: "LOW"
         .unwrap();
     assert_eq!(status2.result().expect("result").to_string(), "HIGH");
 
-    let _ = engine.remove(None, "dynamic_config", Some(&now));
+    engine
+        .remove(None, "dynamic_config", Some(&now))
+        .expect("BUG: dynamic_config loaded in this test");
 }
 
 #[test]
@@ -301,11 +309,11 @@ rule is_on_schedule: elapsed_time <= phase1_duration + phase2_duration
 
     let now = DateTimeValue::now();
     let response = engine
-        .run(
+        .evaluate(
             None,
             "project_timeline",
             Some(&now),
-            HashMap::new(),
+            IndexMap::new(),
             None,
             true,
         )
@@ -335,7 +343,9 @@ rule is_on_schedule: elapsed_time <= phase1_duration + phase2_duration
         Some(false)
     );
 
-    let _ = engine.remove(None, "project_timeline", Some(&now));
+    engine
+        .remove(None, "project_timeline", Some(&now))
+        .expect("BUG: project_timeline loaded in this test");
 }
 
 // ============================================================================
@@ -369,7 +379,7 @@ rule is_valid: salary >= base_contract.min_salary and salary <= base_contract.ma
 
     let now = DateTimeValue::now();
     let response = engine
-        .run(None, "child", Some(&now), HashMap::new(), None, true)
+        .evaluate(None, "child", Some(&now), IndexMap::new(), None, true)
         .unwrap();
 
     let is_valid = response
@@ -411,7 +421,7 @@ rule probation_end: base_contract.project_start + base_contract.probation_period
 
     let now = DateTimeValue::now();
     let response = engine
-        .run(None, "child", Some(&now), HashMap::new(), None, true)
+        .evaluate(None, "child", Some(&now), IndexMap::new(), None, true)
         .unwrap();
 
     let probation_end = response

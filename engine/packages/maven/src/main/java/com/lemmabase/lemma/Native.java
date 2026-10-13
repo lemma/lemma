@@ -23,6 +23,8 @@ final class Native {
 
   private Native() {}
 
+  static native String version();
+
   static native long create();
 
   static native long createWithLimits(String limitsJson);
@@ -57,7 +59,7 @@ final class Native {
   /** Frees an install handle. Safe to call exactly once per {@link #installStart}. */
   static native void installFree(long handle);
 
-  static native String list(long handle);
+  static native String specs(long handle);
 
   static native String show(long handle, String repository, String spec, String effective);
 
@@ -68,8 +70,7 @@ final class Native {
       String repository,
       String spec,
       String effective,
-      String[] dataKeys,
-      String[] dataValues,
+      java.util.Map<String, ?> data,
       String[] rules,
       boolean explain);
 

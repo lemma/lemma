@@ -1,12 +1,12 @@
 //! Targeted rule evaluation: `rules` slice scopes tree eval (explain:false) and response.
 
-use lemma::{DateTimeValue, Engine};
-use std::collections::HashMap;
+use indexmap::IndexMap;
+use lemma::{DateTimeValue, Engine, EvaluateDataValue};
 use std::path::PathBuf;
 use std::sync::Arc;
 
-fn order_pipeline_inputs() -> HashMap<String, String> {
-    HashMap::from([
+fn order_pipeline_inputs() -> IndexMap<String, EvaluateDataValue> {
+    IndexMap::from([
         ("customer_tier".into(), "gold".into()),
         ("payment_method".into(), "credit".into()),
         ("shipping_zone".into(), "national".into()),
@@ -24,7 +24,7 @@ fn order_pipeline_inputs() -> HashMap<String, String> {
     ])
 }
 
-fn load_order_pipeline() -> (Engine, HashMap<String, String>) {
+fn load_order_pipeline() -> (Engine, IndexMap<String, EvaluateDataValue>) {
     let mut engine = Engine::new();
     engine
         .load([(
@@ -40,9 +40,12 @@ fn load_order_pipeline() -> (Engine, HashMap<String, String>) {
 fn explanation_tree_has_rule_node(value: &serde_json::Value, rule_name: &str) -> bool {
     match value {
         serde_json::Value::Object(obj) => {
-            if obj.get("type").and_then(|t| t.as_str()) == Some("rule")
-                && obj.get("name").and_then(|r| r.as_str()) == Some(rule_name)
-            {
+            let name = obj.get("name").and_then(|r| r.as_str()) == Some(rule_name);
+            let is_root = obj.get("type").and_then(|t| t.as_str()) == Some("rule");
+            let is_ref = obj.get("type").and_then(|t| t.as_str()) == Some("rule_ref");
+            let is_table =
+                obj.contains_key("id") && obj.contains_key("body") && !obj.contains_key("type");
+            if name && (is_root || is_ref || is_table) {
                 return true;
             }
             obj.values()
@@ -60,7 +63,7 @@ fn targeted_eval_one_rule_explain_false() {
     let (engine, data) = load_order_pipeline();
     let now = DateTimeValue::now();
     let response = engine
-        .run(
+        .evaluate(
             None,
             "bench_order_pipeline",
             Some(&now),
@@ -68,7 +71,7 @@ fn targeted_eval_one_rule_explain_false() {
             Some(&["grand_total".to_string()]),
             false,
         )
-        .expect("run");
+        .expect("evaluate");
 
     assert_eq!(response.results.len(), 1);
     let grand_total = response.results.get("grand_total").expect("grand_total");
@@ -82,7 +85,7 @@ fn explain_true_subset_full_embed() {
     let (engine, data) = load_order_pipeline();
     let now = DateTimeValue::now();
     let response = engine
-        .run(
+        .evaluate(
             None,
             "bench_order_pipeline",
             Some(&now),
@@ -90,7 +93,7 @@ fn explain_true_subset_full_embed() {
             Some(&["grand_total".to_string()]),
             true,
         )
-        .expect("run");
+        .expect("evaluate");
 
     assert_eq!(response.results.len(), 1);
     let grand_total = response.results.get("grand_total").expect("grand_total");
@@ -110,7 +113,7 @@ fn empty_rules_errors() {
     let (engine, data) = load_order_pipeline();
     let now = DateTimeValue::now();
     let err = engine
-        .run(
+        .evaluate(
             None,
             "bench_order_pipeline",
             Some(&now),
@@ -127,7 +130,7 @@ fn unknown_rule_errors() {
     let (engine, data) = load_order_pipeline();
     let now = DateTimeValue::now();
     let err = engine
-        .run(
+        .evaluate(
             None,
             "bench_order_pipeline",
             Some(&now),
@@ -144,8 +147,8 @@ fn all_local_rules_explain_false() {
     let (engine, data) = load_order_pipeline();
     let now = DateTimeValue::now();
     let response = engine
-        .run(None, "bench_order_pipeline", Some(&now), data, None, false)
-        .expect("run");
+        .evaluate(None, "bench_order_pipeline", Some(&now), data, None, false)
+        .expect("evaluate");
     let rule_count = engine
         .show(None, "bench_order_pipeline", Some(&now))
         .expect("show")
@@ -171,15 +174,15 @@ rule rate: 23 percent
         .expect("load");
     let now = DateTimeValue::now();
     let response = engine
-        .run(
+        .evaluate(
             None,
             "ratio_canonical",
             Some(&now),
-            HashMap::new(),
+            IndexMap::new(),
             None,
             false,
         )
-        .expect("run");
+        .expect("evaluate");
     let rate = response.results.get("rate").expect("rate key canonical");
     assert_eq!(rate.rule.name, "rate");
     assert_eq!(rate.result(), Some("23%"));

@@ -1,8 +1,8 @@
 //! `is veto` / `ResultIsVeto` — boolean coercion from operand `OperationResult`.
 
+use indexmap::IndexMap;
 use lemma::DateTimeValue;
 use lemma::Engine;
-use std::collections::HashMap;
 
 #[test]
 fn unless_validated_price_is_veto_then_fallback_value() {
@@ -22,7 +22,7 @@ rule total: validated_price * quantity
         .unwrap();
     let now = DateTimeValue::now();
     let response = engine
-        .run(None, "pricing", Some(&now), HashMap::new(), None, true)
+        .evaluate(None, "pricing", Some(&now), IndexMap::new(), None, true)
         .unwrap();
 
     let total = response
@@ -51,7 +51,7 @@ rule total: validated_price
         .unwrap();
     let now = DateTimeValue::now();
     let response = engine
-        .run(None, "pricing", Some(&now), HashMap::new(), None, true)
+        .evaluate(None, "pricing", Some(&now), IndexMap::new(), None, true)
         .unwrap();
 
     let total = response
@@ -80,7 +80,7 @@ rule flag: validated_quantity is veto
         .unwrap();
     let now = DateTimeValue::now();
     let response = engine
-        .run(None, "pricing", Some(&now), HashMap::new(), None, true)
+        .evaluate(None, "pricing", Some(&now), IndexMap::new(), None, true)
         .unwrap();
 
     let flag = response
@@ -113,7 +113,7 @@ rule total: price * validated_quantity
         .unwrap();
     let now = DateTimeValue::now();
     let response = engine
-        .run(None, "pricing", Some(&now), HashMap::new(), None, true)
+        .evaluate(None, "pricing", Some(&now), IndexMap::new(), None, true)
         .unwrap();
 
     let total = response
@@ -141,7 +141,7 @@ rule flag: validated_price is veto
         .unwrap();
     let now = DateTimeValue::now();
     let response = engine
-        .run(None, "pricing", Some(&now), HashMap::new(), None, true)
+        .evaluate(None, "pricing", Some(&now), IndexMap::new(), None, true)
         .unwrap();
 
     let flag = response
@@ -173,7 +173,7 @@ rule right_to_left: veto is validated_price
         .unwrap();
     let now = DateTimeValue::now();
     let response = engine
-        .run(None, "pricing", Some(&now), HashMap::new(), None, true)
+        .evaluate(None, "pricing", Some(&now), IndexMap::new(), None, true)
         .unwrap();
 
     let ltr = response
@@ -209,7 +209,7 @@ rule b: not veto is validated_price
         .unwrap();
     let now = DateTimeValue::now();
     let response = engine
-        .run(None, "pricing", Some(&now), HashMap::new(), None, true)
+        .evaluate(None, "pricing", Some(&now), IndexMap::new(), None, true)
         .unwrap();
 
     let a = response
@@ -246,7 +246,7 @@ rule total: validated_price * quantity
         .unwrap();
     let now = DateTimeValue::now();
     let response = engine
-        .run(None, "pricing", Some(&now), HashMap::new(), None, true)
+        .evaluate(None, "pricing", Some(&now), IndexMap::new(), None, true)
         .unwrap();
 
     let total = response

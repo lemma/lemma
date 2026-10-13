@@ -4,7 +4,7 @@
 //! prints a JSON document the xtask report can diff against the Python
 //! benchmark's output dump.
 
-use lemma::{Engine, LemmaType, LiteralValue, OperationResult, SourceType, ValueKind, VetoType};
+use lemma::{Engine, LemmaType, OperationResult, SourceType, ValueKind, VetoType};
 use serde::Serialize;
 use serde_json::Value;
 use std::sync::Arc;
@@ -83,26 +83,26 @@ fn measure_unit_name(lemma_type: &LemmaType) -> Option<String> {
         .map(|(name, _)| name.clone())
 }
 
-fn normalize_literal(literal: &LiteralValue, lemma_type: &LemmaType) -> Output {
-    match &literal.value {
+fn normalize_value(value: &ValueKind, lemma_type: &LemmaType) -> Output {
+    match value {
         ValueKind::Number(_) => Output {
             kind: "number",
-            value: serialized_magnitude(&literal.value),
+            value: serialized_magnitude(value),
             unit: None,
         },
         ValueKind::Ratio(_) => Output {
             kind: "ratio",
-            value: serialized_magnitude(&literal.value),
+            value: serialized_magnitude(value),
             unit: lemma_type.ratio_primary_unit().map(str::to_string),
         },
         ValueKind::Measure(_) if lemma_type.is_calendar_like() => Output {
             kind: "calendar",
-            value: serialized_magnitude(&literal.value),
+            value: serialized_magnitude(value),
             unit: measure_unit_name(lemma_type),
         },
         ValueKind::Measure(_) => Output {
             kind: "measure",
-            value: serialized_magnitude(&literal.value),
+            value: serialized_magnitude(value),
             unit: measure_unit_name(lemma_type),
         },
         ValueKind::Boolean(b) => Output {
@@ -134,11 +134,26 @@ fn normalize_literal(literal: &LiteralValue, lemma_type: &LemmaType) -> Output {
             value: instance.to_string(),
             unit: None,
         },
-        ValueKind::Range(_, _) => {
-            todo!(
-                "range output not yet expected in benchmark fixtures; comparison semantics undefined"
+        ValueKind::Range(from, to) => Output {
+            kind: "range",
+            value: serde_json::to_string(&[
+                normalize_value(&from.value, &from.lemma_type),
+                normalize_value(&to.value, &to.lemma_type),
+            ])
+            .expect("BUG: Output is trivially JSON-serializable"),
+            unit: None,
+        },
+        ValueKind::List(rows) => Output {
+            kind: "list",
+            value: serde_json::to_string(
+                &rows
+                    .iter()
+                    .map(|row| normalize_value(&row.value, &row.lemma_type))
+                    .collect::<Vec<_>>(),
             )
-        }
+            .expect("BUG: Output is trivially JSON-serializable"),
+            unit: None,
+        },
     }
 }
 
@@ -156,7 +171,7 @@ fn main() {
         let engine = build_engine(&fixture);
         let data = fixture.inputs();
         let response = engine
-            .run(
+            .evaluate(
                 None,
                 fixture.spec_name,
                 Some(&common::effective()),
@@ -174,7 +189,7 @@ fn main() {
                 .expect("BUG: outputs bench requires explain: true");
             let normalized = match &explanation.result {
                 OperationResult::Value(bound) => {
-                    normalize_literal(&bound.to_literal(), explanation.result_type.as_ref())
+                    normalize_value(&bound.to_literal().value, explanation.result_type.as_ref())
                 }
                 OperationResult::Veto(veto) => normalize_veto(veto),
             };

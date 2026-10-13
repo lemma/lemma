@@ -1,5 +1,8 @@
+#[path = "support/explanation_json.rs"]
+mod explanation_support;
+
+use indexmap::IndexMap;
 use lemma::{format_explanation, DateTimeValue, Engine, LiteralValue};
-use std::collections::HashMap;
 
 #[test]
 fn explanation_generated_during_evaluation() {
@@ -17,11 +20,11 @@ rule doubled: base_value * 2
         .unwrap();
     let now = DateTimeValue::now();
     let response = engine
-        .run(
+        .evaluate(
             None,
             "test_explanation",
             Some(&now),
-            HashMap::new(),
+            IndexMap::new(),
             None,
             true,
         )
@@ -60,11 +63,11 @@ rule quadruple: doubled * 2
         .unwrap();
     let now = DateTimeValue::now();
     let response = engine
-        .run(
+        .evaluate(
             None,
             "test_explanation_ref",
             Some(&now),
-            HashMap::new(),
+            IndexMap::new(),
             None,
             true,
         )
@@ -88,11 +91,10 @@ rule quadruple: doubled * 2
     assert_eq!(children[0]["operator"], "multiply");
     let operands = children[0]["operands"].as_array().expect("operands");
     assert_eq!(operands.len(), 2);
-    let child_type = operands[0]["type"]
-        .as_str()
-        .expect("embedded rule child type");
-    assert_eq!(child_type, "rule");
+    assert_eq!(operands[0]["type"], "rule_ref");
     assert_eq!(operands[0]["name"], "doubled");
+    let doubled = explanation_support::json_resolve_ref(&json, &operands[0]);
+    assert_eq!(doubled["body"], "base_value * 2");
     assert_eq!(operands[1]["type"], "compose");
     assert_eq!(operands[1]["expression"], "2");
     assert!(operands[1]["operands"]
@@ -121,7 +123,7 @@ rule out: 1 unless flag then 2
         .unwrap();
     let now = DateTimeValue::now();
     let response = engine
-        .run(None, "test_unless", Some(&now), HashMap::new(), None, true)
+        .evaluate(None, "test_unless", Some(&now), IndexMap::new(), None, true)
         .unwrap();
 
     let explanation = response
@@ -153,7 +155,7 @@ rule validated: price unless price < 0 then veto "negative"
         .unwrap();
     let now = DateTimeValue::now();
     let response = engine
-        .run(None, "test_veto", Some(&now), HashMap::new(), None, true)
+        .evaluate(None, "test_veto", Some(&now), IndexMap::new(), None, true)
         .unwrap();
 
     let result = response.results.get("validated").expect("validated");
@@ -181,7 +183,7 @@ rule use_cross_spec: helper.helper_value + 1
         .unwrap();
     let now = DateTimeValue::now();
     let response = engine
-        .run(None, "main", Some(&now), HashMap::new(), None, true)
+        .evaluate(None, "main", Some(&now), IndexMap::new(), None, true)
         .unwrap();
 
     let explanation = response
@@ -206,7 +208,7 @@ rule use_cross_spec: helper.helper_value + 1
         .expect("children")
         .iter()
         .flat_map(|child| {
-            if child["type"] == "rule" {
+            if child["type"] == "rule_ref" {
                 vec![child["name"].as_str().expect("name").to_string()]
             } else if child["type"] == "compose" {
                 child["operands"]
@@ -214,7 +216,7 @@ rule use_cross_spec: helper.helper_value + 1
                     .expect("operands")
                     .iter()
                     .filter_map(|op| {
-                        (op["type"] == "rule")
+                        (op["type"] == "rule_ref")
                             .then(|| op["name"].as_str().map(str::to_string))
                             .flatten()
                     })
@@ -226,7 +228,7 @@ rule use_cross_spec: helper.helper_value + 1
         .collect();
     assert!(
         child_names.iter().any(|n| n == "helper.helper_value"),
-        "JSON Rule name must be input_key, got {child_names:?}"
+        "JSON rule_ref name must be input_key, got {child_names:?}"
     );
     assert!(
         ascii.contains("helper.helper_value + 1")
@@ -254,11 +256,11 @@ rule total: bag.weight
             .to_string(),
         )])
         .unwrap();
-    let mut data = HashMap::new();
+    let mut data = IndexMap::new();
     data.insert("bag.weight".to_string(), "12 kg".into());
     let response = engine
-        .run(None, "calc", None, data, None, true)
-        .expect("run");
+        .evaluate(None, "calc", None, data, None, true)
+        .expect("evaluate");
     let explanation = response
         .results
         .get("total")
@@ -290,21 +292,21 @@ data x: number
 spec main
 uses a: src
 uses b: src
-rule sum: a.x + b.x
+rule added: a.x + b.x
 "#
             .to_string(),
         )])
         .unwrap();
-    let mut data = HashMap::new();
+    let mut data = IndexMap::new();
     data.insert("a.x".to_string(), "1".into());
     data.insert("b.x".to_string(), "2".into());
     let response = engine
-        .run(None, "main", None, data, None, true)
-        .expect("run");
+        .evaluate(None, "main", None, data, None, true)
+        .expect("evaluate");
     let explanation = response
         .results
-        .get("sum")
-        .expect("sum")
+        .get("added")
+        .expect("added")
         .explanation
         .as_ref()
         .expect("explanation");
@@ -333,8 +335,8 @@ rule total: bag.weight
         )])
         .unwrap();
     let response = engine
-        .run(None, "calc", None, HashMap::new(), None, true)
-        .expect("run");
+        .evaluate(None, "calc", None, IndexMap::new(), None, true)
+        .expect("evaluate");
     let result = response.results.get("total").expect("total");
     assert!(result.vetoed);
     let key = "bag.weight";
@@ -347,8 +349,8 @@ rule total: bag.weight
     let explanation = result.explanation.as_ref().expect("explanation");
     let ascii = format_explanation(explanation);
     assert!(
-        ascii.contains("Missing data: bag.weight") || ascii.contains("bag.weight: Missing data"),
-        "explanation must use input_key:\n{ascii}"
+        ascii.contains("Missing data: bag.weight"),
+        "explanation must match veto_reason form:\n{ascii}"
     );
     assert!(
         !ascii.contains('→'),
@@ -375,11 +377,11 @@ rule in_grams: bag.weight as gram
             .to_string(),
         )])
         .unwrap();
-    let mut data = HashMap::new();
+    let mut data = IndexMap::new();
     data.insert("bag.weight".to_string(), "2 kg".into());
     let response = engine
-        .run(None, "calc", None, data, None, true)
-        .expect("run");
+        .evaluate(None, "calc", None, data, None, true)
+        .expect("evaluate");
     let explanation = response
         .results
         .get("in_grams")
@@ -427,7 +429,7 @@ rule in_grams: w as gram
         )])
         .unwrap();
     let response = engine
-        .run(None, "t", None, HashMap::new(), None, true)
+        .evaluate(None, "t", None, IndexMap::new(), None, true)
         .unwrap();
     let explanation = response
         .results

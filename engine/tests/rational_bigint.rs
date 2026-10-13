@@ -1,6 +1,6 @@
+use indexmap::IndexMap;
 use lemma::{DateTimeValue, Engine, SourceType};
 use rust_decimal::Decimal;
-use std::collections::HashMap;
 
 #[test]
 fn decimal_max_multiply_vetoes_on_decimal_limit_not_numeric_overflow() {
@@ -10,7 +10,7 @@ fn decimal_max_multiply_vetoes_on_decimal_limit_not_numeric_overflow() {
 spec bigint_exact
 data max_val: {max_decimal}
 data two: 2
-rule product: max_val * two
+rule multiplied: max_val * two
 "#
     );
 
@@ -21,11 +21,11 @@ rule product: max_val * two
 
     let now = DateTimeValue::now();
     let response = engine
-        .run(
+        .evaluate(
             None,
             "bigint_exact",
             Some(&now),
-            HashMap::new(),
+            IndexMap::new(),
             None,
             false,
         )
@@ -33,7 +33,7 @@ rule product: max_val * two
 
     let rule = response
         .results
-        .get("product")
+        .get("multiplied")
         .expect("product rule must be present");
 
     assert!(rule.vetoed);

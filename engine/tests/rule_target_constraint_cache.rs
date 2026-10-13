@@ -6,8 +6,8 @@
 //! time — proves phase 5 consults the post-merge type, not a stale undetermined
 //! cache entry from phase 3.
 
+use indexmap::IndexMap;
 use lemma::{DateTimeValue, Engine, SourceType};
-use std::collections::HashMap;
 
 #[test]
 fn rule_target_via_with_binding_plans_after_phase4_cache_clear() {
@@ -35,8 +35,8 @@ rule r: i.slot
 
     let now = DateTimeValue::now();
     let response = engine
-        .run(None, "outer", Some(&now), HashMap::new(), None, false)
-        .expect("run");
+        .evaluate(None, "outer", Some(&now), IndexMap::new(), None, false)
+        .expect("evaluate");
     let r = response.results.get("r").expect("r");
     assert!(!r.vetoed);
     assert_eq!(

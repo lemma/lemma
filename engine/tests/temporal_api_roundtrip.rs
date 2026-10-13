@@ -181,7 +181,6 @@ fn datetime_iso_week_53_week_years() {
 fn datetime_offset_z() {
     let dt = roundtrip_datetime("2025-03-04T12:30:45Z", DateGranularity::DateTime);
     let tz = dt.timezone.expect("Z timezone");
-    assert_eq!(tz.offset_hours, 0);
     assert_eq!(tz.offset_minutes, 0);
 }
 
@@ -189,32 +188,28 @@ fn datetime_offset_z() {
 fn datetime_offset_plus_two_hours() {
     let dt = roundtrip_datetime("2025-03-04T12:30:45+02:00", DateGranularity::DateTime);
     let tz = dt.timezone.expect("+02:00");
-    assert_eq!(tz.offset_hours, 2);
-    assert_eq!(tz.offset_minutes, 0);
+    assert_eq!(tz.offset_minutes, 120);
 }
 
 #[test]
 fn datetime_offset_minus_five_hours() {
     let dt = roundtrip_datetime("2025-03-04T12:30:45-05:00", DateGranularity::DateTime);
     let tz = dt.timezone.expect("-05:00");
-    assert_eq!(tz.offset_hours, -5);
-    assert_eq!(tz.offset_minutes, 0);
+    assert_eq!(tz.offset_minutes, -300);
 }
 
 #[test]
 fn datetime_offset_non_hour_plus() {
     let dt = roundtrip_datetime("2025-03-04T12:30:45+05:45", DateGranularity::DateTime);
     let tz = dt.timezone.expect("+05:45");
-    assert_eq!(tz.offset_hours, 5);
-    assert_eq!(tz.offset_minutes, 45);
+    assert_eq!(tz.offset_minutes, 345);
 }
 
 #[test]
 fn datetime_offset_non_hour_minus() {
     let dt = roundtrip_datetime("2025-03-04T12:30:45-03:30", DateGranularity::DateTime);
     let tz = dt.timezone.expect("-03:30");
-    assert_eq!(tz.offset_hours, -3);
-    assert_eq!(tz.offset_minutes, 30);
+    assert_eq!(tz.offset_minutes, -210);
 }
 
 #[test]
@@ -224,7 +219,7 @@ fn datetime_offset_across_date_boundary() {
     assert_eq!(dt.month, 1);
     assert_eq!(dt.day, 1);
     let tz = dt.timezone.expect("timezone");
-    assert_eq!(tz.offset_hours, 10);
+    assert_eq!(tz.offset_minutes, 600);
 }
 
 #[test]
@@ -271,8 +266,7 @@ fn datetime_malformed_returns_err_never_panics() {
         "2025-03-04xyz",
     ];
     for input in cases {
-        let result = std::panic::catch_unwind(|| DateTimeValue::from_str(input));
-        let parsed = result.unwrap_or_else(|_| panic!("FromStr must not panic on {input:?}"));
+        let parsed = DateTimeValue::from_str(input);
         assert!(
             parsed.is_err(),
             "FromStr({input:?}) must return Err, got {parsed:?}"
@@ -315,28 +309,28 @@ fn time_end_of_day_with_max_microseconds() {
 fn time_offset_z() {
     let t = roundtrip_time("12:30:45Z");
     let tz = t.timezone.expect("Z");
-    assert_eq!(tz.offset_hours, 0);
     assert_eq!(tz.offset_minutes, 0);
 }
 
 #[test]
 fn time_offset_plus_and_minus() {
     let plus = roundtrip_time("12:30:45+02:00");
-    assert_eq!(plus.timezone.as_ref().map(|z| z.offset_hours), Some(2));
+    assert_eq!(plus.timezone.as_ref().map(|z| z.offset_minutes), Some(120));
     let minus = roundtrip_time("12:30:45-05:00");
-    assert_eq!(minus.timezone.as_ref().map(|z| z.offset_hours), Some(-5));
+    assert_eq!(
+        minus.timezone.as_ref().map(|z| z.offset_minutes),
+        Some(-300)
+    );
 }
 
 #[test]
 fn time_offset_non_hour() {
     let plus = roundtrip_time("12:30:45+05:45");
     let tz = plus.timezone.expect("+05:45");
-    assert_eq!(tz.offset_hours, 5);
-    assert_eq!(tz.offset_minutes, 45);
+    assert_eq!(tz.offset_minutes, 345);
     let minus = roundtrip_time("12:30:45-03:30");
     let tz = minus.timezone.expect("-03:30");
-    assert_eq!(tz.offset_hours, -3);
-    assert_eq!(tz.offset_minutes, 30);
+    assert_eq!(tz.offset_minutes, -210);
 }
 
 #[test]
@@ -357,8 +351,7 @@ fn time_malformed_returns_err_never_panics() {
         "12:30:45xyz",
     ];
     for input in cases {
-        let result = std::panic::catch_unwind(|| TimeValue::from_str(input));
-        let parsed = result.unwrap_or_else(|_| panic!("FromStr must not panic on {input:?}"));
+        let parsed = TimeValue::from_str(input);
         assert!(
             parsed.is_err(),
             "FromStr({input:?}) must return Err, got {parsed:?}"
@@ -386,7 +379,6 @@ fn roundtrip_timezone(input: &str) -> TimezoneValue {
 #[test]
 fn timezone_z_roundtrip() {
     let tz = roundtrip_timezone("Z");
-    assert_eq!(tz.offset_hours, 0);
     assert_eq!(tz.offset_minutes, 0);
 }
 
@@ -444,7 +436,7 @@ fn semantic_datetime_with_time_roundtrip() {
         "2025-03-04T12:30:45+02:00",
     );
     assert_eq!(dt.hour, 12);
-    assert_eq!(dt.timezone.as_ref().map(|z| z.offset_hours), Some(2));
+    assert_eq!(dt.timezone.as_ref().map(|z| z.offset_minutes), Some(120));
 }
 
 #[test]

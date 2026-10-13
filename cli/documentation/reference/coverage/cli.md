@@ -23,7 +23,7 @@ Numbers are produced by `cargo coverage cli`.
 
 ## Environment
 
-- Host: `Linux 7.0.0-31-generic x86_64`
+- Host: `Linux 7.0.0-38-generic x86_64`
 - Rustc:
 
 ```
@@ -40,14 +40,14 @@ LLVM version: 21.1.3
 
 | Metric | Covered | Total | Percent |
 |--------|--------:|------:|--------:|
-| Lines | 3259 | 5596 | 58.24% |
-| Functions | 268 | 494 | 54.25% |
-| Regions | 5064 | 8458 | 59.87% |
+| Lines | 3926 | 6516 | 60.25% |
+| Functions | 303 | 532 | 56.95% |
+| Regions | 5912 | 9711 | 60.88% |
 
 ## Test run
 
-- Total: 244
-- Passed: 244
+- Total: 293
+- Passed: 293
 - Skipped: 0
 - Failed: 0
 
@@ -57,20 +57,21 @@ Sorted by line coverage ascending (weakest first). Only files under `src/` for t
 
 | Module | Line % | Function % | Region % | Lines covered/total |
 |--------|-------:|-----------:|---------:|--------------------:|
-| `mcp/http.rs` | 7.46 | 9.52 | 9.25 | 25/335 |
-| `server.rs` | 20.35 | 16.90 | 32.34 | 139/683 |
-| `interactive.rs` | 38.45 | 29.58 | 38.94 | 373/970 |
-| `main.rs` | 52.94 | 64.41 | 47.83 | 369/697 |
+| `mcp/http.rs` | 7.37 | 9.52 | 9.25 | 25/339 |
+| `server.rs` | 21.27 | 20.31 | 34.12 | 147/691 |
+| `interactive.rs` | 50.22 | 47.15 | 47.82 | 896/1784 |
 | `error_formatter.rs` | 61.76 | 100.00 | 62.26 | 42/68 |
-| `workspace.rs` | 72.88 | 66.67 | 75.32 | 446/612 |
-| `install.rs` | 79.08 | 67.44 | 76.47 | 412/521 |
-| `formatter.rs` | 84.13 | 81.82 | 86.47 | 106/126 |
-| `mcp/server.rs` | 84.16 | 81.45 | 83.29 | 1217/1446 |
-| `data_json.rs` | 94.20 | 89.47 | 93.52 | 130/138 |
+| `main.rs` | 61.99 | 69.35 | 56.48 | 460/742 |
+| `workspace.rs` | 73.59 | 66.67 | 75.62 | 443/602 |
+| `install.rs` | 78.79 | 68.18 | 75.74 | 416/528 |
+| `mcp/server.rs` | 83.00 | 80.83 | 82.30 | 1191/1435 |
+| `formatter.rs` | 84.76 | 80.00 | 86.05 | 89/105 |
+| `data_json.rs` | 96.67 | 80.00 | 93.88 | 29/30 |
+| `doc_fences.rs` | 97.92 | 100.00 | 97.98 | 188/192 |
 
 ## Related docs
 
 - [CLI integration test catalog](../../../cli/tests/README.md)
 - [Engine test coverage](engine.md)
 - [CLI benchmarks](../benchmarks/cli.md)
-<!-- coverage-input-digest: 25a4999d413a7d45 -->
+<!-- coverage-input-digest: f347284d2a7e40d5 -->

@@ -131,14 +131,13 @@ fn suite_label_for_report(results_relative: &str) -> &'static str {
 }
 
 fn require_llvm_cov() -> Result<(), String> {
-    let ok = Command::new("cargo")
+    let status = Command::new("cargo")
         .args(["llvm-cov", "--version"])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status()
-        .map(|s| s.success())
-        .unwrap_or(false);
-    if !ok {
+        .map_err(|error| format!("failed to run cargo llvm-cov --version: {error}"))?;
+    if !status.success() {
         return Err(
             "cargo-llvm-cov not found; install: cargo install cargo-llvm-cov --locked".into(),
         );
@@ -537,7 +536,7 @@ pub fn compose_report(
         a.lines
             .percent
             .partial_cmp(&b.lines.percent)
-            .unwrap_or(std::cmp::Ordering::Equal)
+            .expect("BUG: coverage line percent must not be NaN")
             .then_with(|| a.module.cmp(&b.module))
     });
 
@@ -654,10 +653,9 @@ fn aggregate_totals(modules: &[ModuleCoverage]) -> MetricSummary {
 
 fn percent(covered: u64, count: u64) -> f64 {
     if count == 0 {
-        0.0
-    } else {
-        (covered as f64) * 100.0 / (count as f64)
+        panic!("BUG: coverage aggregate has zero items to cover; percent is undefined");
     }
+    (covered as f64) * 100.0 / (count as f64)
 }
 
 #[cfg(test)]
@@ -704,6 +702,7 @@ mod tests {
             rustc_version: "rustc 1.92.0".into(),
             uname: "Linux x86_64".into(),
             git_sha: String::new(),
+            generated_at: String::new(),
         };
         let config = ReportConfig {
             command_label: "engine",

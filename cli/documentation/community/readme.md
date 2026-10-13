@@ -13,7 +13,7 @@ Lemma is open source. The language, reference implementation, and issue tracker 
 
 ## Publish specs
 
-When a spec is ready to share or run with a team, publish it on [LemmaBase](https://lemmabase.com).
+When a spec is ready to share or evaluate with a team, publish it on [LemmaBase](https://lemmabase.com).
 
 ## License
 

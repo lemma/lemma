@@ -13,10 +13,10 @@ Elixir/Erlang bindings via Rustler NIFs. Public API lives in `lib/lemma.ex`; NIF
 | `lemma_quality` | `Lemma.quality/1` | Structural quality recommendations |
 | `lemma_load` | `Lemma.load/2` | Binary (volatile) or map/list (labeled) sources |
 | `lemma_install_start` / `lemma_install_respond` | `Lemma.install/2-3` | Download LemmaBase repository (`source` + `id`); host transport; no load |
-| `lemma_list` | `Lemma.list/1` | Loaded specs grouped by repository |
+| `lemma_specs` | `Lemma.specs/1` | Loaded specs grouped by repository |
 | `lemma_show` | `Lemma.show/4` | Spec interface + temporal window |
 | `lemma_source` | `Lemma.source/4` | Formatted canonical Lemma source |
-| `lemma_run` | `Lemma.run/3` | Evaluate (`target` + `options` maps) |
+| `lemma_run` | `Lemma.evaluate/3` | Evaluate (`target` + `options` maps) |
 | `lemma_remove` | `Lemma.remove/4` | Remove a temporal spec slice |
 | `lemma_update` | `Lemma.update/3-4` | Upsert identities from `code`; Path/Dependency prune siblings |
 | `lemma_format` | `Lemma.format/1` | Format Lemma source (no engine) |

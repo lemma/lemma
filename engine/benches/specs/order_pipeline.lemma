@@ -43,87 +43,111 @@ data is_hazardous:  boolean
 data is_gift:       boolean
 data is_first_time: boolean
 
-rule is_standard: customer_tier is "standard"
+rule is_standard:
+  customer_tier is "standard"
 
-rule is_silver: customer_tier is "silver"
+rule is_silver:
+  customer_tier is "silver"
 
-rule is_gold: customer_tier is "gold"
+rule is_gold:
+  customer_tier is "gold"
 
-rule is_platinum: customer_tier is "platinum"
+rule is_platinum:
+  customer_tier is "platinum"
 
-rule subtotal: unit_price * quantity
+rule subtotal:
+  unit_price * quantity
 
-rule volume_discount_rate: 0%
+rule volume_discount_rate:
+  0%
   unless quantity >= 5   then 3%
   unless quantity >= 25  then 7%
   unless quantity >= 100 then 12%
   unless quantity >= 500 then 18%
 
-rule tier_discount_rate: 0%
+rule tier_discount_rate:
+  0%
   unless is_silver   then 5%
   unless is_gold     then 10%
   unless is_platinum then 15%
 
-rule coupon_rate: (coupon_percent / 100) as percent
+rule coupon_rate:
+  (coupon_percent / 100) as percent
 
-rule first_time_rate: 0%
+rule first_time_rate:
+  0%
   unless is_first_time then 8%
 
-rule loyalty_rate: 0%
+rule loyalty_rate:
+  0%
   unless loyalty_points >= 1_000  then 2%
   unless loyalty_points >= 5_000  then 5%
   unless loyalty_points >= 25_000 then 10%
 
 rule combined_discount_rate:
-  volume_discount_rate + tier_discount_rate + coupon_rate
+  volume_discount_rate
+  + tier_discount_rate
+  + coupon_rate
   + first_time_rate
   + loyalty_rate
 
-rule discount_amount: subtotal * combined_discount_rate
+rule discount_amount:
+  subtotal * combined_discount_rate
 
-rule net_price: subtotal - discount_amount
+rule net_price:
+  subtotal - discount_amount
 
-rule base_shipping: 5
+rule base_shipping:
+  5
   unless package_weight > 1  then 8
   unless package_weight > 5  then 14
   unless package_weight > 20 then 25
   unless package_weight > 50 then 45
 
-rule distance_fee: delivery_distance * 0.04
+rule distance_fee:
+  delivery_distance * 0.04
 
-rule zone_multiplier: 1
+rule zone_multiplier:
+  1
   unless shipping_zone is "regional" then 1.2
   unless shipping_zone is "national" then 1.5
   unless shipping_zone is "intl"     then 2.5
 
-rule fragile_fee: 0
+rule fragile_fee:
+  0
   unless is_fragile then 8
 
-rule express_multiplier: 1
+rule express_multiplier:
+  1
   unless is_express then 2
 
-rule hazardous_fee: 0
+rule hazardous_fee:
+  0
   unless is_hazardous then 20
 
-rule gift_wrap_fee: 0
+rule gift_wrap_fee:
+  0
   unless is_gift then 5
 
 rule total_shipping:
-  (base_shipping + distance_fee + fragile_fee
-  + hazardous_fee
-  + gift_wrap_fee)
+  (base_shipping + distance_fee + fragile_fee + hazardous_fee + gift_wrap_fee)
   * zone_multiplier
   * express_multiplier
 
-rule pays_credit: payment_method is "credit"
+rule pays_credit:
+  payment_method is "credit"
 
-rule pays_debit: payment_method is "debit"
+rule pays_debit:
+  payment_method is "debit"
 
-rule pays_cash: payment_method is "cash"
+rule pays_cash:
+  payment_method is "cash"
 
-rule pays_transfer: payment_method is "transfer"
+rule pays_transfer:
+  payment_method is "transfer"
 
-rule processing_fee: 0
+rule processing_fee:
+  0
   unless pays_credit   then net_price * 2.5%
   unless pays_cash     then 2
   unless pays_transfer then 1
@@ -131,12 +155,15 @@ rule processing_fee: 0
 rule pre_tax_total:
   net_price + total_shipping + processing_fee
 
-rule tax_rate: 8%
+rule tax_rate:
+  8%
   unless shipping_zone is "intl" then 0%
 
-rule tax_amount: pre_tax_total * tax_rate
+rule tax_amount:
+  pre_tax_total * tax_rate
 
-rule loyalty_credit_rate: 1%
+rule loyalty_credit_rate:
+  1%
   unless is_silver   then 2%
   unless is_gold     then 3%
   unless is_platinum then 5%
@@ -144,26 +171,33 @@ rule loyalty_credit_rate: 1%
 rule loyalty_credit_earned:
   pre_tax_total * loyalty_credit_rate
 
-rule grand_total: pre_tax_total + tax_amount
+rule grand_total:
+  pre_tax_total + tax_amount
 
-rule meets_minimum: subtotal >= 25
+rule meets_minimum:
+  subtotal >= 25
 
-rule order_valid: meets_minimum
+rule order_valid:
+  meets_minimum
   unless not meets_minimum
     then veto "Order subtotal below the minimum of 25"
 
-rule savings_total: discount_amount
+rule savings_total:
+  discount_amount
 
 rule savings_percent:
   (savings_total / subtotal) as percent
 
-rule is_high_value: grand_total > 500
+rule is_high_value:
+  grand_total > 500
 
-rule is_express_eligible: false
+rule is_express_eligible:
+  false
   unless total_shipping >= 25 then true
   unless is_express           then true
 
-rule order_summary: "standard order"
+rule order_summary:
+  "standard order"
   unless is_high_value then "high value order"
   unless is_first_time then "first-time customer"
   unless is_platinum   then "platinum customer order"

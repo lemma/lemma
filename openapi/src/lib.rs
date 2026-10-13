@@ -340,7 +340,6 @@ fn memento_spec_response_headers() -> Value {
     })
 }
 
-const API_V1_JSON: &str = include_str!("../../engine/schemas/api.v1.json");
 const JSON_SCHEMA_METASCHEMA: &str = "https://json-schema.org/draft/2020-12/schema";
 const DEFS_REF_PREFIX: &str = "#/$defs/";
 
@@ -363,8 +362,8 @@ const EVALUATE_DEF_SEEDS: &[&str] = &[
 ];
 
 fn build_hoisted_show_component_schemas() -> Map<String, Value> {
-    let document: Value =
-        serde_json::from_str(API_V1_JSON).expect("BUG: engine/schemas/api.v1.json must be JSON");
+    let document: Value = serde_json::from_str(lemma::API_V1_SCHEMA_JSON)
+        .expect("BUG: engine/schemas/api.v1.json must be JSON");
     let defs = document["$defs"]
         .as_object()
         .expect("BUG: api.v1.json must have $defs");

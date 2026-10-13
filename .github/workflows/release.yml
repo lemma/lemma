@@ -568,39 +568,39 @@ jobs:
         working-directory: cli/packages/npm/dist/lemma
         run: npm publish --provenance --access public
 
-  publish-vscode:
-    name: Publish VS Code Extension
-    needs: [detect-version-changes, create-release]
-    if: |
-      !cancelled() &&
-      needs.create-release.result == 'success' &&
-      needs.detect-version-changes.outputs.changed == 'true'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
+  # publish-vscode:
+  #   name: Publish VS Code Extension
+  #   needs: [detect-version-changes, create-release]
+  #   if: |
+  #     !cancelled() &&
+  #     needs.create-release.result == 'success' &&
+  #     needs.detect-version-changes.outputs.changed == 'true'
+  #   runs-on: ubuntu-latest
+  #   steps:
+  #     - uses: actions/checkout@v4
 
-      - name: Install Rust stable
-        uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: 1.92.0
+  #     - name: Install Rust stable
+  #       uses: dtolnay/rust-toolchain@master
+  #       with:
+  #         toolchain: 1.92.0
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: "24.11.0"
+  #     - name: Setup Node.js
+  #       uses: actions/setup-node@v4
+  #       with:
+  #         node-version: "24.11.0"
 
-      - name: Package extension
-        run: cargo run -p xtask -- lsp package
+  #     - name: Package extension
+  #       run: cargo run -p xtask -- lsp package
 
-      - name: Publish to Marketplace
-        run: cargo run -p xtask -- lsp publish-marketplace
-        env:
-          VSCE_PAT: ${{ secrets.VSCE_PAT }}
+  #     - name: Publish to Marketplace
+  #       run: cargo run -p xtask -- lsp publish-marketplace
+  #       env:
+  #         VSCE_PAT: ${{ secrets.VSCE_PAT }}
 
-      - name: Publish to Open VSX
-        run: cargo run -p xtask -- lsp publish-openvsx
-        env:
-          OPEN_VSX_TOKEN: ${{ secrets.OPEN_VSX_TOKEN }}
+  #     - name: Publish to Open VSX
+  #       run: cargo run -p xtask -- lsp publish-openvsx
+  #       env:
+  #         OPEN_VSX_TOKEN: ${{ secrets.OPEN_VSX_TOKEN }}
 
   publish-hex:
     name: Publish to Hex.pm

@@ -363,6 +363,19 @@ fn precommit(run_fuzz: bool) {
         "--run-ignored",
         "all",
     ]);
+    eprintln!("xtask: cargo package (publishable crates)");
+    run(&[
+        "package",
+        "-p",
+        "lemma-engine",
+        "-p",
+        "lemma-lsp",
+        "-p",
+        "lemma-openapi",
+        "-p",
+        "lemma",
+        "--allow-dirty",
+    ]);
     eprintln!("xtask: npm wasm package");
     run_npm_wasm_precommit();
     eprintln!("xtask: maven package");

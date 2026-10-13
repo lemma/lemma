@@ -1,14 +1,12 @@
 //! Logistics ladder: pin source lengths and smoke-load the ground profile.
 
-use lemma_fixtures::logistics;
-
+use crate::fixture::{self, LogisticsFixture, LADDER};
 use lemma::{Engine, SourceType};
-use logistics::{LogisticsFixture, LADDER};
 
 #[test]
 fn logistics_ladder_pins_and_ground_eval() {
     for rung in &LADDER {
-        let fixture = logistics::logistics(rung.rate_cells);
+        let fixture = fixture::logistics(rung.rate_cells);
         assert_eq!(
             fixture.rate_cells, rung.rate_cells,
             "{} rate_cells",
@@ -22,15 +20,15 @@ fn logistics_ladder_pins_and_ground_eval() {
         );
     }
 
-    let fixture = logistics::logistics(LADDER[0].rate_cells);
+    let embedded = fixture::logistics(LADDER[0].rate_cells);
     assert!(
-        fixture.catalog_json.is_none(),
+        embedded.catalog_json.is_none(),
         "embedded fixture keeps catalog in source"
     );
-    let embedded_source_len = fixture.source.len();
-    let mut engine = Engine::with_limits(fixture.limits.clone());
+    let embedded_source_len = embedded.source.len();
+    let mut engine = Engine::with_limits(embedded.limits.clone());
     engine
-        .load([(SourceType::Volatile, fixture.source)])
+        .load([(SourceType::Volatile, embedded.source)])
         .expect("ground logistics source must plan");
     let response = engine
         .evaluate(
@@ -49,7 +47,7 @@ fn logistics_ladder_pins_and_ground_eval() {
         .result()
         .expect("cheapest must produce a value");
 
-    let external = logistics::logistics_external_catalog(LADDER[0].rate_cells);
+    let external = fixture::logistics_external_catalog(LADDER[0].rate_cells);
     assert!(external.catalog_json.is_some());
     assert!(external.source.len() < embedded_source_len);
 }

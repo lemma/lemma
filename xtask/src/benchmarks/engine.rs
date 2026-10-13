@@ -114,7 +114,7 @@ pub fn run(root: &Path) -> Result<(), String> {
 
     run_engine_criterion_bench(root, "lemma-engine", "evaluate")?;
     let memory_stdout = run_memory_bench(root)?;
-    let snapshot_stdout = run_snapshot_bench(root)?;
+    let logistics_stdout = run_logistics_bench(root)?;
     let outputs_stdout = run_outputs_bench(root)?;
     let outputs_report: OutputsReport = serde_json::from_str(outputs_stdout.trim())
         .map_err(|error| format!("outputs bench stdout was not valid JSON: {error}"))?;
@@ -161,9 +161,8 @@ pub fn run(root: &Path) -> Result<(), String> {
 
     let accuracy = compute_accuracy(&outputs_by_spec, &python_by_spec)?;
     let (memory_rows, plan_memory_rows) = parse_memory_bench_stdout(&memory_stdout)?;
-    let snapshot_rows = parse_snapshot_bench_stdout(&snapshot_stdout)?;
-    let external_stdout = run_logistics_external_bench(root)?;
-    let external_rows = parse_logistics_external_bench_stdout(&external_stdout)?;
+    let snapshot_rows = parse_snapshot_bench_stdout(&logistics_stdout)?;
+    let external_rows = parse_logistics_external_bench_stdout(&logistics_stdout)?;
     let env = capture_environment(root)?;
     let python_version = capture_stdout("python3", &["--version"], None)?;
 
@@ -281,51 +280,26 @@ fn parse_memory_bench_stdout(stdout: &str) -> Result<(Vec<MemoryRow>, Vec<Memory
     Ok((eval_rows, plan_rows))
 }
 
-/// Rungs of the logistics ladder the snapshot bench must report, in order.
+/// Rungs of the logistics ladder the logistics bench must report, in order.
 const SNAPSHOT_LADDER: [usize; 4] = [1050, 6300, 18900, 126000];
 
-fn run_snapshot_bench(root: &Path) -> Result<String, String> {
+fn run_logistics_bench(root: &Path) -> Result<String, String> {
     let output = Command::new("cargo")
         .current_dir(root)
         .env("CARGO_TARGET_DIR", root.join("target"))
-        .args(["bench", "-p", "lemma-engine", "--bench", "snapshot"])
+        .args(["bench", "-p", "lemma-engine", "--bench", "logistics"])
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())
         .output()
-        .map_err(|error| format!("failed to spawn cargo bench snapshot: {error}"))?;
+        .map_err(|error| format!("failed to spawn cargo bench logistics: {error}"))?;
     if !output.status.success() {
         return Err(format!(
-            "cargo bench snapshot exited with code {:?}",
+            "cargo bench logistics exited with code {:?}",
             output.status.code()
         ));
     }
     String::from_utf8(output.stdout)
-        .map_err(|error| format!("snapshot bench stdout was not UTF-8: {error}"))
-}
-
-fn run_logistics_external_bench(root: &Path) -> Result<String, String> {
-    let output = Command::new("cargo")
-        .current_dir(root)
-        .env("CARGO_TARGET_DIR", root.join("target"))
-        .args([
-            "bench",
-            "-p",
-            "lemma-engine",
-            "--bench",
-            "logistics_external",
-        ])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::inherit())
-        .output()
-        .map_err(|error| format!("failed to spawn cargo bench logistics_external: {error}"))?;
-    if !output.status.success() {
-        return Err(format!(
-            "cargo bench logistics_external exited with code {:?}",
-            output.status.code()
-        ));
-    }
-    String::from_utf8(output.stdout)
-        .map_err(|error| format!("logistics_external bench stdout was not UTF-8: {error}"))
+        .map_err(|error| format!("logistics bench stdout was not UTF-8: {error}"))
 }
 
 fn parse_milliseconds(cell: &str, what: &str) -> Result<f64, String> {
@@ -763,20 +737,20 @@ fn compose_report(ctx: ComposeReportContext<'_>) -> Result<String, String> {
          region.\n",
     );
     out.push_str(
-        "- Snapshot: `cargo bench -p lemma-engine --bench snapshot` on the generated logistics \
-         ladder (1050 / 6300 / 18900 / 126000 rate cells; byte-identical to the Java \
-         `SpecGenerator.logistics` fixtures). One `load`, then 1 warmup + 10 measured \
+        "- Snapshot: `cargo bench -p lemma-engine --bench logistics` (embedded table) on the \
+         generated logistics ladder (1050 / 6300 / 18900 / 126000 rate cells; byte-identical to the \
+         Java `SpecGenerator.logistics` fixtures). One `load`, then 1 warmup + 10 measured \
          `Engine::snapshot`, `Engine::from_snapshot`, and eval (`shipment inputs` + `Engine::evaluate` → \
          `cheapest`; catalog already in the plan). Heap columns are `stats_alloc` net bytes \
          retained by the loaded and by the restored engine. The restored engine must evaluate \
          `rate_shop.cheapest` to the same value as the loaded engine.\n",
     );
     out.push_str(
-        "- External catalog: `cargo bench -p lemma-engine --bench logistics_external` on the same \
-         ladder with empty keyed lists in source and catalog rows held as JSON. Timed eval = \
-         `parse_evaluate_data_object` + `Engine::evaluate` (1 warmup + 10 measured); that includes JSON parse, \
-         unlike embedded eval. Load / snapshot / restore measure the skeleton only. Each rung must \
-         match embedded `rate_shop.cheapest`.\n\n",
+        "- External catalog: same `cargo bench -p lemma-engine --bench logistics` (external table) \
+         on the same ladder with empty keyed lists in source and catalog rows held as JSON. Timed \
+         eval = `parse_evaluate_data_object` + `Engine::evaluate` (1 warmup + 10 measured); that \
+         includes JSON parse, unlike embedded eval. Load / snapshot / restore measure the skeleton \
+         only. Each rung must match embedded `rate_shop.cheapest`.\n\n",
     );
 
     push_environment_block(&mut out, env, Some(python_version));

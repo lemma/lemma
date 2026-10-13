@@ -5,7 +5,6 @@ members = [
     "cli",
     "engine",
     "engine/lsp",
-    "engine/fixtures",
     "engine/packages/hex/native/lemma_hex",
     "engine/packages/maven/native/lemma_jni",
     "openapi",

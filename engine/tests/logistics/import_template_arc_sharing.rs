@@ -1,9 +1,7 @@
 //! Named-`uses` template sharing: one Arc body per SpecIdentity per planning pass.
 
-use lemma_fixtures::logistics;
-
+use crate::fixture::{self, LogisticsFixture, LADDER};
 use lemma::{Engine, SourceType};
-use logistics::{LogisticsFixture, GROUND_CELLS, LADDER};
 use std::collections::HashSet;
 
 #[test]
@@ -78,24 +76,21 @@ rule total: l.out + r.out
 
 #[test]
 fn rate_shop_quotes_share_accessorials_and_zone_templates() {
-    let enterprise = LADDER
-        .iter()
-        .find(|rung| rung.rate_cells == GROUND_CELLS * 6 * 20)
-        .expect("BUG: enterprise rung missing");
-    let fixture = logistics::logistics(enterprise.rate_cells);
-    assert_eq!(fixture.profile, "enterprise");
-    assert_eq!(fixture.rate_cells, enterprise.rate_cells);
+    let enterprise = &LADDER[3];
+    let embedded = fixture::logistics(enterprise.rate_cells);
+    assert_eq!(embedded.profile, "enterprise");
+    assert_eq!(embedded.rate_cells, enterprise.rate_cells);
     assert!(
-        fixture.catalog_json.is_none(),
+        embedded.catalog_json.is_none(),
         "embedded enterprise keeps catalog in source"
     );
-    let external_ground = logistics::logistics_external_catalog(GROUND_CELLS);
+    let external_ground = fixture::logistics_external_catalog(LADDER[0].rate_cells);
     assert!(external_ground.catalog_json.is_some());
-    assert!(external_ground.source.len() < fixture.source.len());
+    assert!(external_ground.source.len() < embedded.source.len());
 
-    let mut engine = Engine::with_limits(fixture.limits.clone());
+    let mut engine = Engine::with_limits(embedded.limits.clone());
     engine
-        .load([(SourceType::Volatile, fixture.source.clone())])
+        .load([(SourceType::Volatile, embedded.source.clone())])
         .expect("hypothesis fixture must load");
 
     let ptrs = engine.debug_row_template_arc_ptrs(None, LogisticsFixture::SPEC_NAME);

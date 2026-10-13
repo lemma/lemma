@@ -15,19 +15,19 @@ use serde_json::{json, Value};
 use std::fmt::Write;
 
 /// UPS Ground zones 2 to 8.
-pub const ZONES: usize = 7;
+const ZONES: usize = 7;
 /// 1 to 150 lb breaks.
-pub const WEIGHTS: usize = 150;
+const WEIGHTS: usize = 150;
 /// Cells in one Ground matrix.
-pub const GROUND_CELLS: usize = ZONES * WEIGHTS;
+const GROUND_CELLS: usize = ZONES * WEIGHTS;
 /// Services on the UPS zone chart header.
-pub const SERVICES: usize = 6;
+const SERVICES: usize = 6;
 /// US ZIP3 prefixes.
-pub const ZIP3_COUNT: usize = 900;
+const ZIP3_COUNT: usize = 900;
 /// D2C multi-carrier count.
-pub const D2C_CARRIERS: usize = 3;
+const D2C_CARRIERS: usize = 3;
 /// Enterprise low contract count.
-pub const ENTERPRISE_CONTRACTS: usize = 20;
+const ENTERPRISE_CONTRACTS: usize = 20;
 /// Open end for last weight / fuel band (`[lo, hi)` containment).
 const BAND_OPEN_END: i32 = 1_000_000;
 

@@ -1,9 +1,7 @@
 //! Measure list Load sharing: nested `uses` must share Arc list bodies.
 
-use lemma_fixtures::logistics;
-
+use crate::fixture::{self, LogisticsFixture, LADDER};
 use lemma::{Engine, SourceType};
-use logistics::{LogisticsFixture, GROUND_CELLS, LADDER};
 use std::collections::HashSet;
 
 fn total_rows(counts: &[(String, usize, usize)]) -> usize {
@@ -20,24 +18,21 @@ fn ptr_of(counts: &[(String, usize, usize)], needle: &str) -> usize {
 
 #[test]
 fn nested_uses_share_list_bodies() {
-    let enterprise = LADDER
-        .iter()
-        .find(|rung| rung.rate_cells == GROUND_CELLS * 6 * 20)
-        .expect("BUG: enterprise rung missing");
-    let fixture = logistics::logistics(enterprise.rate_cells);
-    assert_eq!(fixture.profile, "enterprise");
-    assert_eq!(fixture.rate_cells, enterprise.rate_cells);
+    let enterprise = &LADDER[3];
+    let embedded = fixture::logistics(enterprise.rate_cells);
+    assert_eq!(embedded.profile, "enterprise");
+    assert_eq!(embedded.rate_cells, enterprise.rate_cells);
     assert!(
-        fixture.catalog_json.is_none(),
+        embedded.catalog_json.is_none(),
         "embedded enterprise keeps catalog in source"
     );
-    let external_ground = logistics::logistics_external_catalog(GROUND_CELLS);
+    let external_ground = fixture::logistics_external_catalog(LADDER[0].rate_cells);
     assert!(external_ground.catalog_json.is_some());
-    assert!(external_ground.source.len() < fixture.source.len());
+    assert!(external_ground.source.len() < embedded.source.len());
 
-    let mut engine = Engine::with_limits(fixture.limits.clone());
+    let mut engine = Engine::with_limits(embedded.limits.clone());
     engine
-        .load([(SourceType::Volatile, fixture.source.clone())])
+        .load([(SourceType::Volatile, embedded.source.clone())])
         .expect("enterprise source must load");
 
     let rates_paths = engine.debug_instance_list_row_counts(None, "rates_contract_01_ground");

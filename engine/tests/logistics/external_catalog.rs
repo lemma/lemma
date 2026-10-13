@@ -1,9 +1,7 @@
 //! External-catalog logistics: empty keyed lists + JSON run data match embedded.
 
-use lemma_fixtures::logistics;
-
+use crate::fixture::{self, LogisticsFixture, LADDER};
 use lemma::{parse_evaluate_data_object, Engine, SourceType};
-use logistics::{LogisticsFixture, GROUND_CELLS, LADDER, SERVICES};
 
 fn cheapest_display(
     engine: &Engine,
@@ -30,11 +28,12 @@ fn cheapest_display(
 
 #[test]
 fn external_ground_matches_embedded_cheapest() {
-    let embedded = logistics::logistics(GROUND_CELLS);
-    let external = logistics::logistics_external_catalog(GROUND_CELLS);
+    let ground = LADDER[0].rate_cells;
+    let embedded = fixture::logistics(ground);
+    let external = fixture::logistics_external_catalog(ground);
     assert_eq!(external.profile, "ground");
-    assert_eq!(external.rate_cells, GROUND_CELLS);
-    assert_eq!(embedded.rate_cells, GROUND_CELLS);
+    assert_eq!(external.rate_cells, ground);
+    assert_eq!(embedded.rate_cells, ground);
     assert!(
         external.source.len() < embedded.source.len() / 4,
         "external source {} must be much smaller than embedded {}",
@@ -65,9 +64,9 @@ fn external_ground_matches_embedded_cheapest() {
 
 #[test]
 fn external_carrier_matches_embedded_cheapest() {
-    let rate_cells = GROUND_CELLS * SERVICES;
-    let embedded = logistics::logistics(rate_cells);
-    let external = logistics::logistics_external_catalog(rate_cells);
+    let rate_cells = LADDER[1].rate_cells;
+    let embedded = fixture::logistics(rate_cells);
+    let external = fixture::logistics_external_catalog(rate_cells);
 
     let mut embedded_engine = Engine::with_limits(embedded.limits.clone());
     embedded_engine
@@ -86,13 +85,13 @@ fn external_carrier_matches_embedded_cheapest() {
 
 #[test]
 fn external_cells_reject_default_max_list_rows() {
-    let mut fixture = logistics::logistics_external_catalog(GROUND_CELLS);
-    fixture.limits.max_list_rows = 1024;
-    fixture.limits.max_list_nodes = 4096;
+    let mut skeleton = fixture::logistics_external_catalog(LADDER[0].rate_cells);
+    skeleton.limits.max_list_rows = 1024;
+    skeleton.limits.max_list_nodes = 4096;
 
-    let mut engine = Engine::with_limits(fixture.limits.clone());
+    let mut engine = Engine::with_limits(skeleton.limits.clone());
     engine
-        .load([(SourceType::Volatile, fixture.source)])
+        .load([(SourceType::Volatile, skeleton.source)])
         .expect("skeleton must load under default list limits");
 
     let err = engine
@@ -100,7 +99,7 @@ fn external_cells_reject_default_max_list_rows() {
             None,
             LogisticsFixture::SPEC_NAME,
             None,
-            parse_evaluate_data_object(&fixture.catalog_json).expect("catalog_json must parse"),
+            parse_evaluate_data_object(&skeleton.catalog_json).expect("catalog_json must parse"),
             Some(&[LogisticsFixture::TERMINAL_RULE.to_string()]),
             false,
         )

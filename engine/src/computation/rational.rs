@@ -607,14 +607,19 @@ pub enum NumericFailure {
 impl fmt::Display for NumericFailure {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            NumericFailure::DivisionByZero => formatter.write_str("division by zero"),
-            NumericFailure::Overflow => formatter.write_str("numeric overflow"),
-            NumericFailure::OutOfMemory => formatter.write_str("out of memory"),
+            NumericFailure::DivisionByZero => {
+                formatter.write_str("Division by zero is not allowed.")
+            }
+            NumericFailure::Overflow => formatter.write_str("The numeric result overflowed."),
+            NumericFailure::OutOfMemory => {
+                formatter.write_str("The calculation ran out of memory.")
+            }
             NumericFailure::MagnitudeLimit => write!(
                 formatter,
-                "numeric result exceeds the maximum of {MAX_RATIONAL_BITS} bits"
+                "The numeric result exceeds the maximum size of {MAX_RATIONAL_BITS} bits."
             ),
-            NumericFailure::Irrational => formatter.write_str("irrational numeric result"),
+            NumericFailure::Irrational => formatter
+                .write_str("The numeric result is irrational and cannot be represented exactly."),
         }
     }
 }

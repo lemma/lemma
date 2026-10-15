@@ -174,6 +174,7 @@ Chained casts nest from left to right: `expr as unit as unit … as number`.
 | ----------- | ----------------------------------------------------------------------------------- | -------------------------------------------- |
 | `as <unit>` | Convert, relabel, or construct a measure/ratio in that unit                         | `mass as gram`, `5 as eur`, `rate as hour`  |
 | `as number` | Strip to raw magnitude (requires explicit unit on prior step for quantities/ranges) | `10 eur as number`, `span as day as number` |
+| `as time`   | Time-of-day from a `date` (or identity on `time`); date-only yields midnight        | `now as time`, `2024-06-01 as time`          |
 
 `<unit>` may be bare (`eur`) or qualified (`money.eur`, `units.mass.kilogram`). Optionally qualify; must qualify when the bare name is ambiguous in scope: see [Qualifying units](#qualifying-units).
 
@@ -253,7 +254,7 @@ Evaluating `order` before 2025-01-01 uses `base_points: 100`; from 2025-01-01 on
 | **Evaluation instant**   | `lemma evaluate points --effective 2025-03-01` (CLI) or **Accept-Datetime** (HTTP) | Picks which temporal row of the **root spec** is active           |
 
 
-Bare year on a pin (`2025`) means that year's Jan 1 00:00, same as datetime literals. HTTP details for Accept-Datetime, `Vary`, and `Memento-Datetime`: [CLI: API Defaults](cli.md#api-defaults).
+Bare year on a pin (`2025`) means that year's Jan 1 00:00, same as datetime literals. The evaluation instant (`--effective` / Accept-Datetime) always resolves to a precise datetime: date-only forms become UTC midnight at the start of that period (`2025` → `2025-01-01T00:00:00Z`, `2025-03-01` → `2025-03-01T00:00:00Z`). HTTP details for Accept-Datetime, `Vary`, and `Memento-Datetime`: [CLI: API Defaults](cli.md#api-defaults).
 
 ### Self-reference restriction
 
@@ -572,7 +573,7 @@ Any **rangeable named measure type** can also be declared with a `range` suffix,
 
 **Calendar intervals** use month/year units from `uses lemma units` (`units.calendar`). Inline literals (`18 year...67 year`) and `in` work like other ranges. Endpoints must be calendar units (`year`, `month`). Do not mix calendar and duration units in one literal (`12 year...7 day` is a planning error). Do not mix dates and calendar endpoints (`2024-01-01...18 year` is rejected).
 
-**Time ranges** are half-open like all ranges. Endpoints must share the same timezone (including both absent). Literal order does not imply midnight wraparound: `22:00...02:00` is ordered `[02:00, 22:00)` with an 20-hour span, not an overnight window.
+**Time ranges** are half-open like all ranges. Endpoints must share the same timezone (including both absent). Literal order does not imply midnight wraparound: `22:00...02:00` is ordered `[02:00, 22:00)` with an 20-hour span, not an overnight window. A `date` may be tested with `in` a time range: the date's clock is projected the same way as `date as time` (so `now in shift` equals `now as time in shift`).
 
 Declare range slots on `data`:
 
@@ -1078,7 +1079,7 @@ data can_decline: false
 
 ### `now`
 
-`now` is the evaluation instant (the run's effective datetime). It equals the CLI `--effective` / HTTP Accept-Datetime value when set; otherwise the current clock.
+`now` is the evaluation instant (the run's effective datetime). It equals the CLI `--effective` / HTTP Accept-Datetime value when set; otherwise the current clock. Use `now as time` for the time-of-day of that instant, or `now in <time range>` as sugar for membership in a shift window.
 
 ### Date predicates and windows
 

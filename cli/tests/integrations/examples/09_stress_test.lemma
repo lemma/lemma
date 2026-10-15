@@ -128,6 +128,13 @@ rule uses_cash:
 rule uses_debit:
   payment_method is "debit"
 
+rule payment_allowed:
+  yes
+  unless payment_method is "cash" and is_fragile
+    then veto "Cash not accepted for fragile shipments"
+  unless payment_method is not "credit" and is_express
+    then veto "Express shipping requires credit payment"
+
 rule processing_fee:
   0
   unless uses_credit then final_before_fees * 2.5%
@@ -281,6 +288,10 @@ rule final_status:
     then veto "Insufficient margin"
   unless not discount_within_cap
     then "WARNING: Discount exceeds cap"
+
+rule rush_and_cap_ok:
+  no
+  unless order.is_rush and discount_within_cap then yes
 
 rule order_summary:
   order.grand_total

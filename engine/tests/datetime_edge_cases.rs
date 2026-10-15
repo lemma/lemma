@@ -699,8 +699,8 @@ rule result: t + 9223372036854 second
     assert!(rule_result.vetoed, "must veto, not panic");
     assert_eq!(
         rule_result.veto_reason.as_deref(),
-        Some("Time overflow"),
-        "convertible extreme duration must hit Time overflow: {:?}",
+        Some("The time calculation overflowed."),
+        "convertible extreme duration must hit time overflow: {:?}",
         rule_result.veto_reason
     );
 }
@@ -732,8 +732,8 @@ rule result: t - 9223372036854 second
     assert!(rule_result.vetoed, "must veto, not panic");
     assert_eq!(
         rule_result.veto_reason.as_deref(),
-        Some("Time overflow"),
-        "convertible extreme duration must hit Time overflow: {:?}",
+        Some("The time calculation overflowed."),
+        "convertible extreme duration must hit time overflow: {:?}",
         rule_result.veto_reason
     );
 }
@@ -839,8 +839,8 @@ rule result: d + 9223372036854 second
     assert!(rule_result.vetoed, "must veto, not panic");
     assert_eq!(
         rule_result.veto_reason.as_deref(),
-        Some("Date overflow"),
-        "convertible extreme duration must hit Date overflow: {:?}",
+        Some("The date calculation overflowed."),
+        "convertible extreme duration must hit date overflow: {:?}",
         rule_result.veto_reason
     );
 }
@@ -872,8 +872,8 @@ rule result: d - 9223372036854 second
     assert!(rule_result.vetoed, "must veto, not panic");
     assert_eq!(
         rule_result.veto_reason.as_deref(),
-        Some("Date overflow"),
-        "convertible extreme duration must hit Date overflow: {:?}",
+        Some("The date calculation overflowed."),
+        "convertible extreme duration must hit date overflow: {:?}",
         rule_result.veto_reason
     );
 }
@@ -906,8 +906,8 @@ rule result: d + 2147483647 month
     assert!(rule_result.vetoed, "must veto, not panic");
     assert_eq!(
         rule_result.veto_reason.as_deref(),
-        Some("Calendar offset too large"),
-        "i32-max month add must hit Calendar offset too large: {:?}",
+        Some("The calendar offset is too large."),
+        "i32-max month add must hit calendar offset too large: {:?}",
         rule_result.veto_reason
     );
 }
@@ -940,8 +940,8 @@ rule result: d - 2147483648 month
     assert!(rule_result.vetoed, "must veto, not panic");
     assert_eq!(
         rule_result.veto_reason.as_deref(),
-        Some("Calendar offset too large"),
-        "i32::MIN month subtract must hit Calendar offset too large: {:?}",
+        Some("The calendar offset is too large."),
+        "i32::MIN month subtract must hit calendar offset too large: {:?}",
         rule_result.veto_reason
     );
 }
@@ -973,8 +973,8 @@ rule result: d + 999999999 year
     assert!(rule_result.vetoed, "must veto, not panic");
     assert_eq!(
         rule_result.veto_reason.as_deref(),
-        Some("Calendar offset too large"),
-        "huge year add must hit Calendar offset too large: {:?}",
+        Some("The calendar offset is too large."),
+        "huge year add must hit calendar offset too large: {:?}",
         rule_result.veto_reason
     );
 }

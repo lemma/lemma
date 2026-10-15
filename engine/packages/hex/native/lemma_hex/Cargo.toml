@@ -14,9 +14,9 @@ path = "src/lib.rs"
 crate-type = ["cdylib"]
 
 [dependencies]
-lemma-engine = { path = "../../../../", version = "=0.10.0" }
+lemma-engine = { path = "../../../../", version = "=0.10.1" }
 indexmap = { version = "2.0" }
-lemma-openapi = { path = "../../../../../openapi", version = "=0.10.0" }
+lemma-openapi = { path = "../../../../../openapi", version = "=0.10.1" }
 rustler = { version = "0.38", features = ["big_integer"] }
 rust_decimal = "1"
 serde_json.workspace = true

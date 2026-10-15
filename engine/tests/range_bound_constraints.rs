@@ -202,7 +202,7 @@ fn custom_measure_range_overlay_vetoes_endpoint() {
     assert!(out.vetoed, "overlay below lower must veto rule out");
     let reason = out.veto_reason.as_deref().expect("veto reason");
     assert!(
-        reason.contains("is below minimum"),
+        reason.contains("is below the minimum"),
         "endpoint veto must be element minimum, got: {reason}"
     );
 }
@@ -222,7 +222,7 @@ fn custom_measure_range_overlay_vetoes_width() {
     assert!(out.vetoed, "overlay below width minimum must veto rule out");
     let reason = out.veto_reason.as_deref().expect("veto reason");
     assert!(
-        reason.contains("span is below minimum width"),
+        reason.contains("The span is below the minimum width"),
         "width veto reason must be span minimum, got: {reason}"
     );
 }
@@ -635,7 +635,7 @@ rule out: tier
     );
     let reason = out.veto_reason.as_deref().expect("veto reason");
     assert!(
-        reason.contains("span is below minimum width"),
+        reason.contains("The span is below the minimum width"),
         "range overlay veto reason must be span minimum, got: {reason}"
     );
 }

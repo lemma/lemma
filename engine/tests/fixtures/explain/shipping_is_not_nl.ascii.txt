@@ -1,0 +1,6 @@
+hazardous_fee: Cannot ship hazardous materials internationally
+├─ is_hazardous and destination_country is not NL
+│  ├─ is_hazardous: true
+│  └─ destination_country: BE
+└─ veto
+   └─ veto "Cannot ship hazardous materials internationally"

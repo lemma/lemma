@@ -5,7 +5,10 @@
 //!   - SpecRef override → evaluation completes (import alias ignored like unknown)
 //!   - schema-backed [`DataDefinition::TypeDeclaration`] → success
 //!   - Value → replaces literal
-//!   - Reference (slot bound to data or a rule) → request Error, never overridden
+//!   - ImportOverlay::Reference (`uses … -> with x: base` or a rule) → evaluate may
+//!     override like a literal default; no `cannot be supplied` seal
+//!   - typedef `data x: y` is an evaluate key (not a value-copy wire; historical
+//!     `DataDefinition::Reference` evaluate seal removed)
 //!   - validation failures per primitive → Veto on dependent rules
 //!   - invalid override reasons surface in rule veto text
 
@@ -115,10 +118,144 @@ rule r: i.x
     );
     assert_eq!(
         r.veto_reason.as_deref(),
-        Some("Missing data: i.x"),
+        Some("Required data 'i.x' was not provided."),
         "got: {:?}",
         r.veto_reason
     );
+}
+
+#[test]
+fn local_typedef_data_x_y_is_evaluate_key() {
+    let code = r#"
+spec s
+data age: number
+data person: age
+rule r: person
+"#;
+    let mut engine = Engine::new();
+    engine
+        .load([(
+            lemma::SourceType::Path(std::sync::Arc::new(std::path::PathBuf::from("w.lemma"))),
+            code.to_string(),
+        )])
+        .expect("data person: age is a typedef, not a value-copy reference");
+
+    let mut data = IndexMap::new();
+    data.insert("person".to_string(), "30".into());
+
+    let now = DateTimeValue::now();
+    let resp = engine
+        .evaluate(None, "s", Some(&now), data, None, false)
+        .expect("typedef data x: y is an evaluate key");
+    assert_eq!(rule_value(&resp, "r"), "30");
+}
+
+#[test]
+fn local_typedef_supply_does_not_emit_bound_to_cannot_be_supplied() {
+    let code = r#"
+spec s
+data age: number
+data person: age
+rule r: person
+"#;
+    let mut engine = Engine::new();
+    engine
+        .load([(
+            lemma::SourceType::Path(std::sync::Arc::new(std::path::PathBuf::from("w.lemma"))),
+            code.to_string(),
+        )])
+        .expect("loads");
+
+    let mut data = IndexMap::new();
+    data.insert("person".to_string(), "30".into());
+
+    let now = DateTimeValue::now();
+    match engine.evaluate(None, "s", Some(&now), data, None, false) {
+        Ok(_) => {}
+        Err(err) => {
+            let text = err.to_string();
+            assert!(
+                !text.contains("cannot be supplied"),
+                "typedef `data x: y` must not emit seal error; got: {text}"
+            );
+            panic!("unexpected evaluate Err: {text}");
+        }
+    }
+}
+
+#[test]
+fn uses_wire_to_rule_is_evaluate_key() {
+    let code = r#"
+spec source_spec
+data x: number
+rule computed: x * 2
+
+spec inner
+data slot: number
+
+spec outer
+uses src: source_spec
+uses i: inner
+  -> with slot: src.computed
+rule r: i.slot
+"#;
+    let mut engine = Engine::new();
+    engine
+        .load([(
+            lemma::SourceType::Path(std::sync::Arc::new(std::path::PathBuf::from("w.lemma"))),
+            code.to_string(),
+        )])
+        .expect("loads");
+
+    let mut data = IndexMap::new();
+    data.insert("i.slot".to_string(), "10".into());
+
+    let now = DateTimeValue::now();
+    let resp = engine
+        .evaluate(None, "outer", Some(&now), data, None, false)
+        .expect("uses wire to a rule is an evaluate key");
+    assert_eq!(rule_value(&resp, "r"), "10");
+}
+
+#[test]
+fn uses_wire_to_rule_supply_does_not_emit_bound_to_cannot_be_supplied() {
+    let code = r#"
+spec source_spec
+data x: number
+rule computed: x * 2
+
+spec inner
+data slot: number
+
+spec outer
+uses src: source_spec
+uses i: inner
+  -> with slot: src.computed
+rule r: i.slot
+"#;
+    let mut engine = Engine::new();
+    engine
+        .load([(
+            lemma::SourceType::Path(std::sync::Arc::new(std::path::PathBuf::from("w.lemma"))),
+            code.to_string(),
+        )])
+        .expect("loads");
+
+    let mut data = IndexMap::new();
+    data.insert("i.slot".to_string(), "10".into());
+
+    let now = DateTimeValue::now();
+    match engine.evaluate(None, "outer", Some(&now), data, None, false) {
+        Ok(_) => {}
+        Err(err) => {
+            let text = err.to_string();
+            assert!(
+                !text.contains("cannot be supplied"),
+                "uses wire to a rule must not emit seal error; got: {text}"
+            );
+            panic!("unexpected evaluate Err: {text}");
+        }
+    }
 }
 
 #[test]
@@ -374,22 +511,24 @@ fn load(code: &str) -> Engine {
     engine
 }
 
-fn assert_bound_slot_rejected(engine: &Engine, spec: &str, key: &str, target: &str) {
+fn assert_overlay_override_wins(
+    engine: &Engine,
+    spec: &str,
+    key: &str,
+    value: &str,
+    expected: &str,
+) {
     let mut data = IndexMap::new();
-    data.insert(key.to_string(), "10".into());
+    data.insert(key.to_string(), value.into());
     let now = DateTimeValue::now();
-    let error = engine
+    let resp = engine
         .evaluate(None, spec, Some(&now), data, None, false)
-        .expect_err("run data for a bound slot must be a request error");
-    assert_eq!(
-        error.message(),
-        format!("data '{key}' is bound to '{target}' by the spec and cannot be supplied")
-    );
-    assert_eq!(error.related_data(), Some(key));
+        .expect("evaluate override of reference -> with must succeed");
+    assert_eq!(rule_value(&resp, "r"), expected);
 }
 
 #[test]
-fn evaluate_data_for_slot_bound_to_data_is_request_error() {
+fn evaluate_data_overrides_slot_bound_to_data() {
     let engine = load(
         r#"
 spec inner
@@ -402,7 +541,48 @@ uses i: inner
 rule r: i.n
 "#,
     );
-    assert_bound_slot_rejected(&engine, "outer", "i.n", "i.v");
+    assert_overlay_override_wins(&engine, "outer", "i.n", "4", "4");
+}
+
+#[test]
+fn evaluate_data_overrides_wired_slot_alone_without_wire_source() {
+    let engine = load(
+        r#"
+spec inner
+data n: number
+data v: number
+
+spec outer
+uses i: inner
+  -> with n: i.v
+rule r: i.n
+"#,
+    );
+    assert_overlay_override_wins(&engine, "outer", "i.n", "10", "10");
+}
+
+#[test]
+fn evaluate_data_override_wins_over_wire_source_when_both_supplied() {
+    let engine = load(
+        r#"
+spec inner
+data n: number
+data v: number
+
+spec outer
+uses i: inner
+  -> with n: i.v
+rule r: i.n
+"#,
+    );
+    let mut data = IndexMap::new();
+    data.insert("i.v".to_string(), "3".into());
+    data.insert("i.n".to_string(), "10".into());
+    let now = DateTimeValue::now();
+    let resp = engine
+        .evaluate(None, "outer", Some(&now), data, None, false)
+        .expect("evaluates");
+    assert_eq!(rule_value(&resp, "r"), "10");
 }
 
 #[test]
@@ -430,7 +610,7 @@ rule r: i.n
 }
 
 #[test]
-fn evaluate_data_for_slot_bound_to_rule_is_request_error() {
+fn evaluate_data_overrides_slot_bound_to_rule() {
     let engine = load(
         r#"
 spec source_spec
@@ -447,11 +627,11 @@ uses i: inner
 rule r: i.slot
 "#,
     );
-    assert_bound_slot_rejected(&engine, "outer", "i.slot", "src.computed");
+    assert_overlay_override_wins(&engine, "outer", "i.slot", "10", "10");
 }
 
 #[test]
-fn evaluate_data_for_row_field_bound_in_row_spec_is_request_error() {
+fn evaluate_data_overrides_row_field_bound_in_row_spec() {
     let engine = load(
         r#"
 spec rate
@@ -478,11 +658,8 @@ rule all_totals: lines -> sum total
         EvaluateDataValue::List(vec![EvaluateDataValue::Map(row)]),
     );
     let now = DateTimeValue::now();
-    let error = engine
+    let resp = engine
         .evaluate(None, "order", Some(&now), data, None, false)
-        .expect_err("row field bound in the row spec must be a request error");
-    assert_eq!(
-        error.message(),
-        "data 'r.amount' is bound to 'price' by the spec and cannot be supplied"
-    );
+        .expect("row field override of reference -> with must succeed");
+    assert_eq!(rule_value(&resp, "all_totals"), "9");
 }

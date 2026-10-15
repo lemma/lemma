@@ -1,0 +1,67 @@
+net_salary: 2906.14 eur
+└─ net_annual_salary / periods_per_year
+   ├─ net_annual_salary: 34873.71 eur
+   │  └─ gross_annual_salary - pension_contribution_per_year - payroll_tax_per_year
+   │     ├─ gross_annual_salary - pension_contribution_per_year
+   │     │  ├─ gross_annual_salary: 42000.00 eur
+   │     │  │  └─ gross_salary * periods_per_year
+   │     │  │     ├─ gross_salary: 3500.00 eur
+   │     │  │     └─ periods_per_year: 12
+   │     │  │        └─ pay_period: month
+   │     │  └─ pension_contribution_per_year: 0.00 eur
+   │     │     └─ pension_contribution * periods_per_year
+   │     │        ├─ pension_contribution: 0.00 eur
+   │     │        └─ periods_per_year: 12 (see above)
+   │     └─ payroll_tax_per_year: 7126.29 eur
+   │        ├─ payroll_tax_before_credits > total_tax_credit
+   │        │  ├─ payroll_tax_before_credits: 15071.42 eur
+   │        │  │  └─ bracket_1_tax + bracket_2_tax + bracket_3_tax
+   │        │  │     ├─ bracket_1_tax: 13900.67 eur
+   │        │  │     │  └─ bracket_1_income * 35.75%
+   │        │  │     │     └─ bracket_1_income: 38883.00 eur
+   │        │  │     │        └─ taxable_annual_salary > 38883.00 eur
+   │        │  │     │           └─ taxable_annual_salary: 42000.00 eur
+   │        │  │     │              └─ gross_annual_salary - pension_contribution_per_year
+   │        │  │     │                 ├─ gross_annual_salary: 42000.00 eur (see above)
+   │        │  │     │                 └─ pension_contribution_per_year: 0.00 eur (see above)
+   │        │  │     ├─ bracket_2_tax: 1170.75 eur
+   │        │  │     │  └─ bracket_2_income * 37.56%
+   │        │  │     │     └─ bracket_2_income: 3117.00 eur
+   │        │  │     │        ├─ taxable_annual_salary <= 78426.00 eur
+   │        │  │     │        │  └─ taxable_annual_salary: 42000.00 eur (see above)
+   │        │  │     │        ├─ taxable_annual_salary > 38883.00 eur and taxable_annual_salary <= 78426.00 eur
+   │        │  │     │        │  └─ taxable_annual_salary: 42000.00 eur (see above)
+   │        │  │     │        └─ taxable_annual_salary - 38883.00 eur
+   │        │  │     │           └─ taxable_annual_salary: 42000.00 eur (see above)
+   │        │  │     └─ bracket_3_tax: 0.00 eur
+   │        │  │        └─ bracket_3_income * 49.5%
+   │        │  │           └─ bracket_3_income: 0.00 eur
+   │        │  │              └─ taxable_annual_salary <= 78426.00 eur
+   │        │  │                 └─ taxable_annual_salary: 42000.00 eur (see above)
+   │        │  └─ total_tax_credit: 7945.13 eur
+   │        │     ├─ payroll_tax_credit
+   │        │     └─ general_tax_credit + employment_tax_credit
+   │        │        ├─ general_tax_credit: 2330.10 eur
+   │        │        │  ├─ taxable_annual_salary <= 78426.00 eur
+   │        │        │  │  └─ taxable_annual_salary: 42000.00 eur (see above)
+   │        │        │  ├─ taxable_annual_salary > 29736.00 eur and taxable_annual_salary <= 78426.00 eur
+   │        │        │  │  └─ taxable_annual_salary: 42000.00 eur (see above)
+   │        │        │  └─ 3115.00 eur - (taxable_annual_salary - 29736.00 eur) * 6.4%
+   │        │        │     └─ (taxable_annual_salary - 29736.00 eur) * 6.4%
+   │        │        │        └─ taxable_annual_salary - 29736.00 eur
+   │        │        │           └─ taxable_annual_salary: 42000.00 eur (see above)
+   │        │        └─ employment_tax_credit: 5615.02 eur
+   │        │           ├─ taxable_annual_salary <= 45592.00 eur
+   │        │           │  └─ taxable_annual_salary: 42000.00 eur (see above)
+   │        │           ├─ taxable_annual_salary <= 132920.00 eur
+   │        │           │  └─ taxable_annual_salary: 42000.00 eur (see above)
+   │        │           ├─ income_source is employment and taxable_annual_salary > 25845.00 eur and taxable_annual_salary <= 45592.00 eur
+   │        │           │  └─ taxable_annual_salary: 42000.00 eur (see above)
+   │        │           └─ 5300.00 eur + (taxable_annual_salary - 25845.00 eur) * 1.95%
+   │        │              └─ (taxable_annual_salary - 25845.00 eur) * 1.95%
+   │        │                 └─ taxable_annual_salary - 25845.00 eur
+   │        │                    └─ taxable_annual_salary: 42000.00 eur (see above)
+   │        └─ payroll_tax_before_credits - total_tax_credit
+   │           ├─ payroll_tax_before_credits: 15071.42 eur (see above)
+   │           └─ total_tax_credit: 7945.13 eur (see above)
+   └─ periods_per_year: 12 (see above)

@@ -124,7 +124,7 @@ const restored = Engine.fromSnapshot(readFileSync('engine.lems'));
 - A list-valued result has `list`, a `RuleResultValue[]`. A row-valued result has `row` (`RowReference`: `spec`, `effective`, `instance` such as `staff.2`, `index`).
 - `index` points into `response.rows`, where each referenced row appears once with its `data` and `rules`. `rows` is absent when no result reaches a row.
 - `SpecResult.path` lists each `uses` hop. Show `x-lemma-type` has `kind: 'list'` with `element` and `key` (`'numbered'` or `{ fields: [...] }`); the property is `type: 'array'` with `items` (an element literal schema, or a `$ref` into `Show.$defs`). An instance list with source rows has an `x-lemma-value` whose `list` items, in row order, carry only `fields`, the fields the row sets (no `result` on the list or its rows).
-- Evaluation data for a slot bound to data or a rule (`uses i: inner -> with x: base`) is rejected (`data 'i.x' is bound to 'base' by the spec and cannot be supplied`).
+- Evaluation data for a slot bound to data or a rule on a `uses` (`uses i: inner -> with x: base`) overrides the wire (same as a literal `-> with` default).
 
 ## Install from LemmaBase
 

@@ -68,7 +68,7 @@ rule total: rules.final_total
     );
     assert_eq!(
         total_rule.veto_reason.as_deref(),
-        Some("Missing data: rules.quantity"),
+        Some("Required data 'rules.quantity' was not provided."),
         "got: {:?}",
         total_rule.veto_reason
     );

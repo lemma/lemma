@@ -34,17 +34,39 @@ impl fmt::Display for VetoType {
             VetoType::MissingData {
                 data,
                 suggestion: Some(suggestion),
-            } => write!(f, "Missing data: {data} (did you mean '{suggestion}'?)"),
+            } => write!(
+                f,
+                "Required data '{data}' was not provided. Did you mean '{suggestion}'?"
+            ),
             VetoType::MissingData {
                 data,
                 suggestion: None,
-            } => write!(f, "Missing data: {data}"),
-            VetoType::MissingRowData { key } => write!(f, "Missing data: {key}"),
+            } => write!(f, "Required data '{data}' was not provided."),
+            VetoType::MissingRowData { key } => match split_numbered_row_field_key(key) {
+                Some((list, number, field)) => write!(
+                    f,
+                    "Required field '{field}' was not provided on row {number} of list '{list}'."
+                ),
+                None => write!(f, "Required data '{key}' was not provided."),
+            },
             VetoType::UserDefined { message: Some(msg) } => write!(f, "{msg}"),
-            VetoType::UserDefined { message: None } => write!(f, "Vetoed"),
+            VetoType::UserDefined { message: None } => write!(f, "This rule was vetoed."),
             VetoType::Computation { message } => write!(f, "{message}"),
         }
     }
+}
+
+/// `list.number.field` from [`crate::planning::semantics::row_field_input_key`].
+fn split_numbered_row_field_key(key: &str) -> Option<(&str, &str, &str)> {
+    let (list_and_number, field) = key.rsplit_once('.')?;
+    let (list, number) = list_and_number.rsplit_once('.')?;
+    if number.is_empty() || !number.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    if list.is_empty() || field.is_empty() {
+        return None;
+    }
+    Some((list, number, field))
 }
 
 impl VetoType {
@@ -190,6 +212,17 @@ mod tests {
     fn veto_type_serializes_as_display_string() {
         let v = VetoType::missing_data(DataPath::new(vec![], "product".to_string()), None);
         let json = serde_json::to_string(&v).expect("serialize");
-        assert_eq!(json, "\"Missing data: product\"");
+        assert_eq!(json, "\"Required data 'product' was not provided.\"");
+    }
+
+    #[test]
+    fn missing_row_data_display_names_list_row_and_field() {
+        let v = VetoType::MissingRowData {
+            key: "menu.2.price".to_string(),
+        };
+        assert_eq!(
+            v.to_string(),
+            "Required field 'price' was not provided on row 2 of list 'menu'."
+        );
     }
 }

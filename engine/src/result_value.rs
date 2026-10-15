@@ -183,9 +183,11 @@ pub(crate) enum UnitExpansion<'a> {
 /// Human-readable veto message for a [`RuleResultValueFailure`].
 pub fn rule_result_value_failure_message(failure: RuleResultValueFailure) -> &'static str {
     match failure {
-        RuleResultValueFailure::DecimalLimit => "Calculated result exceeds decimal value limit",
-        RuleResultValueFailure::NumericOverflow => "numeric overflow",
-        RuleResultValueFailure::OutOfMemory => "out of memory",
+        RuleResultValueFailure::DecimalLimit => {
+            "The calculated result exceeds the decimal value limit."
+        }
+        RuleResultValueFailure::NumericOverflow => "The numeric result overflowed.",
+        RuleResultValueFailure::OutOfMemory => "The calculation ran out of memory.",
     }
 }
 

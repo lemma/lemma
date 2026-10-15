@@ -43,7 +43,7 @@ rule total: p.amount
     );
     assert_eq!(
         total.veto_reason.as_deref(),
-        Some("Missing data: p.amount"),
+        Some("Required data 'p.amount' was not provided."),
         "got: {:?}",
         total.veto_reason
     );
@@ -74,7 +74,7 @@ rule r: age
         .as_deref()
         .expect("veto reason");
     assert!(
-        reason.contains("Missing data") && reason.contains("did you mean 'agge'"),
+        reason.contains("Required data") && reason.contains("Did you mean 'agge'"),
         "got: {reason}"
     );
 }
@@ -198,7 +198,7 @@ rule r: age
     assert!(r.vetoed, "-> suggest must not commit");
     let reason = r.veto_reason.as_deref().expect("reason");
     assert!(
-        reason.contains("Missing data") && reason.contains("age"),
+        reason.contains("Required data") && reason.contains("age"),
         "got: {reason}"
     );
     assert_ne!(r.result(), Some("18"));
@@ -229,7 +229,7 @@ rule r: age
         .as_deref()
         .expect("veto reason");
     assert!(
-        reason.contains("Missing data") && reason.contains("did you mean 'agge'"),
+        reason.contains("Required data") && reason.contains("Did you mean 'agge'"),
         "got: {reason}"
     );
 }
@@ -259,7 +259,7 @@ rule r: age
         .as_deref()
         .expect("veto reason");
     assert!(
-        reason.contains("Missing data") && reason.contains("did you mean 'Agge'"),
+        reason.contains("Required data") && reason.contains("Did you mean 'Agge'"),
         "got: {reason}"
     );
 }

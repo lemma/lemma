@@ -149,3 +149,158 @@ rule r: a.r
         "template must not inherit typedef suggestion once slot is filled"
     );
 }
+
+/// Inner `uses a -> with x: 6` must surface on consumer Show as `b.a.x` value 6.
+#[test]
+fn show_lists_inner_with_literal_through_uses_chain() {
+    let code = r#"
+spec a
+data x: number
+  -> minimum 4
+
+spec b
+uses a
+  -> with x: 6
+
+spec c
+uses b
+rule z: b.a.x
+"#;
+    let mut engine = Engine::new();
+    engine
+        .load([(lemma::SourceType::Volatile, code.to_string())])
+        .expect("load");
+    let now = DateTimeValue::now();
+    let show = engine.show(None, "c", Some(&now)).expect("show c");
+    let entry = show.data.get("b.a.x").expect("b.a.x in show");
+    assert_eq!(
+        entry.value.as_ref().and_then(|v| v.number),
+        Some(rust_decimal::Decimal::from(6)),
+        "inner -> with must be Show value, got {:?}",
+        entry.value
+    );
+    let response = engine
+        .evaluate(None, "c", Some(&now), IndexMap::new(), None, false)
+        .expect("evaluate");
+    assert_eq!(response.results.get("z").expect("z").result(), Some("6"));
+}
+
+#[test]
+fn show_inner_with_overrides_leaf_data_literal() {
+    let code = r#"
+spec a
+data x: 1
+
+spec b
+uses a
+  -> with x: 2
+
+spec c
+uses b
+rule z: b.a.x
+"#;
+    let mut engine = Engine::new();
+    engine
+        .load([(lemma::SourceType::Volatile, code.to_string())])
+        .expect("load");
+    let now = DateTimeValue::now();
+    let show = engine.show(None, "c", Some(&now)).expect("show c");
+    let entry = show.data.get("b.a.x").expect("b.a.x in show");
+    assert_eq!(
+        entry.value.as_ref().and_then(|v| v.number),
+        Some(rust_decimal::Decimal::from(2)),
+        "must not fall back to leaf data literal 1, got {:?}",
+        entry.value
+    );
+}
+
+#[test]
+fn show_inner_with_through_three_uses_hops() {
+    let code = r#"
+spec a
+data x: number
+  -> minimum 4
+
+spec b
+uses a
+  -> with x: 6
+
+spec c
+uses b
+
+spec d
+uses c
+rule z: c.b.a.x
+"#;
+    let mut engine = Engine::new();
+    engine
+        .load([(lemma::SourceType::Volatile, code.to_string())])
+        .expect("load");
+    let now = DateTimeValue::now();
+    let show = engine.show(None, "d", Some(&now)).expect("show d");
+    let entry = show.data.get("c.b.a.x").expect("c.b.a.x in show");
+    assert_eq!(
+        entry.value.as_ref().and_then(|v| v.number),
+        Some(rust_decimal::Decimal::from(6)),
+        "3-hop Show must see b's with, got {:?}",
+        entry.value
+    );
+}
+
+#[test]
+fn show_outer_deep_with_wins_over_inner_with() {
+    let code = r#"
+spec a
+data x: number
+
+spec b
+uses a
+  -> with x: 6
+
+spec c
+uses b
+  -> with a.x: 9
+rule z: b.a.x
+"#;
+    let mut engine = Engine::new();
+    engine
+        .load([(lemma::SourceType::Volatile, code.to_string())])
+        .expect("load");
+    let now = DateTimeValue::now();
+    let show = engine.show(None, "c", Some(&now)).expect("show c");
+    let entry = show.data.get("b.a.x").expect("b.a.x in show");
+    assert_eq!(
+        entry.value.as_ref().and_then(|v| v.number),
+        Some(rust_decimal::Decimal::from(9)),
+        "outer deep with must win, got {:?}",
+        entry.value
+    );
+}
+
+#[test]
+fn evaluate_overrides_inner_with_listed_on_show() {
+    let code = r#"
+spec a
+data x: number
+  -> minimum 4
+
+spec b
+uses a
+  -> with x: 6
+
+spec c
+uses b
+rule z: b.a.x
+"#;
+    let mut engine = Engine::new();
+    engine
+        .load([(lemma::SourceType::Volatile, code.to_string())])
+        .expect("load");
+    let now = DateTimeValue::now();
+    let mut data = IndexMap::new();
+    data.insert("b.a.x".to_string(), "8".into());
+    let response = engine
+        .evaluate(None, "c", Some(&now), data, None, false)
+        .expect("evaluate");
+    assert_eq!(response.results.get("z").expect("z").result(), Some("8"));
+}

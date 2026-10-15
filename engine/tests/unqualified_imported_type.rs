@@ -275,3 +275,81 @@ fn local_unit_conversion_ignores_same_named_imported_family() {
         "2.5 usd"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Bug: qualified parent first segment must be a uses alias (not bare spec name)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn qualified_parent_without_uses_is_error() {
+    let joined = load_err_joined(
+        r#"
+spec a
+data x: number
+
+spec c
+data zz: a.x
+rule z: zz
+"#,
+    );
+    assert!(
+        joined.contains("uses") && joined.contains("a"),
+        "expected uses-alias error for bare a.x, got: {joined}"
+    );
+}
+
+#[test]
+fn qualified_parent_with_matching_uses_alias_ok() {
+    let mut engine = load_ok(
+        r#"
+spec a
+data x: number
+  -> minimum 4
+
+spec c
+uses a
+data zz: a.x
+rule z: zz
+"#,
+    );
+    let mut data = IndexMap::new();
+    data.insert("zz".to_string(), "5".into());
+    assert_eq!(eval_rule(&mut engine, "c", data, "z"), "5");
+}
+
+#[test]
+fn qualified_parent_with_explicit_uses_alias_ok() {
+    let mut engine = load_ok(
+        r#"
+spec a
+data x: number
+
+spec c
+uses foo: a
+data zz: foo.x
+rule z: zz
+"#,
+    );
+    let mut data = IndexMap::new();
+    data.insert("zz".to_string(), "5".into());
+    assert_eq!(eval_rule(&mut engine, "c", data, "z"), "5");
+}
+
+#[test]
+fn qualified_parent_target_name_instead_of_uses_alias_is_error() {
+    let joined = load_err_joined(
+        r#"
+spec a
+data x: number
+
+spec c
+uses foo: a
+data zz: a.x
+rule z: zz
+"#,
+    );
+    assert!(
+        joined.contains("uses") && (joined.contains("foo") || joined.contains("a")),
+        "expected alias-not-target error for a.x after uses foo: a, got: {joined}"
+    );
+}

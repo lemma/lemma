@@ -1,0 +1,7 @@
+membership_active: true
+└─ now in membership_start...(membership_start + membership_length)
+   └─ membership_start...(membership_start + membership_length)
+      ├─ membership_start: 2024-01-01
+      └─ membership_start + membership_length
+         ├─ membership_start: 2024-01-01
+         └─ membership_length: 1 year

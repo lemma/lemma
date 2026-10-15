@@ -344,13 +344,14 @@ pub(crate) struct KeyedRow {
     pub values: Vec<TypedLiteral>,
 }
 
-fn describe_key(fields: &[String], values: &[TypedLiteral]) -> String {
+/// Key fields for veto text: `band: 23 hour, and tier: gold`.
+pub(crate) fn describe_key(fields: &[String], values: &[TypedLiteral]) -> String {
     fields
         .iter()
         .zip(values)
-        .map(|(field, value)| format!("{field} {}", value.display_value()))
+        .map(|(field, value)| format!("{field}: {}", value.display_value()))
         .collect::<Vec<_>>()
-        .join(", ")
+        .join(", and ")
 }
 
 fn is_range(value: &TypedLiteral) -> bool {
@@ -430,7 +431,7 @@ pub(crate) fn key_conflict(fields: &[String], rows: &[KeyedRow]) -> Option<Strin
     let second_row = &rows[second];
     Some(if has_range {
         format!(
-            "key ranges overlap: {} ({}) and {} ({})",
+            "Key ranges overlap between {} ({}) and {} ({}).",
             first_row.label,
             describe_key(fields, &first_row.values),
             second_row.label,
@@ -438,7 +439,7 @@ pub(crate) fn key_conflict(fields: &[String], rows: &[KeyedRow]) -> Option<Strin
         )
     } else {
         format!(
-            "duplicate key {} in {} and {}",
+            "Duplicate key {} appears in both {} and {}.",
             describe_key(fields, &first_row.values),
             first_row.label,
             second_row.label,

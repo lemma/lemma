@@ -37,7 +37,7 @@ pub(crate) fn checked_row_field(
     ) {
         Ok(()) => value,
         Err(message) => OperationResult::Veto(VetoType::computation(format!(
-            "`{}`: {message}",
+            "Field '{}' is invalid: {message}",
             field.input_key()
         ))),
     }
@@ -145,7 +145,7 @@ pub(crate) fn row_result(
             key: row_key(row, &key),
         }),
         RowOrigin::Appended { .. } => OperationResult::Veto(VetoType::computation(format!(
-            "{} has no value for `{key}`",
+            "{} has no value for '{key}'.",
             row.origin
         ))),
     }

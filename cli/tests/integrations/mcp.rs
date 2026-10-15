@@ -551,13 +551,13 @@ rule premium: (1 / denom) * loading
     );
     // The `Missing data` section (header line, then keys) must be absent. The
     // reasoning tree still narrates the `loading` sibling, whose own value is a
-    // `Missing data: is_smoker` veto: the explain walk visits every operand.
+    // `Required data 'is_smoker' was not provided.` veto: the explain walk visits every operand.
     assert!(
         !text.contains("Missing data\n"),
         "settled Computation must not list Missing data for leftover live keys, got: {text}"
     );
     assert!(
-        text.contains("loading: Missing data: is_smoker"),
+        text.contains("loading: Required data 'is_smoker' was not provided."),
         "reasoning must narrate the sibling operand after the definitive veto, got: {text}"
     );
 }

@@ -601,22 +601,12 @@ rule doubled: n * 2`,
       }
     });
 
-    await run('evaluation data rejects a slot bound to data', () => {
+    await run('evaluation data overrides a slot bound to data', () => {
       engine.load({
         'bound.lemma': 'spec inner\ndata slot: number\n\nspec outer\ndata base: number\nuses i: inner\n  -> with slot: base\nrule r: i.slot',
       });
-      let err = null;
-      try {
-        engine.evaluate({ spec: 'outer', data: { 'i.slot': '5' } });
-      } catch (e) {
-        err = e;
-      }
-      assert(err && err.kind === 'request', `want request error, got: ${JSON.stringify(err)}`);
-      assert(err.related_data === 'i.slot', `want related_data i.slot, got: ${JSON.stringify(err)}`);
-      assert(
-        err.message === "data 'i.slot' is bound to 'base' by the spec and cannot be supplied",
-        `want bound slot rejection, got: ${err.message}`,
-      );
+      const r = engine.evaluate({ spec: 'outer', data: { 'i.slot': '5' } });
+      assert(ruleNumber(r.results.r) === 5, `r: ${JSON.stringify(r.results.r)}`);
     });
 
     await run('show lists source rows of an instance list with their fields', () => {

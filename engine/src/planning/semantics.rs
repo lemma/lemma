@@ -1303,7 +1303,7 @@ pub fn resolve_endpoint_unit_token(
 }
 
 /// Lift a parser literal range endpoint to a [`TypedLiteral`] with the element's primitive type.
-/// Routes [`Value::NumberWithUnit`] through [`parser_value_to_value_kind`] so ratio endpoints
+/// Routes [`Value::NumberWithUnit`] through [`number_with_unit_value_kind`] so ratio endpoints
 /// (e.g. `10%` in a `ratio range`) canonicalize to ratios, not anonymous quantities.
 ///
 /// When `resolve_unit` is set, qualified tokens are resolved to bare declared names before bind.
@@ -1329,7 +1329,7 @@ pub(crate) fn lift_range_endpoint(
             })
         }
         _ => {
-            let kind = value_to_semantic(value)?;
+            let kind = parser_scalar_to_value_kind(value, element_spec)?;
             Ok(TypedLiteral {
                 value: kind,
                 lemma_type: Arc::new(LemmaType::primitive(element_spec.clone())),
@@ -2554,7 +2554,11 @@ impl TypeSpecification {
                     .expect("BUG: RatioRange must define element_from_range");
                     let left = lift_range_endpoint(left, &element_spec, resolve_unit)?;
                     let right = lift_range_endpoint(right, &element_spec, resolve_unit)?;
-                    if !left.lemma_type.is_ratio() || !right.lemma_type.is_ratio() {
+                    if !value_kind_matches_spec(&left.value, &element_spec)
+                        || !value_kind_matches_spec(&right.value, &element_spec)
+                        || !matches!(&left.value, ValueKind::Ratio(_))
+                        || !matches!(&right.value, ValueKind::Ratio(_))
+                    {
                         return Err(
                             "Please provide a ratio range, for example `-> suggest 10%...50%`."
                                 .to_string(),
@@ -2898,7 +2902,11 @@ impl TypeSpecification {
                     .expect("BUG: MeasureRange must define element_from_range");
                     let left = lift_range_endpoint(left, &element_spec, resolve_unit)?;
                     let right = lift_range_endpoint(right, &element_spec, resolve_unit)?;
-                    if !left.lemma_type.is_measure() || !right.lemma_type.is_measure() {
+                    if !value_kind_matches_spec(&left.value, &element_spec)
+                        || !value_kind_matches_spec(&right.value, &element_spec)
+                        || !matches!(&left.value, ValueKind::Measure(_))
+                        || !matches!(&right.value, ValueKind::Measure(_))
+                    {
                         return Err(format!(
                             "Please provide a range with units valid for '{type_name}', for example `-> suggest 30 kilogram...35 kilogram`."
                         ));
@@ -5246,7 +5254,7 @@ impl LemmaType {
         }
     }
 
-    /// `Data age [number]: {detail}` for runtime data override vetoes.
+    /// `Data age [number]: {detail}` for runtime data override vetoes (parse/validation).
     #[must_use]
     pub fn data_veto_message(&self, input_key: &str, detail: &str) -> String {
         format!("Data {}: {}", self.label_for_data_input(input_key), detail)
@@ -6002,7 +6010,8 @@ pub enum ReferenceTarget {
 /// One site binding on a named `uses` import (`-> with` or path-fill).
 ///
 /// Keys live on [`DataDefinition::Import::overlay`] as paths local to the imported
-/// spec. Literals are defaults (run data may override); references are wiring.
+/// spec. Literals are defaults (run data may override). References copy from another
+/// data or rule by default; run data for the nested LHS may override that link.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum ImportOverlay {
     Literal(BoundValueKind),
@@ -6086,8 +6095,9 @@ pub enum DataDefinition {
     /// stays MissingData.
     ///
     /// The reference itself is evaluated by copying the target's value (data path)
-    /// or the target rule's result in topological order. It is wiring, not input:
-    /// [`crate::evaluation::evaluate_data::EvaluateData`] naming it is a request Error.
+    /// or the target rule's result in topological order. Evaluate data for this
+    /// path binds via `resolved_type` like a type declaration. (Import overlay
+    /// references are the live value-copy wires; see [`ImportOverlay::Reference`].)
     Reference {
         target: ReferenceTarget,
         #[serde(with = "crate::snapshot::shared::arc")]
@@ -6240,7 +6250,6 @@ pub(crate) fn value_kind_matches_spec(value: &ValueKind, type_spec: &TypeSpecifi
             | (TypeSpecification::Time { .. }, ValueKind::Time(_))
             | (TypeSpecification::Measure { .. }, ValueKind::Measure(_))
             | (TypeSpecification::Ratio { .. }, ValueKind::Ratio(_))
-            | (TypeSpecification::Ratio { .. }, ValueKind::Number(_))
             | (
                 TypeSpecification::NumberRange { .. },
                 ValueKind::Range(_, _)
@@ -6281,9 +6290,7 @@ fn parser_value_type_mismatch(
                 .next()
                 .map(|u| u.name.as_str())
                 .unwrap_or("unit");
-            format!(
-                "cannot use {value_str} as {type_spec}: expected `<n> {unit_hint}` or bare ratio"
-            )
+            format!("cannot use {value_str} as {type_spec}: expected `<n> {unit_hint}`")
         }
         _ => format!("cannot use {value_str} as {type_spec}"),
     }
@@ -6348,16 +6355,14 @@ fn number_with_unit_value_kind(
     }
 }
 
-/// Convert parser [`Value`] to [`ValueKind`] using the target type (canonicalizes ratio at bind).
+/// Convert a non-range parser [`Value`] to [`ValueKind`] using the target type.
 ///
-/// When `resolve_unit` is set, qualified range-endpoint unit tokens are resolved to bare
-/// declared names before bind.
-pub fn parser_value_to_value_kind(
+/// Range values must go through [`parser_value_to_value_kind`] so endpoints use
+/// [`lift_range_endpoint`]. Kept separate so that helper cannot re-enter the Range arm.
+fn parser_scalar_to_value_kind(
     value: &crate::literals::Value,
     type_spec: &TypeSpecification,
-    resolve_unit: Option<&UnitTokenResolver<'_>>,
 ) -> Result<ValueKind, String> {
-    use crate::computation::rational::decimal_to_rational;
     use crate::literals::Value;
     match (value, type_spec) {
         (Value::NumberWithUnit(magnitude, unit_name), _) => {
@@ -6365,11 +6370,6 @@ pub fn parser_value_to_value_kind(
         }
         (Value::Number(n), TypeSpecification::Number { .. }) => {
             Ok(ValueKind::Number(lift_parser_decimal(*n)?))
-        }
-        (Value::Number(n), TypeSpecification::Ratio { .. }) => {
-            let r = decimal_to_rational(*n)
-                .map_err(|failure| format!("ratio literal failed rational lift: {failure}"))?;
-            Ok(ValueKind::Ratio(r))
         }
         (Value::Text(s), TypeSpecification::Text { .. }) => Ok(ValueKind::Text(s.clone())),
         (Value::Boolean(b), TypeSpecification::Boolean { .. }) => Ok(ValueKind::Boolean(b.into())),
@@ -6379,6 +6379,21 @@ pub fn parser_value_to_value_kind(
         (Value::Time(t), TypeSpecification::Time { .. }) => {
             Ok(ValueKind::Time(time_to_semantic(t)))
         }
+        (value, type_spec) => Err(parser_value_type_mismatch(value, type_spec)),
+    }
+}
+
+/// Convert parser [`Value`] to [`ValueKind`] using the target type (canonicalizes ratio at bind).
+///
+/// When `resolve_unit` is set, qualified range-endpoint unit tokens are resolved to bare
+/// declared names before bind.
+pub fn parser_value_to_value_kind(
+    value: &crate::literals::Value,
+    type_spec: &TypeSpecification,
+    resolve_unit: Option<&UnitTokenResolver<'_>>,
+) -> Result<ValueKind, String> {
+    use crate::literals::Value;
+    match (value, type_spec) {
         (
             Value::Range(left, right),
             range_spec @ (TypeSpecification::NumberRange { .. }
@@ -6394,7 +6409,7 @@ pub fn parser_value_to_value_kind(
             let right_lit = lift_range_endpoint(right, &endpoint, resolve_unit)?;
             Ok(ValueKind::Range(Box::new(left_lit), Box::new(right_lit)))
         }
-        (value, type_spec) => Err(parser_value_type_mismatch(value, type_spec)),
+        (value, type_spec) => parser_scalar_to_value_kind(value, type_spec),
     }
 }
 
@@ -6429,6 +6444,17 @@ pub(crate) fn date_time_to_semantic(dt: &crate::parsing::ast::DateTimeValue) -> 
         second: dt.second,
         microsecond: dt.microsecond,
         timezone: dt.timezone.as_ref().map(SemanticTimezone::from),
+    }
+}
+
+/// Project a date's clock fields to a time-of-day (date-only values yield midnight).
+pub(crate) fn semantic_date_as_time(date: &SemanticDateTime) -> SemanticTime {
+    SemanticTime {
+        hour: date.hour,
+        minute: date.minute,
+        second: date.second,
+        microsecond: date.microsecond,
+        timezone: date.timezone.clone(),
     }
 }
 
@@ -7844,17 +7870,26 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn parser_value_to_value_kind_accepts_bare_number_for_ratio() {
+    fn parser_value_to_value_kind_rejects_bare_number_for_ratio() {
         let ten = Value::Number(Decimal::from(10));
-        let kind = parser_value_to_value_kind(&ten, &TypeSpecification::ratio(), None)
-            .expect("number -> ratio");
-        assert!(matches!(kind, ValueKind::Ratio(_)));
+        let err = parser_value_to_value_kind(&ten, &TypeSpecification::ratio(), None)
+            .expect_err("bare number must not bind to ratio");
+        assert!(
+            err.contains("percent"),
+            "error must hint expected unit, got: {err}"
+        );
     }
 
     #[test]
     fn value_kind_matches_spec_rejects_number_for_measure() {
         let n = ValueKind::Number(rational_new(10, 1));
         assert!(!value_kind_matches_spec(&n, &measure_type_with_kilogram()));
+    }
+
+    #[test]
+    fn value_kind_matches_spec_rejects_number_for_ratio() {
+        let n = ValueKind::Number(rational_new(1, 2));
+        assert!(!value_kind_matches_spec(&n, &TypeSpecification::ratio()));
     }
 
     #[test]

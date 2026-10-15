@@ -39,12 +39,12 @@ rule multiplied: max_val * two
     assert!(rule.vetoed);
     assert_eq!(
         rule.veto_reason.as_deref(),
-        Some("Calculated result exceeds decimal value limit"),
+        Some("The calculated result exceeds the decimal value limit."),
         "rule_result_value_from_literal must veto magnitude overflow, not fail with numeric overflow"
     );
     assert_ne!(
         rule.veto_reason.as_deref(),
-        Some("numeric overflow"),
+        Some("The numeric result overflowed."),
         "must not spuriously veto during exact rational evaluation before building RuleResultValue"
     );
 }

@@ -60,6 +60,15 @@ pub(super) fn ignored_under_prefix(ignored: &[String], prefix: &str) -> Vec<Stri
 /// Constant value of a DataPath that peels through named `uses` into a template: a site
 /// overlay literal or a template default. `None` when the member has no constant.
 fn resolve_import_member_value(plan: &ExecutionPlan, path: &DataPath) -> Option<OperationResult> {
+    match plan.import_overlay_entry(path) {
+        Some(ImportOverlay::Literal(bound)) => {
+            return Some(OperationResult::from_bound(bound.clone()));
+        }
+        // Reference overlays validate against the template field type in the
+        // import scope; do not prefill here.
+        Some(ImportOverlay::Reference { .. }) => return None,
+        None => {}
+    }
     let mut plan: &ExecutionPlan = plan;
     let mut path = path.clone();
     loop {
@@ -68,10 +77,7 @@ fn resolve_import_member_value(plan: &ExecutionPlan, path: &DataPath) -> Option<
             .next()
             .unwrap_or_else(|| panic!("BUG: resolve_import_member_value on local path '{path}'"));
         let import_marker = DataPath::local(first.uses.clone());
-        let Some(DataDefinition::Import {
-            identity, overlay, ..
-        }) = plan.data.get(&import_marker)
-        else {
+        let Some(DataDefinition::Import { identity, .. }) = plan.data.get(&import_marker) else {
             panic!("BUG: member '{path}' first hop is not a local Import marker");
         };
         let relative = DataPath {
@@ -79,14 +85,6 @@ fn resolve_import_member_value(plan: &ExecutionPlan, path: &DataPath) -> Option<
             data: path.data.clone(),
         };
         let template = plan.row_template(identity);
-        if let Some(entry) = overlay.get(&relative) {
-            return match entry {
-                ImportOverlay::Literal(bound) => Some(OperationResult::from_bound(bound.clone())),
-                // Reference overlays validate against the template field type in
-                // the import scope; do not prefill here.
-                ImportOverlay::Reference { .. } => None,
-            };
-        }
         if relative.segments.is_empty() {
             let definition = template.data.get(&relative).unwrap_or_else(|| {
                 panic!(
@@ -258,7 +256,7 @@ impl EvaluationContext {
                                 Err(msg) => {
                                     values[leaf.index()] = Some(OperationResult::Veto(
                                         VetoType::computation(format!(
-                                            "Reference '{}' violates declared constraint: {}",
+                                            "Reference '{}' violates its declared constraint: {}",
                                             reference_path, msg
                                         )),
                                     ));
@@ -709,8 +707,14 @@ fn missing_candidates(
                             continue;
                         }
                     };
+                    let absolute = absolute_import_member_path(&marker, identity, &field);
                     match overlay.get(&field) {
                         Some(ImportOverlay::Literal(_)) => {}
+                        Some(ImportOverlay::Reference { .. })
+                            if ctx.is_some_and(|c| c.is_data_bound(plan, &absolute)) =>
+                        {
+                            // Evaluate override on the nested LHS; wire source not needed.
+                        }
                         Some(ImportOverlay::Reference {
                             target: ReferenceTarget::Data(target),
                             ..
@@ -743,9 +747,7 @@ fn missing_candidates(
                             });
                         }
                         None => next.push(MissingTask::Emit {
-                            candidate: MissingCandidate::Data(absolute_import_member_path(
-                                &marker, identity, &field,
-                            )),
+                            candidate: MissingCandidate::Data(absolute),
                             dest,
                         }),
                     }

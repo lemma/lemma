@@ -1,0 +1,4 @@
+yearly_interest: 50
+└─ principal * annual_rate
+   ├─ principal: 1000
+   └─ annual_rate: 5%

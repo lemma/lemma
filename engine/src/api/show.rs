@@ -332,18 +332,6 @@ impl From<&DomainShowRule> for ShowRule {
 
 const JSON_SCHEMA_DIALECT: &str = "https://json-schema.org/draft/2020-12/schema";
 
-const TEXT_NOTE: &str = "Text values are limited to 1024 UTF-8 bytes.";
-const DATE_NOTE: &str = "Accepted forms: an RFC 3339 date-time with offset; a naive date-time `YYYY-MM-DDTHH:MM[:SS[.f]]`; a date `YYYY-MM-DD`; an ISO week `YYYY-Www` (week 1 to 53, 53 only in ISO years that have one); a year-month `YYYY-MM`; a year `YYYY` (1 to 9999). Exact separators follow the chrono parsers the engine uses.";
-const TIME_NOTE: &str = "Accepted forms: `HH:MM[:SS[.f]]`, optionally followed by `Z` or an offset `+HH:MM` / `-HH:MM`.";
-
-fn with_engine_note(help: &str, note: &str) -> String {
-    if help.is_empty() {
-        note.to_string()
-    } else {
-        format!("{help} {note}")
-    }
-}
-
 /// Run-data boolean text (`BooleanValue::from_str`): case-insensitive, surrounding whitespace.
 const BOOLEAN_TEXT_PATTERN: &str =
     r"^\s*(?:[Tt][Rr][Uu][Ee]|[Ff][Aa][Ll][Ss][Ee]|[Yy][Ee][Ss]|[Nn][Oo])\s*$";
@@ -702,12 +690,12 @@ fn specification_help(specification: &DomainTypeSpecification) -> String {
         | DomainTypeSpecification::Number { help, .. }
         | DomainTypeSpecification::NumberRange { help, .. }
         | DomainTypeSpecification::Ratio { help, .. }
-        | DomainTypeSpecification::RatioRange { help, .. } => help.clone(),
-        DomainTypeSpecification::Text { help, .. } => with_engine_note(help, TEXT_NOTE),
-        DomainTypeSpecification::Date { help, .. }
-        | DomainTypeSpecification::DateRange { help, .. } => with_engine_note(help, DATE_NOTE),
-        DomainTypeSpecification::Time { help, .. }
-        | DomainTypeSpecification::TimeRange { help, .. } => with_engine_note(help, TIME_NOTE),
+        | DomainTypeSpecification::RatioRange { help, .. }
+        | DomainTypeSpecification::Text { help, .. }
+        | DomainTypeSpecification::Date { help, .. }
+        | DomainTypeSpecification::DateRange { help, .. }
+        | DomainTypeSpecification::Time { help, .. }
+        | DomainTypeSpecification::TimeRange { help, .. } => help.clone(),
         DomainTypeSpecification::Spec { spec } => spec.to_string(),
         DomainTypeSpecification::List { .. } => {
             unreachable!("BUG: list chain is unwound before the leaf match")

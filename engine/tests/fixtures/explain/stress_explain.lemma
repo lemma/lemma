@@ -1,0 +1,296 @@
+spec stress_test
+"""
+Explain fixture from cli/tests/integrations/examples/09_stress_test.lemma.
+Also: payment is/is-not veto arms; rush_and_cap_ok ImportRule under held and.
+"""
+
+data customer_tier_type: text
+  -> option "standard"
+  -> option "premium"
+  -> option "vip"
+
+data payment_method_type: text
+  -> option "credit"
+  -> option "cash"
+  -> option "debit"
+
+data min_order_value:         50
+data free_shipping_threshold: 500
+data is_fragile:              boolean
+data is_express:              boolean
+data customer_tier:           customer_tier_type
+data payment_method:          payment_method_type
+data base_price: number
+  -> minimum 0
+
+data delivery_distance: number
+  -> minimum 0
+
+data loyalty_points: number
+  -> minimum 0
+
+data package_weight: number
+  -> minimum 0
+
+data quantity: number
+  -> minimum 0
+
+rule is_standard:
+  customer_tier is "standard"
+
+rule is_premium:
+  customer_tier is "premium"
+
+rule is_vip:
+  customer_tier is "vip"
+
+rule measure_discount_rate:
+  0%
+  unless quantity >= 10  then 5%
+  unless quantity >= 50  then 10%
+  unless quantity >= 100 then 15%
+
+rule tier_discount_rate:
+  0%
+  unless is_premium then 20%
+  unless is_vip     then 30%
+
+rule combined_discount_rate:
+  measure_discount_rate
+  unless tier_discount_rate > measure_discount_rate
+    then tier_discount_rate
+
+rule subtotal:
+  base_price * quantity
+
+rule discount_amount:
+  subtotal * combined_discount_rate
+
+rule net_price:
+  subtotal - discount_amount
+
+rule price_per_unit:
+  net_price / quantity
+
+rule base_shipping:
+  10
+  unless package_weight > 20  then 15
+  unless package_weight > 50  then 25
+  unless package_weight > 100 then 40
+
+rule distance_fee:
+  delivery_distance * 0.05
+
+rule fragile_fee:
+  0
+  unless is_fragile then 12
+
+rule standard_shipping:
+  base_shipping + distance_fee + fragile_fee
+
+rule express_multiplier:
+  1
+  unless is_express then 2.5
+
+rule total_shipping:
+  standard_shipping * express_multiplier
+
+rule order_total:
+  net_price + total_shipping
+
+rule loyalty_discount_rate:
+  0%
+  unless loyalty_points >= 1_000  then 2%
+  unless loyalty_points >= 5_000  then 5%
+  unless loyalty_points >= 10_000 then 10%
+
+rule loyalty_discount:
+  net_price * loyalty_discount_rate
+
+rule subtotal_after_loyalty:
+  order_total - loyalty_discount
+
+rule qualifies_for_free_shipping:
+  net_price >= free_shipping_threshold
+
+rule final_before_fees:
+  subtotal_after_loyalty
+  unless qualifies_for_free_shipping
+    then net_price - loyalty_discount
+
+rule uses_credit:
+  payment_method is "credit"
+
+rule uses_cash:
+  payment_method is "cash"
+
+rule uses_debit:
+  payment_method is "debit"
+
+rule payment_allowed:
+  yes
+  unless payment_method is "cash" and is_fragile
+    then veto "Cash not accepted for fragile shipments"
+  unless payment_method is not "credit" and is_express
+    then veto "Express shipping requires credit payment"
+
+rule processing_fee:
+  0
+  unless uses_credit then final_before_fees * 2.5%
+  unless uses_cash   then 5
+
+rule grand_total:
+  final_before_fees + processing_fee
+
+rule estimated_delivery_days:
+  5
+  unless delivery_distance > 200 then 3
+  unless delivery_distance > 500 then 7
+  unless is_express              then 1
+
+rule savings_total:
+  discount_amount + loyalty_discount
+
+rule savings_percent:
+  (savings_total / subtotal) as percent
+
+rule is_high_value:
+  price_per_unit > 50
+
+rule is_bulk_order:
+  quantity >= 50
+
+rule is_rush:
+  is_express and estimated_delivery_days <= 2
+
+rule order_status:
+  "standard"
+  unless is_vip
+    then "vip"
+  unless is_high_value
+    then "high_value"
+  unless qualifies_for_free_shipping
+    then "free_shipping"
+  unless is_rush
+    then "rush"
+  unless is_bulk_order
+    then "bulk"
+
+rule meets_minimum:
+  subtotal >= min_order_value
+
+rule order_valid:
+  meets_minimum
+  unless not meets_minimum
+    then veto "Order below minimum value"
+
+rule summary:
+  "Low value order"
+  unless savings_percent > 10% then "Good savings!"
+  unless savings_percent > 20% then "Great savings!"
+  unless savings_percent > 30% then "Excellent savings!"
+
+
+spec stress_test_config
+"""
+Configuration spec - demonstrates spec composition
+"""
+
+data base_tax_rate:                 8%
+data customer_tier_points_premium:  2
+data customer_tier_points_standard: 1
+data customer_tier_points_vip:      5
+data expedited_handling_fee:        25
+data express_processing_days:       1
+data international_fee_rate:        20%
+data luxury_tax_rate:               15%
+data luxury_tax_threshold:          1_000
+data max_discount_cap:              40%
+data min_profitable_margin:         15%
+data rush_processing_days:          0
+data standard_processing_days:      3
+data weekend_delivery_surcharge:    10%
+data weight_limit_express:          100
+data weight_limit_standard:         50
+
+
+spec stress_test_extended
+"""
+Extended stress test with spec composition
+Demonstrates: cross-spec references, field access, complex dependencies, data bindings
+"""
+
+uses config: stress_test_config
+  -> with base_tax_rate: 7%
+  -> with luxury_tax_threshold: 1_200
+  -> with max_discount_cap: 35%
+
+uses order: stress_test
+  -> with free_shipping_threshold: 600
+  -> with min_order_value: 100
+
+rule is_luxury_order:
+  order.grand_total > config.luxury_tax_threshold
+
+rule applicable_tax_rate:
+  config.base_tax_rate
+  unless is_luxury_order then config.luxury_tax_rate
+
+rule tax_amount:
+  order.grand_total * applicable_tax_rate
+
+rule grand_total_with_tax:
+  order.grand_total + tax_amount
+
+rule points_earned_base:
+  order.grand_total * 0.01
+
+rule points_multiplier:
+  config.customer_tier_points_standard
+  unless order.is_premium
+    then config.customer_tier_points_premium
+  unless order.is_vip
+    then config.customer_tier_points_vip
+
+rule total_points_earned:
+  points_earned_base * points_multiplier
+
+rule weight_within_limits:
+  order.package_weight <= config.weight_limit_standard
+  unless order.is_express
+    then order.package_weight <= config.weight_limit_express
+
+rule processing_days:
+  config.standard_processing_days
+  unless order.is_express
+    then config.express_processing_days
+  unless order.is_rush
+    then config.rush_processing_days
+
+rule estimated_total_days:
+  processing_days + order.estimated_delivery_days
+
+rule discount_within_cap:
+  order.savings_percent <= config.max_discount_cap
+
+rule margin:
+  ((order.grand_total - order.subtotal) / order.grand_total) as percent
+
+rule is_profitable:
+  margin >= config.min_profitable_margin
+
+rule final_status:
+  "APPROVED"
+  unless not weight_within_limits
+    then veto "Package exceeds weight limit"
+  unless not is_profitable
+    then veto "Insufficient margin"
+  unless not discount_within_cap
+    then "WARNING: Discount exceeds cap"
+
+rule rush_and_cap_ok:
+  no
+  unless order.is_rush and discount_within_cap then yes
+
+rule order_summary:
+  order.grand_total

@@ -491,7 +491,7 @@ rule out: n * 2
         .unwrap();
     let explanation = explanation_json(&response, "out");
 
-    assert_eq!(explanation["result"], "Missing data: n");
+    assert_eq!(explanation["result"], "Required data 'n' was not provided.");
     // Walk-faithful: missing data leaf is data; veto text is on display.
     // Literal `2` remains in JSON for parsers; ASCII omits it.
     let children = explanation["children"].as_array().unwrap();
@@ -500,7 +500,7 @@ rule out: n * 2
     assert_eq!(operands.len(), 2);
     assert_eq!(operands[0]["type"], "data");
     assert_eq!(operands[0]["name"], "n");
-    assert_eq!(operands[0]["result"], "Missing data: n");
+    assert_eq!(operands[0]["result"], "Required data 'n' was not provided.");
     assert_empty_operand_compose(&operands[1], "2");
     let typed = response
         .results
@@ -512,9 +512,9 @@ rule out: n * 2
     assert_eq!(
         format_explanation(typed),
         "\
-out: Missing data: n
+out: Required data 'n' was not provided.
 └─ n * 2
-   └─ n: Missing data: n"
+   └─ n: Required data 'n' was not provided."
     );
 }
 

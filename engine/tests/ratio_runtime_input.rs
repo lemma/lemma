@@ -312,7 +312,7 @@ fn rejects_empty() {
     load(&mut engine, percent_spec());
     let msg = evaluate_veto_reason(&engine, "s", "");
     assert!(
-        msg.contains("Data r [ratio]:") && msg.to_lowercase().contains("cannot be empty"),
+        msg.contains("Data r [ratio] cannot be empty."),
         "expected field-named empty ratio message, got: {msg}"
     );
     assert!(
@@ -327,7 +327,7 @@ fn rejects_whitespace_only() {
     load(&mut engine, percent_spec());
     let msg = evaluate_veto_reason(&engine, "s", "   ");
     assert!(
-        msg.contains("Data r [ratio]:") && msg.to_lowercase().contains("cannot be empty"),
+        msg.contains("Data r [ratio] cannot be empty."),
         "expected field-named empty ratio message, got: {msg}"
     );
 }

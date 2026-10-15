@@ -22,7 +22,7 @@ use crate::evaluation::expression::resolve_data_path_value;
 use crate::evaluation::tree::borrow_value;
 use crate::evaluation::EvaluationContext;
 use crate::formatting::expression::display_comparison;
-use crate::parsing::ast::{ArithmeticComputation, RowCondition};
+use crate::parsing::ast::{ArithmeticComputation, ComparisonComputation, RowCondition};
 use crate::planning::execution_plan::{
     resolve_nested_dispatch_body, ExecutableRule, ExecutionPlan,
 };
@@ -33,8 +33,8 @@ use crate::planning::normalize::{
 };
 use crate::planning::ordered_dispatch::{is_exclusive_point_table, region_of_scrutinee};
 use crate::planning::semantics::{
-    negated_comparison, DataPath, LemmaType, ListKey, ReferenceEnd, RowEnd, RowInstance, RowOrigin,
-    RulePath, SpecValue, ValueKind,
+    negated_comparison, DataDefinition, DataPath, LemmaType, ListKey, PathSegment, ReferenceEnd,
+    RowEnd, RowInstance, RowOrigin, RulePath, SpecValue, ValueKind,
 };
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -95,7 +95,166 @@ fn operands_of(as_operand: &Option<ExplanationNode>) -> Vec<ExplanationNode> {
 /// Narrate a rule whose value is stored and insert its arena id into
 /// `rule_explanations`. Rules narrate in plan order (topological), so every rule
 /// reference under this rule already has its arena entry.
+///
+/// Self-ImportRule rules peel into the template with an explicit job stack (no
+/// recursion): narrate evaluated locals first, then copy body/causes/children.
 pub(crate) fn narrate_rule(
+    rule: &ExecutableRule,
+    plan: &ExecutionPlan,
+    ctx: &mut EvaluationContext,
+    arena: &mut ExplanationArena,
+) {
+    enum Job {
+        /// Narrate `plan.rules[index]` under import hops `segments` from `plan`/`ctx`.
+        Narrate {
+            segments: Vec<PathSegment>,
+            index: usize,
+        },
+        /// After locals under the import are narrated, copy them onto the qualified path.
+        FinishImport {
+            segments: Vec<PathSegment>,
+            index: usize,
+        },
+    }
+
+    let start = plan.rule_index(&rule.path).index();
+    let mut stack = vec![Job::Narrate {
+        segments: Vec::new(),
+        index: start,
+    }];
+    while let Some(job) = stack.pop() {
+        match job {
+            Job::Narrate { segments, index } => {
+                let already = {
+                    let (scope_plan, scope_ctx) = import_context_at(plan, ctx, &segments);
+                    let scope_rule = rule_by_index(scope_plan, index);
+                    scope_ctx.rule_explanations.contains_key(&scope_rule.path)
+                };
+                if already {
+                    continue;
+                }
+                let self_import_child = {
+                    let (scope_plan, _) = import_context_at(plan, ctx, &segments);
+                    let scope_rule = rule_by_index(scope_plan, index);
+                    if is_self_import_rule(scope_rule, scope_plan) {
+                        let mut child_segments = segments.clone();
+                        child_segments.extend(scope_rule.path.segments.iter().cloned());
+                        Some(child_segments)
+                    } else {
+                        None
+                    }
+                };
+                if let Some(child_segments) = self_import_child {
+                    let locals: Vec<usize> = {
+                        let (template, import_ctx) = import_context_at(plan, ctx, &child_segments);
+                        template
+                            .rules
+                            .values()
+                            .enumerate()
+                            .filter(|(i, local)| {
+                                import_ctx.rule_values[*i].is_some()
+                                    && !import_ctx.rule_explanations.contains_key(&local.path)
+                            })
+                            .map(|(i, _)| i)
+                            .collect()
+                    };
+                    stack.push(Job::FinishImport { segments, index });
+                    for local_index in locals.into_iter().rev() {
+                        stack.push(Job::Narrate {
+                            segments: child_segments.clone(),
+                            index: local_index,
+                        });
+                    }
+                    continue;
+                }
+                let (scope_plan, scope_ctx) = import_context_at(plan, ctx, &segments);
+                let scope_rule = rule_by_index(scope_plan, index);
+                narrate_rule_leaf(scope_rule, scope_plan, scope_ctx, arena);
+            }
+            Job::FinishImport { segments, index } => {
+                let already = {
+                    let (scope_plan, scope_ctx) = import_context_at(plan, ctx, &segments);
+                    let scope_rule = rule_by_index(scope_plan, index);
+                    scope_ctx.rule_explanations.contains_key(&scope_rule.path)
+                };
+                if already {
+                    continue;
+                }
+                let (path, result, child_segments) = {
+                    let (scope_plan, scope_ctx) = import_context_at(plan, ctx, &segments);
+                    let scope_rule = rule_by_index(scope_plan, index);
+                    let path = scope_rule.path.clone();
+                    let result_type = scope_ctx.rule_result_type(scope_plan, scope_rule);
+                    let result = explanation_result_value(
+                        scope_ctx.rule_value(scope_plan, &path),
+                        result_type.as_ref(),
+                        &scope_plan.family_units,
+                    );
+                    let mut child_segments = segments.clone();
+                    child_segments.extend(path.segments.iter().cloned());
+                    (path, result, child_segments)
+                };
+                let local_name = path.rule.clone();
+                let local_id = {
+                    let (template, import_ctx) = import_context_at(plan, ctx, &child_segments);
+                    let local_path = template
+                        .rules
+                        .keys()
+                        .find(|rule| rule.segments.is_empty() && rule.rule == local_name)
+                        .unwrap_or_else(|| {
+                            panic!(
+                                "BUG: self-ImportRule '{}' missing local rule in peeled template",
+                                path.input_key()
+                            )
+                        });
+                    *import_ctx
+                        .rule_explanations
+                        .get(local_path)
+                        .unwrap_or_else(|| {
+                            panic!(
+                                "BUG: local rule '{}' not narrated after import-context pass",
+                                local_path.input_key()
+                            )
+                        })
+                };
+                let id = {
+                    let local = arena.get(local_id);
+                    arena.push(ArenaEntry {
+                        name: path.clone(),
+                        result,
+                        body: local.body.clone(),
+                        causes: local.causes.clone(),
+                        children: local.children.clone(),
+                    })
+                };
+                let (_, scope_ctx) = import_context_at(plan, ctx, &segments);
+                scope_ctx.rule_explanations.insert(path, id);
+            }
+        }
+    }
+}
+
+fn is_self_import_rule(rule: &ExecutableRule, plan: &ExecutionPlan) -> bool {
+    matches!(
+        &plan.normal_form(rule.normal_form).kind,
+        NormalFormKind::Leaf(LeafKind::ImportRule(path)) if *path == rule.path
+    )
+}
+
+fn rule_by_index(plan: &ExecutionPlan, index: usize) -> &ExecutableRule {
+    plan.rules
+        .get_index(index)
+        .map(|(_, rule)| rule)
+        .unwrap_or_else(|| {
+            panic!(
+                "BUG: rule index {} out of plan.rules range ({} rules)",
+                index,
+                plan.rules.len()
+            )
+        })
+}
+
+fn narrate_rule_leaf(
     rule: &ExecutableRule,
     plan: &ExecutionPlan,
     ctx: &mut EvaluationContext,
@@ -107,22 +266,6 @@ pub(crate) fn narrate_rule(
         result_type.as_ref(),
         &plan.family_units,
     );
-    // Import ExecutableRule: its body is the peel cut naming itself.
-    if let NormalFormKind::Leaf(LeafKind::ImportRule(path)) =
-        &plan.normal_form(rule.normal_form).kind
-    {
-        if *path == rule.path {
-            let id = arena.push(ArenaEntry {
-                name: rule.path.clone(),
-                result,
-                body: rule.path.input_key(),
-                causes: Vec::new(),
-                children: Vec::new(),
-            });
-            ctx.rule_explanations.insert(rule.path.clone(), id);
-            return;
-        }
-    }
     let narrated = narrate(rule.normal_form, plan, ctx);
     let id = arena.push(ArenaEntry {
         name: rule.path.clone(),
@@ -132,6 +275,33 @@ pub(crate) fn narrate_rule(
         children: operands_of(&narrated.as_operand),
     });
     ctx.rule_explanations.insert(rule.path.clone(), id);
+}
+
+/// Plan and context after walking `segments` through cached import contexts.
+fn import_context_at<'a>(
+    mut plan: &'a ExecutionPlan,
+    mut ctx: &'a mut EvaluationContext,
+    segments: &[PathSegment],
+) -> (&'a ExecutionPlan, &'a mut EvaluationContext) {
+    for segment in segments {
+        let marker = DataPath::local(segment.uses.clone());
+        let DataDefinition::Import { identity, .. } = plan.data.get(&marker).unwrap_or_else(|| {
+            panic!("BUG: import hop '{}' missing from plan", marker.input_key())
+        }) else {
+            panic!(
+                "BUG: import hop '{}' is not DataDefinition::Import",
+                marker.input_key()
+            );
+        };
+        plan = plan.row_template(identity);
+        ctx = ctx.import_contexts.get_mut(&marker).unwrap_or_else(|| {
+            panic!(
+                "BUG: import context missing for '{}' while narrating ImportRule",
+                marker.input_key()
+            )
+        });
+    }
+    (plan, ctx)
 }
 
 /// Narrate every row context bottom-up so nested rows exist before their parents.
@@ -1186,10 +1356,16 @@ fn cause(
         }
     }
     let (condition_text, value) = condition_statement(focus, held, plan);
-    let children = if matches!(plan.normal_form(focus).kind, NormalFormKind::And(..)) {
-        and_cause_children(focus, plan, ctx)
-    } else {
-        cause_children(child(done, focus)?.as_operand.clone())
+    let children = match (&plan.normal_form(focus).kind, held) {
+        (NormalFormKind::And(..), true) | (NormalFormKind::Comparison(..), true) => {
+            premise_cause_children(focus, plan, ctx)
+        }
+        (NormalFormKind::And(..), false) => {
+            unreachable!(
+                "BUG: false And must be peeled to a deciding conjunct before cause children"
+            )
+        }
+        _ => cause_children(child(done, focus)?.as_operand.clone()),
     };
     Ok(Cause {
         condition: condition_text,
@@ -1371,46 +1547,140 @@ fn cause_children(operand: Option<ExplanationNode>) -> Vec<ExplanationNode> {
     }
 }
 
-/// `and` conditions list every data path under them, in structural order:
-/// bound paths as `Data`, unbound ones as `DataUnused`.
-fn and_cause_children(
+/// Held `and` / comparison premises: surface facts only, stopping at `rule_ref`
+/// cuts (same cut as [`narrate_step`]). Does not walk into a referenced rule's
+/// body, so `views_consumed < max_views` lists `max_views` as a RuleRef rather
+/// than leaking `max_views`'s own data (e.g. `premium_member`).
+fn premise_cause_children(
     focus: NormalFormId,
     plan: &ExecutionPlan,
     ctx: &EvaluationContext,
 ) -> Vec<ExplanationNode> {
     let mut children = Vec::new();
-    let mut seen = HashSet::new();
-    for path in structural_data_paths_from(focus, plan) {
-        if !seen.insert(path.clone()) {
-            continue;
-        }
-        if ctx.data_slot(plan, &path).is_some() {
-            children.push(data_node(&path, plan, ctx));
-        } else {
-            children.push(ExplanationNode::DataUnused { name: path });
-        }
-    }
+    let mut seen_data = HashSet::new();
+    let mut seen_rules = HashSet::new();
+    collect_premise_facts(
+        focus,
+        plan,
+        ctx,
+        &mut children,
+        &mut seen_data,
+        &mut seen_rules,
+    );
     children
 }
 
-/// DataPath leaves under a cell, following children and origins (structural
-/// mentions, whether or not the walk looked them up).
-fn structural_data_paths_from(id: NormalFormId, plan: &ExecutionPlan) -> Vec<DataPath> {
-    let mut out = Vec::new();
-    let mut stack = vec![id];
-    let mut seen = HashSet::new();
-    while let Some(current) = stack.pop() {
-        if !seen.insert(current.index()) {
-            continue;
-        }
-        let cell = plan.normal_form(current);
-        if let NormalFormKind::Leaf(LeafKind::DataPath(path)) = &cell.kind {
-            out.push(path.clone());
-        }
-        stack.extend(cell.kind.children());
-        if let Some(origin) = cell.origin {
-            stack.push(origin);
+fn collect_premise_facts(
+    id: NormalFormId,
+    plan: &ExecutionPlan,
+    ctx: &EvaluationContext,
+    out: &mut Vec<ExplanationNode>,
+    seen_data: &mut HashSet<DataPath>,
+    seen_rules: &mut HashSet<RulePath>,
+) {
+    enum Task {
+        Facts(NormalFormId),
+        Side { id: NormalFormId, omit_data: bool },
+    }
+    let mut stack = vec![Task::Facts(id)];
+    while let Some(task) = stack.pop() {
+        match task {
+            Task::Facts(id) => {
+                let cell = plan.normal_form(id);
+                if let Some(path) = &cell.rule_ref {
+                    if seen_rules.insert(path.clone()) {
+                        out.push(rule_ref_node(path, plan, ctx));
+                    }
+                    continue;
+                }
+                match &cell.kind {
+                    NormalFormKind::And(children) => {
+                        for &child in children.iter().rev() {
+                            stack.push(Task::Facts(child));
+                        }
+                    }
+                    NormalFormKind::Comparison(a, op, b) => {
+                        let omit_data = *op == ComparisonComputation::Is
+                            && comparison_is_data_versus_literal(*a, *b, plan);
+                        stack.push(Task::Side { id: *b, omit_data });
+                        stack.push(Task::Side { id: *a, omit_data });
+                    }
+                    NormalFormKind::Not(inner) => {
+                        stack.push(Task::Facts(*inner));
+                    }
+                    NormalFormKind::Leaf(LeafKind::DataPath(path)) => {
+                        push_premise_data(path, plan, ctx, out, seen_data);
+                    }
+                    NormalFormKind::Leaf(LeafKind::ImportRule(path)) => {
+                        if seen_rules.insert(path.clone()) {
+                            out.push(rule_ref_node(path, plan, ctx));
+                        }
+                    }
+                    NormalFormKind::Leaf(LeafKind::Literal(_)) => {}
+                    _ => {
+                        for child in cell.kind.children().into_iter().rev() {
+                            stack.push(Task::Facts(child));
+                        }
+                    }
+                }
+            }
+            Task::Side { id, omit_data } => {
+                let cell = plan.normal_form(id);
+                if let Some(path) = &cell.rule_ref {
+                    if seen_rules.insert(path.clone()) {
+                        out.push(rule_ref_node(path, plan, ctx));
+                    }
+                    continue;
+                }
+                match &cell.kind {
+                    NormalFormKind::Leaf(LeafKind::DataPath(path)) => {
+                        if !omit_data {
+                            push_premise_data(path, plan, ctx, out, seen_data);
+                        }
+                    }
+                    NormalFormKind::Leaf(LeafKind::Literal(_)) => {}
+                    _ => stack.push(Task::Facts(id)),
+                }
+            }
         }
     }
-    out
+}
+
+fn push_premise_data(
+    path: &DataPath,
+    plan: &ExecutionPlan,
+    ctx: &EvaluationContext,
+    out: &mut Vec<ExplanationNode>,
+    seen_data: &mut HashSet<DataPath>,
+) {
+    if !seen_data.insert(path.clone()) {
+        return;
+    }
+    if ctx.data_slot(plan, path).is_some() {
+        out.push(data_node(path, plan, ctx));
+    } else {
+        out.push(ExplanationNode::DataUnused { name: path.clone() });
+    }
+}
+
+fn comparison_is_data_versus_literal(
+    a: NormalFormId,
+    b: NormalFormId,
+    plan: &ExecutionPlan,
+) -> bool {
+    let left_data = cell_is_bare_data(a, plan);
+    let right_data = cell_is_bare_data(b, plan);
+    let left_literal = cell_is_bare_literal(a, plan);
+    let right_literal = cell_is_bare_literal(b, plan);
+    (left_data && right_literal) || (left_literal && right_data)
+}
+
+fn cell_is_bare_data(id: NormalFormId, plan: &ExecutionPlan) -> bool {
+    let cell = plan.normal_form(id);
+    cell.rule_ref.is_none() && matches!(cell.kind, NormalFormKind::Leaf(LeafKind::DataPath(_)))
+}
+
+fn cell_is_bare_literal(id: NormalFormId, plan: &ExecutionPlan) -> bool {
+    let cell = plan.normal_form(id);
+    cell.rule_ref.is_none() && matches!(cell.kind, NormalFormKind::Leaf(LeafKind::Literal(_)))
 }

@@ -7,7 +7,9 @@ use crate::computation::{arithmetic_operation, comparison_operation, OperationRe
 use crate::evaluation::rows::checked_row_field;
 use crate::parsing::ast::RowCondition;
 use crate::planning::execution_plan::ExecutionPlan;
-use crate::planning::instance_list::{key_conflict, row_end_type, typed_from_bound, KeyedRow};
+use crate::planning::instance_list::{
+    describe_key, key_conflict, row_end_type, typed_from_bound, KeyedRow,
+};
 use crate::planning::normalize::{NormalFormId, NormalFormListOp};
 use crate::planning::semantics::{
     row_literal, ArithmeticComputation, BoundValueKind, ComparisonComputation, DataPath, LemmaType,
@@ -51,7 +53,7 @@ pub(crate) fn first_or_last(rows: &[TypedLiteral], first: bool) -> OperationResu
     match row {
         Some(row) => OperationResult::from_literal(row.to_literal()),
         None => OperationResult::Veto(VetoType::computation(format!(
-            "cannot take {} of an empty list",
+            "Cannot take the {} element of an empty list.",
             if first { "first" } else { "last" }
         ))),
     }
@@ -82,10 +84,10 @@ pub(crate) fn reduce(
         return match fold {
             ListFold::Sum => empty_sum(result_type),
             ListFold::Avg => OperationResult::Veto(VetoType::computation(
-                "cannot take avg of an empty list".to_string(),
+                "Cannot compute the average of an empty list.".to_string(),
             )),
             ListFold::Product => OperationResult::Veto(VetoType::computation(
-                "cannot take product of an empty list".to_string(),
+                "Cannot compute the product of an empty list.".to_string(),
             )),
         };
     }
@@ -142,7 +144,7 @@ fn empty_sum(result_type: &Arc<LemmaType>) -> OperationResult {
 pub(crate) fn extrema(rows: &[TypedLiteral], want: Ordering) -> OperationResult {
     let Some(mut best) = rows.first() else {
         return OperationResult::Veto(VetoType::computation(
-            "cannot take min/max of an empty list".to_string(),
+            "Cannot compute the minimum or maximum of an empty list.".to_string(),
         ));
     };
     for row in rows.iter().skip(1) {
@@ -215,7 +217,7 @@ pub(crate) fn top_rows(
     };
     let Some(count) = whole_count(n) else {
         return OperationResult::Veto(VetoType::computation(format!(
-            "`top` takes a whole number >= 0, got {}",
+            "`top` requires a whole number greater than or equal to 0; got {}.",
             n.display_str()
         )));
     };
@@ -233,14 +235,16 @@ pub(crate) fn find_numbered(rows: &[TypedLiteral], key_result: OperationResult) 
         Some(index) if index >= 1 => index,
         _ => {
             return OperationResult::Veto(VetoType::computation(format!(
-                "row number must be a whole number >= 1, got {}",
+                "Row number must be a whole number greater than or equal to 1; got {}.",
                 n.display_str()
             )));
         }
     };
     match rows.get(index - 1) {
         Some(row) => OperationResult::from_literal(row.to_literal()),
-        None => OperationResult::Veto(VetoType::computation(format!("no row {index}"))),
+        None => OperationResult::Veto(VetoType::computation(format!(
+            "There is no row number {index}."
+        ))),
     }
 }
 
@@ -444,14 +448,9 @@ fn key_matches(row_value: &TypedLiteral, value: &TypedLiteral) -> OperationResul
 }
 
 pub(crate) fn no_row_with_key(fields: &[String], wanted: &[TypedLiteral]) -> OperationResult {
-    let described = fields
-        .iter()
-        .zip(wanted)
-        .map(|(field, value)| format!("{field} {}", value.display_value()))
-        .collect::<Vec<_>>()
-        .join(", ");
+    let described = describe_key(fields, wanted);
     OperationResult::Veto(VetoType::computation(format!(
-        "no row with key {described}"
+        "No row found where {described}."
     )))
 }
 

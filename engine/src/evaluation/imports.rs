@@ -45,7 +45,7 @@ pub(crate) fn check_overlay_value(
             ) {
                 Ok(()) => OperationResult::from_bound(bound),
                 Err(msg) => OperationResult::Veto(VetoType::computation(format!(
-                    "Reference '{}' violates declared constraint: {}",
+                    "Reference '{}' violates its declared constraint: {}",
                     absolute, msg
                 ))),
             }

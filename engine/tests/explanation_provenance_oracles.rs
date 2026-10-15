@@ -335,7 +335,7 @@ rule as_kg: (1 / zero) as kg
     let json = serde_json::to_value(explanation).expect("serialize");
     assert_eq!(
         json["result"].as_str(),
-        Some("Division by zero"),
+        Some("Division by zero is not allowed."),
         "veto text on display, got {json}"
     );
     assert!(

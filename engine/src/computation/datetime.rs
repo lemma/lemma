@@ -51,7 +51,7 @@ pub fn datetime_arithmetic(
             };
             let new_dt = match dt.checked_add_signed(duration) {
                 Some(d) => d,
-                None => return OperationResult::Veto(VetoType::computation("Date overflow")),
+                None => return OperationResult::Veto(VetoType::computation("The date calculation overflowed.")),
             };
             OperationResult::from_literal(LiteralValue::date(chrono_to_semantic_datetime(new_dt)))
         }
@@ -88,7 +88,7 @@ pub fn datetime_arithmetic(
             };
             let new_dt = match dt.checked_sub_signed(duration) {
                 Some(d) => d,
-                None => return OperationResult::Veto(VetoType::computation("Date overflow")),
+                None => return OperationResult::Veto(VetoType::computation("The date calculation overflowed.")),
             };
             OperationResult::from_literal(LiteralValue::date(chrono_to_semantic_datetime(new_dt)))
         }
@@ -125,7 +125,7 @@ pub fn datetime_arithmetic(
             };
             let new_dt = match dt.checked_add_signed(duration) {
                 Some(d) => d,
-                None => return OperationResult::Veto(VetoType::computation("Date overflow")),
+                None => return OperationResult::Veto(VetoType::computation("The date calculation overflowed.")),
             };
             OperationResult::from_literal(LiteralValue::date(chrono_to_semantic_datetime(new_dt)))
         }
@@ -159,7 +159,7 @@ pub fn datetime_arithmetic(
                 Some(d) => d,
                 None => {
                     return OperationResult::Veto(VetoType::computation(format!(
-                        "Invalid date: {}-{}-{}",
+                        "Invalid date: {}-{}-{}.",
                         date.year, date.month, date.day
                     )))
                 }
@@ -173,7 +173,7 @@ pub fn datetime_arithmetic(
                 Some(t) => t,
                 None => {
                     return OperationResult::Veto(VetoType::computation(format!(
-                        "Invalid time: {}:{}:{}.{}",
+                        "Invalid time: {}:{}:{}.{}.",
                         time.hour, time.minute, time.second, time.microsecond
                     )))
                 }
@@ -186,7 +186,7 @@ pub fn datetime_arithmetic(
                 Some(dt) => dt,
                 None => {
                     return OperationResult::Veto(VetoType::computation(
-                        "Ambiguous or invalid datetime for timezone",
+                        "The datetime is ambiguous or invalid for the given timezone.",
                     ))
                 }
             };
@@ -212,13 +212,13 @@ pub(crate) fn semantic_datetime_to_chrono(
     date: &SemanticDateTime,
 ) -> Result<DateTime<FixedOffset>, String> {
     let naive_date = NaiveDate::from_ymd_opt(date.year, date.month, date.day)
-        .ok_or_else(|| format!("Invalid date: {}-{}-{}", date.year, date.month, date.day))?;
+        .ok_or_else(|| format!("Invalid date: {}-{}-{}.", date.year, date.month, date.day))?;
 
     let naive_time =
         NaiveTime::from_hms_micro_opt(date.hour, date.minute, date.second, date.microsecond)
             .ok_or_else(|| {
                 format!(
-                    "Invalid time: {}:{}:{}.{}",
+                    "Invalid time: {}:{}:{}.{}.",
                     date.hour, date.minute, date.second, date.microsecond
                 )
             })?;
@@ -229,7 +229,7 @@ pub(crate) fn semantic_datetime_to_chrono(
     offset
         .from_local_datetime(&naive_dt)
         .single()
-        .ok_or_else(|| "Ambiguous or invalid datetime for timezone".to_string())
+        .ok_or_else(|| "The datetime is ambiguous or invalid for the given timezone.".to_string())
 }
 
 fn semantic_timezone_of(dt: &DateTime<FixedOffset>) -> SemanticTimezone {
@@ -255,14 +255,14 @@ fn seconds_to_chrono_duration(second: &RationalInteger) -> Result<ChronoDuration
     use crate::computation::rational::checked_mul;
     let micros_per_sec = rational_new(MICROSECONDS_PER_SECOND, 1);
     let microsecond = checked_mul(second, &micros_per_sec)
-        .map_err(|e| format!("Duration conversion overflow: {e}"))?;
+        .map_err(|e| format!("Duration conversion overflowed: {e}."))?;
     if !microsecond.is_integer() {
-        return Err("Duration conversion requires microsecond precision".to_string());
+        return Err("Duration conversion requires microsecond precision.".to_string());
     }
     let us_i64 = microsecond
         .numer_to_i128()
         .and_then(|v| i64::try_from(v).ok())
-        .ok_or_else(|| "Duration conversion failed".to_string())?;
+        .ok_or_else(|| "Duration conversion failed.".to_string())?;
     Ok(ChronoDuration::microseconds(us_i64))
 }
 
@@ -271,7 +271,7 @@ pub(crate) fn chrono_duration_to_rational_seconds(
 ) -> Result<RationalInteger, String> {
     let microsecond = duration
         .num_microseconds()
-        .ok_or_else(|| "Duration conversion failed".to_string())?;
+        .ok_or_else(|| "Duration conversion failed.".to_string())?;
     Ok(rational_new(microsecond, MICROSECONDS_PER_SECOND))
 }
 
@@ -284,31 +284,31 @@ fn apply_calendar_to_datetime(
 
     if !months_rational.is_integer() {
         return Err(format!(
-            "Cannot apply fractional calendar offset ({} month) to a date",
+            "Cannot apply a fractional calendar offset of {} months to a date.",
             months_rational
         ));
     }
 
     let months_i32 = months_rational
         .numer_to_i32()
-        .ok_or_else(|| "Calendar offset too large".to_string())?;
+        .ok_or_else(|| "The calendar offset is too large.".to_string())?;
 
     let signed_months = if add {
         months_i32
     } else {
         months_i32
             .checked_neg()
-            .ok_or_else(|| "Calendar offset too large".to_string())?
+            .ok_or_else(|| "The calendar offset is too large.".to_string())?
     };
 
     let base_months = dt
         .year()
         .checked_mul(12)
         .and_then(|y| y.checked_add(dt.month() as i32 - 1))
-        .ok_or_else(|| "Calendar offset too large".to_string())?;
+        .ok_or_else(|| "The calendar offset is too large.".to_string())?;
     let total_months = base_months
         .checked_add(signed_months)
-        .ok_or_else(|| "Calendar offset too large".to_string())?;
+        .ok_or_else(|| "The calendar offset is too large.".to_string())?;
     let target_year = total_months.div_euclid(12);
     let target_month = (total_months.rem_euclid(12) + 1) as u32;
 
@@ -317,7 +317,9 @@ fn apply_calendar_to_datetime(
 
     let naive_date =
         NaiveDate::from_ymd_opt(target_year, target_month, target_day).ok_or_else(|| {
-            format!("Invalid date after calendar offset: {target_year}-{target_month}-{target_day}")
+            format!(
+                "Invalid date after calendar offset: {target_year}-{target_month}-{target_day}."
+            )
         })?;
     let naive_time = dt.time();
     let naive_dt = NaiveDateTime::new(naive_date, naive_time);
@@ -326,7 +328,9 @@ fn apply_calendar_to_datetime(
     offset
         .from_local_datetime(&naive_dt)
         .single()
-        .ok_or_else(|| "Ambiguous or invalid datetime after calendar offset".to_string())
+        .ok_or_else(|| {
+            "The datetime is ambiguous or invalid after applying the calendar offset.".to_string()
+        })
 }
 
 fn days_in_month(year: i32, month: u32) -> u32 {
@@ -547,7 +551,7 @@ pub fn time_arithmetic(
             };
             let result_dt = match time_aware.checked_add_signed(duration) {
                 Some(d) => d,
-                None => return OperationResult::Veto(VetoType::computation("Time overflow")),
+                None => return OperationResult::Veto(VetoType::computation("The time calculation overflowed.")),
             };
             OperationResult::from_literal(LiteralValue::time(chrono_datetime_to_semantic_time(result_dt)))
         }
@@ -568,7 +572,7 @@ pub fn time_arithmetic(
             };
             let result_dt = match time_aware.checked_sub_signed(duration) {
                 Some(d) => d,
-                None => return OperationResult::Veto(VetoType::computation("Time overflow")),
+                None => return OperationResult::Veto(VetoType::computation("The time calculation overflowed.")),
             };
             OperationResult::from_literal(LiteralValue::time(chrono_datetime_to_semantic_time(result_dt)))
         }
@@ -587,7 +591,7 @@ pub fn time_arithmetic(
             };
             let result_dt = match time_aware.checked_add_signed(duration) {
                 Some(d) => d,
-                None => return OperationResult::Veto(VetoType::computation("Time overflow")),
+                None => return OperationResult::Veto(VetoType::computation("The time calculation overflowed.")),
             };
             OperationResult::from_literal(LiteralValue::time(chrono_datetime_to_semantic_time(result_dt)))
         }
@@ -605,7 +609,7 @@ pub fn time_arithmetic(
                 Some(d) => d,
                 None => {
                     return OperationResult::Veto(VetoType::computation(format!(
-                        "Invalid date: {}-{}-{}",
+                        "Invalid date: {}-{}-{}.",
                         date.year, date.month, date.day
                     )))
                 }
@@ -619,7 +623,7 @@ pub fn time_arithmetic(
                 Some(t) => t,
                 None => {
                     return OperationResult::Veto(VetoType::computation(format!(
-                        "Invalid time: {}:{}:{}.{}",
+                        "Invalid time: {}:{}:{}.{}.",
                         time.hour, time.minute, time.second, time.microsecond
                     )))
                 }
@@ -632,7 +636,7 @@ pub fn time_arithmetic(
                 Some(dt) => dt,
                 None => {
                     return OperationResult::Veto(VetoType::computation(
-                        "Ambiguous or invalid datetime for timezone",
+                        "The datetime is ambiguous or invalid for the given timezone.",
                     ))
                 }
             };
@@ -659,7 +663,7 @@ pub(crate) fn semantic_time_to_chrono_datetime(
     let naive_date =
         NaiveDate::from_ymd_opt(EPOCH_YEAR, EPOCH_MONTH, EPOCH_DAY).ok_or_else(|| {
             format!(
-                "Invalid epoch date: {}-{}-{}",
+                "Invalid epoch date: {}-{}-{}.",
                 EPOCH_YEAR, EPOCH_MONTH, EPOCH_DAY
             )
         })?;
@@ -667,7 +671,7 @@ pub(crate) fn semantic_time_to_chrono_datetime(
         NaiveTime::from_hms_micro_opt(time.hour, time.minute, time.second, time.microsecond)
             .ok_or_else(|| {
                 format!(
-                    "Invalid time: {}:{}:{}.{}",
+                    "Invalid time: {}:{}:{}.{}.",
                     time.hour, time.minute, time.second, time.microsecond
                 )
             })?;
@@ -678,7 +682,7 @@ pub(crate) fn semantic_time_to_chrono_datetime(
     offset
         .from_local_datetime(&naive_dt)
         .single()
-        .ok_or_else(|| "Ambiguous or invalid time for timezone".to_string())
+        .ok_or_else(|| "The time is ambiguous or invalid for the given timezone.".to_string())
 }
 
 fn chrono_datetime_to_semantic_time(dt: DateTime<FixedOffset>) -> SemanticTime {
@@ -736,21 +740,21 @@ fn calendar_boundaries(
         CalendarPeriodUnit::Year => {
             let target_year = now.year() + offset;
             let start = NaiveDate::from_ymd_opt(target_year, 1, 1)
-                .ok_or_else(|| format!("Invalid year: {}", target_year))?
+                .ok_or_else(|| format!("Invalid year: {}.", target_year))?
                 .and_hms_opt(0, 0, 0)
-                .ok_or("Invalid start time")?;
+                .ok_or("Invalid start time.")?;
             let end = NaiveDate::from_ymd_opt(target_year, 12, 31)
-                .ok_or_else(|| format!("Invalid year end: {}", target_year))?
+                .ok_or_else(|| format!("Invalid year end: {}.", target_year))?
                 .and_hms_micro_opt(23, 59, 59, 999_999)
-                .ok_or("Invalid end time")?;
+                .ok_or("Invalid end time.")?;
             let start_dt = tz
                 .from_local_datetime(&start)
                 .single()
-                .ok_or("Ambiguous start datetime")?;
+                .ok_or("The start datetime is ambiguous.")?;
             let end_dt = tz
                 .from_local_datetime(&end)
                 .single()
-                .ok_or("Ambiguous end datetime")?;
+                .ok_or("The end datetime is ambiguous.")?;
             Ok((start_dt, end_dt))
         }
         CalendarPeriodUnit::Month => {
@@ -766,29 +770,29 @@ fn calendar_boundaries(
             }
             let tm = target_month as u32;
             let start = NaiveDate::from_ymd_opt(target_year, tm, 1)
-                .ok_or_else(|| format!("Invalid month start: {}-{}", target_year, tm))?
+                .ok_or_else(|| format!("Invalid month start: {}-{}.", target_year, tm))?
                 .and_hms_opt(0, 0, 0)
-                .ok_or("Invalid start time")?;
+                .ok_or("Invalid start time.")?;
             let next_month_start = if tm == 12 {
                 NaiveDate::from_ymd_opt(target_year + 1, 1, 1)
             } else {
                 NaiveDate::from_ymd_opt(target_year, tm + 1, 1)
             }
-            .ok_or_else(|| format!("Invalid next month: {}-{}", target_year, tm + 1))?;
+            .ok_or_else(|| format!("Invalid next month: {}-{}.", target_year, tm + 1))?;
             let last_day = next_month_start
                 .pred_opt()
-                .ok_or("Invalid last day of month")?;
+                .ok_or("Invalid last day of month.")?;
             let end = last_day
                 .and_hms_micro_opt(23, 59, 59, 999_999)
-                .ok_or("Invalid end time")?;
+                .ok_or("Invalid end time.")?;
             let start_dt = tz
                 .from_local_datetime(&start)
                 .single()
-                .ok_or("Ambiguous start datetime")?;
+                .ok_or("The start datetime is ambiguous.")?;
             let end_dt = tz
                 .from_local_datetime(&end)
                 .single()
-                .ok_or("Ambiguous end datetime")?;
+                .ok_or("The end datetime is ambiguous.")?;
             Ok((start_dt, end_dt))
         }
         CalendarPeriodUnit::Week => {
@@ -799,25 +803,25 @@ fn calendar_boundaries(
             )
             .ok_or_else(|| {
                 format!(
-                    "Invalid ISO week: year={}, week={}",
+                    "Invalid ISO week: year {}, week {}.",
                     now.iso_week().year(),
                     now.iso_week().week()
                 )
             })?;
             let monday = current_monday + ChronoDuration::weeks(offset as i64);
             let sunday = monday + ChronoDuration::days(6);
-            let start = monday.and_hms_opt(0, 0, 0).ok_or("Invalid start time")?;
+            let start = monday.and_hms_opt(0, 0, 0).ok_or("Invalid start time.")?;
             let end = sunday
                 .and_hms_micro_opt(23, 59, 59, 999_999)
-                .ok_or("Invalid end time")?;
+                .ok_or("Invalid end time.")?;
             let start_dt = tz
                 .from_local_datetime(&start)
                 .single()
-                .ok_or("Ambiguous start datetime")?;
+                .ok_or("The start datetime is ambiguous.")?;
             let end_dt = tz
                 .from_local_datetime(&end)
                 .single()
-                .ok_or("Ambiguous end datetime")?;
+                .ok_or("The end datetime is ambiguous.")?;
             Ok((start_dt, end_dt))
         }
     }

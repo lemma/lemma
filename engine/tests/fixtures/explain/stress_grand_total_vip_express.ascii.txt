@@ -1,0 +1,55 @@
+grand_total: 717.5
+└─ final_before_fees + processing_fee
+   ├─ final_before_fees: 700
+   │  ├─ net_price >= free_shipping_threshold
+   │  │  └─ qualifies_for_free_shipping: true
+   │  │     └─ net_price >= free_shipping_threshold
+   │  │        ├─ net_price: 700
+   │  │        │  └─ subtotal - discount_amount
+   │  │        │     ├─ subtotal: 1000
+   │  │        │     │  └─ base_price * quantity
+   │  │        │     │     ├─ base_price: 100
+   │  │        │     │     └─ quantity: 10
+   │  │        │     └─ discount_amount: 300
+   │  │        │        └─ subtotal * combined_discount_rate
+   │  │        │           ├─ subtotal: 1000 (see above)
+   │  │        │           └─ combined_discount_rate: 30%
+   │  │        │              ├─ tier_discount_rate > measure_discount_rate
+   │  │        │              │  ├─ tier_discount_rate: 30%
+   │  │        │              │  │  └─ customer_tier is vip
+   │  │        │              │  │     └─ is_vip: true
+   │  │        │              │  │        └─ customer_tier is vip
+   │  │        │              │  │           └─ customer_tier: vip
+   │  │        │              │  └─ measure_discount_rate: 5%
+   │  │        │              │     ├─ quantity < 50
+   │  │        │              │     │  └─ quantity: 10
+   │  │        │              │     ├─ quantity < 100
+   │  │        │              │     │  └─ quantity: 10
+   │  │        │              │     └─ quantity >= 10
+   │  │        │              │        └─ quantity: 10
+   │  │        │              └─ tier_discount_rate
+   │  │        │                 └─ tier_discount_rate: 30% (see above)
+   │  │        └─ free_shipping_threshold: 500
+   │  └─ net_price - loyalty_discount
+   │     ├─ net_price: 700 (see above)
+   │     └─ loyalty_discount: 0
+   │        └─ net_price * loyalty_discount_rate
+   │           ├─ net_price: 700 (see above)
+   │           └─ loyalty_discount_rate: 0%
+   │              ├─ loyalty_points < 1000
+   │              │  └─ loyalty_points: 0
+   │              ├─ loyalty_points < 5000
+   │              │  └─ loyalty_points: 0
+   │              └─ loyalty_points < 10000
+   │                 └─ loyalty_points: 0
+   └─ processing_fee: 17.5
+      ├─ payment_method is not cash
+      │  └─ uses_cash: false
+      │     └─ payment_method is cash
+      │        └─ payment_method: credit
+      ├─ payment_method is credit
+      │  └─ uses_credit: true
+      │     └─ payment_method is credit
+      │        └─ payment_method: credit
+      └─ final_before_fees * 2.5%
+         └─ final_before_fees: 700 (see above)

@@ -161,6 +161,35 @@ rule out: r
 }
 
 #[test]
+fn ratio_bare_with_rejected_at_load() {
+    let code = r#"
+spec s
+data r: ratio -> with 0.5
+rule out: r
+"#;
+    let mut engine = Engine::new();
+    let err = engine
+        .load([(
+            lemma::SourceType::Path(std::sync::Arc::new(std::path::PathBuf::from(
+                "ratio_constraints.lemma",
+            ))),
+            code.to_string(),
+        )])
+        .expect_err("bare number with on ratio must fail");
+    let s = err
+        .errors
+        .iter()
+        .map(|e| e.to_string())
+        .collect::<Vec<_>>()
+        .join("\n")
+        .to_lowercase();
+    assert!(
+        s.contains("ratio") && (s.contains("unit") || s.contains("%") || s.contains("percent")),
+        "expected ratio unit requirement, got: {s}"
+    );
+}
+
+#[test]
 fn ratio_default_percent_loads() {
     let code = r#"
 spec s

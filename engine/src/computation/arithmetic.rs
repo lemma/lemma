@@ -443,7 +443,9 @@ pub(crate) fn scalar_arithmetic(
                     (r_val, l_val)
                 };
                 if is_divide && crate::computation::rational::rational_is_zero(r_val_ref) {
-                    return OperationResult::Veto(VetoType::computation("Division by zero"));
+                    return OperationResult::Veto(VetoType::computation(
+                        "Division by zero is not allowed.",
+                    ));
                 }
                 let raw_result = match rational_operation(
                     l_val_ref,
@@ -584,7 +586,9 @@ pub(crate) fn scalar_arithmetic(
                     if matches!(op, ArithmeticComputation::Divide)
                         && crate::computation::rational::rational_is_zero(r_val)
                     {
-                        return OperationResult::Veto(VetoType::computation("Division by zero"));
+                        return OperationResult::Veto(VetoType::computation(
+                            "Division by zero is not allowed.",
+                        ));
                     }
                     let numeric_op = match op {
                         ArithmeticComputation::Multiply => NumericOperation::Multiply,
@@ -804,8 +808,8 @@ pub(crate) enum NumberArithmeticFailure {
 impl NumberArithmeticFailure {
     pub(crate) fn message(self) -> String {
         match self {
-            Self::DivisionByZero => "Division by zero".to_string(),
-            Self::ModuloByZero => "Division by zero (modulo)".to_string(),
+            Self::DivisionByZero => "Division by zero is not allowed.".to_string(),
+            Self::ModuloByZero => "Modulo by zero is not allowed.".to_string(),
             Self::Computation(message) => message,
         }
     }

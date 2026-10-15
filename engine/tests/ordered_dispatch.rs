@@ -489,15 +489,8 @@ fn exclusive_point_lookup_mid_hit_states_only_the_winner() {
         explanation.causes
     );
     assert!(
-        explanation.causes[0].children.iter().any(|child| {
-            matches!(
-                child,
-                lemma::ExplanationNode::Data { name, result }
-                    if name.input_key() == "code"
-                        && result.result.as_deref() == Some("DE")
-            )
-        }),
-        "structured cause keeps the Data child, got {:?}",
+        explanation.causes[0].children.is_empty(),
+        "held data-vs-literal is omits restated Data child, got {:?}",
         explanation.causes[0].children
     );
     let ascii = format_explanation(explanation);

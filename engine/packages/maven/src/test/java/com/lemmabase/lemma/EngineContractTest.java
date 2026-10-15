@@ -246,7 +246,7 @@ final class EngineContractTest {
   }
 
   @Test
-  void rejectsRunDataForBoundSlot() {
+  void overridesRunDataForBoundSlot() {
     try (Engine engine = Engine.create()) {
       engine.load(
           """
@@ -259,15 +259,10 @@ final class EngineContractTest {
             -> with slot: base
           rule r: i.slot
           """);
-      LemmaException thrown =
-          assertThrows(
-              LemmaException.class,
-              () -> engine.evaluate(EvaluateRequest.of("outer").data(Map.of("i.slot", "5"))));
-      assertEquals("request", thrown.errors().get(0).kind());
-      assertEquals("i.slot", thrown.errors().get(0).relatedData());
+      Response response =
+          engine.evaluate(EvaluateRequest.of("outer").data(Map.of("i.slot", "5")));
       assertEquals(
-          "data 'i.slot' is bound to 'base' by the spec and cannot be supplied",
-          thrown.errors().get(0).message());
+          "5", ((RuleResult.Number) response.results().get("r")).number().toPlainString());
     }
   }
 

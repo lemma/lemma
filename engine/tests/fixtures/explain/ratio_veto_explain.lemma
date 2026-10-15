@@ -1,0 +1,36 @@
+spec validation
+
+data input_value: number
+
+rule validated:
+  input_value
+  unless input_value < 0
+    then veto "Negative values not allowed"
+  unless input_value > 1_000
+    then veto "Value too large"
+
+rule is_valid:
+  validated is not veto
+
+rule is_invalid:
+  validated is veto
+
+rule safe_value:
+  validated
+  unless is_invalid then 0
+
+
+spec interest
+
+data principal: number
+  -> minimum 0
+
+data annual_rate: ratio
+  -> minimum 0 percent
+  -> maximum 100 percent
+
+rule yearly_interest:
+  principal * annual_rate
+
+rule total_with_interest:
+  principal + yearly_interest

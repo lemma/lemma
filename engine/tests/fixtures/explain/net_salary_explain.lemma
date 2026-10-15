@@ -1,0 +1,153 @@
+spec net_salary 2026-01-01
+"""
+Dutch Net Salary Calculator 2026
+
+Computes net salary from gross salary, applying the 2026 Dutch
+payroll tax brackets, national insurance contributions,
+general tax credit, and employment tax credit.
+
+Covers employees and benefit recipients under state pension age.
+Based on rates from Belastingdienst (Dutch Tax Authority) 2026.
+
+Inputs:
+  gross_salary          Gross salary per chosen period (see payslip or contract).
+  pay_period            Pay period: month, 4weeks, week, quarter, year.
+  income_source         Source of income: employment or benefit.
+  pension_contribution  Employee share of pension premium per period (see payslip).
+  payroll_tax_credit    Whether tax credits are applied (yes for main/only income).
+
+Outputs:
+  net_salary              Net salary per period.
+  payroll_tax_per_period  Tax withheld per period.
+  net_annual_salary       Net annual salary.
+  gross_annual_salary     Gross annual salary.
+"""
+
+data money: measure
+  -> decimals 2
+  -> unit eur: 1.00
+  -> minimum 0 eur
+
+data pay_period: text
+  -> option "month"
+  -> option "4 week"
+  -> option "week"
+  -> option "quarter"
+  -> option "year"
+  -> help "Pay period: how often you are paid. Default is monthly."
+
+data income_source_type: text
+  -> option "employment"
+  -> option "benefit"
+
+data gross_salary: money
+  -> help "Gross salary per chosen period. Found on your payslip or in your employment contract."
+
+data income_source: income_source_type
+  -> suggest "employment"
+  -> help "Source of income: employment for employees, benefit for unemployment/disability/welfare. Employees receive the employment tax credit, benefit recipients do not."
+
+data pension_contribution: money
+  -> suggest 0 eur
+  -> help "Employee share of the pension premium per period. Found on your payslip under pension deduction. Reduces taxable salary."
+
+data payroll_tax_credit: boolean
+  -> suggest true
+  -> help "Apply payroll tax credit? Choose yes if this is your only or main income. May only be applied at one employer or benefits agency."
+
+rule periods_per_year:
+  12
+  unless pay_period is "4 week"  then 13
+  unless pay_period is "week"    then 52
+  unless pay_period is "quarter" then 4
+  unless pay_period is "year"    then 1
+
+rule gross_annual_salary:
+  gross_salary * periods_per_year
+
+rule pension_contribution_per_year:
+  pension_contribution * periods_per_year
+
+rule taxable_annual_salary:
+  gross_annual_salary - pension_contribution_per_year
+
+rule bracket_1_income:
+  taxable_annual_salary
+  unless taxable_annual_salary > 38_883 eur
+    then 38_883 eur
+
+rule bracket_1_tax:
+  bracket_1_income * 35.75%
+
+rule bracket_2_income:
+  0 eur
+  unless taxable_annual_salary > 38_883 eur
+    and taxable_annual_salary <= 78_426 eur
+    then taxable_annual_salary - 38_883 eur
+  unless taxable_annual_salary > 78_426 eur
+    then 39_543 eur
+
+rule bracket_2_tax:
+  bracket_2_income * 37.56%
+
+rule bracket_3_income:
+  0 eur
+  unless taxable_annual_salary > 78_426 eur
+    then taxable_annual_salary - 78_426 eur
+
+rule bracket_3_tax:
+  bracket_3_income * 49.5%
+
+rule payroll_tax_before_credits:
+  bracket_1_tax + bracket_2_tax + bracket_3_tax
+
+rule general_tax_credit:
+  3_115 eur
+  unless taxable_annual_salary > 29_736 eur
+    and taxable_annual_salary <= 78_426 eur
+    then 3_115 eur - (taxable_annual_salary - 29_736 eur) * 6.4%
+  unless taxable_annual_salary > 78_426 eur
+    then 0 eur
+
+rule employment_tax_credit:
+  0 eur
+  unless income_source is "employment"
+    and taxable_annual_salary > 0 eur
+    and taxable_annual_salary <= 11_965 eur
+    then taxable_annual_salary * 8.324%
+  unless income_source is "employment"
+    and taxable_annual_salary > 11_965 eur
+    and taxable_annual_salary <= 25_845 eur
+    then 996 eur + (taxable_annual_salary - 11_965 eur) * 31.009%
+  unless income_source is "employment"
+    and taxable_annual_salary > 25_845 eur
+    and taxable_annual_salary <= 45_592 eur
+    then 5_300 eur + (taxable_annual_salary - 25_845 eur) * 1.95%
+  unless income_source is "employment"
+    and taxable_annual_salary > 45_592 eur
+    and taxable_annual_salary <= 132_920 eur
+    then 5_685 eur - (taxable_annual_salary - 45_592 eur) * 6.51%
+  unless income_source is "employment"
+    and taxable_annual_salary > 132_920 eur
+    then 0 eur
+
+rule total_tax_credit:
+  0 eur
+  unless payroll_tax_credit
+    then general_tax_credit + employment_tax_credit
+
+rule payroll_tax_per_year:
+  payroll_tax_before_credits - total_tax_credit
+  unless payroll_tax_before_credits <= total_tax_credit
+    then 0 eur
+
+rule net_annual_salary:
+  gross_annual_salary
+  - pension_contribution_per_year
+  - payroll_tax_per_year
+
+rule net_salary:
+  net_annual_salary / periods_per_year
+
+rule payroll_tax_per_period:
+  payroll_tax_per_year / periods_per_year

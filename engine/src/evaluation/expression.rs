@@ -40,7 +40,7 @@ pub(crate) fn evaluate_mathematical_operator(
                 Ok(decimal) => decimal,
                 Err(crate::computation::rational::NumericFailure::Overflow) => {
                     return OperationResult::Veto(VetoType::computation(
-                        "Calculated result exceeds decimal value limit",
+                        "The calculated result exceeds the decimal value limit.",
                     ));
                 }
                 Err(failure) => {
@@ -69,7 +69,7 @@ pub(crate) fn evaluate_mathematical_operator(
                 Some(rounded) => rounded,
                 None => {
                     return OperationResult::Veto(VetoType::computation(
-                        "Mathematical operation result is undefined for this input",
+                        "This mathematical operation is undefined for the given input.",
                     ));
                 }
             };

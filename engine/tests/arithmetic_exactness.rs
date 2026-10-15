@@ -115,7 +115,7 @@ fn i128_min_intermediate_divides_without_out_of_memory() {
     assert_eq!(rule_display(&response, "data_reciprocal_negative"), "true");
 }
 
-const MAGNITUDE_LIMIT_REASON: &str = "numeric result exceeds the maximum of 32768 bits";
+const MAGNITUDE_LIMIT_REASON: &str = "The numeric result exceeds the maximum size of 32768 bits.";
 
 fn assert_magnitude_limit_veto(response: &lemma::Response, rule: &str) {
     let rule_result = response.results.get(rule).expect("rule missing");
@@ -263,7 +263,7 @@ fn repeated_squaring_across_rules_vetoes_at_magnitude_limit() {
     let r14 = response.results.get("r14").expect("r14 missing");
     assert_eq!(
         r14.veto_reason.as_deref(),
-        Some("Calculated result exceeds decimal value limit"),
+        Some("The calculated result exceeds the decimal value limit."),
         "3^16384 fits the magnitude limit and only fails decimal output"
     );
     assert_magnitude_limit_veto(&response, "r15");

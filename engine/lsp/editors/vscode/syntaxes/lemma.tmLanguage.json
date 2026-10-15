@@ -7,9 +7,6 @@
       "include": "#comments"
     },
     {
-      "include": "#type_annotations"
-    },
-    {
       "include": "#declaration-names"
     },
     {
@@ -34,39 +31,40 @@
     "keywords": {
       "patterns": [
         {
-          "match": "\\b(spec|data|with|rule)\\b",
+          "match": "(?i)\\b(spec|repo|data|rule|uses|with|meta)\\b",
           "name": "keyword.declaration.lemma"
         },
         {
-          "match": "\\b(unless|then|veto|uses|and|not|in|meta|repo|now|calendar|past|future)\\b",
+          "match": "(?i)\\b(unless|then|not|and|in|as|veto|now|past|future|calendar)\\b",
           "name": "keyword.control.lemma"
         },
         {
-          "match": "\\b(boolean|measure|number|percent|ratio|text|date|time|duration)\\b",
+          "match": "(?i)\\b(boolean|measure|number|ratio|text|date|time|range)\\b",
           "name": "storage.type.lemma"
         },
         {
-          "match": "\\b(option|minimum|maximum|lower|upper|minimal|decimals|unit|units|options|length|suggest|help|with)\\b",
+          "match": "(?i)\\b(help|suggest|with|unit|trait|minimum|maximum|lower|upper|decimals|option|options|length)\\b",
           "name": "keyword.operator.constraint.lemma"
         },
         {
-          "match": "\\b(list|key|find|first|last|sum|avg|product|count|min|max|any|all|where|sort|top|asc|desc)\\b",
+          "match": "(?i)\\b(list|key|find|first|last|sum|avg|product|count|min|max|any|all|where|sort|top|asc|desc)\\b",
           "name": "keyword.operator.constraint.lemma"
         }
       ]
     },
     "literals": {
+      "comment": "Date/unit forms are best-effort; parser is authoritative for multi-token literals.",
       "patterns": [
         {
-          "match": "\\b(true|false|yes|no)\\b",
+          "match": "(?i)\\b(true|false|yes|no)\\b",
           "name": "constant.language.lemma"
         },
         {
-          "match": "\\b\\d{4}-\\d{2}-\\d{2}(T\\d{2}:\\d{2}(:\\d{2})?([+-]\\d{2}:\\d{2}|Z)?)?\\b",
+          "match": "\\b\\d{4}-\\d{2}-\\d{2}(T\\d{2}:\\d{2}(:\\d{2}([.,]\\d+)?)?(Z|[+-]\\d{2}:\\d{2})?)?\\b",
           "name": "constant.numeric.date.lemma"
         },
         {
-          "match": "\\b\\d{2}:\\d{2}(:\\d{2})?([+-]\\d{2}:\\d{2}|Z)?\\b",
+          "match": "\\b\\d{2}:\\d{2}(:\\d{2}([.,]\\d+)?)?(Z|[+-]\\d{2}:\\d{2})?\\b",
           "name": "constant.numeric.time.lemma"
         },
         {
@@ -78,7 +76,7 @@
           "name": "constant.numeric.percent.lemma"
         },
         {
-          "match": "\\b\\d+(_\\d+)*(\\.\\d+)?([eE][+-]?\\d+)?\\s+(percent|permille)\\b",
+          "match": "(?i)\\b\\d+(_\\d+)*(\\.\\d+)?([eE][+-]?\\d+)?\\s+(percent|permille)\\b",
           "name": "constant.numeric.percent.lemma"
         },
         {
@@ -92,13 +90,7 @@
         {
           "begin": "\"",
           "end": "\"",
-          "name": "string.quoted.double.lemma",
-          "patterns": [
-            {
-              "match": "\\\\.",
-              "name": "constant.character.escape.lemma"
-            }
-          ]
+          "name": "string.quoted.double.lemma"
         }
       ]
     },
@@ -109,61 +101,36 @@
           "name": "keyword.operator.arrow.lemma"
         },
         {
-          "match": "(==|!=|>=|<=|>|<|\\bis\\s+not\\b|\\bis\\b)",
+          "match": "\\.\\.\\.",
+          "name": "keyword.operator.ellipsis.lemma"
+        },
+        {
+          "match": "%%",
+          "name": "keyword.operator.arithmetic.lemma"
+        },
+        {
+          "match": "(>=|<=|>|<|(?i)\\bis\\s+not\\b|(?i)\\bis\\b)",
           "name": "keyword.operator.comparison.lemma"
+        },
+        {
+          "match": "(?i)\\bmod\\b",
+          "name": "keyword.operator.arithmetic.lemma"
         },
         {
           "match": "[+\\-*/%^]",
           "name": "keyword.operator.arithmetic.lemma"
         },
         {
-          "match": "\\b(sqrt|sin|cos|tan|asin|acos|atan|log|exp|abs|floor|ceil|round|lower|upper)\\b",
+          "match": "(?i)\\b(sqrt|sin|cos|tan|asin|acos|atan|log|exp|abs|floor|ceil|round|lower|upper)\\b",
           "name": "support.function.math.lemma"
-        }
-      ]
-    },
-    "type_annotations": {
-      "patterns": [
-        {
-          "begin": "\\[",
-          "beginCaptures": {
-            "0": {
-              "name": "punctuation.bracket.lemma"
-            }
-          },
-          "end": "\\]",
-          "endCaptures": {
-            "0": {
-              "name": "punctuation.bracket.lemma"
-            }
-          },
-          "name": "meta.type.annotation.lemma",
-          "patterns": [
-            {
-              "include": "#comments"
-            },
-            {
-              "include": "#keywords"
-            },
-            {
-              "include": "#operators"
-            },
-            {
-              "include": "#literals"
-            },
-            {
-              "match": "\\b[a-zA-Z_][a-zA-Z0-9_]*\\b",
-              "name": "storage.type.lemma"
-            }
-          ]
         }
       ]
     },
     "declaration-names": {
       "patterns": [
         {
-          "comment": "repo @qualifier/path or repo localname — all parts colored as namespace",
-          "match": "\\b(repo)\\s+(@?[a-zA-Z_][a-zA-Z0-9_\\-.]*(?:/[a-zA-Z_][a-zA-Z0-9_\\-.]*)*)",
+          "comment": "repo @qualifier/path or repo localname \u2014 all parts colored as namespace",
+          "match": "(?i)\\b(repo)\\s+(@?[a-zA-Z_][a-zA-Z0-9_\\-.]*(?:/[a-zA-Z_][a-zA-Z0-9_\\-.]*)*)",
           "captures": {
             "1": {
               "name": "keyword.declaration.lemma"
@@ -174,8 +141,8 @@
           }
         },
         {
-          "comment": "spec name with optional effective date suffix: year, date, or full ISO datetime with microseconds and timezone",
-          "match": "\\b(spec)\\s+([a-zA-Z_][a-zA-Z0-9_-]*(?:/[a-zA-Z_][a-zA-Z0-9_-]*)*(?:\\.[a-zA-Z0-9_]+)?(?:\\s+\\d{4}(?:-\\d{2}-\\d{2}(?:T\\d{2}:\\d{2}(?::\\d{2}(?:[.,]\\d+)?)?(?:Z|[+-]\\d{2}:\\d{2})?)?)?)?)",
+          "comment": "spec name with optional effective date suffix: year, date, or full ISO datetime with fractional seconds and timezone",
+          "match": "(?i)\\b(spec)\\s+([a-zA-Z_][a-zA-Z0-9_-]*(?:/[a-zA-Z_][a-zA-Z0-9_-]*)*(?:\\.[a-zA-Z0-9_]+)?(?:\\s+\\d{4}(?:-\\d{2}-\\d{2}(?:T\\d{2}:\\d{2}(?::\\d{2}(?:[.,]\\d+)?)?(?:Z|[+-]\\d{2}:\\d{2})?)?)?)?)",
           "captures": {
             "1": {
               "name": "keyword.declaration.lemma"
@@ -186,7 +153,7 @@
           }
         },
         {
-          "match": "\\b(data)\\s+([a-zA-Z_][a-zA-Z0-9_]*(?:\\.[a-zA-Z_][a-zA-Z0-9_]*)*)\\s*:",
+          "match": "(?i)\\b(data)\\s+([a-zA-Z_][a-zA-Z0-9_]*(?:\\.[a-zA-Z_][a-zA-Z0-9_]*)*)\\s*:",
           "captures": {
             "1": {
               "name": "keyword.declaration.lemma"
@@ -197,7 +164,7 @@
           }
         },
         {
-          "match": "\\b(with)\\s+([a-zA-Z_][a-zA-Z0-9_]*(?:\\.[a-zA-Z_][a-zA-Z0-9_]*)*)\\s*:",
+          "match": "(?i)\\b(with)\\s+([a-zA-Z_][a-zA-Z0-9_]*(?:\\.[a-zA-Z_][a-zA-Z0-9_]*)*)\\s*:",
           "captures": {
             "1": {
               "name": "keyword.declaration.lemma"
@@ -208,7 +175,7 @@
           }
         },
         {
-          "match": "\\b(rule)\\s+([a-zA-Z_][a-zA-Z0-9_]*)\\s*:",
+          "match": "(?i)\\b(rule)\\s+([a-zA-Z_][a-zA-Z0-9_]*)\\s*:",
           "captures": {
             "1": {
               "name": "keyword.declaration.lemma"

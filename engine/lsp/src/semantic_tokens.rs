@@ -127,7 +127,9 @@ fn type_in_body(kind: &TokenKind) -> Option<u32> {
         | TokenKind::Sort
         | TokenKind::Top
         | TokenKind::Asc
-        | TokenKind::Desc => Some(IDX_KEYWORD),
+        | TokenKind::Desc
+        | TokenKind::Lower
+        | TokenKind::Upper => Some(IDX_KEYWORD),
 
         // Operators
         TokenKind::Plus
@@ -142,6 +144,9 @@ fn type_in_body(kind: &TokenKind) -> Option<u32> {
         | TokenKind::Gte
         | TokenKind::Lte
         | TokenKind::Arrow
+        | TokenKind::Ellipsis
+        | TokenKind::As
+        | TokenKind::Mod
         | TokenKind::Is => Some(IDX_OPERATOR),
 
         // Comment
@@ -376,6 +381,9 @@ pub fn tokenize(text: &str) -> Vec<SemanticToken> {
                         } else {
                             Some((IDX_DATA_BODY, 0))
                         }
+                    } else if matches!(tok.kind, TokenKind::Lower | TokenKind::Upper) {
+                        // Lexer keywords, not Identifier — still TypeConstraintCommand spellings.
+                        Some((IDX_KEYWORD, 0))
                     } else if tok.kind == TokenKind::Commentary {
                         Some((IDX_COMMENT, 0))
                     } else if is_type_keyword(&tok.kind) {
@@ -937,6 +945,86 @@ mod tests {
                 IDX_REFERENCE,
                 IDX_PUNCTUATION,
                 IDX_VALUE
+            ]
+        );
+    }
+
+    #[test]
+    fn as_and_mod_and_ellipsis_are_operators() {
+        assert_eq!(
+            token_types("rule r: x as number"),
+            vec![
+                IDX_DECLARATION,
+                IDX_FUNCTION,
+                IDX_PUNCTUATION,
+                IDX_REFERENCE,
+                IDX_OPERATOR,
+                IDX_KEYWORD,
+            ]
+        );
+        assert_eq!(
+            token_types("rule r: 10 mod 3"),
+            vec![
+                IDX_DECLARATION,
+                IDX_FUNCTION,
+                IDX_PUNCTUATION,
+                IDX_VALUE,
+                IDX_OPERATOR,
+                IDX_VALUE,
+            ]
+        );
+        assert_eq!(
+            token_types("rule r: 1...5"),
+            vec![
+                IDX_DECLARATION,
+                IDX_FUNCTION,
+                IDX_PUNCTUATION,
+                IDX_VALUE,
+                IDX_OPERATOR,
+                IDX_VALUE,
+            ]
+        );
+    }
+
+    #[test]
+    fn lower_and_upper_are_keywords() {
+        assert_eq!(
+            token_types("rule r: lower x"),
+            vec![
+                IDX_DECLARATION,
+                IDX_FUNCTION,
+                IDX_PUNCTUATION,
+                IDX_KEYWORD,
+                IDX_REFERENCE,
+            ]
+        );
+        assert_eq!(
+            token_types("rule r: upper x"),
+            vec![
+                IDX_DECLARATION,
+                IDX_FUNCTION,
+                IDX_PUNCTUATION,
+                IDX_KEYWORD,
+                IDX_REFERENCE,
+            ]
+        );
+    }
+
+    #[test]
+    fn data_constraint_lower_upper_are_keywords() {
+        assert_eq!(
+            token_types("data x: number -> lower 0 -> upper 10"),
+            vec![
+                IDX_DECLARATION,
+                IDX_PROPERTY,
+                IDX_PUNCTUATION,
+                IDX_KEYWORD,
+                IDX_OPERATOR,
+                IDX_KEYWORD,
+                IDX_DATA_BODY,
+                IDX_OPERATOR,
+                IDX_KEYWORD,
+                IDX_DATA_BODY,
             ]
         );
     }

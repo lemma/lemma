@@ -1,0 +1,7 @@
+is_probation_complete: true
+└─ current_date > probation_end_date
+   ├─ current_date: 2024-07-01
+   └─ probation_end_date: 2024-05-30T00:00:00Z
+      └─ hire_date + probation_period
+         ├─ hire_date: 2024-03-01
+         └─ probation_period: 90 day

@@ -11,7 +11,7 @@ cargo install cargo-fuzz
 
 ## Run like CI
 
-CI runs the full gate then 30 minutes of fuzz total (split evenly across targets):
+CI runs the full gate then 5 minutes of fuzz total (split evenly across targets):
 
 ```bash
 cargo precommit --fuzz

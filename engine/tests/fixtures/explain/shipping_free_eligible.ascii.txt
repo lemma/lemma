@@ -1,0 +1,8 @@
+final_shipping: 0
+└─ free_shipping_eligible
+   └─ free_shipping_eligible: true
+      └─ order_total >= 100 and destination_country is NL
+         ├─ order_total >= 100
+         │  └─ order_total: 150
+         └─ destination_country is NL
+            └─ destination_country: NL

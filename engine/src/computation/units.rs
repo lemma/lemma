@@ -6,8 +6,8 @@ use crate::computation::rational::{
 };
 use crate::parsing::ast::PrimitiveKind;
 use crate::planning::semantics::{
-    calendar_unit_factor, primitive_number_arc, BoundValueKind, LemmaType, LiteralValue,
-    SemanticConversionTarget, TypeSpecification, TypedLiteral, ValueKind,
+    calendar_unit_factor, primitive_number_arc, semantic_date_as_time, BoundValueKind, LemmaType,
+    LiteralValue, SemanticConversionTarget, TypeSpecification, TypedLiteral, ValueKind,
 };
 use std::sync::Arc;
 
@@ -24,6 +24,7 @@ pub fn convert_unit(
         SemanticConversionTarget::Type(PrimitiveKind::Text) => OperationResult::from_literal(
             LiteralValue::text(value.to_literal().display_value_with_type(value_type)),
         ),
+        SemanticConversionTarget::Type(PrimitiveKind::Time) => cast_to_time(&value.value),
         SemanticConversionTarget::Type(PrimitiveKind::Boolean) => {
             if value_type.is_boolean() {
                 OperationResult::from_bound(value.clone())
@@ -91,6 +92,19 @@ fn same_primitive_kind(value_type: &LemmaType, target: PrimitiveKind) -> bool {
             | (PrimitiveKind::Ratio, TypeSpecification::Ratio { .. })
             | (PrimitiveKind::Measure, TypeSpecification::Measure { .. })
     )
+}
+
+fn cast_to_time(value: &ValueKind) -> OperationResult {
+    match value {
+        ValueKind::Time(_) => OperationResult::from_bound(BoundValueKind::unbound(value.clone())),
+        ValueKind::Date(date) => {
+            OperationResult::from_literal(LiteralValue::time(semantic_date_as_time(date)))
+        }
+        other => unreachable!(
+            "BUG: time cast from {:?} should be rejected at planning",
+            other
+        ),
+    }
 }
 
 fn cast_to_unit(

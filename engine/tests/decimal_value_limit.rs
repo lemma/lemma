@@ -63,7 +63,7 @@ rule over_limit: max_val * two
     assert!(rule.vetoed);
     assert_eq!(
         rule.veto_reason.as_deref(),
-        Some("Calculated result exceeds decimal value limit")
+        Some("The calculated result exceeds the decimal value limit.")
     );
 }
 
@@ -93,7 +93,7 @@ fn magnitude_overflow_intermediate_stored_exactly_explain_result_not_vetoed() {
     );
     assert_eq!(
         huge.veto_reason.as_deref(),
-        Some("Calculated result exceeds decimal value limit")
+        Some("The calculated result exceeds the decimal value limit.")
     );
 
     let explanation = huge.explanation.as_ref().expect("huge explanation");
@@ -103,7 +103,7 @@ fn magnitude_overflow_intermediate_stored_exactly_explain_result_not_vetoed() {
     );
     assert_eq!(
         serde_json::to_value(explanation).unwrap()["result"].as_str(),
-        Some("Calculated result exceeds decimal value limit"),
+        Some("The calculated result exceeds the decimal value limit."),
         "explanation result must be the same computation veto text as the response"
     );
 }
@@ -131,7 +131,7 @@ fn magnitude_overflow_boundary_full_eval_huge_vetoes_safe_succeeds() {
     assert!(huge.vetoed);
     assert_eq!(
         huge.veto_reason.as_deref(),
-        Some("Calculated result exceeds decimal value limit")
+        Some("The calculated result exceeds the decimal value limit.")
     );
 
     let safe = response.results.get("safe").expect("safe");

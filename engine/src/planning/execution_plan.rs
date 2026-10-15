@@ -1704,16 +1704,7 @@ fn overlay_literal_for(
     plan: &ExecutionPlan,
     path: &DataPath,
 ) -> Option<crate::planning::semantics::BoundValueKind> {
-    let first = path.segments.first()?;
-    let import_marker = DataPath::local(first.uses.clone());
-    let DataDefinition::Import { overlay, .. } = plan.data.get(&import_marker)? else {
-        return None;
-    };
-    let relative = DataPath {
-        segments: path.segments[1..].to_vec(),
-        data: path.data.clone(),
-    };
-    match overlay.get(&relative)? {
+    match plan.import_overlay_entry(path)? {
         ImportOverlay::Literal(bound) => Some(bound.clone()),
         ImportOverlay::Reference { .. } => None,
     }
@@ -2665,8 +2656,16 @@ impl ExecutionPlan {
     }
 
     /// Needs of reading `path` on this plan (local slot or named-`uses` member).
+    ///
+    /// A nested path bound by `ImportOverlay::Reference` also marks itself so Show
+    /// lists the LHS as an optional evaluate override, while still needing the wire
+    /// source through [`Self::reference_end_of`].
     pub(crate) fn data_read_needs(&self, path: &DataPath) -> Vec<ImportNeed> {
-        needs_of_end(self, self.reference_end_of(path))
+        let mut needs = needs_of_end(self, self.reference_end_of(path));
+        if self.import_overlay_reference_target(path).is_some() {
+            needs.push(ImportNeed::Data(path.clone()));
+        }
+        needs
     }
 
     /// [`ReferenceEnd`] of any data path on this plan: local slots by definition and
@@ -2699,19 +2698,51 @@ impl ExecutionPlan {
 
     /// Whether a site overlay on a leading Import hop binds `path`'s relative member.
     pub(crate) fn import_overlay_binds(&self, path: &DataPath) -> bool {
-        let mut hops = path.segments.iter();
-        let Some(first) = hops.next() else {
-            return false;
-        };
-        let import_marker = DataPath::local(first.uses.clone());
-        let Some(DataDefinition::Import { overlay, .. }) = self.data.get(&import_marker) else {
-            return false;
-        };
-        let relative = DataPath {
-            segments: hops.cloned().collect(),
-            data: path.data.clone(),
-        };
-        overlay.contains_key(&relative)
+        self.import_overlay_entry(path).is_some()
+    }
+
+    /// Site overlay entry for `path` walking named `uses` hops (outermost hit wins).
+    pub(crate) fn import_overlay_entry(&self, path: &DataPath) -> Option<&ImportOverlay> {
+        let mut plan: &ExecutionPlan = self;
+        let mut path = path.clone();
+        loop {
+            let mut hops = path.segments.iter();
+            let first = hops.next()?;
+            let import_marker = DataPath::local(first.uses.clone());
+            let Some(DataDefinition::Import {
+                identity, overlay, ..
+            }) = plan.data.get(&import_marker)
+            else {
+                return None;
+            };
+            let relative = DataPath {
+                segments: hops.cloned().collect(),
+                data: path.data.clone(),
+            };
+            if let Some(entry) = overlay.get(&relative) {
+                return Some(entry);
+            }
+            if relative.segments.is_empty() {
+                return None;
+            }
+            plan = plan.row_template(identity);
+            path = relative;
+        }
+    }
+
+    /// Wire target input key when `path` is bound by `ImportOverlay::Reference`.
+    pub(crate) fn import_overlay_reference_target(&self, path: &DataPath) -> Option<String> {
+        match self.import_overlay_entry(path)? {
+            ImportOverlay::Reference {
+                target: ReferenceTarget::Data(target),
+                ..
+            } => Some(target.input_key()),
+            ImportOverlay::Reference {
+                target: ReferenceTarget::Rule(target),
+                ..
+            } => Some(target.input_key()),
+            ImportOverlay::Literal(_) => None,
+        }
     }
 
     /// Validate caller-requested rule names and return resolved [`RulePath`]s.
@@ -3249,30 +3280,30 @@ fn validate_scalar_against_type(
             if let Some(d) = decimals {
                 if exceeds_decimal_places(n, *d) {
                     return Err(format!(
-                        "{} exceeds decimals constraint {d}",
+                        "{} exceeds the decimals constraint of {d}.",
                         n.display_str()
                     ));
                 }
             }
             if let Some(min) = minimum {
-                if n.try_cmp(min)
-                    .map_err(|failure| format!("minimum bound compare failed: {failure}"))?
-                    == Ordering::Less
+                if n.try_cmp(min).map_err(|failure| {
+                    format!("Comparing against the minimum bound failed: {failure}.")
+                })? == Ordering::Less
                 {
                     return Err(format!(
-                        "{} is below minimum {}",
+                        "{} is below the minimum of {}.",
                         format_rational_for_validation_message(expected_type, n),
                         format_rational_for_validation_message(expected_type, min)
                     ));
                 }
             }
             if let Some(max) = maximum {
-                if n.try_cmp(max)
-                    .map_err(|failure| format!("maximum bound compare failed: {failure}"))?
-                    == Ordering::Greater
+                if n.try_cmp(max).map_err(|failure| {
+                    format!("Comparing against the maximum bound failed: {failure}.")
+                })? == Ordering::Greater
                 {
                     return Err(format!(
-                        "{} is above maximum {}",
+                        "{} is above the maximum of {}.",
                         format_rational_for_validation_message(expected_type, n),
                         format_rational_for_validation_message(expected_type, max)
                     ));
@@ -3304,19 +3335,19 @@ fn validate_scalar_against_type(
                 })
                 .ok_or_else(|| {
                     format!(
-                        "measure type '{}' has no declared units for validation",
+                        "Measure type '{}' has no declared units for validation.",
                         expected_type.name()
                     )
                 })?;
             let measure_unit = units.get(unit)?;
             let factor = &measure_unit.factor;
             let in_unit = checked_div(magnitude, factor).map_err(|failure| {
-                format!("cannot de-canonicalize measure for validation: {failure}")
+                format!("Cannot de-canonicalize the measure for validation: {failure}.")
             })?;
             if let Some(d) = decimals {
                 if exceeds_decimal_places(&in_unit, *d) {
                     return Err(format!(
-                        "{} {unit} exceeds decimals constraint {d}",
+                        "{} {unit} exceeds the decimals constraint of {d}.",
                         in_unit.display_str()
                     ));
                 }
@@ -3329,13 +3360,12 @@ fn validate_scalar_against_type(
                     expected_type.name().as_str(),
                     "minimum",
                 )?;
-                if magnitude
-                    .try_cmp(&canonical_min)
-                    .map_err(|failure| format!("minimum bound compare failed: {failure}"))?
-                    == Ordering::Less
+                if magnitude.try_cmp(&canonical_min).map_err(|failure| {
+                    format!("Comparing against the minimum bound failed: {failure}.")
+                })? == Ordering::Less
                 {
                     let min_in_unit = checked_div(&canonical_min, factor).map_err(|failure| {
-                        format!("cannot de-canonicalize minimum for validation: {failure}")
+                        format!("Cannot de-canonicalize the minimum for validation: {failure}.")
                     })?;
                     let value_display = format!(
                         "{} {}",
@@ -3347,7 +3377,9 @@ fn validate_scalar_against_type(
                         format_rational_for_validation_message(expected_type, &min_in_unit),
                         measure_unit.name
                     );
-                    return Err(format!("{value_display} is below minimum {bound_display}"));
+                    return Err(format!(
+                        "{value_display} is below the minimum of {bound_display}."
+                    ));
                 }
             }
             if let Some(bound) = maximum {
@@ -3358,13 +3390,12 @@ fn validate_scalar_against_type(
                     expected_type.name().as_str(),
                     "maximum",
                 )?;
-                if magnitude
-                    .try_cmp(&canonical_max)
-                    .map_err(|failure| format!("maximum bound compare failed: {failure}"))?
-                    == Ordering::Greater
+                if magnitude.try_cmp(&canonical_max).map_err(|failure| {
+                    format!("Comparing against the maximum bound failed: {failure}.")
+                })? == Ordering::Greater
                 {
                     let max_in_unit = checked_div(&canonical_max, factor).map_err(|failure| {
-                        format!("cannot de-canonicalize maximum for validation: {failure}")
+                        format!("Cannot de-canonicalize the maximum for validation: {failure}.")
                     })?;
                     let value_display = format!(
                         "{} {}",
@@ -3376,7 +3407,9 @@ fn validate_scalar_against_type(
                         format_rational_for_validation_message(expected_type, &max_in_unit),
                         measure_unit.name
                     );
-                    return Err(format!("{value_display} is above maximum {bound_display}"));
+                    return Err(format!(
+                        "{value_display} is above the maximum of {bound_display}."
+                    ));
                 }
             }
             Ok(())
@@ -3391,14 +3424,14 @@ fn validate_scalar_against_type(
             if let Some(exact) = length {
                 if len != *exact {
                     return Err(format!(
-                        "'{}' has length {} but required length is {}",
+                        "'{}' has length {}, but the required length is {}.",
                         s, len, exact
                     ));
                 }
             }
             if !options.is_empty() && !options.iter().any(|opt| opt == s) {
                 return Err(format!(
-                    "'{}' is not in allowed options: {}",
+                    "'{}' is not one of the allowed options: {}.",
                     s,
                     options.join(", ")
                 ));
@@ -3432,15 +3465,15 @@ fn validate_scalar_against_type(
                 };
                 if exceeds_decimal_places(&magnitude_for_decimals, *d) {
                     return Err(format!(
-                        "{} exceeds decimals constraint {d}",
+                        "{} exceeds the decimals constraint of {d}.",
                         magnitude_for_decimals.display_str()
                     ));
                 }
             }
             if let Some(type_minimum) = minimum {
-                if r.try_cmp(type_minimum)
-                    .map_err(|failure| format!("minimum bound compare failed: {failure}"))?
-                    == Ordering::Less
+                if r.try_cmp(type_minimum).map_err(|failure| {
+                    format!("Comparing against the minimum bound failed: {failure}.")
+                })? == Ordering::Less
                 {
                     let message = match primary_unit {
                         Some(unit) => {
@@ -3451,7 +3484,7 @@ fn validate_scalar_against_type(
                                 "BUG: RatioUnit.minimum missing after type minimum set by sync_ratio_units_from_canonical",
                             );
                             format!(
-                                "{} {unit} is below minimum {} {unit}",
+                                "{} {unit} is below the minimum of {} {unit}.",
                                 format_rational_for_validation_message(
                                     expected_type,
                                     &value_per_unit
@@ -3463,7 +3496,7 @@ fn validate_scalar_against_type(
                             )
                         }
                         None => format!(
-                            "{} is below minimum {}",
+                            "{} is below the minimum of {}.",
                             format_rational_for_validation_message(expected_type, r),
                             format_rational_for_validation_message(expected_type, type_minimum),
                         ),
@@ -3472,9 +3505,9 @@ fn validate_scalar_against_type(
                 }
             }
             if let Some(type_maximum) = maximum {
-                if r.try_cmp(type_maximum)
-                    .map_err(|failure| format!("maximum bound compare failed: {failure}"))?
-                    == Ordering::Greater
+                if r.try_cmp(type_maximum).map_err(|failure| {
+                    format!("Comparing against the maximum bound failed: {failure}.")
+                })? == Ordering::Greater
                 {
                     let message = match primary_unit {
                         Some(unit) => {
@@ -3485,7 +3518,7 @@ fn validate_scalar_against_type(
                                 "BUG: RatioUnit.maximum missing after type maximum set by sync_ratio_units_from_canonical",
                             );
                             format!(
-                                "{} {unit} is above maximum {} {unit}",
+                                "{} {unit} is above the maximum of {} {unit}.",
                                 format_rational_for_validation_message(
                                     expected_type,
                                     &value_per_unit
@@ -3497,57 +3530,12 @@ fn validate_scalar_against_type(
                             )
                         }
                         None => format!(
-                            "{} is above maximum {}",
+                            "{} is above the maximum of {}.",
                             format_rational_for_validation_message(expected_type, r),
                             format_rational_for_validation_message(expected_type, type_maximum),
                         ),
                     };
                     return Err(message);
-                }
-            }
-            Ok(())
-        }
-        (
-            TypeSpecification::Ratio {
-                minimum,
-                maximum,
-                decimals,
-                units: _,
-                ..
-            },
-            ValueKind::Number(n),
-        ) => {
-            use std::cmp::Ordering;
-            if let Some(d) = decimals {
-                if exceeds_decimal_places(n, *d) {
-                    return Err(format!(
-                        "{} exceeds decimals constraint {d}",
-                        n.display_str()
-                    ));
-                }
-            }
-            if let Some(type_minimum) = minimum {
-                if n.try_cmp(type_minimum)
-                    .map_err(|failure| format!("minimum bound compare failed: {failure}"))?
-                    == Ordering::Less
-                {
-                    return Err(format!(
-                        "{} is below minimum {}",
-                        format_rational_for_validation_message(expected_type, n),
-                        format_rational_for_validation_message(expected_type, type_minimum)
-                    ));
-                }
-            }
-            if let Some(type_maximum) = maximum {
-                if n.try_cmp(type_maximum)
-                    .map_err(|failure| format!("maximum bound compare failed: {failure}"))?
-                    == Ordering::Greater
-                {
-                    return Err(format!(
-                        "{} is above maximum {}",
-                        format_rational_for_validation_message(expected_type, n),
-                        format_rational_for_validation_message(expected_type, type_maximum)
-                    ));
                 }
             }
             Ok(())
@@ -3563,13 +3551,13 @@ fn validate_scalar_against_type(
             if let Some(min) = minimum {
                 let min_sem = date_time_to_semantic(min);
                 if compare_semantic_dates(dt, &min_sem) == Ordering::Less {
-                    return Err(format!("{} is below minimum {}", dt, min));
+                    return Err(format!("{} is below the minimum of {}.", dt, min));
                 }
             }
             if let Some(max) = maximum {
                 let max_sem = date_time_to_semantic(max);
                 if compare_semantic_dates(dt, &max_sem) == Ordering::Greater {
-                    return Err(format!("{} is above maximum {}", dt, max));
+                    return Err(format!("{} is above the maximum of {}.", dt, max));
                 }
             }
             Ok(())
@@ -3585,13 +3573,13 @@ fn validate_scalar_against_type(
             if let Some(min) = minimum {
                 let min_sem = time_to_semantic(min);
                 if compare_semantic_times(t, &min_sem) == Ordering::Less {
-                    return Err(format!("{} is below minimum {}", t, min));
+                    return Err(format!("{} is below the minimum of {}.", t, min));
                 }
             }
             if let Some(max) = maximum {
                 let max_sem = time_to_semantic(max);
                 if compare_semantic_times(t, &max_sem) == Ordering::Greater {
-                    return Err(format!("{} is above maximum {}", t, max));
+                    return Err(format!("{} is above the maximum of {}.", t, max));
                 }
             }
             Ok(())
@@ -3658,22 +3646,22 @@ fn validate_range_literal(
     let ordering = match (&left.value, &right.value) {
         (ValueKind::Number(l), ValueKind::Number(r)) => l
             .try_cmp(r)
-            .map_err(|failure| format!("range endpoint compare failed: {failure}"))?,
+            .map_err(|failure| format!("Comparing range endpoints failed: {failure}."))?,
         (ValueKind::Date(l), ValueKind::Date(r)) => compare_semantic_dates(l, r),
         (ValueKind::Time(l), ValueKind::Time(r)) => compare_semantic_times(l, r),
         (ValueKind::Ratio(l), ValueKind::Ratio(r)) => l
             .try_cmp(r)
-            .map_err(|failure| format!("range endpoint compare failed: {failure}"))?,
+            .map_err(|failure| format!("Comparing range endpoints failed: {failure}."))?,
         (ValueKind::Measure(l), ValueKind::Measure(r)) => l
             .try_cmp(r)
-            .map_err(|failure| format!("range endpoint compare failed: {failure}"))?,
+            .map_err(|failure| format!("Comparing range endpoints failed: {failure}."))?,
         (left_kind, right_kind) => unreachable!(
             "BUG: range endpoints have mismatched value kinds after typing: {left_kind:?} vs {right_kind:?}"
         ),
     };
     if ordering == Ordering::Greater {
         return Err(format!(
-            "range left endpoint {} is above right endpoint {}",
+            "The range left endpoint {} is above the right endpoint {}.",
             left.display_value(),
             right.display_value()
         ));
@@ -3708,7 +3696,10 @@ fn validate_range_literal(
                     &LiteralValue::number(min_w.clone()),
                     crate::planning::semantics::primitive_number_arc(),
                     ComparisonComputation::GreaterThanOrEqual,
-                    format!("span is below minimum width {}", min_w.display_str()),
+                    format!(
+                        "The span is below the minimum width of {}.",
+                        min_w.display_str()
+                    ),
                 )?;
             }
             if let Some(max_w) = maximum {
@@ -3716,7 +3707,10 @@ fn validate_range_literal(
                     &LiteralValue::number(max_w.clone()),
                     crate::planning::semantics::primitive_number_arc(),
                     ComparisonComputation::LessThanOrEqual,
-                    format!("span is above maximum width {}", max_w.display_str()),
+                    format!(
+                        "The span is above the maximum width of {}.",
+                        max_w.display_str()
+                    ),
                 )?;
             }
         }
@@ -3728,7 +3722,10 @@ fn validate_range_literal(
                     &LiteralValue::ratio(min_w.clone()),
                     crate::planning::semantics::primitive_ratio_arc(),
                     ComparisonComputation::GreaterThanOrEqual,
-                    format!("span is below minimum width {}", min_w.display_str()),
+                    format!(
+                        "The span is below the minimum width of {}.",
+                        min_w.display_str()
+                    ),
                 )?;
             }
             if let Some(max_w) = maximum {
@@ -3736,7 +3733,10 @@ fn validate_range_literal(
                     &LiteralValue::ratio(max_w.clone()),
                     crate::planning::semantics::primitive_ratio_arc(),
                     ComparisonComputation::LessThanOrEqual,
-                    format!("span is above maximum width {}", max_w.display_str()),
+                    format!(
+                        "The span is above the maximum width of {}.",
+                        max_w.display_str()
+                    ),
                 )?;
             }
         }
@@ -3756,7 +3756,7 @@ fn validate_range_literal(
                     &element_type,
                     ComparisonComputation::GreaterThanOrEqual,
                     format!(
-                        "span is below minimum width {} {}",
+                        "The span is below the minimum width of {} {}.",
                         min_w.0.display_str(),
                         min_w.1
                     ),
@@ -3772,7 +3772,7 @@ fn validate_range_literal(
                     &element_type,
                     ComparisonComputation::LessThanOrEqual,
                     format!(
-                        "span is above maximum width {} {}",
+                        "The span is above the maximum width of {} {}.",
                         max_w.0.display_str(),
                         max_w.1
                     ),
@@ -3786,39 +3786,41 @@ fn validate_range_literal(
             minimum, maximum, ..
         } => {
             let allow_calendar = matches!(range_spec, TypeSpecification::DateRange { .. });
-            let resolve_bound =
-                |bound: &(crate::computation::rational::RationalInteger, String),
-                 command: &str|
-                 -> Result<(LiteralValue, Arc<LemmaType>), String> {
-                    let (bare, owner) = unit_index
-                        .resolve(bound.1.as_str())
-                        .map_err(|err| format!("{command} width unit '{}': {err}", bound.1))?;
-                    if allow_calendar {
-                        if !owner.is_duration_like() && !owner.is_calendar_like() {
-                            return Err(format!(
-                                "{command} width unit '{bare}' must be a duration or calendar unit",
+            let resolve_bound = |bound: &(
+                crate::computation::rational::RationalInteger,
+                String,
+            ),
+                                 command: &str|
+             -> Result<(LiteralValue, Arc<LemmaType>), String> {
+                let (bare, owner) = unit_index
+                    .resolve(bound.1.as_str())
+                    .map_err(|err| format!("{command} width unit '{}': {err}", bound.1))?;
+                if allow_calendar {
+                    if !owner.is_duration_like() && !owner.is_calendar_like() {
+                        return Err(format!(
+                                "The {command} width unit '{bare}' must be a duration or calendar unit.",
                             ));
-                        }
-                    } else if !owner.is_duration_like() {
-                        return Err(format!(
-                            "{command} width unit '{bare}' must be a duration unit",
-                        ));
                     }
-                    let TypeSpecification::Measure { units, .. } = &owner.specifications else {
-                        return Err(format!(
-                            "{command} width unit '{bare}' must resolve to a measure type",
-                        ));
-                    };
-                    let type_name = owner.name();
-                    let canonical = measure_declared_bound_to_canonical(
-                        &bound.0,
-                        &bare,
-                        units,
-                        type_name.as_str(),
-                        command,
-                    )?;
-                    Ok((LiteralValue::measure(canonical), Arc::clone(&owner)))
+                } else if !owner.is_duration_like() {
+                    return Err(format!(
+                        "The {command} width unit '{bare}' must be a duration unit.",
+                    ));
+                }
+                let TypeSpecification::Measure { units, .. } = &owner.specifications else {
+                    return Err(format!(
+                        "The {command} width unit '{bare}' must resolve to a measure type.",
+                    ));
                 };
+                let type_name = owner.name();
+                let canonical = measure_declared_bound_to_canonical(
+                    &bound.0,
+                    &bare,
+                    units,
+                    type_name.as_str(),
+                    command,
+                )?;
+                Ok((LiteralValue::measure(canonical), Arc::clone(&owner)))
+            };
             if let Some(min_w) = minimum {
                 let (bound, bound_type) = resolve_bound(min_w, "minimum")?;
                 compare_width(
@@ -3826,7 +3828,7 @@ fn validate_range_literal(
                     &bound_type,
                     ComparisonComputation::GreaterThanOrEqual,
                     format!(
-                        "span is below minimum width {} {}",
+                        "The span is below the minimum width of {} {}.",
                         min_w.0.display_str(),
                         min_w.1
                     ),
@@ -3839,7 +3841,7 @@ fn validate_range_literal(
                     &bound_type,
                     ComparisonComputation::LessThanOrEqual,
                     format!(
-                        "span is above maximum width {} {}",
+                        "The span is above the maximum width of {} {}.",
                         max_w.0.display_str(),
                         max_w.1
                     ),

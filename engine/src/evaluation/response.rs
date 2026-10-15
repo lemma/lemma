@@ -1178,10 +1178,13 @@ mod tests {
             RuleResultValueFailure::OutOfMemory,
             Vec::new(),
         );
-        assert_eq!(result.veto_reason.as_deref(), Some("out of memory"));
+        assert_eq!(
+            result.veto_reason.as_deref(),
+            Some("The calculation ran out of memory.")
+        );
         assert_ne!(
             result.veto_reason.as_deref(),
-            Some("Calculated result exceeds decimal value limit")
+            Some("The calculated result exceeds the decimal value limit.")
         );
     }
 
@@ -1196,7 +1199,7 @@ mod tests {
         );
         assert_eq!(
             result.veto_reason.as_deref(),
-            Some("Calculated result exceeds decimal value limit")
+            Some("The calculated result exceeds the decimal value limit.")
         );
     }
 

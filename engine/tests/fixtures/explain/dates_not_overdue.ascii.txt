@@ -1,0 +1,8 @@
+is_overdue: false
+└─ days_until_deadline < 0 day
+   └─ days_until_deadline: 30.29166666666666666666666666 day
+      └─ current_date...project_deadline as day
+         ├─ 2024-11-01 − 2024-10-01T17:00:00Z = 2617200
+         └─ current_date...project_deadline
+            ├─ current_date: 2024-11-01
+            └─ project_deadline: 2024-10-01T17:00:00Z

@@ -201,8 +201,7 @@ rule total: price
         assert!(total.vetoed, "empty price must veto total");
         let reason = total.veto_reason.as_deref().expect("veto reason");
         assert!(
-            reason.contains("Data price [mass]:")
-                && reason.to_lowercase().contains("cannot be empty"),
+            reason.contains("Data price [mass] cannot be empty."),
             "empty measure veto must name field and type, got: {reason}"
         );
         assert!(
@@ -240,7 +239,7 @@ rule doubled: age * 2
     assert!(doubled.vetoed, "empty age must veto doubled");
     let reason = doubled.veto_reason.as_deref().expect("veto reason");
     assert!(
-        reason.contains("Data age [number]:") && reason.to_lowercase().contains("cannot be empty"),
+        reason.contains("Data age [number] cannot be empty."),
         "empty number veto must name field and type, got: {reason}"
     );
     assert!(

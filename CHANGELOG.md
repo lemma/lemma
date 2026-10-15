@@ -2,6 +2,23 @@
 
 Releases cover the Lemma engine, `lemma` CLI, OpenAPI crate, LSP, SDKs and VS Code extension. They all follow the same version everywhere. The release version is `[workspace.package] version` in the root `Cargo.toml`. Git tags follow `lemma-v{version}` (for example `lemma-v0.8.20`); releases before the rename used `cli-v{version}`. Draft notes for the next version quickly by running `cargo changelog` to print `git diff` / `git log` since the latest release tag (`xtask` `versions-diff`). Tip: feed that into an LLM to create a summary for this changelog.
 
+## [0.10.1] - 2026-10-15
+
+VS Code publish and highlighting, .NET NuGet SDK, overridable `uses` wire bindings, and clearer `--explain` narration.
+
+### Added
+
+- **VS Code extension publishes on release again**: Marketplace and Open VSX jobs run after a successful release when the version changed.
+- **.NET NuGet SDK (`Lemmabase.Lemma.Engine`)**: UniFFI `lemma_dotnet` native, C# host over serde JSON, `dotnet test` in precommit, and NuGet.org publish on release (OIDC login).
+
+### Changed
+
+- **[breaking] Reference `-> with` on `uses` is overridable again**: evaluate data for a nested key bound by `uses i: inner -> with x: base` (or a rule) overrides the wire, like a literal default. Show lists the nested key as optional (`x-lemma-value.reference` names the wire source).
+- **VS Code / TextMate highlighting matches current Lemma**: case-insensitive keywords; `mod`, `%%`, `as`, `range`, `trait`, and `...`; fractional seconds on date/time literals; obsolete `[...]` type-annotation coloring and `==` / `!=` scopes removed; `[]` auto-close dropped from language config.
+- **`--explain` narration is tighter**: held `and` / `is` causes stop at rule refs and omit restated data-vs-literal bindings; not-taken `is` keeps the actual value; imported rule bodies show the underlying expression.
+- **Show `description` is author help only**: text, date, and time properties no longer append engine format notes.
+- **CI fuzz budget is 5 minutes**: `cargo precommit --fuzz` splits 5 minutes across `engine/fuzz` targets (was 30).
+
 ## [0.10.0] - 2026-10-13
 
 Lists, Show as a JSON Schema for evaluation data, exact-arithmetic hardening, and the `run` API has been renamed to `evaluate`.

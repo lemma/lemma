@@ -46,7 +46,7 @@ pub fn measure_magnitude_math(
     let signature = lemma_type.measure_runtime_signature();
     if signature.len() != 1 || signature[0].1 != 1 {
         return OperationResult::Veto(VetoType::computation(format!(
-            "Cannot apply '{op}' to measure with compound unit; convert with `as <unit>` first"
+            "Cannot apply '{op}' to a measure with a compound unit; convert with `as <unit>` first."
         )));
     }
     let unit_name = signature[0].0.clone();

@@ -945,7 +945,7 @@ rule main: missing_flag and (base > 0)
     );
     assert_eq!(
         main.veto_reason.as_deref(),
-        Some("Missing data: missing_flag"),
+        Some("Required data 'missing_flag' was not provided."),
         "And result must stay MissingData-shaped, not settle on no rate alone: {:?}",
         main.veto_reason
     );
@@ -1643,7 +1643,7 @@ rule name: prev.name
     assert!(name.vetoed, "unbound code must veto name");
     let reason = name.veto_reason.as_deref().expect("veto reason");
     assert!(
-        reason.contains("Missing data: code"),
+        reason.contains("Required data 'code'"),
         "veto must name promptable input key 'code', not internal reference path; got: {reason}"
     );
     assert!(

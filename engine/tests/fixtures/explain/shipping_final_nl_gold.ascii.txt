@@ -1,0 +1,26 @@
+final_shipping: 17.6
+├─ order_total < 100
+│  └─ order_total: 50
+└─ shipping_before_discount - shipping_discount_amount
+   ├─ shipping_before_discount: 22
+   │  └─ base_shipping_rate + weight_surcharge + po_box_fee + expedited_fee + hazardous_fee
+   │     ├─ base_shipping_rate: 22
+   │     │  └─ destination_country is NL
+   │     ├─ weight_surcharge: 0
+   │     │  ├─ item_weight <= 5
+   │     │  │  └─ item_weight: 2
+   │     │  └─ item_weight <= 20
+   │     │     └─ item_weight: 2
+   │     ├─ po_box_fee: 0
+   │     │  └─ is_po_box is false
+   │     ├─ expedited_fee: 0
+   │     │  ├─ is_expedited is false
+   │     │  └─ is_expedited is false
+   │     └─ hazardous_fee: 0
+   │        ├─ is_hazardous is false
+   │        └─ is_hazardous is false
+   └─ shipping_discount_amount: 4.4
+      └─ shipping_before_discount * customer_discount
+         ├─ shipping_before_discount: 22 (see above)
+         └─ customer_discount: 20%
+            └─ customer_tier is gold

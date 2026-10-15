@@ -126,7 +126,7 @@ rule huge: 10 ^ 100
     );
     assert_eq!(
         result.veto_reason.as_deref(),
-        Some("Calculated result exceeds decimal value limit")
+        Some("The calculated result exceeds the decimal value limit.")
     );
 
     let explanation = result.explanation.as_ref().expect("explanation built");
@@ -136,7 +136,7 @@ rule huge: 10 ^ 100
     );
     assert_eq!(
         serde_json::to_value(explanation).unwrap()["result"].as_str(),
-        Some("Calculated result exceeds decimal value limit"),
+        Some("The calculated result exceeds the decimal value limit."),
         "explanation result must match the RuleResult veto reason"
     );
 }

@@ -46,8 +46,8 @@ LLVM version: 21.1.3
 
 ## Test run
 
-- Total: 293
-- Passed: 293
+- Total: 300
+- Passed: 300
 - Skipped: 0
 - Failed: 0
 
@@ -74,4 +74,4 @@ Sorted by line coverage ascending (weakest first). Only files under `src/` for t
 - [CLI integration test catalog](../../../cli/tests/README.md)
 - [Engine test coverage](engine.md)
 - [CLI benchmarks](../benchmarks/cli.md)
-<!-- coverage-input-digest: f347284d2a7e40d5 -->
+<!-- coverage-input-digest: 86acb269cb9c985f -->

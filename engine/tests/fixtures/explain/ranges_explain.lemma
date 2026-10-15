@@ -1,0 +1,26 @@
+spec grading
+
+data score: number
+  -> minimum 0
+  -> maximum 100
+
+rule grade:
+  "F"
+  unless score in 60...70  then "D"
+  unless score in 70...80  then "C"
+  unless score in 80...90  then "B"
+  unless score in 90...101 then "A"
+
+rule is_passing:
+  score >= 60
+
+
+spec employment_window
+
+data hire_date: date
+
+rule in_first_year:
+  hire_date in 2023-01-01...2024-01-01
+
+rule in_q1_2023:
+  hire_date in 2023-01-01...2023-04-01

@@ -4,7 +4,8 @@ use crate::computation::arithmetic::SignatureIndex;
 use crate::computation::operation_result::{OperationResult, VetoType};
 use crate::computation::rational::{rational_abs, rational_zero, RationalInteger};
 use crate::planning::semantics::{
-    ArithmeticComputation, ComparisonComputation, LemmaType, LiteralValue, TypedLiteral, ValueKind,
+    primitive_time_arc, semantic_date_as_time, ArithmeticComputation, ComparisonComputation,
+    LemmaType, LiteralValue, TypedLiteral, ValueKind,
 };
 
 pub fn compute_span(left: &TypedLiteral, right: &TypedLiteral) -> OperationResult {
@@ -169,6 +170,8 @@ pub fn ordered_endpoints<'a>(
 
 /// Half-open interval `[lo, hi)` where `lo` and `hi` are the ordered range endpoints.
 /// Returns `OperationResult::from_literal(Boolean)` or propagates a Veto from inner comparisons.
+///
+/// `date in time range` projects the date's clock via [`semantic_date_as_time`] (same as `as time`).
 pub fn check_containment(
     value: &ValueKind,
     value_type: &Arc<LemmaType>,
@@ -179,6 +182,15 @@ pub fn check_containment(
     let (lo, hi) = match ordered_endpoints(range_left, range_right, endpoint_type) {
         Ok(pair) => pair,
         Err(veto) => return OperationResult::Veto(veto),
+    };
+
+    let projected_time;
+    let (value, value_type) = match value {
+        ValueKind::Date(date) if endpoint_type.is_time() => {
+            projected_time = ValueKind::Time(semantic_date_as_time(date));
+            (&projected_time, primitive_time_arc())
+        }
+        _ => (value, value_type),
     };
 
     let lower_ok = match comparison_boolean_result(

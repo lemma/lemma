@@ -1,0 +1,5 @@
+grade: B
+├─ score in 90...101 is false
+│  └─ score: 85
+└─ score in 80...90
+   └─ score: 85

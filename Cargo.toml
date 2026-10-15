@@ -7,13 +7,14 @@ members = [
     "engine/lsp",
     "engine/packages/hex/native/lemma_hex",
     "engine/packages/maven/native/lemma_jni",
+    "engine/packages/nuget/native/lemma_dotnet",
     "openapi",
 ]
 default-members = ["cli"]
 exclude = ["engine/fuzz"]
 
 [workspace.package]
-version = "0.10.0"
+version = "0.10.1"
 edition = "2021"
 authors = ["Ben Rogmans <ben@lemmabase.com>"]
 description = "A pure, declarative language for business rules."

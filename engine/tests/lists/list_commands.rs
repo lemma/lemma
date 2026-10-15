@@ -343,7 +343,7 @@ rule dearest: fares -> max
     assert_eq!(value(&response, "n"), "0");
     assert_eq!(value(&response, "any_high"), "false");
     assert_eq!(value(&response, "all_high"), "true");
-    assert_contains(&veto_reason(&response, "mean"), "avg");
+    assert_contains(&veto_reason(&response, "mean"), "average");
     assert_contains(&veto_reason(&response, "times"), "product");
     assert_contains(&veto_reason(&response, "times"), "empty");
     assert_contains(&veto_reason(&response, "cheapest"), "empty");

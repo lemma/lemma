@@ -343,13 +343,13 @@ rule total: bag.weight
     assert_eq!(result.missing_data(), &[key.to_string()]);
     assert_eq!(
         result.veto_reason.as_deref(),
-        Some("Missing data: bag.weight"),
+        Some("Required data 'bag.weight' was not provided."),
         "veto_reason must match missing_data key"
     );
     let explanation = result.explanation.as_ref().expect("explanation");
     let ascii = format_explanation(explanation);
     assert!(
-        ascii.contains("Missing data: bag.weight"),
+        ascii.contains("Required data 'bag.weight' was not provided."),
         "explanation must match veto_reason form:\n{ascii}"
     );
     assert!(

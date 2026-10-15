@@ -582,7 +582,7 @@ rule total:
     assert!(price.vetoed, "price entry should veto on 0 eur");
     let reason = price.veto_reason.as_deref().unwrap_or("");
     assert!(
-        reason.contains("0") && reason.contains("below minimum 1.00 eur"),
+        reason.contains("0") && reason.contains("below the minimum of 1.00 eur"),
         "constraint reason, got {reason:?}"
     );
     let cost = spec.rules.get("cost").expect("cost rule");

@@ -754,6 +754,12 @@ fn step_import_scope<'p>(
                     let (path, entry) = overlay
                         .get_index(frame.overlay_cursor)
                         .expect("BUG: overlay cursor is within the overlay");
+                    // Evaluate / parent extras already bind this relative path: skip the
+                    // wire (do not require the source or force a rule eval).
+                    if frame.extras.contains_key(path) {
+                        frame.overlay_cursor += 1;
+                        continue;
+                    }
                     let raw = match entry {
                         ImportOverlay::Literal(bound) => OperationResult::from_bound(bound.clone()),
                         ImportOverlay::Reference {

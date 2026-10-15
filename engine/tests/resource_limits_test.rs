@@ -155,7 +155,7 @@ fn test_data_value_size_limit() {
     );
     let reason = result.veto_reason.as_deref().expect("veto reason");
     assert!(
-        reason.contains("Data name [text]:") && reason.contains("size limit"),
+        reason.contains("Data name [text]") && reason.contains("exceeds the size limit"),
         "veto reason must name field, type, and size limit, got: {reason}"
     );
 }

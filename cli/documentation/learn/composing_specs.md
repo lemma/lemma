@@ -91,7 +91,7 @@ rule r:
 
 The binding path must be relative to the imported spec (`x`, not `i.x`). Local slots use `data`.
 
-A slot bound to a value (`-> with x: 42`) is a default: evaluation data for `i.x` replaces it, and Show lists it with its value. A slot bound to data or a Rule (`-> with x: base`, `-> with x: src.total`) is wiring: evaluation data for `i.x` is a request error, and Show leaves the slot out. Supply `base` instead.
+A slot bound to a value (`-> with x: 42`) is a default: evaluation data for `i.x` replaces it, and Show lists it with its value. A slot bound to data or a Rule (`-> with x: base`, `-> with x: src.total`) copies from that source by default: evaluation data for `i.x` overrides the link, and Show lists `i.x` (optional, documents the wire) plus the source when rules need it.
 
 See [Setting data on an imported spec](../reference/readme.md#setting-data-on-an-imported-spec-uses-block).
 

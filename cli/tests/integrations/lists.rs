@@ -383,18 +383,16 @@ rule r: i.slot
 "#;
 
 #[test]
-fn json_evaluate_data_for_bound_slot_is_request_error() {
+fn json_evaluate_data_overrides_bound_slot() {
     let temp = TempDir::new().unwrap();
     write_spec(temp.path(), "bound.lemma", BOUND_SLOT_SPEC);
     evaluate_with_stdin(temp.path(), "outer", r#"{"i.slot": "5"}"#)
-        .failure()
-        .stderr(predicate::str::contains(
-            "data 'i.slot' is bound to 'base' by the spec and cannot be supplied",
-        ));
+        .success()
+        .stdout(predicate::str::contains("5"));
 }
 
 #[test]
-fn http_post_evaluate_data_for_bound_slot_is_request_error() {
+fn http_post_evaluate_data_overrides_bound_slot() {
     let temp = TempDir::new().unwrap();
     write_spec(temp.path(), "bound.lemma", BOUND_SLOT_SPEC);
     let (status, body) = http_post(
@@ -404,13 +402,8 @@ fn http_post_evaluate_data_for_bound_slot_is_request_error() {
         "application/json",
         r#"{"i.slot": "5"}"#,
     );
-    assert_eq!(status, reqwest::StatusCode::BAD_REQUEST, "{body}");
-    assert!(
-        body["error"]
-            .as_str()
-            .is_some_and(|e| e.contains("data 'i.slot' is bound to 'base'")),
-        "{body}"
-    );
+    assert!(status.is_success(), "POST override: {status} {body}");
+    assert_eq!(body["results"]["r"]["result"], "5", "{body}");
 }
 
 #[test]

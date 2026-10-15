@@ -129,7 +129,7 @@ fn missing_data_includes_product_when_no_inputs() {
     );
     assert_eq!(
         base_price.veto_reason.as_deref(),
-        Some("Missing data: sku"),
+        Some("Required data 'sku' was not provided."),
         "got {:?}",
         base_price.veto_reason
     );
@@ -155,8 +155,8 @@ rule total: base_price * 2
         .evaluate(None, "pricing", Some(&now), IndexMap::new(), None, false)
         .expect("evaluate");
 
-    assert_veto_reason_contains(rule_by_name(&response, "base_price"), "Missing data");
-    assert_veto_reason_contains(rule_by_name(&response, "total"), "Missing data");
+    assert_veto_reason_contains(rule_by_name(&response, "base_price"), "Required data");
+    assert_veto_reason_contains(rule_by_name(&response, "total"), "Required data");
 }
 
 #[test]
@@ -185,7 +185,7 @@ fn coffee_order_dependent_rules_propagate_missing_product_not_default_veto() {
     assert_veto_reason_contains(rule_by_name(&response, "base_price"), "sku");
     for name in ["price_per_cup", "subtotal", "discount_amount", "total"] {
         let rr = rule_by_name(&response, name);
-        assert_veto_reason_contains(rr, "Missing data");
+        assert_veto_reason_contains(rr, "Required data");
         assert!(
             !rr.veto_reason
                 .as_deref()

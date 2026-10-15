@@ -7,8 +7,8 @@ use crate::planning::instance_list::{
 use crate::planning::normalize::lookup_data_definition;
 use crate::planning::semantics::{
     parse_value_from_string, parser_value_to_value_kind, row_literal, DataDefinition, DataPath,
-    ImportOverlay, LemmaType, ListKey, LiteralValue, ReferenceTarget, RowEnd, RowOrigin, Source,
-    TypeSpecification, TypedLiteral, UnitTokenResolver, ValueKind,
+    LemmaType, ListKey, LiteralValue, RowEnd, RowOrigin, Source, TypeSpecification, TypedLiteral,
+    UnitTokenResolver, ValueKind,
 };
 use crate::planning::unit_index::UnitIndex;
 use crate::Error;
@@ -898,33 +898,11 @@ impl<'a> LevelFrame<'a> {
                 continue;
             };
 
-            if let Some(target) = overlay_reference_target(plan, data_path) {
-                return Err(Error::request(
-                    format!(
-                        "data '{name}' is bound to '{target}' by the spec and cannot be supplied"
-                    ),
-                    Some(format!("remove '{name}' from the evaluation data")),
-                )
-                .with_related_data(name));
-            }
-
             let data_source = data_definition.source();
             let type_arc = match data_definition {
                 DataDefinition::TypeDeclaration { resolved_type, .. }
-                | DataDefinition::Value { resolved_type, .. } => Arc::clone(resolved_type),
-                DataDefinition::Reference { target, .. } => {
-                    let target = match target {
-                        ReferenceTarget::Data(path) => path.input_key(),
-                        ReferenceTarget::Rule(path) => path.input_key(),
-                    };
-                    return Err(Error::request(
-                        format!(
-                            "data '{name}' is bound to '{target}' by the spec and cannot be supplied"
-                        ),
-                        Some(format!("remove '{name}' from the evaluation data")),
-                    )
-                    .with_related_data(name));
-                }
+                | DataDefinition::Value { resolved_type, .. }
+                | DataDefinition::Reference { resolved_type, .. } => Arc::clone(resolved_type),
                 DataDefinition::Import { .. } => {
                     if matches!(
                         raw_value,
@@ -954,9 +932,10 @@ impl<'a> LevelFrame<'a> {
             if raw_value.is_empty() && type_arc.empty_runtime_input_vetoes() {
                 evaluate_data.bindings.insert(
                     data_path.clone(),
-                    OperationResult::Veto(VetoType::computation(
-                        type_arc.data_veto_message(&input_key, "cannot be empty."),
-                    )),
+                    OperationResult::Veto(VetoType::computation(format!(
+                        "Data {} cannot be empty.",
+                        type_arc.label_for_data_input(&input_key)
+                    ))),
                 );
                 continue;
             }
@@ -1009,16 +988,24 @@ impl<'a> LevelFrame<'a> {
                 ValueKind::List(items) => items
                     .iter()
                     .position(|item| item.byte_size() > limits.max_data_value_bytes)
-                    .map(|index| format!("list item {} exceeds the size limit.", index + 1)),
-                _ => (literal_value.byte_size() > limits.max_data_value_bytes)
-                    .then(|| "exceeds the size limit.".to_string()),
+                    .map(|index| {
+                        format!(
+                            "Data {} list item {} exceeds the size limit.",
+                            type_arc.label_for_data_input(&input_key),
+                            index + 1
+                        )
+                    }),
+                _ => (literal_value.byte_size() > limits.max_data_value_bytes).then(|| {
+                    format!(
+                        "Data {} exceeds the size limit.",
+                        type_arc.label_for_data_input(&input_key)
+                    )
+                }),
             };
             if let Some(reason) = oversize {
                 evaluate_data.bindings.insert(
                     data_path.clone(),
-                    OperationResult::Veto(VetoType::computation(
-                        type_arc.data_veto_message(&input_key, &reason),
-                    )),
+                    OperationResult::Veto(VetoType::computation(reason)),
                 );
                 continue;
             }
@@ -1061,26 +1048,6 @@ fn resolve_evaluate_data_target<'a>(
     let definition = lookup_data_definition(&plan.data, &plan.row_templates, path)
         .unwrap_or_else(|| panic!("BUG: indexed input '{key}' has no data definition"));
     Some((path, definition))
-}
-
-/// Site-overlay reference binding for a nested import member, if any.
-fn overlay_reference_target(plan: &ExecutionPlan, path: &DataPath) -> Option<String> {
-    let first = path.segments.first()?;
-    let import_marker = DataPath::local(first.uses.clone());
-    let DataDefinition::Import { overlay, .. } = plan.data.get(&import_marker)? else {
-        return None;
-    };
-    let relative = DataPath {
-        segments: path.segments[1..].to_vec(),
-        data: path.data.clone(),
-    };
-    match overlay.get(&relative)? {
-        ImportOverlay::Reference { target, .. } => Some(match target {
-            ReferenceTarget::Data(target) => target.input_key(),
-            ReferenceTarget::Rule(target) => target.input_key(),
-        }),
-        ImportOverlay::Literal(_) => None,
-    }
 }
 
 /// Instance list whose rows `key` addresses one field of (`staff.2.salary`).
@@ -1306,7 +1273,7 @@ impl<'a> ListFrame<'a> {
         for (field, binding) in row_data.bindings {
             if let OperationResult::Veto(veto) = &binding {
                 return Ok(Some(OperationResult::Veto(VetoType::computation(format!(
-                    "{name} row {number}: {veto}"
+                    "In {name} row {number}: {veto}"
                 )))));
             }
             bindings.insert(field, binding);
@@ -2039,7 +2006,7 @@ rule n: people -> count
             .as_deref()
             .expect("veto");
         assert!(
-            reason.contains("list item 2 exceeds the size limit"),
+            reason.contains("list item 2 exceeds the size limit."),
             "{reason}"
         );
     }

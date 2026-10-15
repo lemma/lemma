@@ -1,0 +1,4 @@
+payment_allowed: true
+├─ payment_method is not cash
+│  └─ payment_method: credit
+└─ payment_method is credit

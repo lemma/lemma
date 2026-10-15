@@ -104,7 +104,7 @@
     },
     "ordered": {
       "type": "string",
-      "description": "A text value. Text values are limited to 1024 UTF-8 bytes.",
+      "description": "A text value.",
       "default": "latte",
       "x-lemma-type": {
         "name": "ordered",
@@ -233,7 +233,7 @@
       "properties": {
         "drink": {
           "type": "string",
-          "description": "A text value. Text values are limited to 1024 UTF-8 bytes.",
+          "description": "A text value.",
           "x-lemma-type": {
             "name": "drink",
             "kind": "text",

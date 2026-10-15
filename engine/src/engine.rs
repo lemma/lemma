@@ -1,5 +1,6 @@
 use crate::evaluation::Evaluator;
 use crate::evaluation::{EvaluateData, EvaluateDataValue};
+use crate::literals::{DateGranularity, TimezoneValue};
 use crate::parsing::ast::{DateTimeValue, LemmaRepository, LemmaSpec};
 use crate::parsing::source::SourceType;
 use crate::parsing::{parse, EffectiveDate};
@@ -30,19 +31,41 @@ impl Errors {
 ///
 /// `None` or whitespace-only input resolves to [`DateTimeValue::now`].
 /// Non-empty invalid strings return a request [`Error`].
+///
+/// Date-only forms (`YYYY`, `YYYY-MM`, `YYYY-MM-DD`, ISO week) become a precise
+/// UTC instant at the start of that period (`00:00:00Z`, [`DateGranularity::DateTime`]).
+/// Full ISO datetimes keep their parsed clock and timezone.
 pub fn resolve_effective(raw: Option<&str>) -> Result<DateTimeValue, Error> {
     match raw {
-        Some(s) if !s.trim().is_empty() => s.trim().parse::<DateTimeValue>().map_err(|_| {
-            Error::request(
-                format!(
-                    "Invalid effective value '{}'. Expected: YYYY, YYYY-MM, YYYY-MM-DD, or ISO 8601 datetime",
-                    s.trim()
-                ),
-                None::<String>,
-            )
-        }),
+        Some(s) if !s.trim().is_empty() => {
+            let parsed = s.trim().parse::<DateTimeValue>().map_err(|_| {
+                Error::request(
+                    format!(
+                        "Invalid effective value '{}'. Expected: YYYY, YYYY-MM, YYYY-MM-DD, or ISO 8601 datetime",
+                        s.trim()
+                    ),
+                    None::<String>,
+                )
+            })?;
+            Ok(promote_effective_to_instant(parsed))
+        }
         _ => Ok(DateTimeValue::now()),
     }
+}
+
+/// Date-only parse results keep calendar granularity; the evaluation instant always
+/// needs a clock. Promote to UTC midnight at the already-normalized calendar day.
+fn promote_effective_to_instant(mut dt: DateTimeValue) -> DateTimeValue {
+    if matches!(dt.granularity, DateGranularity::DateTime) {
+        return dt;
+    }
+    dt.hour = 0;
+    dt.minute = 0;
+    dt.second = 0;
+    dt.microsecond = 0;
+    dt.timezone = Some(TimezoneValue { offset_minutes: 0 });
+    dt.granularity = DateGranularity::DateTime;
+    dt
 }
 
 /// Repository name reserved for the embedded standard library (`repo lemma`, `spec units`).
@@ -799,14 +822,13 @@ impl Engine {
             let Some(lemma_type) = definition.schema_type().cloned() else {
                 continue;
             };
-            if matches!(definition, DataDefinition::Reference { .. }) {
-                continue;
-            }
             let input_key = path.input_key();
             if path.segments.is_empty()
                 && matches!(
                     definition,
-                    DataDefinition::Value { .. } | DataDefinition::TypeDeclaration { .. }
+                    DataDefinition::Value { .. }
+                        | DataDefinition::TypeDeclaration { .. }
+                        | DataDefinition::Reference { .. }
                 )
             {
                 type_entries.push((
@@ -842,16 +864,27 @@ impl Engine {
                         DataDefinition::InstanceList { .. } => {
                             crate::planning::execution_plan::show_instance_list_value(plan, &path)
                         }
-                        _ => display.and_then(|d| {
-                            d.value.as_ref().map(|bound| {
-                                crate::planning::execution_plan::show_bound_result_value(
-                                    bound,
-                                    &lemma_type,
-                                    &input_key,
-                                    crate::planning::execution_plan::ShowBoundRole::Value,
-                                )
-                            })
-                        }),
+                        _ => {
+                            if let Some(target) = plan.import_overlay_reference_target(&path) {
+                                // Document the wire; not a literal default (OpenAPI skips
+                                // default when reference is set) and not `required`.
+                                Some(crate::result_value::RuleResultValue {
+                                    reference: Some(target),
+                                    ..Default::default()
+                                })
+                            } else {
+                                display.and_then(|d| {
+                                    d.value.as_ref().map(|bound| {
+                                        crate::planning::execution_plan::show_bound_result_value(
+                                            bound,
+                                            &lemma_type,
+                                            &input_key,
+                                            crate::planning::execution_plan::ShowBoundRole::Value,
+                                        )
+                                    })
+                                })
+                            }
+                        }
                     },
                     suggestion: display.and_then(|d| {
                         d.suggestion.as_ref().map(|bound| {

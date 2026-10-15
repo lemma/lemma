@@ -1,0 +1,7 @@
+selected_price: 3.5 eur
+└─ (menu -> find ordered).price
+   └─ menu -> find ordered
+      └─ ordered: latte
+      ["espresso"] drink: espresso
+      ["latte"] drink: latte
+   2. price: 3.5 eur

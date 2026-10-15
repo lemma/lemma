@@ -753,8 +753,8 @@ rule out: cost_per_unit
         "out",
     );
     assert!(
-        message.contains("below minimum"),
-        "expected below minimum, got: {message}"
+        message.contains("below the minimum"),
+        "expected below the minimum, got: {message}"
     );
     assert!(
         message.contains("eur_per_kilo"),
@@ -796,8 +796,8 @@ rule out: cost_per_unit
         "out",
     );
     assert!(
-        message.contains("below minimum"),
-        "expected below minimum, got: {message}"
+        message.contains("below the minimum"),
+        "expected below the minimum, got: {message}"
     );
     assert!(
         message.contains("usd_per_tonne"),
@@ -892,8 +892,8 @@ fn compound_measure_above_maximum_shows_converted_bound_in_user_unit() {
         "out",
     );
     assert!(
-        message.contains("above maximum"),
-        "expected above maximum, got: {message}"
+        message.contains("above the maximum"),
+        "expected above the maximum, got: {message}"
     );
     assert!(
         message.contains("usd_per_tonne"),
@@ -989,8 +989,8 @@ fn tri_compound_measure_above_maximum_shows_converted_bound_in_user_unit() {
         "out",
     );
     assert!(
-        message.contains("above maximum"),
-        "expected above maximum, got: {message}"
+        message.contains("above the maximum"),
+        "expected above the maximum, got: {message}"
     );
     assert!(
         message.contains("usd_per_ton_hour"),
@@ -1028,7 +1028,7 @@ rule result: weight
         "result",
     );
     assert!(
-        message.contains("500 gram is below minimum 1000 gram"),
+        message.contains("500 gram is below the minimum of 1000 gram"),
         "expected cross-unit bound in user's unit, got: {message}"
     );
     assert!(

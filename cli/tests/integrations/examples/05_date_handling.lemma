@@ -7,6 +7,7 @@ This example demonstrates:
 - Date comparisons
 - Time arithmetic
 - Type annotations for dynamic input
+- Calendar membership windows
 """
 
 uses lemma units
@@ -20,6 +21,8 @@ data meeting_time:        14:30:00
 data probation_period:    90 day
 data project_deadline:    2024-10-01T17:00:00Z
 data current_date:        date
+data membership_start:    date
+data membership_length:   units.calendar
 
 rule contract_duration:
   contract_start...contract_end as day as number
@@ -58,3 +61,6 @@ rule time_employed:
 
 rule years_employed:
   time_employed as year as number
+
+rule membership_active:
+  now in membership_start...(membership_start + membership_length)

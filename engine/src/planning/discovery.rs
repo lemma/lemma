@@ -389,8 +389,6 @@ pub(crate) enum DependencyEdgeOrigin {
     Uses,
     /// `uses alias: dep list`
     UsesList,
-    /// `data x: alias.type`
-    QualifiedType,
 }
 
 impl DependencyEdge {
@@ -456,17 +454,6 @@ pub(crate) fn dependency_edges(
                     &data.source_location,
                     &data.reference.name,
                     DependencyEdgeOrigin::UsesList,
-                );
-            }
-            DataValue::Definition {
-                base: Some(ParentType::Qualified { spec_alias, .. }),
-                ..
-            } => {
-                push_edge(
-                    &SpecRef::same_repository(spec_alias.clone()),
-                    &data.source_location,
-                    spec_alias,
-                    DependencyEdgeOrigin::QualifiedType,
                 );
             }
             _ => {}
@@ -886,17 +873,6 @@ pub fn validate_dependency_interfaces<'a>(
                 }
             };
 
-            let uses_aliases: HashSet<&str> = edges
-                .iter()
-                .filter(|edge| {
-                    matches!(
-                        edge.origin,
-                        DependencyEdgeOrigin::Uses | DependencyEdgeOrigin::UsesList
-                    )
-                })
-                .map(|edge| edge.alias.as_str())
-                .collect();
-
             for edge in &edges {
                 if edge.explicit_effective.is_some() {
                     continue;
@@ -911,13 +887,6 @@ pub fn validate_dependency_interfaces<'a>(
                 {
                     continue;
                 }
-                // The `uses` row for this alias already checks every member read through it.
-                if edge.origin == DependencyEdgeOrigin::QualifiedType
-                    && uses_aliases.contains(edge.alias.as_str())
-                {
-                    continue;
-                }
-
                 let dep_qualified = format_dep_qualified_name(&edge.dep_repository, &edge.dep_name);
                 let Some(_) = context.spec_set(&edge.dep_repository, &edge.dep_name) else {
                     errors.push((
@@ -1319,9 +1288,7 @@ impl<'a, 'l> DependencyDiscovery<'a, 'l> {
 
             let resolve = match edge.origin {
                 DependencyEdgeOrigin::UsesList => resolve_spec_ref_or_self,
-                DependencyEdgeOrigin::Uses | DependencyEdgeOrigin::QualifiedType => {
-                    resolve_spec_ref
-                }
+                DependencyEdgeOrigin::Uses => resolve_spec_ref,
             };
             let dependency = match resolve(
                 context,
@@ -1889,17 +1856,18 @@ mod tests {
             .unwrap();
 
         let edges = dependency_edges(&consumer, &workspace, &ctx).expect("dependency_edges");
-        let from_y = edges
+        let from_uses = edges
             .iter()
             .find(|e| {
                 e.dep_name == "alpha2"
+                    && e.alias == "iso"
+                    && e.origin == DependencyEdgeOrigin::Uses
                     && e.explicit_repository_qualifier
                         .as_ref()
                         .is_some_and(|q| q.name == "@iso/countries")
-                    && e.source == consumer.data[1].source_location
             })
-            .expect("edge from data y binding");
-        assert_eq!(from_y.dep_name, "alpha2");
+            .expect("edge from uses iso");
+        assert_eq!(from_uses.dep_name, "alpha2");
     }
 
     #[test]

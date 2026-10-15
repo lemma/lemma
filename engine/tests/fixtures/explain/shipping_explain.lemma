@@ -1,0 +1,114 @@
+spec shipping_policy
+"""
+Explain fixture from cli/tests/integrations/examples/07_shipping_policy.lemma.
+Units, is/is not, multi-veto, percent discounts.
+"""
+
+uses lemma units
+
+data country: text
+  -> option "NL"
+  -> option "BE"
+  -> option "DE"
+  -> option "FR"
+
+data customer_tier_type: text
+  -> option "standard"
+  -> option "silver"
+  -> option "gold"
+  -> option "platinum"
+
+data destination_region: "North Holland"
+data is_expedited:       boolean
+data is_hazardous:       boolean
+data is_po_box:          boolean
+data customer_tier: customer_tier_type
+  -> suggest "gold"
+
+data destination_country: country
+  -> suggest "NL"
+
+data item_weight: number
+  -> minimum 0
+
+data order_total: number
+  -> minimum 0
+
+rule base_shipping_rate:
+  35
+  unless destination_country is "NL" then 22
+  unless destination_country is "BE" then 25
+  unless destination_country is "DE" then 28
+  unless destination_country is "FR" then 30
+
+rule weight_surcharge:
+  0
+  unless item_weight > 5
+    then 7.5
+  unless item_weight > 20
+    then veto "Item too heavy for standard shipping"
+
+rule po_box_fee:
+  0
+  unless is_po_box then 5
+
+rule expedited_fee:
+  0
+  unless is_expedited                      then 25
+  unless is_expedited and item_weight > 10 then 45
+
+rule hazardous_fee:
+  0
+  unless is_hazardous
+    then 50
+  unless is_hazardous
+    and destination_country is not "NL"
+    then veto "Cannot ship hazardous materials internationally"
+
+rule customer_discount:
+  0%
+  unless customer_tier is "silver"   then 10%
+  unless customer_tier is "gold"     then 20%
+  unless customer_tier is "platinum" then 30%
+
+rule free_shipping_eligible:
+  order_total >= 100 and destination_country is "NL"
+
+rule shipping_before_discount:
+  base_shipping_rate
+  + weight_surcharge
+  + po_box_fee
+  + expedited_fee
+  + hazardous_fee
+
+rule shipping_discount_amount:
+  shipping_before_discount * customer_discount
+
+rule final_shipping:
+  shipping_before_discount - shipping_discount_amount
+  unless free_shipping_eligible then 0
+
+rule estimated_delivery_days:
+  14 day
+  unless destination_country is "NL" then 2 day
+  unless destination_country is "BE" then 3 day
+  unless destination_country is "DE" then 4 day
+  unless destination_country is "FR" then 5 day
+  unless is_expedited                then 1 day
+
+rule ships_to_location:
+  true
+  unless is_po_box and is_hazardous
+    then veto "Cannot ship hazardous materials to PO boxes"
+  unless destination_region is "Svalbard"
+    then veto "Shipping not available to Svalbard"
+
+rule total_with_shipping:
+  order_total + final_shipping
+
+rule summary:
+  "Standard shipping"
+  unless free_shipping_eligible
+    then "Free shipping (order over €100)"
+  unless is_expedited
+    then "Expedited shipping"

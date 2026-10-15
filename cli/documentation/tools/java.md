@@ -17,14 +17,14 @@ Maven:
 <dependency>
   <groupId>com.lemmabase</groupId>
   <artifactId>lemma-engine</artifactId>
-  <version>0.10.0</version>
+  <version>0.10.1</version>
 </dependency>
 ```
 
 Gradle (Kotlin DSL): consume the published artifact; this repository builds the package with Maven only:
 
 ```kotlin
-implementation("com.lemmabase:lemma-engine:0.10.0")
+implementation("com.lemmabase:lemma-engine:0.10.1")
 ```
 
 Requires JDK 21+.
@@ -133,7 +133,7 @@ Lists:
 - A row-valued rule is `RuleResult.Row` with a `RowReference` (`spec`, `effective`, `instance` such as `staff.2`, and `index`). `index` points into `Response.rows()`, a list of `RuleResult.RowResult`, each with its `data()` and `rules()`. A row from the origin spec has an empty `effective`.
 - `SpecResult.path()` lists each `uses` hop to a spec instance.
 - Show types: `LemmaType.ListType` with `element()` and `key()` (`ListKey.Numbered` or `ListKey.Fields`). An instance list with source rows has a `ShowData.value()` `ListValue` (null `result()`) of `RuleResultValue.SourceRow` items in row order (`fields()` the fields the row sets).
-- Evaluation data for a slot bound to data or a rule (`uses i: inner -> with x: base`) is a request error.
+- Evaluation data for a slot bound to data or a rule on a `uses` (`uses i: inner -> with x: base`) overrides the wire (same as a literal `-> with` default).
 
 Persist and restore without re-parsing:
 

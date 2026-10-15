@@ -4,7 +4,7 @@ use crate::computation::arithmetic::{expand_signature_to_base_units, SignatureIn
 use crate::parsing::ast::PrimitiveKind;
 use crate::planning::semantics::{
     calendar_decomposition, combine_decompositions, duration_decomposition, primitive_boolean_arc,
-    primitive_date_range_arc, primitive_number_arc, primitive_text_arc,
+    primitive_date_range_arc, primitive_number_arc, primitive_text_arc, primitive_time_arc,
     range_type_specification_from_endpoints, ArithmeticComputation, BaseMeasureVector, LemmaType,
     MathematicalComputation, SemanticConversionTarget, TypeExtends, TypeFamily, TypeSpecification,
 };
@@ -666,6 +666,11 @@ pub(crate) fn unit_conversion_type(
         SemanticConversionTarget::Type(PrimitiveKind::Number) => primitive_number_arc().clone(),
         SemanticConversionTarget::Type(PrimitiveKind::Text) => primitive_text_arc().clone(),
         SemanticConversionTarget::Type(PrimitiveKind::Boolean) => primitive_boolean_arc().clone(),
+        SemanticConversionTarget::Type(PrimitiveKind::Time)
+            if source.is_date() || source.is_time() =>
+        {
+            primitive_time_arc().clone()
+        }
         SemanticConversionTarget::Type(kind) if source.matches_primitive_kind(*kind) => {
             Arc::clone(source)
         }

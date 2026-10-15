@@ -42,7 +42,7 @@ rule total: p.doubled
         .as_deref()
         .expect("veto reason");
     assert!(
-        reason.contains("Missing data") && reason.contains("did you mean 'amountt'"),
+        reason.contains("Required data") && reason.contains("Did you mean 'amountt'"),
         "got: {reason}"
     );
 }

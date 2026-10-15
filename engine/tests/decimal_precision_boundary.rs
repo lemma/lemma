@@ -92,7 +92,7 @@ rule multiplied: max_val * two
     assert!(result.vetoed);
     assert_eq!(
         result.veto_reason.as_deref(),
-        Some("Calculated result exceeds decimal value limit")
+        Some("The calculated result exceeds the decimal value limit.")
     );
 }
 
@@ -122,7 +122,7 @@ rule safe: huge / two
     assert!(huge.vetoed);
     assert_eq!(
         huge.veto_reason.as_deref(),
-        Some("Calculated result exceeds decimal value limit")
+        Some("The calculated result exceeds the decimal value limit.")
     );
     let explanation = huge.explanation.as_ref().expect("huge explanation");
     assert!(
@@ -197,7 +197,7 @@ rule r: price
     );
     let reason = result.veto_reason.as_deref().unwrap_or("");
     assert!(
-        reason.contains("exceeds decimals constraint 2"),
+        reason.contains("exceeds the decimals constraint of 2"),
         "expected decimals constraint message, got: {reason}"
     );
     assert!(
@@ -245,7 +245,7 @@ rule r: cost
     assert!(result.vetoed);
     let reason = result.veto_reason.as_deref().unwrap_or("");
     assert!(
-        reason.contains("exceeds decimals constraint 2"),
+        reason.contains("exceeds the decimals constraint of 2"),
         "expected decimals constraint message, got: {reason}"
     );
     assert!(

@@ -2,7 +2,60 @@ use assert_cmd::cargo::cargo_bin_cmd;
 
 use predicates::prelude::*;
 use std::fs;
+use std::path::PathBuf;
 use tempfile::TempDir;
+
+fn explain_fixtures_dir() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("engine")
+        .join("tests")
+        .join("fixtures")
+        .join("explain")
+}
+
+/// Strip CSI/SGR sequences (`Source:` is gray in explain tables).
+fn strip_ansi(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '\u{1b}' {
+            if chars.peek() == Some(&'[') {
+                chars.next();
+                for c in chars.by_ref() {
+                    if c.is_ascii_alphabetic() {
+                        break;
+                    }
+                }
+            }
+            continue;
+        }
+        out.push(ch);
+    }
+    out
+}
+
+/// Inner text of the explain cell (before `Source:`), matching `format_explanation`.
+fn extract_explain_ascii(stdout: &str) -> String {
+    let plain = strip_ansi(stdout);
+    let mut body = Vec::new();
+    for line in plain.lines() {
+        if !line.starts_with('│') {
+            if !body.is_empty() {
+                break;
+            }
+            continue;
+        }
+        let rest = line.strip_prefix('│').expect("starts with │");
+        let inner = rest.strip_suffix('│').unwrap_or(rest).trim_end();
+        let content = inner.strip_prefix(' ').unwrap_or(inner);
+        if content.starts_with("Source:") {
+            break;
+        }
+        body.push(content.to_string());
+    }
+    body.join("\n")
+}
 
 #[test]
 fn test_cli_run_alias_still_evaluates() {
@@ -1361,4 +1414,216 @@ fn format_check_fails_unformatted_markdown_fence() {
         .assert()
         .failure()
         .stderr(predicate::str::contains("Would reformat:"));
+}
+
+fn copy_explain_fixture(name: &str) -> TempDir {
+    let fixtures = explain_fixtures_dir();
+    let temp_dir = TempDir::new().unwrap();
+    fs::copy(fixtures.join(name), temp_dir.path().join(name)).unwrap();
+    temp_dir
+}
+
+fn assert_cli_explain_ascii(stdout: &str, golden: &str) {
+    assert_eq!(extract_explain_ascii(stdout), golden);
+}
+
+#[test]
+fn test_cli_explain_stress_rush_and_cap_ok_ascii() {
+    let temp_dir = copy_explain_fixture("stress_explain.lemma");
+    let output = cargo_bin_cmd!("lemma")
+        .arg("evaluate")
+        .arg("--path")
+        .arg(temp_dir.path())
+        .arg("stress_test_extended")
+        .arg("--rules=rush_and_cap_ok")
+        .arg("--explain")
+        .arg("order.base_price=100")
+        .arg("order.quantity=10")
+        .arg("order.delivery_distance=50")
+        .arg("order.loyalty_points=0")
+        .arg("order.package_weight=5")
+        .arg("order.customer_tier=vip")
+        .arg("order.payment_method=credit")
+        .arg("order.is_fragile=false")
+        .arg("order.is_express=true")
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success(),
+        "evaluate --explain must succeed: {stdout}\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_cli_explain_ascii(
+        &stdout,
+        include_str!("../../../engine/tests/fixtures/explain/stress_rush_and_cap_ok.ascii.txt"),
+    );
+}
+
+#[test]
+fn test_cli_explain_stress_payment_express_noncredit_ascii() {
+    let temp_dir = copy_explain_fixture("stress_explain.lemma");
+    let output = cargo_bin_cmd!("lemma")
+        .arg("evaluate")
+        .arg("--path")
+        .arg(temp_dir.path())
+        .arg("stress_test")
+        .arg("--rules=payment_allowed")
+        .arg("--explain")
+        .arg("base_price=100")
+        .arg("quantity=10")
+        .arg("delivery_distance=50")
+        .arg("loyalty_points=0")
+        .arg("package_weight=5")
+        .arg("customer_tier=vip")
+        .arg("payment_method=debit")
+        .arg("is_fragile=false")
+        .arg("is_express=true")
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success(),
+        "evaluate --explain must succeed: {stdout}\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_cli_explain_ascii(
+        &stdout,
+        include_str!(
+            "../../../engine/tests/fixtures/explain/stress_payment_express_noncredit.ascii.txt"
+        ),
+    );
+}
+
+#[test]
+fn test_cli_explain_shipping_hazardous_is_not_nl_ascii() {
+    let temp_dir = copy_explain_fixture("shipping_explain.lemma");
+    let output = cargo_bin_cmd!("lemma")
+        .arg("evaluate")
+        .arg("--path")
+        .arg(temp_dir.path())
+        .arg("shipping_policy")
+        .arg("--rules=hazardous_fee")
+        .arg("--explain")
+        .arg("destination_country=BE")
+        .arg("customer_tier=standard")
+        .arg("item_weight=2")
+        .arg("order_total=50")
+        .arg("is_expedited=false")
+        .arg("is_hazardous=true")
+        .arg("is_po_box=false")
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success(),
+        "evaluate --explain must succeed: {stdout}\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_cli_explain_ascii(
+        &stdout,
+        include_str!("../../../engine/tests/fixtures/explain/shipping_is_not_nl.ascii.txt"),
+    );
+}
+
+#[test]
+fn test_cli_explain_dates_membership_active_ascii() {
+    let temp_dir = copy_explain_fixture("dates_explain.lemma");
+    let output = cargo_bin_cmd!("lemma")
+        .arg("evaluate")
+        .arg("--path")
+        .arg(temp_dir.path())
+        .arg("date_handling")
+        .arg("--rules=membership_active")
+        .arg("--explain")
+        .arg("--effective=2024-06-15")
+        .arg("current_date=2024-06-15")
+        .arg("membership_start=2024-01-01")
+        .arg("membership_length=1 year")
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success(),
+        "evaluate --explain must succeed: {stdout}\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_cli_explain_ascii(
+        &stdout,
+        include_str!("../../../engine/tests/fixtures/explain/dates_membership_active.ascii.txt"),
+    );
+}
+
+#[test]
+fn test_cli_explain_lists_total_ascii() {
+    let temp_dir = copy_explain_fixture("lists_explain.lemma");
+    let output = cargo_bin_cmd!("lemma")
+        .arg("evaluate")
+        .arg("--path")
+        .arg(temp_dir.path())
+        .arg("coffee_order")
+        .arg("--rules=total")
+        .arg("--explain")
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success(),
+        "evaluate --explain must succeed: {stdout}\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_cli_explain_ascii(
+        &stdout,
+        include_str!("../../../engine/tests/fixtures/explain/lists_total.ascii.txt"),
+    );
+}
+
+#[test]
+fn test_cli_explain_ranges_grade_b_ascii() {
+    let temp_dir = copy_explain_fixture("ranges_explain.lemma");
+    let output = cargo_bin_cmd!("lemma")
+        .arg("evaluate")
+        .arg("--path")
+        .arg(temp_dir.path())
+        .arg("grading")
+        .arg("--rules=grade")
+        .arg("--explain")
+        .arg("score=85")
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success(),
+        "evaluate --explain must succeed: {stdout}\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_cli_explain_ascii(
+        &stdout,
+        include_str!("../../../engine/tests/fixtures/explain/ranges_grade_b.ascii.txt"),
+    );
+}
+
+#[test]
+fn test_cli_explain_compound_total_payment_ascii() {
+    let temp_dir = copy_explain_fixture("compound_units_explain.lemma");
+    let output = cargo_bin_cmd!("lemma")
+        .arg("evaluate")
+        .arg("--path")
+        .arg(temp_dir.path())
+        .arg("contractor")
+        .arg("--rules=total_payment")
+        .arg("--explain")
+        .arg("hourly_rate=85 eur_per_hour")
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success(),
+        "evaluate --explain must succeed: {stdout}\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_cli_explain_ascii(
+        &stdout,
+        include_str!("../../../engine/tests/fixtures/explain/compound_total_payment.ascii.txt"),
+    );
 }

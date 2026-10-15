@@ -1,0 +1,25 @@
+spec contractor
+
+uses lemma units
+
+data money: measure
+  -> unit eur: 1.00
+
+data wage_rate: measure
+  -> unit eur_per_second: eur/second
+  -> unit eur_per_hour: eur/hour
+
+data hours_worked: 120 hour
+data hourly_rate: wage_rate
+  -> minimum 0 eur_per_hour
+  -> suggest 85 eur_per_hour
+
+rule total_payment:
+  (hourly_rate * hours_worked) as eur
+
+rule annual_hours:
+  hours_worked * 12
+
+rule benefits_eligible:
+  false
+  unless annual_hours > 1_000 hour then true

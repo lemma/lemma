@@ -1,0 +1,6 @@
+payment_allowed: Express shipping requires credit payment
+├─ payment_method is not credit and is_express
+│  ├─ payment_method: debit
+│  └─ is_express: true
+└─ veto
+   └─ veto "Express shipping requires credit payment"

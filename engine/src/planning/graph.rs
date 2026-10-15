@@ -626,9 +626,6 @@ impl<'a> Graph<'a> {
                 out.lemma_type = Self::preserve_measure_binding(schema_type, &lit.lemma_type);
                 Ok(out)
             }
-            (TypeSpecification::Ratio { .. }, ValueKind::Number(n)) => Ok(
-                TypedLiteral::ratio_with_type(n.clone(), Arc::clone(schema_type)),
-            ),
             _ => Err(format!(
                 "value {} cannot be used as type {}",
                 lit,
@@ -3831,12 +3828,38 @@ impl<'a, 'i> GraphBuilder<'a, 'i> {
                                     current_segments,
                                     effective,
                                 ) {
-                                    Some(ReferenceTarget::Data(consumer)) => DataSource::Reference(
-                                        instance_list::owner_relative_reference(
+                                    Some(ReferenceTarget::Data(consumer)) => {
+                                        let relative = instance_list::owner_relative_reference(
                                             &consumer,
                                             current_segments,
-                                        ),
-                                    ),
+                                        );
+                                        let target_type = self
+                                            .data
+                                            .get(&consumer)
+                                            .and_then(DataDefinition::resolved_type_arc);
+                                        let Some(target_type) = target_type else {
+                                            self.errors.push(self.engine_error(
+                                                format!(
+                                                    "Data reference for row field `{name}` target `{consumer}` does not exist"
+                                                ),
+                                                &binding.source_location,
+                                            ));
+                                            continue;
+                                        };
+                                        if let Some(msg) = reference_kind_mismatch_message(
+                                            field_type.as_ref(),
+                                            target_type.as_ref(),
+                                            &path,
+                                            &relative,
+                                            "target",
+                                        ) {
+                                            self.errors.push(
+                                                self.engine_error(msg, &binding.source_location),
+                                            );
+                                            continue;
+                                        }
+                                        DataSource::Reference(relative)
+                                    }
                                     Some(ReferenceTarget::Rule(rule)) => {
                                         self.errors.push(self.engine_error(
                                             format!(
@@ -4742,22 +4765,6 @@ impl<'a, 'i> GraphBuilder<'a, 'i> {
                     ) {
                         Ok((source_repo, source_arc)) => {
                             return Some((source_arc, source_repo, import_effective));
-                        }
-                        Err(error) => self.errors.push(error),
-                    }
-                }
-                ParsedDataValue::Definition {
-                    base: Some(ParentType::Qualified { spec_alias, .. }),
-                    ..
-                } => {
-                    match self.resolve_spec_ref(
-                        &ast::SpecRef::same_repository(spec_alias.clone()),
-                        &frame.effective,
-                        spec,
-                        &frame.repository,
-                    ) {
-                        Ok((source_repo, source_arc)) => {
-                            return Some((source_arc, source_repo, frame.effective.clone()));
                         }
                         Err(error) => self.errors.push(error),
                     }
@@ -7022,7 +7029,7 @@ fn check_range_containment_types(
         )]);
     }
     let compatible = (range_type.is_date_range() && value_type.is_date())
-        || (range_type.is_time_range() && value_type.is_time())
+        || (range_type.is_time_range() && (value_type.is_time() || value_type.is_date()))
         || (range_type.is_number_range() && value_type.is_number())
         || (range_type.is_measure_range()
             && value_type.is_measure()
@@ -7811,6 +7818,17 @@ fn check_unit_conversion_types(
 
     match target {
         SemanticConversionTarget::Type(PrimitiveKind::Text) => Ok(()),
+        SemanticConversionTarget::Type(PrimitiveKind::Time) => {
+            if source_type.is_date() || source_type.is_time() {
+                Ok(())
+            } else {
+                Err(vec![engine_error_at_graph(
+                    graph,
+                    source_loc,
+                    format!("Cannot convert {} to time.", source_type.name()),
+                )])
+            }
+        }
         SemanticConversionTarget::Type(PrimitiveKind::Boolean) => {
             if source_type.is_boolean() {
                 Ok(())
@@ -10575,9 +10593,25 @@ fn lookup_leaf_parent_type(
             )])
         }
         ParentType::Qualified { spec_alias, inner } => {
-            let spec_ref = ast::SpecRef::same_repository(spec_alias.clone());
+            let Some(spec_ref) = spec.data.iter().find_map(|row| {
+                if row.reference.segments.is_empty() && row.reference.name == *spec_alias {
+                    row.value.uses_spec_ref()
+                } else {
+                    None
+                }
+            }) else {
+                return Err(vec![Error::validation_with_context(
+                    format!("'{spec_alias}' is not a `uses` import alias in this spec"),
+                    Some(source.clone()),
+                    Some(format!(
+                        "Add `uses {spec_alias}: <target_spec>`, then write `{spec_alias}.<type>`."
+                    )),
+                    Some(spec),
+                    None,
+                )]);
+            };
             let (_, target_spec) =
-                match resolver.resolve_spec_for_import(spec, &spec_ref, source, at) {
+                match resolver.resolve_spec_for_import(spec, spec_ref, source, at) {
                     Ok(import_pair) => import_pair,
                     Err(error) => return Err(vec![error]),
                 };
@@ -15861,9 +15895,25 @@ impl<'a> TypeResolver<'a> {
         else {
             return Ok(None);
         };
-        let spec_ref = ast::SpecRef::same_repository(spec_alias.to_string());
+        let Some(spec_ref) = spec.data.iter().find_map(|row| {
+            if row.reference.segments.is_empty() && row.reference.name == spec_alias {
+                row.value.uses_spec_ref()
+            } else {
+                None
+            }
+        }) else {
+            return Err(Error::validation_with_context(
+                format!("'{spec_alias}' is not a `uses` import alias in this spec"),
+                Some(defined_by.source.clone()),
+                Some(format!(
+                    "Add `uses {spec_alias}: <target_spec>`, then write `{spec_alias}.<type>`."
+                )),
+                Some(spec),
+                None,
+            ));
+        };
         let (_, target_spec) =
-            resolver.resolve_spec_for_import(spec, &spec_ref, &defined_by.source, at)?;
+            resolver.resolve_spec_for_import(spec, spec_ref, &defined_by.source, at)?;
         let Some(imported_resolved) = already_resolved
             .iter()
             .find(|(_, imported, _)| discovery::same_loaded_spec(imported, target_spec))

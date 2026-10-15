@@ -740,7 +740,7 @@ defmodule LemmaTest do
       assert Map.keys(latte["fields"]) == ["drink"]
     end
 
-    test "rejects evaluation data for a slot bound to data" do
+    test "overrides evaluation data for a slot bound to data" do
       {:ok, engine} = Lemma.new()
 
       :ok =
@@ -757,14 +757,10 @@ defmodule LemmaTest do
           """
         })
 
-      assert {:error, err} =
+      assert {:ok, response} =
                Lemma.evaluate(engine, %{spec: "outer"}, %{data: %{"i.slot" => "5"}})
 
-      assert err[:kind] == "request"
-      assert err[:related_data] == "i.slot"
-
-      assert err[:message] ==
-               "data 'i.slot' is bound to 'base' by the spec and cannot be supplied"
+      assert response["results"]["r"]["number"] == "5"
     end
 
     test "rejects nested floats, non-boolean atoms, and colliding keys" do

@@ -1,0 +1,5 @@
+total_payment: 10200 eur
+└─ (hourly_rate * hours_worked) as eur
+   └─ hourly_rate * hours_worked
+      ├─ hourly_rate: 85 eur_per_hour
+      └─ hours_worked: 120 hour

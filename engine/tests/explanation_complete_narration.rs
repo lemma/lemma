@@ -7,7 +7,7 @@ mod explanation_json;
 mod explanation_support;
 
 use indexmap::IndexMap;
-use lemma::{DateTimeValue, Engine, EvaluateDataValue, Explanation};
+use lemma::{DateTimeValue, Engine, EvaluateDataValue, Explanation, ExplanationNode};
 
 fn load(code: &str) -> Engine {
     let mut engine = Engine::new();
@@ -899,4 +899,204 @@ rule out: 0 unless true then 1 unless true then 2
     let explanation = out_explanation(&response);
     assert_eq!(explanation.body, "2");
     assert_eq!(cause_pairs(explanation), vec![("true", "true")]);
+}
+
+fn cause_child_names(cause: &lemma::Cause) -> Vec<String> {
+    cause
+        .children
+        .iter()
+        .map(|node| match node {
+            ExplanationNode::Data { name, .. } | ExplanationNode::DataUnused { name } => {
+                name.input_key()
+            }
+            ExplanationNode::RuleRef { name, .. } => name.input_key(),
+            other => panic!("unexpected cause child: {other:?}"),
+        })
+        .collect()
+}
+
+#[test]
+fn held_and_cause_stops_at_rule_ref_not_dependency_data() {
+    let engine = load(
+        r#"
+spec premium_membership
+uses lemma units
+data start: date
+data length: units.calendar
+rule valid: now in start...start + length
+
+spec film_access
+uses premium_membership
+data type: text
+  -> option "rental"
+  -> option "purchase"
+data views_consumed: number
+data premium_member: boolean
+rule max_views: 3
+  unless premium_membership.valid then 10
+  unless premium_member then 5
+rule can_view: no
+  unless type is "rental" and views_consumed < max_views then yes
+  unless type is "purchase" then yes
+"#,
+    );
+    let mut data = IndexMap::new();
+    data.insert("type".into(), "rental".into());
+    data.insert("views_consumed".into(), "3".into());
+    data.insert("premium_member".into(), "true".into());
+    let response = run(
+        &engine,
+        "film_access",
+        data,
+        Some(&["can_view".to_string()]),
+        true,
+    );
+    assert_eq!(
+        response.results.get("can_view").expect("can_view").result(),
+        Some("true")
+    );
+    let explanation = response
+        .results
+        .get("can_view")
+        .expect("can_view")
+        .explanation
+        .as_ref()
+        .expect("explanation");
+    let winning = explanation
+        .causes
+        .iter()
+        .find(|c| c.condition.contains("max_views") && c.value == "true")
+        .expect("held rental and cause");
+    assert_eq!(
+        cause_child_names(winning),
+        vec!["views_consumed".to_string(), "max_views".to_string()],
+        "held and lists local value + rule_ref cut, not max_views deps or literal is data"
+    );
+    assert!(
+        !cause_child_names(winning).iter().any(|n| n == "type"),
+        "type is \"rental\" already states the binding"
+    );
+    assert!(
+        !cause_child_names(winning)
+            .iter()
+            .any(|n| n == "premium_member"),
+        "premium_member belongs under max_views, not can_view's condition"
+    );
+    let max_views_ref = winning
+        .children
+        .iter()
+        .find(|n| matches!(n, ExplanationNode::RuleRef { name, .. } if name.rule == "max_views"))
+        .expect("max_views RuleRef");
+    let max_views = match max_views_ref {
+        ExplanationNode::RuleRef { id, .. } => explanation
+            .rules
+            .iter()
+            .find(|r| r.id == *id)
+            .expect("max_views in rules table"),
+        _ => unreachable!(),
+    };
+    assert_eq!(max_views.result.result.as_deref(), Some("5"));
+    assert_eq!(
+        lemma::format_explanation(explanation),
+        "\
+can_view: true
+├─ type is not purchase
+│  └─ type: rental
+└─ type is rental and views_consumed < max_views
+   ├─ views_consumed: 3
+   └─ max_views: 5
+      └─ premium_member"
+    );
+}
+
+#[test]
+fn held_literal_is_cause_omits_restated_data() {
+    let engine = load(
+        r#"
+spec rental_only
+data type: text
+rule out: no
+  unless type is "rental" then yes
+"#,
+    );
+    let mut data = IndexMap::new();
+    data.insert("type".into(), "rental".into());
+    let response = run(
+        &engine,
+        "rental_only",
+        data,
+        Some(&["out".to_string()]),
+        true,
+    );
+    assert_eq!(
+        response.results.get("out").expect("out").result(),
+        Some("true")
+    );
+    let explanation = out_explanation(&response);
+    let winning = explanation
+        .causes
+        .iter()
+        .find(|c| c.condition.contains("type") && c.value == "true")
+        .expect("held type is rental cause");
+    assert!(
+        winning.children.is_empty(),
+        "held data-vs-literal is fully stated in the cause line, got {:?}",
+        winning.children
+    );
+}
+
+#[test]
+fn not_taken_literal_is_keeps_actual_data_value() {
+    let engine = load(
+        r#"
+spec film_access
+data type: text
+  -> option "rental"
+  -> option "purchase"
+data views_consumed: number
+data max_views: number
+rule can_view: no
+  unless type is "rental" and views_consumed < max_views then yes
+  unless type is "purchase" then yes
+"#,
+    );
+    let mut data = IndexMap::new();
+    data.insert("type".into(), "rental".into());
+    data.insert("views_consumed".into(), "6".into());
+    data.insert("max_views".into(), "5".into());
+    let response = run(
+        &engine,
+        "film_access",
+        data,
+        Some(&["can_view".to_string()]),
+        true,
+    );
+    assert_eq!(
+        response.results.get("can_view").expect("can_view").result(),
+        Some("false")
+    );
+    let explanation = response
+        .results
+        .get("can_view")
+        .expect("can_view")
+        .explanation
+        .as_ref()
+        .expect("explanation");
+    let not_purchase = explanation
+        .causes
+        .iter()
+        .find(|c| c.condition.contains("is not") && c.value == "true")
+        .expect("flipped type is not purchase cause");
+    assert_eq!(
+        cause_child_names(not_purchase),
+        vec!["type".to_string()],
+        "is not keeps the actual binding; cause line only names the rejected literal"
+    );
+    match not_purchase.children.as_slice() {
+        [ExplanationNode::Data { name, result }] => {
+            assert_eq!(name.input_key(), "type");
+            assert_eq!(result.result.as_deref(), Some("rental"));
+        }
+        other => panic!("expected type: rental data child, got {other:?}"),
+    }
 }

@@ -30,10 +30,12 @@ data currency: measure
   -> unit cent: 0.01
 
 spec pricing 2024-01-01
+uses money
 data amount: money.currency
 rule doubled: amount * 2
 
 spec pricing 2025-01-01
+uses money
 data amount: money.currency
 rule doubled: amount * 3
 
@@ -147,10 +149,12 @@ data currency: measure
   -> unit cent: 0.01
 
 spec pricing 2024-01-01
+uses money
 data amount: money.currency
 rule doubled: amount * 2
 
 spec pricing 2025-01-01
+uses money
 data amount: money.currency
 rule doubled: amount * 3
 
@@ -178,10 +182,12 @@ data currency: measure
 data note: text
 
 spec pricing 2024-01-01
+uses money
 data amount: money.currency
 rule doubled: amount * 2
 
 spec pricing 2025-01-01
+uses money
 data amount: money.currency
 rule doubled: amount * 3
 

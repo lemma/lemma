@@ -1,0 +1,9 @@
+is_invalid: true
+└─ validated is veto
+   └─ validated: Negative values not allowed
+      ├─ input_value <= 1000
+      │  └─ input_value: -5
+      ├─ input_value < 0
+      │  └─ input_value: -5
+      └─ veto
+         └─ veto "Negative values not allowed"

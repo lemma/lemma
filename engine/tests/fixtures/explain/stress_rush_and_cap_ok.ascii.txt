@@ -1,0 +1,52 @@
+rush_and_cap_ok: true
+└─ order.is_rush and discount_within_cap
+   ├─ order.is_rush: true
+   │  └─ is_express and estimated_delivery_days <= 2
+   │     ├─ is_express: true
+   │     └─ estimated_delivery_days <= 2
+   │        └─ estimated_delivery_days: 1
+   │           └─ is_express
+   └─ discount_within_cap: true
+      └─ order.savings_percent <= config.max_discount_cap
+         ├─ order.savings_percent: 30%
+         │  └─ (savings_total / subtotal) as percent
+         │     └─ savings_total / subtotal
+         │        ├─ savings_total: 300
+         │        │  └─ discount_amount + loyalty_discount
+         │        │     ├─ discount_amount: 300
+         │        │     │  └─ subtotal * combined_discount_rate
+         │        │     │     ├─ subtotal: 1000
+         │        │     │     │  └─ base_price * quantity
+         │        │     │     │     ├─ base_price: 100
+         │        │     │     │     └─ quantity: 10
+         │        │     │     └─ combined_discount_rate: 30%
+         │        │     │        ├─ tier_discount_rate > measure_discount_rate
+         │        │     │        │  ├─ tier_discount_rate: 30%
+         │        │     │        │  │  └─ customer_tier is vip
+         │        │     │        │  │     └─ is_vip: true
+         │        │     │        │  │        └─ customer_tier is vip
+         │        │     │        │  │           └─ customer_tier: vip
+         │        │     │        │  └─ measure_discount_rate: 5%
+         │        │     │        │     ├─ quantity < 50
+         │        │     │        │     │  └─ quantity: 10
+         │        │     │        │     ├─ quantity < 100
+         │        │     │        │     │  └─ quantity: 10
+         │        │     │        │     └─ quantity >= 10
+         │        │     │        │        └─ quantity: 10
+         │        │     │        └─ tier_discount_rate
+         │        │     │           └─ tier_discount_rate: 30% (see above)
+         │        │     └─ loyalty_discount: 0
+         │        │        └─ net_price * loyalty_discount_rate
+         │        │           ├─ net_price: 700
+         │        │           │  └─ subtotal - discount_amount
+         │        │           │     ├─ subtotal: 1000 (see above)
+         │        │           │     └─ discount_amount: 300 (see above)
+         │        │           └─ loyalty_discount_rate: 0%
+         │        │              ├─ loyalty_points < 1000
+         │        │              │  └─ loyalty_points: 0
+         │        │              ├─ loyalty_points < 5000
+         │        │              │  └─ loyalty_points: 0
+         │        │              └─ loyalty_points < 10000
+         │        │                 └─ loyalty_points: 0
+         │        └─ subtotal: 1000 (see above)
+         └─ config.max_discount_cap: 35%

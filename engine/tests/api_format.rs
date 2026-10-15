@@ -597,7 +597,7 @@ fn assert_cost_price_rule_not_vetoed(response: &lemma::Response, context: &str) 
     );
     assert_ne!(
         rule.veto_reason.as_deref(),
-        Some("Calculated result exceeds decimal value limit"),
+        Some("The calculated result exceeds the decimal value limit."),
         "{context}: must not veto for decimal limit"
     );
     assert!(

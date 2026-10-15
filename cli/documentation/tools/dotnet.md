@@ -10,7 +10,7 @@ nav_order: 60
 ## Install
 
 ```bash
-dotnet add package Lemmabase.Lemma.Engine --version 0.10.1
+dotnet add package Lemmabase.Lemma.Engine --version 0.10.2
 ```
 
 ## Usage

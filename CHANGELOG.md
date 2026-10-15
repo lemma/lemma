@@ -2,6 +2,15 @@
 
 Releases cover the Lemma engine, `lemma` CLI, OpenAPI crate, LSP, SDKs and VS Code extension. They all follow the same version everywhere. The release version is `[workspace.package] version` in the root `Cargo.toml`. Git tags follow `lemma-v{version}` (for example `lemma-v0.8.20`); releases before the rename used `cli-v{version}`. Draft notes for the next version quickly by running `cargo changelog` to print `git diff` / `git log` since the latest release tag (`xtask` `versions-diff`). Tip: feed that into an LLM to create a summary for this changelog.
 
+## [0.10.2] - 2026-10-15
+
+Compound unit planning: same-family scale units and imported compound units of measure.
+
+### Fixed
+
+- **Same-family scale units on extensions**: after `uses lemma units`, `data worktime: units.duration -> unit workday: 8 hour` plans. Resolve expands the factor through `hour` and stores `workday` as a simple identity unit. Bare `hour` still binds `duration`; `as workday` / `as hour` convert in family.
+- **Imported compound measure factors**: typed `data rate: dimensions.wage_rate` keeps the defining conversion factor, so `14.80 eur_per_hour * 8 hour` is `118.40 eur` (was off by 3600). Additive units on the import still resolve once.
+
 ## [0.10.1] - 2026-10-15
 
 VS Code publish and highlighting, .NET NuGet SDK, overridable `uses` wire bindings, and clearer `--explain` narration.

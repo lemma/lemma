@@ -74,4 +74,4 @@ Sorted by line coverage ascending (weakest first). Only files under `src/` for t
 - [CLI integration test catalog](../../../cli/tests/README.md)
 - [Engine test coverage](engine.md)
 - [CLI benchmarks](../benchmarks/cli.md)
-<!-- coverage-input-digest: 86acb269cb9c985f -->
+<!-- coverage-input-digest: 221e1cb4427f8c4a -->

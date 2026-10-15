@@ -41,14 +41,14 @@ LLVM version: 21.1.3
 
 | Metric | Covered | Total | Percent |
 |--------|--------:|------:|--------:|
-| Lines | 57059 | 65620 | 86.95% |
-| Functions | 4402 | 4947 | 88.98% |
-| Regions | 83753 | 97334 | 86.05% |
+| Lines | 57094 | 65649 | 86.97% |
+| Functions | 4405 | 4950 | 88.99% |
+| Regions | 83814 | 97385 | 86.06% |
 
 ## Test run
 
-- Total: 3486
-- Passed: 3486
+- Total: 3497
+- Passed: 3497
 - Skipped: 0
 - Failed: 0
 
@@ -71,7 +71,7 @@ Sorted by line coverage ascending (weakest first). Only files under `src/` for t
 | `computation/bigint/signed.rs` | 78.77 | 75.56 | 76.66 | 256/325 |
 | `computation/units.rs` | 79.81 | 100.00 | 77.58 | 166/208 |
 | `mcp/tools.rs` | 80.13 | 71.43 | 78.92 | 383/478 |
-| `planning/graph.rs` | 80.71 | 87.71 | 81.17 | 10356/12831 |
+| `planning/graph.rs` | 80.80 | 87.77 | 81.27 | 10391/12860 |
 | `evaluation/expression.rs` | 81.82 | 100.00 | 86.87 | 54/66 |
 | `computation/measure_math.rs` | 82.86 | 100.00 | 84.44 | 58/70 |
 | `planning/semantics.rs` | 83.07 | 84.03 | 82.83 | 4481/5394 |
@@ -134,4 +134,4 @@ Sorted by line coverage ascending (weakest first). Only files under `src/` for t
 - [Engine integration test catalog](../../../engine/tests/README.md) — qualitative map of scenarios and subsystem overlap clusters
 - [CLI test coverage](cli.md)
 - [Engine benchmarks](../benchmarks/engine.md)
-<!-- coverage-input-digest: ee9446b57181b338 -->
+<!-- coverage-input-digest: 09b45818179dc813 -->

@@ -7,7 +7,7 @@
     <RootNamespace>Lemmabase.Lemma.Engine</RootNamespace>
     <AssemblyName>Lemmabase.Lemma.Engine</AssemblyName>
     <PackageId>Lemmabase.Lemma.Engine</PackageId>
-    <Version>0.10.1</Version>
+    <Version>0.10.2</Version>
     <Authors>Lemma</Authors>
     <Description>Lemma rules engine for .NET</Description>
     <PackageLicenseExpression>Apache-2.0</PackageLicenseExpression>

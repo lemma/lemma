@@ -11006,15 +11006,38 @@ fn resolve_measure_decompositions(
     for type_name in &derived_measure_type_names {
         let type_source = source_for(type_name);
 
-        let units_snapshot = match &resolved[type_name].specifications {
-            TypeSpecification::Measure { units, .. } => units.clone(),
+        let (units_snapshot, already_resolved_body) = match &resolved[type_name].specifications {
+            TypeSpecification::Measure {
+                units,
+                decomposition,
+                ..
+            } => (units.clone(), decomposition.clone()),
             _ => continue,
         };
 
-        let mut resolved_type_decomp: Option<BaseMeasureVector> = None;
+        // Post-resolve import clones already carry `decomposition: Some`. Re-running
+        // `resolve_compound_unit` on inherited units squares non-1 scales (eur/hour → 1/3600²).
+        // Pure aliases (no locally owned units) leave the clone intact before the unit walk.
+        let body_already_resolved = already_resolved_body.is_some();
+        let unit_owned_locally = |unit_name: &str| {
+            unit_index.owners_for(unit_name).iter().any(|owner| {
+                matches!(
+                    owner,
+                    PlanningOwner::Local {
+                        type_name: local_name
+                    } if local_name == type_name
+                )
+            })
+        };
+        if body_already_resolved && !units_snapshot.iter().any(|u| unit_owned_locally(&u.name)) {
+            continue;
+        }
+
+        let mut resolved_type_decomp: Option<BaseMeasureVector> = already_resolved_body;
         let mut unit_errors: Vec<Error> = Vec::new();
         let mut resolved_unit_factors: Vec<Option<crate::computation::rational::RationalInteger>> =
             vec![None; units_snapshot.len()];
+        let mut resolve_to_simple: Vec<bool> = vec![false; units_snapshot.len()];
 
         for (unit_idx, unit) in units_snapshot.iter().enumerate() {
             if crate::planning::semantics::calendar_unit_factor(&unit.name).is_some()
@@ -11062,6 +11085,11 @@ fn resolve_measure_decompositions(
                 continue;
             }
 
+            if body_already_resolved && !unit_owned_locally(&unit.name) {
+                resolved_unit_factors[unit_idx] = Some(unit.factor.clone());
+                continue;
+            }
+
             match resolve_compound_unit(
                 spec_name,
                 type_name,
@@ -11072,6 +11100,11 @@ fn resolve_measure_decompositions(
                 type_source.as_ref(),
             ) {
                 Ok((unit_decomp, derived_factor)) => {
+                    // Same-family scale (`workday: 8 hour` on duration): resolved decomp matches
+                    // the declaring type's declared decomp → simple identity + expanded factor.
+                    if unit_decomp == declared_measure_decomposition(resolved[type_name].as_ref()) {
+                        resolve_to_simple[unit_idx] = true;
+                    }
                     if let Some(existing) = &resolved_type_decomp {
                         if existing != &unit_decomp {
                             unit_errors.push(Error::validation(
@@ -11120,9 +11153,14 @@ fn resolve_measure_decompositions(
                     .enumerate()
                     .map(|(idx, u)| {
                         let u = u.with_decomposition(type_decomp.clone());
-                        match resolved_unit_factors[idx].clone() {
-                            Some(factor) => u.with_factor(factor.clone()),
+                        let u = match resolved_unit_factors[idx].clone() {
+                            Some(factor) => u.with_factor(factor),
                             None => u,
+                        };
+                        if resolve_to_simple[idx] {
+                            u.with_derived_measure_factors(Vec::new())
+                        } else {
+                            u
                         }
                     })
                     .collect(),
@@ -11132,6 +11170,11 @@ fn resolve_measure_decompositions(
 
         if let TypeSpecification::Measure { units, .. } = &updated.specifications {
             for unit in units.iter() {
+                // Import clones: only additive (locally owned) units may claim bare names in
+                // lookup. Inherited compounds stay keyed to the defining import owner.
+                if body_already_resolved && !unit_owned_locally(&unit.name) {
+                    continue;
+                }
                 lookup.insert(
                     unit.name.clone(),
                     (

@@ -1665,7 +1665,7 @@ checksum = "20870f649af7073d53e38067b2a84312175d56ea15217e1b15bc83506ec50afb"
 
 [[package]]
 name = "lemma"
-version = "0.10.1"
+version = "0.10.2"
 dependencies = [
  "anyhow",
  "ariadne",
@@ -1700,7 +1700,7 @@ dependencies = [
 
 [[package]]
 name = "lemma-engine"
-version = "0.10.1"
+version = "0.10.2"
 dependencies = [
  "chrono",
  "console_error_panic_hook",
@@ -1722,7 +1722,7 @@ dependencies = [
 
 [[package]]
 name = "lemma-lsp"
-version = "0.10.1"
+version = "0.10.2"
 dependencies = [
  "console_error_panic_hook",
  "futures",
@@ -1739,7 +1739,7 @@ dependencies = [
 
 [[package]]
 name = "lemma-openapi"
-version = "0.10.1"
+version = "0.10.2"
 dependencies = [
  "lemma-engine",
  "serde",
@@ -1748,7 +1748,7 @@ dependencies = [
 
 [[package]]
 name = "lemma_dotnet"
-version = "0.10.1"
+version = "0.10.2"
 dependencies = [
  "lemma-engine",
  "serde",
@@ -1759,7 +1759,7 @@ dependencies = [
 
 [[package]]
 name = "lemma_hex"
-version = "0.10.1"
+version = "0.10.2"
 dependencies = [
  "indexmap",
  "lemma-engine",
@@ -1771,7 +1771,7 @@ dependencies = [
 
 [[package]]
 name = "lemma_jni"
-version = "0.10.1"
+version = "0.10.2"
 dependencies = [
  "indexmap",
  "jni",

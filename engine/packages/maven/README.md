@@ -6,7 +6,7 @@ JVM binding for the Lemma rules engine. Coordinates: `com.lemmabase:lemma-engine
 <dependency>
   <groupId>com.lemmabase</groupId>
   <artifactId>lemma-engine</artifactId>
-  <version>0.10.1</version>
+  <version>0.10.2</version>
 </dependency>
 ```
 

@@ -11,7 +11,7 @@
 //! `Decimal`'s default serde.
 
 use crate::computation::rational::{
-    checked_div, checked_mul, decimal_to_display_str, NumericFailure,
+    checked_div, checked_mul, decimal_to_display_str, NumericFailure, RationalInteger,
 };
 use crate::literals::rational_from_parsed_decimal;
 use crate::planning::semantics::{
@@ -25,7 +25,7 @@ use indexmap::IndexMap;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 use std::sync::Arc;
 
@@ -79,7 +79,9 @@ pub struct RuleResultValue {
     pub time: Option<SemanticTime>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub calendar: Option<CalendarResult>,
-    /// Written unit for a measure or ratio value (including range endpoints).
+    /// Unit `result` is expressed in, for a measure or ratio value written in a unit
+    /// (including range endpoints). A written dynamic unit without a factor in the
+    /// presenting spec is reported as the unit used instead.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub unit: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -88,7 +90,7 @@ pub struct RuleResultValue {
     /// data slot of that instance, keyed relative to that spec.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub spec: Option<Box<SpecResult>>,
-    /// Set when the value is a row of an instance list.
+    /// Set when the value is an instance-list row or a `uses` instance projected from one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub row: Option<RowReference>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -123,7 +125,8 @@ pub struct SpecResult {
     pub rules: IndexMap<String, SpecRuleResult>,
 }
 
-/// A row of an instance list. Its data and rules are `Response.rows[index]`.
+/// An instance-list row or a `uses` instance projected from one.
+/// Its data and rules are `Response.rows[index]`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RowReference {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -131,8 +134,12 @@ pub struct RowReference {
     pub spec: String,
     /// Resolved row's effective date. Empty when the row is the origin row.
     pub effective: String,
-    /// Row path relative to the spec holding this value (`lines.2`, `components.1`).
-    pub instance: String,
+    /// Row path relative to the spec holding this value (`lines.2`, `lines.2.item`).
+    /// Present for a row with a data path (evaluation-data rows). An appended row
+    /// (`-> with`) has no path; its identity is its place in the list, and a value
+    /// bound inside it carries only its row-relative path (`item`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instance: Option<String>,
     pub index: usize,
 }
 
@@ -312,6 +319,7 @@ fn result_value_from_literal(
     lemma_type: &LemmaType,
     expansion: &UnitExpansion<'_>,
     catalog: Option<&FamilyUnitCatalog>,
+    runtime_scales: Option<&HashMap<String, RationalInteger>>,
 ) -> Result<RuleResultValue, RuleResultValueFailure> {
     let mut tasks = vec![ResultValueTask::Visit {
         literal: Cow::Borrowed(literal),
@@ -332,12 +340,14 @@ fn result_value_from_literal(
                             from.lemma_type.as_ref(),
                             expansion,
                             catalog,
+                            runtime_scales,
                         )?;
                         let to_value = result_value_from_range_endpoint(
                             &to.to_literal(),
                             to.lemma_type.as_ref(),
                             expansion,
                             catalog,
+                            runtime_scales,
                         )?;
                         converted.push(RuleResultValue {
                             result: Some(literal.display_value_with_type(lemma_type)),
@@ -361,7 +371,11 @@ fn result_value_from_literal(
                         }
                     }
                     _ => converted.push(result_value_from_non_range_literal(
-                        &literal, lemma_type, expansion, catalog,
+                        &literal,
+                        lemma_type,
+                        expansion,
+                        catalog,
+                        runtime_scales,
                     )?),
                 }
             }
@@ -387,9 +401,16 @@ pub(crate) fn rule_result_value_from_literal(
     literal: &LiteralValue,
     rule_type: &LemmaType,
     catalog: &FamilyUnitCatalog,
+    runtime_scales: Option<&HashMap<String, RationalInteger>>,
 ) -> Result<RuleResultValue, RuleResultValueFailure> {
     let expansion = expansion_for_type(rule_type, Some(catalog));
-    result_value_from_literal(literal, rule_type, &expansion, Some(catalog))
+    result_value_from_literal(
+        literal,
+        rule_type,
+        &expansion,
+        Some(catalog),
+        runtime_scales,
+    )
 }
 
 /// Build a [`RuleResultValue`] using only units declared on `lemma_type` (Show data fill/suggestion).
@@ -398,7 +419,7 @@ pub fn type_scoped_result_value_from_literal(
     lemma_type: &LemmaType,
 ) -> Result<RuleResultValue, RuleResultValueFailure> {
     let expansion = UnitExpansion::Declared;
-    result_value_from_literal(literal, lemma_type, &expansion, None)
+    result_value_from_literal(literal, lemma_type, &expansion, None, None)
 }
 
 fn result_value_from_range_endpoint(
@@ -406,11 +427,12 @@ fn result_value_from_range_endpoint(
     endpoint_type: &LemmaType,
     expansion: &UnitExpansion<'_>,
     catalog: Option<&FamilyUnitCatalog>,
+    runtime_scales: Option<&HashMap<String, RationalInteger>>,
 ) -> Result<RuleResultValue, RuleResultValueFailure> {
     if matches!(&endpoint.value, ValueKind::Range(_, _)) {
         panic!("BUG: range endpoint must not itself be a range");
     }
-    result_value_from_non_range_literal(endpoint, endpoint_type, expansion, catalog)
+    result_value_from_non_range_literal(endpoint, endpoint_type, expansion, catalog, runtime_scales)
 }
 
 fn result_value_from_non_range_literal(
@@ -418,6 +440,7 @@ fn result_value_from_non_range_literal(
     result_type: &LemmaType,
     expansion: &UnitExpansion<'_>,
     catalog: Option<&FamilyUnitCatalog>,
+    runtime_scales: Option<&HashMap<String, RationalInteger>>,
 ) -> Result<RuleResultValue, RuleResultValueFailure> {
     match &literal.value {
         ValueKind::Measure(rational) if result_type.is_calendar_like() => {
@@ -435,22 +458,46 @@ fn result_value_from_non_range_literal(
                 ..RuleResultValue::default()
             })
         }
+        ValueKind::UnscaledMeasure { magnitude, unit } => {
+            let decimal = magnitude
+                .try_to_decimal()
+                .map_err(map_numeric_to_rule_result_value_failure)?;
+            let api_decimal = format_decimal_for_api(decimal);
+            let display = format!("{} {unit}", decimal_to_display_str(&decimal));
+            let mut measure = BTreeMap::new();
+            measure.insert(unit.to_string(), api_decimal);
+            Ok(RuleResultValue {
+                result: Some(display),
+                measure: Some(measure),
+                unit: Some(unit.to_string()),
+                ..RuleResultValue::default()
+            })
+        }
         ValueKind::Measure(_) => {
-            let result = Some(literal.display_value_with_type(result_type));
             let unit_names = unit_names_for_expansion(result_type, expansion, catalog);
             let unit_name_refs: Vec<&str> = unit_names.iter().map(String::as_str).collect();
+            let fallback = measure_factor_source(result_type, expansion);
+            let source = match runtime_scales {
+                Some(scales) => UnitFactorSource::Runtime {
+                    scales,
+                    fallback: &fallback,
+                },
+                None => fallback,
+            };
+            let measure = result_type
+                .measure_literal_unit_map(literal, &unit_name_refs, source)
+                .map_err(map_literal_unit_map_failure)?;
+            let result = Some(literal.display_value_with_scales(result_type, runtime_scales));
+            let unit = result_type.unit().map(|_| {
+                result_type
+                    .measure_display_unit_name(runtime_scales)
+                    .expect("BUG: a measure with a written unit has a unit table")
+                    .to_string()
+            });
             Ok(RuleResultValue {
                 result,
-                measure: Some(
-                    result_type
-                        .measure_literal_unit_map(
-                            literal,
-                            &unit_name_refs,
-                            measure_factor_source(result_type, expansion),
-                        )
-                        .map_err(map_literal_unit_map_failure)?,
-                ),
-                unit: result_type.unit().map(str::to_string),
+                measure: Some(measure),
+                unit,
                 ..RuleResultValue::default()
             })
         }
@@ -486,7 +533,7 @@ fn scalar_result_value(
             let decimal = rational
                 .try_to_decimal()
                 .map_err(map_numeric_to_rule_result_value_failure)?;
-            let api_decimal = format_decimal_for_api(decimal, result_type.decimal_places());
+            let api_decimal = format_decimal_for_api(decimal);
             let display_string = decimal_to_display_str(&decimal);
             Ok(RuleResultValue {
                 result: Some(display_string),
@@ -506,8 +553,8 @@ fn scalar_result_value(
             let result = Some(value.to_string());
             Ok(scalar_result_value_non_numeric(result, value))
         }
-        ValueKind::Measure(_) | ValueKind::Ratio(_) => {
-            unreachable!("BUG: measure and ratio must be handled by caller")
+        ValueKind::Measure(_) | ValueKind::Ratio(_) | ValueKind::UnscaledMeasure { .. } => {
+            unreachable!("BUG: measure, ratio and unscaled measure must be handled by caller")
         }
         ValueKind::Range(_, _) => {
             unreachable!("BUG: range must be handled by result_value_from_literal")
@@ -515,13 +562,29 @@ fn scalar_result_value(
         ValueKind::List(_) => {
             unreachable!("BUG: list must be handled by result_value_from_literal")
         }
+        ValueKind::Spec(SpecValue::Row(key)) => match key.segments() {
+            Some(path) => Ok(RuleResultValue {
+                result: Some(key.to_string()),
+                spec: Some(Box::new(SpecResult {
+                    repository: key.row.identity.repository.clone(),
+                    spec: key.row.identity.spec.clone(),
+                    effective: key.row.identity.effective.to_string(),
+                    instance: key.to_string(),
+                    path: path.iter().map(crate::api::PathSegment::from).collect(),
+                    data: IndexMap::new(),
+                    rules: IndexMap::new(),
+                })),
+                ..RuleResultValue::default()
+            }),
+            None => Ok(RuleResultValue {
+                result: Some(value.to_string()),
+                ..RuleResultValue::default()
+            }),
+        },
         ValueKind::Spec(SpecValue::Fixed(instance)) => {
-            let identity = result_type.spec_identity().unwrap_or_else(|| {
-                panic!(
-                    "BUG: spec value whose type is not a spec ({})",
-                    result_type.name()
-                )
-            });
+            let identity = result_type
+                .spec_identity()
+                .expect("BUG: spec value whose type is not a spec");
             Ok(RuleResultValue {
                 result: Some(instance.to_string()),
                 spec: Some(Box::new(SpecResult {
@@ -540,10 +603,6 @@ fn scalar_result_value(
                 ..RuleResultValue::default()
             })
         }
-        ValueKind::Spec(SpecValue::Row(row)) => Ok(RuleResultValue {
-            result: Some(row.origin.to_string()),
-            ..RuleResultValue::default()
-        }),
     }
 }
 
@@ -551,7 +610,7 @@ fn scalar_result_value_non_numeric(result: Option<String>, value: &ValueKind) ->
     match value {
         ValueKind::Text(s) => RuleResultValue {
             result,
-            text: Some(s.clone()),
+            text: Some(s.to_string()),
             ..RuleResultValue::default()
         },
         ValueKind::Date(d) => RuleResultValue {
@@ -572,24 +631,32 @@ fn literal_from_measure_map(
     measure: &BTreeMap<String, Decimal>,
     rule_type: &LemmaType,
 ) -> LiteralValue {
-    let unit_names = rule_type
-        .measure_unit_names()
-        .expect("BUG: measure rule result must have declared units");
-    let unit_name = rule_type
+    let unit = rule_type
         .unit()
-        .map(str::to_string)
-        .or_else(|| unit_names.first().map(|name| (*name).to_string()))
-        .expect("BUG: measure rule result type must declare at least one unit");
+        .and_then(|name| rule_type.measure_units_table()?.get(name).ok())
+        .or_else(|| rule_type.measure_fallback_unit())
+        .expect(
+            "BUG: reconstructing a measure from a unit map requires a declared unit on the type",
+        );
     let magnitude = measure
-        .get(&unit_name)
-        .unwrap_or_else(|| panic!("BUG: measure map missing unit '{unit_name}'"));
+        .get(&unit.name)
+        .unwrap_or_else(|| panic!("BUG: measure map missing unit '{}'", unit.name));
     let rational = rational_from_parsed_decimal(*magnitude)
         .expect("BUG: measure rule result value must lift to rational");
-    let factor = rule_type.measure_unit_factor(&unit_name);
-    let canonical = checked_mul(&rational, factor).unwrap_or_else(|failure| {
-        panic!("BUG: measure canonicalization from RuleResultValue fields failed: {failure}")
-    });
-    LiteralValue::measure(canonical)
+    match unit.literal_factor() {
+        Some(factor) => {
+            let canonical = checked_mul(&rational, factor).unwrap_or_else(|failure| {
+                panic!(
+                    "BUG: measure canonicalization from RuleResultValue fields failed: {failure}"
+                )
+            });
+            LiteralValue::measure(canonical)
+        }
+        None => LiteralValue::new(ValueKind::UnscaledMeasure {
+            magnitude: rational,
+            unit: Arc::from(unit.name.as_str()),
+        }),
+    }
 }
 
 fn literal_from_ratio_map(
@@ -631,7 +698,7 @@ impl RuleResultValue {
         if let Some(row) = &self.row {
             panic!(
                 "BUG: list row '{}' cannot be rebuilt from its API value",
-                row.instance
+                row.instance.as_deref().unwrap_or("<appended>")
             );
         }
         if let Some(spec) = &self.spec {
@@ -645,9 +712,10 @@ impl RuleResultValue {
                     .path
                     .iter()
                     .map(|segment| crate::planning::semantics::PathSegment {
-                        uses: segment.uses.clone(),
-                        repository: segment.repository.clone(),
-                        spec: segment.spec.clone(),
+                        uses: Arc::from(segment.uses.as_str()),
+                        row: segment.row,
+                        repository: segment.repository.as_deref().map(Arc::from),
+                        spec: Arc::from(segment.spec.as_str()),
                     })
                     .collect(),
             })));
@@ -685,11 +753,11 @@ impl RuleResultValue {
             let left = range.from.to_literal(&left_type);
             let right = range.to.to_literal(&right_type);
             return LiteralValue::range(
-                crate::planning::semantics::TypedLiteral {
+                TypedLiteral {
                     value: left.value,
                     lemma_type: Arc::new(left_type),
                 },
-                crate::planning::semantics::TypedLiteral {
+                TypedLiteral {
                     value: right.value,
                     lemma_type: Arc::new(right_type),
                 },

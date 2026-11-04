@@ -3,9 +3,10 @@ use crate::limits::ResourceLimits;
 use crate::parsing::ast::{try_parse_type_constraint_command, *};
 use crate::parsing::lexer::{
     can_be_label, can_be_spec_name_spelling, can_be_unit_name, is_boolean_keyword, is_keyword,
-    is_math_function, is_reserved_repository_name, is_spec_body_keyword,
-    token_is_calendar_period_marker, token_kind_to_boolean_value, token_kind_to_primitive, Lexer,
-    LexerCheckpoint, Token, TokenKind,
+    is_math_function, is_prefix_rounding, is_reserved_repository_name, is_spec_body_keyword,
+    token_is_calendar_period_marker, token_kind_to_boolean_value,
+    token_kind_to_conversion_type_kind, token_kind_to_primitive, Lexer, LexerCheckpoint, Token,
+    TokenKind,
 };
 use crate::parsing::source::Source;
 use indexmap::IndexMap;
@@ -47,7 +48,7 @@ pub fn parse_repository_qualifier_str(
     );
     let (qualifier, _) = parser.parse_repository_qualifier()?;
     if !parser.at(&TokenKind::Eof)? {
-        let tok = parser.peek()?.clone();
+        let tok = *parser.peek()?;
         return Err(parser.error_at_token(
             &tok,
             format!(
@@ -120,6 +121,7 @@ struct ParserCheckpoint {
 
 struct Parser {
     lexer: Lexer,
+    source: Arc<str>,
     source_type: crate::parsing::source::SourceType,
     depth_tracker: DepthTracker,
     expression_count: usize,
@@ -128,8 +130,6 @@ struct Parser {
     max_data_name_length: usize,
     max_rule_name_length: usize,
     last_span: Span,
-    /// Parsing a bare command argument: `->` ends the operand instead of chaining onto it.
-    bare_operand: bool,
     /// Nesting depth of comma-separated call arguments (`find(a, b)`).
     call_argument_depth: usize,
     /// Operand starts of the bound chain that last completed without `...`.
@@ -149,8 +149,10 @@ impl Parser {
         source_type: crate::parsing::source::SourceType,
         limits: &ResourceLimits,
     ) -> Self {
+        let source: Arc<str> = Arc::from(content);
         Parser {
-            lexer: Lexer::new(content, &source_type),
+            lexer: Lexer::new(Arc::clone(&source), &source_type),
+            source,
             source_type,
             depth_tracker: DepthTracker::with_max_depth(limits.max_expression_depth),
             expression_count: 0,
@@ -164,7 +166,6 @@ impl Parser {
                 line: 1,
                 col: 0,
             },
-            bare_operand: false,
             call_argument_depth: 0,
             bound_chain_starts: Vec::new(),
             no_range_at: std::collections::HashMap::new(),
@@ -183,7 +184,7 @@ impl Parser {
 
     fn next(&mut self) -> Result<Token, Error> {
         let token = self.lexer.next_token()?;
-        self.last_span = token.span.clone();
+        self.last_span = token.span;
         Ok(token)
     }
 
@@ -221,12 +222,13 @@ impl Parser {
     }
 
     fn at_calendar_period_marker(&mut self) -> Result<bool, Error> {
-        Ok(token_is_calendar_period_marker(self.peek()?))
+        let peeked = *self.peek()?;
+        Ok(token_is_calendar_period_marker(&self.source, &peeked))
     }
 
     fn expect_calendar_period_marker(&mut self) -> Result<Token, Error> {
         let token = self.next()?;
-        if token_is_calendar_period_marker(&token) {
+        if token_is_calendar_period_marker(&self.source, &token) {
             Ok(token)
         } else {
             Err(self.error_at_token(&token, "Expected 'calendar' (date-period predicate marker)"))
@@ -240,7 +242,7 @@ impl Parser {
     fn error_at_token(&self, token: &Token, message: impl Into<String>) -> Error {
         Error::parsing(
             message,
-            Source::new(self.source_type(), token.span.clone()),
+            Source::new(self.source_type(), token.span),
             None::<String>,
         )
     }
@@ -253,7 +255,7 @@ impl Parser {
     ) -> Error {
         Error::parsing(
             message,
-            Source::new(self.source_type(), token.span.clone()),
+            Source::new(self.source_type(), token.span),
             Some(suggestion),
         )
     }
@@ -261,8 +263,9 @@ impl Parser {
     fn parse_spec_ref_trailing_effective(&mut self) -> Result<Option<DateTimeValue>, Error> {
         let mut effective = None;
         if self.at(&TokenKind::NumberLit)? {
-            let peeked = self.peek()?;
-            if peeked.text.len() == 4 && peeked.text.chars().all(|c| c.is_ascii_digit()) {
+            let peeked = *self.peek()?;
+            let peeked_text = peeked.text.of(&self.source);
+            if peeked_text.len() == 4 && peeked_text.chars().all(|c| c.is_ascii_digit()) {
                 effective = self.try_parse_effective_from()?;
             }
         }
@@ -376,7 +379,7 @@ impl Parser {
         let mut meta_fields = Vec::new();
 
         loop {
-            let peek_kind = self.peek()?.kind.clone();
+            let peek_kind = self.peek()?.kind;
             match peek_kind {
                 TokenKind::Data => {
                     let datum = self.parse_data()?;
@@ -409,7 +412,7 @@ impl Parser {
                         &token,
                         format!(
                             "Expected 'data', 'rule', 'meta', 'uses', or a new 'spec', found '{}'",
-                            token.text
+                            token.text.of(&self.source)
                         ),
                         "Check the spelling or add the appropriate keyword",
                     ));
@@ -432,13 +435,13 @@ impl Parser {
 
     fn next_logical_name(&mut self) -> Result<Token, Error> {
         let token = self.lexer.next_logical_name()?;
-        self.last_span = token.span.clone();
+        self.last_span = token.span;
         Ok(token)
     }
 
     fn parse_spec_name(&mut self) -> Result<(String, Span), Error> {
         let tok = self.next_logical_name()?;
-        if tok.text.starts_with('@') {
+        if tok.text.of(&self.source).starts_with('@') {
             return Err(Error::parsing(
                 "'@' is not allowed in spec names; it is valid for repository names (`repo @org/name`) and qualifiers (`uses @org/name`)",
                 self.make_source(tok.span),
@@ -447,27 +450,38 @@ impl Parser {
                 ),
             ));
         }
-        if !can_be_spec_name_spelling(&tok.text) {
-            return Err(
-                self.error_at_token(&tok, format!("Expected a spec name, found '{}'", tok.text))
-            );
+        if !can_be_spec_name_spelling(tok.text.of(&self.source)) {
+            return Err(self.error_at_token(
+                &tok,
+                format!(
+                    "Expected a spec name, found '{}'",
+                    tok.text.of(&self.source)
+                ),
+            ));
         }
-        Ok((tok.text, tok.span))
+        Ok((tok.text.of(&self.source).to_string(), tok.span))
     }
 
     /// Parse a repository qualifier as one opaque [`TokenKind::LogicalName`].
     fn parse_repository_qualifier(&mut self) -> Result<(RepositoryQualifier, Span), Error> {
         let tok = self.next_logical_name()?;
-        if !tok.text.starts_with('@') && is_reserved_repository_name(&tok.text) {
+        if !tok.text.of(&self.source).starts_with('@')
+            && is_reserved_repository_name(tok.text.of(&self.source))
+        {
             return Err(self.error_at_token(
                 &tok,
                 format!(
                     "'{}' is a reserved keyword and cannot be used as a repository name",
-                    tok.text.to_ascii_lowercase()
+                    tok.text.of(&self.source).to_ascii_lowercase()
                 ),
             ));
         }
-        Ok((RepositoryQualifier { name: tok.text }, tok.span))
+        Ok((
+            RepositoryQualifier {
+                name: tok.text.of(&self.source).to_string(),
+            },
+            tok.span,
+        ))
     }
 
     /// Parses `[<repository_qualifier>] <spec> [<effective>]`
@@ -475,29 +489,29 @@ impl Parser {
         let first = self.next_logical_name()?;
         let mut repository = None;
         let mut repository_span = None;
-        let (spec_name, spec_name_span) = if first.text.starts_with('@') {
+        let (spec_name, spec_name_span) = if first.text.of(&self.source).starts_with('@') {
             repository = Some(RepositoryQualifier {
-                name: first.text.clone(),
+                name: first.text.of(&self.source).to_string(),
             });
-            repository_span = Some(first.span.clone());
+            repository_span = Some(first.span);
             self.parse_spec_name()?
         } else if can_be_label(&self.peek()?.kind) {
-            if is_reserved_repository_name(&first.text) {
+            if is_reserved_repository_name(first.text.of(&self.source)) {
                 return Err(self.error_at_token(
                     &first,
                     format!(
                         "'{}' is a reserved keyword and cannot be used as a repository name",
-                        first.text.to_ascii_lowercase()
+                        first.text.of(&self.source).to_ascii_lowercase()
                     ),
                 ));
             }
             repository = Some(RepositoryQualifier {
-                name: first.text.clone(),
+                name: first.text.of(&self.source).to_string(),
             });
-            repository_span = Some(first.span.clone());
+            repository_span = Some(first.span);
             self.parse_spec_name()?
         } else {
-            (first.text, first.span)
+            (first.text.of(&self.source).to_string(), first.span)
         };
         let effective = self.parse_spec_ref_trailing_effective()?;
         let target_span = self.span_covering(&spec_name_span, &self.last_span);
@@ -525,49 +539,50 @@ impl Parser {
             return Ok(None);
         }
 
-        let peeked = self.peek()?;
-        let peeked_text = peeked.text.clone();
-        let peeked_span = peeked.span.clone();
+        let peeked = *self.peek()?;
+        let peeked_text = peeked.text.of(&self.source).to_string();
+        let peeked_span = peeked.span;
 
         // Check if it could be a date: 4-digit number followed by -
         if peeked_text.len() == 4 && peeked_text.chars().all(|c| c.is_ascii_digit()) {
             // Collect the full datetime string by consuming tokens
             let mut dt_str = String::new();
             let num_tok = self.next()?; // consume the year number
-            dt_str.push_str(&num_tok.text);
+            dt_str.push_str(num_tok.text.of(&self.source));
 
             // Try to consume -MM-DD and optional T... parts
             while self.at(&TokenKind::Minus)? {
                 self.next()?; // consume -
                 dt_str.push('-');
                 let part = self.next()?;
-                dt_str.push_str(&part.text);
+                dt_str.push_str(part.text.of(&self.source));
             }
 
             // Check for T (time part)
             if self.at(&TokenKind::Identifier)? {
-                let peeked = self.peek()?;
-                if peeked.text.starts_with('T') || peeked.text.starts_with('t') {
+                let peeked = *self.peek()?;
+                let time_marker = peeked.text.of(&self.source).starts_with(['T', 't']);
+                if time_marker {
                     let time_part = self.next()?;
-                    dt_str.push_str(&time_part.text);
+                    dt_str.push_str(time_part.text.of(&self.source));
                     // Consume any : separated parts
                     while self.at(&TokenKind::Colon)? {
                         self.next()?;
                         dt_str.push(':');
                         let part = self.next()?;
-                        dt_str.push_str(&part.text);
+                        dt_str.push_str(part.text.of(&self.source));
                     }
                     // Check for timezone (+ or Z)
                     if self.at(&TokenKind::Plus)? {
                         self.next()?;
                         dt_str.push('+');
                         let tz_part = self.next()?;
-                        dt_str.push_str(&tz_part.text);
+                        dt_str.push_str(tz_part.text.of(&self.source));
                         if self.at(&TokenKind::Colon)? {
                             self.next()?;
                             dt_str.push(':');
                             let tz_min = self.next()?;
-                            dt_str.push_str(&tz_min.text);
+                            dt_str.push_str(tz_min.text.of(&self.source));
                         }
                     }
                 }
@@ -593,7 +608,7 @@ impl Parser {
             return Ok(None);
         }
         let token = self.next()?;
-        let trimmed = token.text.trim().to_string();
+        let trimmed = token.text.of(&self.source).trim().to_string();
         if trimmed.is_empty() {
             Ok(None)
         } else {
@@ -607,7 +622,7 @@ impl Parser {
 
     fn parse_data(&mut self) -> Result<LemmaData, Error> {
         let data_token = self.expect(&TokenKind::Data)?;
-        let start_span = data_token.span.clone();
+        let start_span = data_token.span;
 
         let reference = self.parse_reference()?;
         for segment in reference
@@ -619,14 +634,14 @@ impl Parser {
                 segment,
                 self.max_data_name_length,
                 "data",
-                Some(Source::new(self.source_type(), start_span.clone())),
+                Some(Source::new(self.source_type(), start_span)),
             )?;
         }
 
         self.expect(&TokenKind::Colon)?;
 
         if !reference.segments.is_empty() {
-            let tok = self.peek()?.clone();
+            let tok = *self.peek()?;
             return Err(self.error_at_token_with_suggestion(
                 &tok,
                 "Dotted paths require `uses` with `-> with`; `data` declares types and values on local names only.",
@@ -634,7 +649,7 @@ impl Parser {
             ));
         }
 
-        let value = self.parse_data_value()?;
+        let value = self.parse_data_value(&reference.name)?;
 
         let span = self.span_covering(&start_span, &self.last_span);
         let source = self.make_source(span);
@@ -650,7 +665,7 @@ impl Parser {
     }
 
     fn parse_with_rhs(&mut self) -> Result<WithRhs, Error> {
-        let peek_kind = self.peek()?.kind.clone();
+        let peek_kind = self.peek()?.kind;
 
         if Self::with_rhs_starts_as_literal(&peek_kind) {
             let value = self.parse_literal_value()?;
@@ -660,7 +675,7 @@ impl Parser {
         if can_be_label(&peek_kind) {
             let target = self.parse_reference()?;
             if self.at(&TokenKind::Arrow)? && self.lexer.peek_second()?.kind != TokenKind::With {
-                let tok = self.peek()?.clone();
+                let tok = *self.peek()?;
                 return Err(self.error_at_token_with_suggestion(
                     &tok,
                     "Constraint chains (`-> ...`) are not allowed on a `uses` binding reference.",
@@ -670,7 +685,7 @@ impl Parser {
             return Ok(WithRhs::Reference { target });
         }
 
-        let tok = self.peek()?.clone();
+        let tok = *self.peek()?;
         Err(self.error_at_token(
             &tok,
             format!(
@@ -690,7 +705,7 @@ impl Parser {
                 &first,
                 format!(
                     "'{}' is a reserved keyword and cannot be used as a name",
-                    first.text.to_ascii_lowercase()
+                    first.text.of(&self.source).to_ascii_lowercase()
                 ),
                 "Choose a different name that is not a reserved keyword",
             ));
@@ -703,7 +718,7 @@ impl Parser {
             ));
         }
 
-        segments.push(first.text.clone());
+        segments.push(first.text.of(&self.source).to_string());
 
         // Consume . separated segments
         while self.at(&TokenKind::Dot)? {
@@ -715,13 +730,13 @@ impl Parser {
                     format!("Expected an identifier after '.', found {}", seg.kind),
                 ));
             }
-            segments.push(seg.text.clone());
+            segments.push(seg.text.of(&self.source).to_string());
         }
 
         Ok(Reference::from_path(segments))
     }
 
-    fn parse_data_value(&mut self) -> Result<DataValue, Error> {
+    fn parse_data_value(&mut self, data_name: &str) -> Result<DataValue, Error> {
         if self.at(&TokenKind::Spec)? {
             let token = self.next()?;
             return Err(self.error_at_token_with_suggestion(
@@ -731,14 +746,28 @@ impl Parser {
             ));
         }
 
-        let peek_kind = self.peek()?.kind.clone();
+        let peek = *self.peek()?;
+        let starts_parent_type = token_kind_to_primitive(&peek.kind).is_some()
+            || can_be_label(&peek.kind)
+            || (peek.kind == TokenKind::LogicalName && peek.text.of(&self.source).starts_with('@'));
 
-        if token_kind_to_primitive(&peek_kind).is_some() || can_be_label(&peek_kind) {
-            let (base, constraints) = self.parse_type_arrow_chain()?;
+        if starts_parent_type {
+            let base = self.parse_parent_type()?;
+            if matches!(base, ParentType::List { .. }) {
+                let (constraints, list) = self.parse_list_suffix(data_name)?;
+                return Ok(DataValue::Definition {
+                    base: Some(base),
+                    constraints,
+                    value: None,
+                    list,
+                });
+            }
+            let constraints = self.parse_trailing_constraints()?;
             return Ok(DataValue::Definition {
                 base: Some(base),
                 constraints,
                 value: None,
+                list: None,
             });
         }
 
@@ -748,20 +777,100 @@ impl Parser {
             base: None,
             constraints: None,
             value: Some(value),
+            list: None,
         })
+    }
+
+    /// True when the next arrows are instance-list `-> key` or `-> with` field/named-instance rows.
+    fn data_instance_list_body_ahead(&mut self) -> Result<bool, Error> {
+        if !self.at(&TokenKind::Arrow)? {
+            return Ok(false);
+        }
+        match self.lexer.peek_second()?.kind {
+            TokenKind::Key => Ok(true),
+            TokenKind::With => {
+                let checkpoint = self.checkpoint();
+                self.next()?; // ->
+                self.next()?; // with
+                let instance = if self.at_uses_field_pair()? {
+                    true
+                } else {
+                    let kind = self.peek()?.kind;
+                    can_be_label(&kind) && !Self::with_rhs_starts_as_literal(&kind)
+                };
+                self.restore(checkpoint);
+                Ok(instance)
+            }
+            _ => Ok(false),
+        }
+    }
+
+    fn list_query_ahead(&mut self) -> Result<bool, Error> {
+        if !self.at(&TokenKind::Arrow)? {
+            return Ok(false);
+        }
+        Ok(matches!(
+            self.lexer.peek_second()?.kind,
+            TokenKind::Find
+                | TokenKind::First
+                | TokenKind::Last
+                | TokenKind::Sum
+                | TokenKind::Avg
+                | TokenKind::Product
+                | TokenKind::Count
+                | TokenKind::Min
+                | TokenKind::Max
+                | TokenKind::Any
+                | TokenKind::All
+                | TokenKind::Where
+                | TokenKind::Sort
+                | TokenKind::Top
+        ))
+    }
+
+    fn option_field_row_ahead(&mut self) -> Result<bool, Error> {
+        if !self.at(&TokenKind::Arrow)? {
+            return Ok(false);
+        }
+        let second = *self.lexer.peek_second()?;
+        if !second.text.of(&self.source).eq_ignore_ascii_case("option") {
+            return Ok(false);
+        }
+        let checkpoint = self.checkpoint();
+        self.next()?;
+        self.next()?;
+        let field = self.at_uses_field_pair()?;
+        self.restore(checkpoint);
+        Ok(field)
+    }
+
+    fn parse_option_field_row(
+        &mut self,
+        alias: &str,
+        list: &mut InstanceListBody,
+    ) -> Result<(), Error> {
+        let arrow = self.next()?;
+        let name_tok = self.next()?;
+        let bindings = self.parse_row_field_pairs(alias, &name_tok)?;
+        let span = self.span_covering(&arrow.span, &self.last_span);
+        list.option_rows.push(InstanceListRow::Fields {
+            bindings,
+            source_location: self.make_source(span),
+        });
+        Ok(())
     }
 
     /// Parse a single `uses` item: `[alias ':']` then [`Self::parse_spec_ref_target`] (optional
     /// repository qualifier, spec name, optional effective date pin).
     fn parse_uses_item(&mut self, start_span: &Span) -> Result<LemmaData, Error> {
         let explicit_alias = if self.lexer.peek_second()?.kind == TokenKind::Colon {
-            let peek = self.peek()?.clone();
+            let peek = *self.peek()?;
             if is_keyword(&peek.kind) {
                 return Err(self.error_at_token_with_suggestion(
                     &peek,
                     format!(
                         "'{}' is a reserved keyword and cannot be used as a name",
-                        peek.text.to_ascii_lowercase()
+                        peek.text.of(&self.source).to_ascii_lowercase()
                     ),
                     "Choose a different name that is not a reserved keyword",
                 ));
@@ -782,7 +891,7 @@ impl Parser {
         let spec_name_source = spec_ref
             .target_span
             .as_ref()
-            .map(|sp| Source::new(self.source_type(), sp.clone()));
+            .map(|sp| Source::new(self.source_type(), *sp));
 
         crate::limits::check_max_length(
             &spec_ref.name,
@@ -793,12 +902,12 @@ impl Parser {
 
         let alias = if let Some(ref alias_tok) = explicit_alias {
             crate::limits::check_max_length(
-                &alias_tok.text,
+                alias_tok.text.of(&self.source),
                 self.max_data_name_length,
                 "data",
-                Some(Source::new(self.source_type(), alias_tok.span.clone())),
+                Some(Source::new(self.source_type(), alias_tok.span)),
             )?;
-            alias_tok.text.clone()
+            alias_tok.text.of(&self.source).to_string()
         } else {
             let implicit = spec_ref.name.clone();
             crate::limits::check_max_length(
@@ -811,103 +920,177 @@ impl Parser {
         };
 
         if self.at(&TokenKind::List)? {
-            self.next()?;
-            let list = self.parse_uses_list(&alias)?;
-            let span = self.span_covering(start_span, &self.last_span);
-            return Ok(LemmaData::new(
-                Reference::local(alias),
-                DataValue::ImportList { spec_ref, list },
-                self.make_source(span),
+            let list_tok = *self.peek()?;
+            return Err(self.error_at_token_with_suggestion(
+                &list_tok,
+                format!(
+                    "`uses {alias}: {spec_ref} list` is not valid; `uses` imports one sealed item"
+                ),
+                format!(
+                    "Write `uses {alias}: {spec_ref}` for one item, or `data {alias}: {spec_ref} list` for a caller-owned list, or a list-valued rule for a sealed catalog"
+                ),
             ));
         }
 
         let mut bindings = Vec::new();
+        let mut effective_ref = None;
         while self.at(&TokenKind::Arrow)? {
-            if self.lexer.peek_second()?.kind != TokenKind::With {
-                let tok = self.peek()?.clone();
-                return Err(self.error_at_token_with_suggestion(
-                    &tok,
-                    "Expected `with` after `->` in a `uses` block.",
-                    "Write `  -> with path.to.slot: <value or reference>` under the `uses` line.",
-                ));
+            let command = self.lexer.peek_second()?.kind;
+            match command {
+                TokenKind::With => {
+                    self.next()?; // ->
+                    let with_token = self.expect(&TokenKind::With)?;
+                    bindings.extend(self.parse_uses_field_pairs(&alias, &with_token)?);
+                }
+                TokenKind::Effective => {
+                    self.next()?; // ->
+                    let effective_token = self.expect(&TokenKind::Effective)?;
+                    if effective_ref.is_some() {
+                        return Err(self.error_at_token_with_suggestion(
+                            &effective_token,
+                            "A `uses` block may have at most one `-> effective`.",
+                            "Remove the extra `-> effective` line.",
+                        ));
+                    }
+                    if spec_ref.effective.is_some() {
+                        return Err(self.error_at_token_with_suggestion(
+                            &effective_token,
+                            "Cannot combine a literal effective pin on the `uses` target with `-> effective`.",
+                            "Remove the date after the spec name, or remove `-> effective`.",
+                        ));
+                    }
+                    effective_ref = Some(self.parse_reference()?);
+                }
+                _ => {
+                    let tok = *self.peek()?;
+                    return Err(self.error_at_token_with_suggestion(
+                        &tok,
+                        "Expected `with` or `effective` after `->` in a `uses` block.",
+                        "Write `  -> with path.to.slot: <value or reference>` or `  -> effective <date>` under the `uses` line.",
+                    ));
+                }
             }
-            self.next()?; // ->
-            let with_token = self.expect(&TokenKind::With)?;
-            bindings.extend(self.parse_uses_field_pairs(&alias, &with_token)?);
         }
 
         let span = self.span_covering(start_span, &self.last_span);
         Ok(LemmaData::new(
             Reference::local(alias),
-            DataValue::Import { spec_ref, bindings },
+            DataValue::Import {
+                spec_ref,
+                bindings,
+                effective_ref,
+            },
             self.make_source(span),
         ))
     }
 
-    /// `-> key`, `-> with` rows; query commands under `uses x: spec list` are a parse Error.
-    fn parse_uses_list(&mut self, alias: &str) -> Result<UsesList, Error> {
-        let mut list = UsesList {
+    /// Constraints and instance-list rows under `data name: T list`.
+    ///
+    /// `-> key` and instance `-> with` stay on the list body. `-> options`, `-> help`,
+    /// and a value-list `-> with` stay constraints. A list can carry both.
+    fn parse_list_suffix(
+        &mut self,
+        alias: &str,
+    ) -> Result<(Option<Vec<Constraint>>, Option<InstanceListBody>), Error> {
+        let mut commands = Vec::new();
+        let mut list = InstanceListBody {
             key: None,
             rows: Vec::new(),
+            option_rows: Vec::new(),
         };
+        let mut saw_instance = false;
         while self.at(&TokenKind::Arrow)? {
-            let arrow = self.next()?;
-            let name_tok = self.next()?;
-            match name_tok.kind {
-                TokenKind::Key => {
-                    if list.key.is_some() {
-                        return Err(self.error_at_token(
+            if self.option_field_row_ahead()? {
+                saw_instance = true;
+                self.parse_option_field_row(alias, &mut list)?;
+            } else if self.data_instance_list_body_ahead()? {
+                saw_instance = true;
+                self.parse_instance_list_command(alias, &mut list)?;
+            } else if self.list_query_ahead()? {
+                let arrow = self.next()?;
+                let name_tok = self.next()?;
+                let command = self.parse_list_command_body(name_tok)?;
+                let command = display_list_command(&self.table, &command);
+                return Err(self.error_at_token(
+                    &arrow,
+                    format!(
+                        "data supplies values; `-> {command}` is a query on `{alias}`, write it in a rule"
+                    ),
+                ));
+            } else {
+                commands.push(self.parse_one_constraint()?);
+            }
+        }
+        let constraints = if commands.is_empty() {
+            None
+        } else {
+            Some(commands)
+        };
+        let list = if saw_instance { Some(list) } else { None };
+        Ok((constraints, list))
+    }
+
+    /// `-> key`, `-> with` rows under `data name: Spec list`.
+    fn parse_instance_list_command(
+        &mut self,
+        alias: &str,
+        list: &mut InstanceListBody,
+    ) -> Result<(), Error> {
+        let arrow = self.next()?;
+        let name_tok = self.next()?;
+        match name_tok.kind {
+            TokenKind::Key => {
+                if list.key.is_some() {
+                    return Err(self.error_at_token(
                             &name_tok,
                             format!("`{alias}` declares `-> key` twice; list every key field in one `-> key`"),
                         ));
-                    }
-                    let mut fields = vec![self.parse_reference()?];
-                    while self.at(&TokenKind::Comma)? {
-                        self.next()?;
-                        fields.push(self.parse_reference()?);
-                    }
-                    let span = self.span_covering(&arrow.span, &self.last_span);
-                    list.key = Some(UsesListKey {
-                        fields,
-                        source_location: self.make_source(span),
-                    });
                 }
-                TokenKind::With => {
-                    let row = if self.at_uses_field_pair()? {
-                        let bindings = self.parse_uses_field_pairs(alias, &name_tok)?;
-                        let span = self.span_covering(&arrow.span, &self.last_span);
-                        UsesListRow::Fields {
-                            bindings,
-                            source_location: self.make_source(span),
-                        }
-                    } else {
-                        let values = self.parse_uses_list_values()?;
-                        let span = self.span_covering(&arrow.span, &self.last_span);
-                        UsesListRow::Values {
-                            values,
-                            source_location: self.make_source(span),
-                        }
-                    };
-                    list.rows.push(row);
-                }
-                _ => {
-                    let command = self.parse_list_command_body(name_tok)?;
-                    let command = display_list_command(&self.table, &command);
+                if !list.rows.is_empty() {
                     return Err(self.error_at_token(
-                        &arrow,
-                        format!(
-                            "data supplies values; `-> {command}` is a query on `{alias}`, write it in a rule"
-                        ),
+                        &name_tok,
+                        format!("`-> key` on `{alias}` must come before the first `-> with`"),
                     ));
                 }
+                let mut fields = vec![self.parse_reference()?];
+                while self.at(&TokenKind::Comma)? {
+                    self.next()?;
+                    fields.push(self.parse_reference()?);
+                }
+                let span = self.span_covering(&arrow.span, &self.last_span);
+                list.key = Some(InstanceListKey {
+                    fields,
+                    source_location: self.make_source(span),
+                });
+            }
+            TokenKind::With => {
+                let row = if self.at_uses_field_pair()? {
+                    let bindings = self.parse_row_field_pairs(alias, &name_tok)?;
+                    let span = self.span_covering(&arrow.span, &self.last_span);
+                    InstanceListRow::Fields {
+                        bindings,
+                        source_location: self.make_source(span),
+                    }
+                } else {
+                    let values = self.parse_instance_list_values()?;
+                    let span = self.span_covering(&arrow.span, &self.last_span);
+                    InstanceListRow::Values {
+                        values,
+                        source_location: self.make_source(span),
+                    }
+                };
+                list.rows.push(row);
+            }
+            other => {
+                unreachable!("BUG: instance-list command ahead was not key or with, got {other:?}")
             }
         }
-        Ok(list)
+        Ok(())
     }
 
-    /// `-> with ada, grace` under `uses x: spec list`: references to instances (literals are
+    /// `-> with ada, grace` under `data name: Spec list`: references to instances (literals are
     /// rejected at planning with the row spec's name).
-    fn parse_uses_list_values(&mut self) -> Result<Vec<WithRhs>, Error> {
+    fn parse_instance_list_values(&mut self) -> Result<Vec<WithRhs>, Error> {
         let mut values = Vec::new();
         loop {
             values.push(self.parse_with_rhs()?);
@@ -916,7 +1099,7 @@ impl Parser {
             }
             self.next()?;
             if self.at_command_terminator()? || self.at(&TokenKind::Comma)? {
-                let tok = self.peek()?.clone();
+                let tok = *self.peek()?;
                 return Err(self.error_at_token_with_suggestion(
                     &tok,
                     "Trailing or empty comma in list".to_string(),
@@ -925,7 +1108,7 @@ impl Parser {
             }
         }
         if self.at_uses_field_pair()? {
-            let tok = self.peek()?.clone();
+            let tok = *self.peek()?;
             return Err(self.error_at_token_with_suggestion(
                 &tok,
                 "A `-> with` line holds either references or field pairs, not both".to_string(),
@@ -935,6 +1118,78 @@ impl Parser {
         Ok(values)
     }
 
+    fn parse_row_field_pairs(
+        &mut self,
+        alias: &str,
+        with_token: &Token,
+    ) -> Result<Vec<RowBinding>, Error> {
+        let mut bindings = Vec::new();
+        let mut binding_start_span = with_token.span;
+        loop {
+            let path = self.parse_reference()?;
+            for segment in path.segments.iter().chain(std::iter::once(&path.name)) {
+                crate::limits::check_max_length(
+                    segment,
+                    self.max_data_name_length,
+                    "row binding",
+                    Some(Source::new(self.source_type(), binding_start_span)),
+                )?;
+            }
+            if path
+                .segments
+                .first()
+                .is_some_and(|segment| segment == alias)
+            {
+                return Err(self.error_at_token_with_suggestion(
+                    with_token,
+                    format!("Row path must be relative, not prefixed with `{alias}`."),
+                    format!(
+                        "Use `-> with {}: …` without the `{alias}.` prefix.",
+                        path.name
+                    ),
+                ));
+            }
+            let (rhs, _) =
+                self.parse_assignment_after_key(|parser| parser.parse_with_rhs(), "with", false)?;
+            let binding_span = self.span_covering(&binding_start_span, &self.last_span);
+            bindings.push(RowBinding {
+                path,
+                rhs,
+                source_location: self.make_source(binding_span),
+            });
+            if self.at(&TokenKind::Comma)? {
+                self.next()?;
+                if self.at_command_terminator()? || self.at(&TokenKind::Comma)? {
+                    let tok = *self.peek()?;
+                    return Err(self.error_at_token_with_suggestion(
+                        &tok,
+                        "Trailing or empty comma in list".to_string(),
+                        "Remove the extra comma, or add the missing field pair",
+                    ));
+                }
+                if !self.at_uses_field_pair()? {
+                    let tok = *self.peek()?;
+                    return Err(self.error_at_token_with_suggestion(
+                        &tok,
+                        "Expected a field pair after comma".to_string(),
+                        "Remove the extra comma, or add `path: value`",
+                    ));
+                }
+                binding_start_span = self.peek()?.span;
+                continue;
+            }
+            if self.at_uses_field_pair()? {
+                let tok = *self.peek()?;
+                return Err(self.error_at_token_with_suggestion(
+                    &tok,
+                    "Expected a comma between field pairs".to_string(),
+                    "Separate field pairs with commas",
+                ));
+            }
+            return Ok(bindings);
+        }
+    }
+
     /// Comma-separated `path: value` pairs after `-> with` in a `uses` block.
     fn parse_uses_field_pairs(
         &mut self,
@@ -942,7 +1197,7 @@ impl Parser {
         with_token: &Token,
     ) -> Result<Vec<UsesBinding>, Error> {
         let mut bindings = Vec::new();
-        let mut binding_start_span = with_token.span.clone();
+        let mut binding_start_span = with_token.span;
         loop {
             let path = self.parse_reference()?;
             for segment in path.segments.iter().chain(std::iter::once(&path.name)) {
@@ -950,7 +1205,7 @@ impl Parser {
                     segment,
                     self.max_data_name_length,
                     "uses binding",
-                    Some(Source::new(self.source_type(), binding_start_span.clone())),
+                    Some(Source::new(self.source_type(), binding_start_span)),
                 )?;
             }
             if path
@@ -970,8 +1225,43 @@ impl Parser {
                 ));
             }
 
-            let (rhs, _) =
+            let (first_rhs, _) =
                 self.parse_assignment_after_key(|parser| parser.parse_with_rhs(), "with", false)?;
+            let mut next_field_pair = false;
+            let rhs = match first_rhs {
+                WithRhs::Literal(value) => UsesBindingRhs::Literal(value),
+                WithRhs::Reference { target } => {
+                    let mut targets = vec![target];
+                    while self.at(&TokenKind::Comma)? {
+                        self.next()?;
+                        if self.at_command_terminator()? || self.at(&TokenKind::Comma)? {
+                            let tok = *self.peek()?;
+                            return Err(self.error_at_token_with_suggestion(
+                                &tok,
+                                "Trailing or empty comma in list".to_string(),
+                                "Remove the extra comma, or add the missing reference",
+                            ));
+                        }
+                        if self.at_uses_field_pair()? {
+                            next_field_pair = true;
+                            break;
+                        }
+                        let rhs_token = *self.peek()?;
+                        match self.parse_with_rhs()? {
+                            WithRhs::Reference { target } => targets.push(target),
+                            WithRhs::Literal(_) => {
+                                return Err(self.error_at_token_with_suggestion(
+                                    &rhs_token,
+                                    "A `uses -> with` reference sequence cannot contain literals"
+                                        .to_string(),
+                                    "Use only `uses` aliases in the sequence",
+                                ));
+                            }
+                        }
+                    }
+                    UsesBindingRhs::References { targets }
+                }
+            };
 
             let binding_span = self.span_covering(&binding_start_span, &self.last_span);
             bindings.push(UsesBinding {
@@ -980,10 +1270,15 @@ impl Parser {
                 source_location: self.make_source(binding_span),
             });
 
+            if next_field_pair {
+                binding_start_span = self.peek()?.span;
+                continue;
+            }
+
             if self.at(&TokenKind::Comma)? {
                 self.next()?;
                 if self.at_command_terminator()? || self.at(&TokenKind::Comma)? {
-                    let tok = self.peek()?.clone();
+                    let tok = *self.peek()?;
                     return Err(self.error_at_token_with_suggestion(
                         &tok,
                         "Trailing or empty comma in list".to_string(),
@@ -991,19 +1286,19 @@ impl Parser {
                     ));
                 }
                 if !self.at_uses_field_pair()? {
-                    let tok = self.peek()?.clone();
+                    let tok = *self.peek()?;
                     return Err(self.error_at_token_with_suggestion(
                         &tok,
                         "Expected a field pair after comma".to_string(),
                         "Remove the extra comma, or add `path: value`",
                     ));
                 }
-                binding_start_span = self.peek()?.span.clone();
+                binding_start_span = self.peek()?.span;
                 continue;
             }
 
             if self.at_uses_field_pair()? {
-                let tok = self.peek()?.clone();
+                let tok = *self.peek()?;
                 return Err(self.error_at_token_with_suggestion(
                     &tok,
                     "Expected a comma between field pairs".to_string(),
@@ -1052,7 +1347,7 @@ impl Parser {
 
     fn parse_uses_statement(&mut self) -> Result<LemmaData, Error> {
         let uses_token = self.expect(&TokenKind::Uses)?;
-        let start_span = uses_token.span.clone();
+        let start_span = uses_token.span;
         self.parse_uses_item(&start_span)
     }
 
@@ -1062,7 +1357,7 @@ impl Parser {
 
     fn parse_rule(&mut self) -> Result<LemmaRule, Error> {
         let rule_token = self.expect(&TokenKind::Rule)?;
-        let start_span = rule_token.span.clone();
+        let start_span = rule_token.span;
 
         let name_tok = self.next()?;
         if is_keyword(&name_tok.kind) {
@@ -1070,7 +1365,7 @@ impl Parser {
                 &name_tok,
                 format!(
                     "'{}' is a reserved keyword and cannot be used as a rule name",
-                    name_tok.text.to_ascii_lowercase()
+                    name_tok.text.of(&self.source).to_ascii_lowercase()
                 ),
                 "Choose a different name that is not a reserved keyword",
             ));
@@ -1081,12 +1376,12 @@ impl Parser {
                 format!("Expected a rule name, found {}", name_tok.kind),
             ));
         }
-        let rule_name = name_tok.text.clone();
+        let rule_name = name_tok.text.of(&self.source).to_string();
         crate::limits::check_max_length(
             &rule_name,
             self.max_rule_name_length,
             "rule",
-            Some(Source::new(self.source_type(), name_tok.span.clone())),
+            Some(Source::new(self.source_type(), name_tok.span)),
         )?;
 
         self.expect(&TokenKind::Colon)?;
@@ -1107,11 +1402,11 @@ impl Parser {
         }
 
         let end_span = if let Some(last_unless) = unless_clauses.last() {
-            last_unless.source_location.span.clone()
+            last_unless.source_location.span
         } else if let Some(loc) = expression.root_source() {
-            loc.span.clone()
+            loc.span
         } else {
-            start_span.clone()
+            start_span
         };
 
         let span = self.span_covering(&start_span, &end_span);
@@ -1125,11 +1420,11 @@ impl Parser {
 
     fn parse_veto_expression(&mut self) -> Result<ExprId, Error> {
         let veto_tok = self.expect(&TokenKind::Veto)?;
-        let start_span = veto_tok.span.clone();
+        let start_span = veto_tok.span;
 
         let message = if self.at(&TokenKind::StringLit)? {
             let str_tok = self.next()?;
-            Some(str_tok.text)
+            Some(str_tok.text.of(&self.source).to_string())
         } else {
             None
         };
@@ -1143,7 +1438,7 @@ impl Parser {
 
     fn parse_unless_clause(&mut self) -> Result<UnlessClause, Error> {
         let unless_tok = self.expect(&TokenKind::Unless)?;
-        let start_span = unless_tok.span.clone();
+        let start_span = unless_tok.span;
 
         let condition_root = self.parse_expression()?;
         let condition = self.finish_expression(condition_root);
@@ -1156,9 +1451,7 @@ impl Parser {
             self.parse_expression()?
         };
 
-        let end_span = self
-            .expr_span(result_root)
-            .unwrap_or_else(|| start_span.clone());
+        let end_span = self.expr_span(result_root).unwrap_or(start_span);
         let span = self.span_covering(&start_span, &end_span);
         let result = self.finish_expression(result_root);
 
@@ -1169,13 +1462,15 @@ impl Parser {
         })
     }
 
-    /// Parse a type arrow chain: [`ParentType`] followed by `(-> command)*`.
-    fn parse_type_arrow_chain(&mut self) -> Result<(ParentType, Option<Vec<Constraint>>), Error> {
-        let peek_kind = self.peek()?.kind.clone();
-        let base = if let Some(primitive) = token_kind_to_primitive(&peek_kind) {
+    /// Parse a parent type, including optional `range` / `list` suffixes.
+    ///
+    /// List and type parents are bare names. Pin and `@repo` belong on `uses`.
+    fn parse_parent_type(&mut self) -> Result<ParentType, Error> {
+        let peek = *self.peek()?;
+        let base = if let Some(primitive) = token_kind_to_primitive(&peek.kind) {
             self.next()?;
             if self.at(&TokenKind::Dot)? {
-                let dot_tok = self.peek()?.clone();
+                let dot_tok = *self.peek()?;
                 return Err(self.error_at_token_with_suggestion(
                     &dot_tok,
                     "A primitive type cannot be the left segment of a qualified parent path",
@@ -1184,20 +1479,13 @@ impl Parser {
             }
             ParentType::Primitive { primitive }
         } else {
-            let (name, _) = self.parse_spec_name()?;
-            if let Some((alias, type_name)) = name.rsplit_once('.') {
-                ParentType::Qualified {
-                    spec_alias: alias.to_string(),
-                    inner: Box::new(ParentType::Custom {
-                        name: type_name.to_string(),
-                    }),
-                }
-            } else {
-                ParentType::Custom { name }
-            }
+            self.parse_custom_or_spec_element_parent()?
         };
 
-        let base = if self.at(&TokenKind::Identifier)? && self.peek()?.text == "range" {
+        let base = if self.at(&TokenKind::Identifier)? && {
+            let peeked = *self.peek()?;
+            peeked.text.of(&self.source) == "range"
+        } {
             self.next()?;
             ParentType::Ranged {
                 inner: Box::new(base),
@@ -1206,33 +1494,56 @@ impl Parser {
             base
         };
 
-        let base = if self.at(&TokenKind::List)? {
+        if self.at(&TokenKind::List)? {
             self.next()?;
-            ParentType::List {
+            Ok(ParentType::List {
                 inner: Box::new(base),
-            }
+            })
         } else {
-            base
-        };
+            Ok(base)
+        }
+    }
 
-        let constraints = self.parse_trailing_constraints()?;
-
-        Ok((base, constraints))
+    /// Custom or qualified type name. `@repo` and a trailing pin are parse Errors.
+    fn parse_custom_or_spec_element_parent(&mut self) -> Result<ParentType, Error> {
+        let peek = *self.peek()?;
+        if peek.text.of(&self.source).starts_with('@') {
+            return Err(self.error_at_token_with_suggestion(
+                &peek,
+                "A repository qualifier is not valid on a type or list element",
+                "Write `uses @repo Spec [pin]`, then `data name: Spec list` or `rule name: Spec list`.",
+            ));
+        }
+        let (name, _) = self.parse_spec_name()?;
+        if let Some((alias, type_name)) = name.rsplit_once('.') {
+            return Ok(ParentType::Qualified {
+                spec_alias: alias.to_string(),
+                inner: Box::new(ParentType::custom(type_name.to_string())),
+            });
+        }
+        if self.at(&TokenKind::NumberLit)? {
+            let year = *self.peek()?;
+            if year.text.of(&self.source).len() == 4
+                && year
+                    .text
+                    .of(&self.source)
+                    .chars()
+                    .all(|c| c.is_ascii_digit())
+            {
+                return Err(self.error_at_token_with_suggestion(
+                    &year,
+                    "An effective pin is not valid on a type or list element",
+                    "Write `uses Spec <pin>`, then `data name: Spec list` or `rule name: Spec list`.",
+                ));
+            }
+        }
+        Ok(ParentType::custom(name))
     }
 
     fn parse_trailing_constraints(&mut self) -> Result<Option<Vec<Constraint>>, Error> {
         let mut commands = Vec::new();
         while self.at(&TokenKind::Arrow)? {
-            let arrow_token = self.next()?;
-            let constraint_start_span = arrow_token.span.clone();
-            let (cmd, cmd_args, deprecated_without_colon) = self.parse_constraint_command()?;
-            let constraint_span = self.span_covering(&constraint_start_span, &self.last_span);
-            commands.push(Constraint {
-                command: cmd,
-                args: cmd_args,
-                source_location: self.make_source(constraint_span),
-                deprecated_without_colon,
-            });
+            commands.push(self.parse_one_constraint()?);
         }
         let constraints = if commands.is_empty() {
             None
@@ -1240,6 +1551,19 @@ impl Parser {
             Some(commands)
         };
         Ok(constraints)
+    }
+
+    fn parse_one_constraint(&mut self) -> Result<Constraint, Error> {
+        let arrow_token = self.next()?;
+        let constraint_start_span = arrow_token.span;
+        let (cmd, cmd_args, deprecated_without_colon) = self.parse_constraint_command()?;
+        let constraint_span = self.span_covering(&constraint_start_span, &self.last_span);
+        Ok(Constraint {
+            command: cmd,
+            args: cmd_args,
+            source_location: self.make_source(constraint_span),
+            deprecated_without_colon,
+        })
     }
 
     fn parse_constraint_command(
@@ -1286,12 +1610,12 @@ impl Parser {
                 format!("Expected a command name, found {}", name_tok.kind),
             ));
         }
-        let cmd = try_parse_type_constraint_command(&name_tok.text).ok_or_else(|| {
+        let cmd = try_parse_type_constraint_command(name_tok.text.of(&self.source)).ok_or_else(|| {
             self.error_at_token(
                 &name_tok,
                 format!(
                     "Unknown constraint command '{}'. Valid commands: help, suggest, with, unit, trait, minimum, maximum, lower, upper, decimals, option, options, length",
-                    name_tok.text
+                    name_tok.text.of(&self.source)
                 ),
             )
         })?;
@@ -1324,7 +1648,7 @@ impl Parser {
             let value = parse_value(self)?;
             return Ok((value, true));
         }
-        let tok = self.peek()?.clone();
+        let tok = *self.peek()?;
         Err(self.error_at_token_with_suggestion(
             &tok,
             format!("Expected `:` after `{assignment_context}` key."),
@@ -1337,14 +1661,14 @@ impl Parser {
             return Ok((Vec::new(), false));
         }
 
-        let peek_kind = self.peek()?.kind.clone();
+        let peek_kind = self.peek()?.kind;
         if is_keyword(&peek_kind) {
-            let tok = self.peek()?.clone();
+            let tok = *self.peek()?;
             return Err(self.error_at_token_with_suggestion(
                 &tok,
                 format!(
                     "'{}' is a reserved keyword and cannot be used as a unit name",
-                    tok.text.to_ascii_lowercase()
+                    tok.text.of(&self.source).to_ascii_lowercase()
                 ),
                 "Choose a different name that is not a reserved keyword",
             ));
@@ -1354,7 +1678,7 @@ impl Parser {
         }
 
         let unit_name_tok = self.next()?;
-        let unit_name_arg = CommandArg::Label(unit_name_tok.text.clone());
+        let unit_name_arg = CommandArg::Label(unit_name_tok.text.of(&self.source).to_string());
 
         let (unit_arg, deprecated_without_colon) =
             self.parse_assignment_after_key(|parser| parser.parse_unit_payload(), "unit", true)?;
@@ -1368,7 +1692,7 @@ impl Parser {
     /// Value side of `-> unit <name>: <payload>` (factor, compound, or prefix + compound).
     fn parse_unit_payload(&mut self) -> Result<UnitArg, Error> {
         if self.at_command_terminator()? {
-            let tok = self.peek()?.clone();
+            let tok = *self.peek()?;
             return Err(self.error_at_token_with_suggestion(
                 &tok,
                 "Expected a unit conversion factor or compound unit expression after `:`.",
@@ -1378,23 +1702,50 @@ impl Parser {
 
         let numeric_prefix: Option<Decimal> = if self.at(&TokenKind::NumberLit)? {
             let num_tok = self.next()?;
-            Some(parse_decimal_string(&num_tok.text, &num_tok.span, self)?)
+            Some(parse_decimal_string(
+                num_tok.text.of(&self.source),
+                &num_tok.span,
+                self,
+            )?)
         } else {
             None
         };
 
-        let peek_kind_after_prefix = self.peek()?.kind.clone();
+        let peek_kind_after_prefix = self.peek()?.kind;
         let has_compound_expr =
             can_be_unit_name(&peek_kind_after_prefix) && !self.at_command_terminator()?;
 
         if has_compound_expr {
-            let factors = self.parse_unit_factors()?;
-            let prefix = numeric_prefix.unwrap_or(Decimal::ONE);
-            Ok(UnitArg::Expr(prefix, factors))
+            // When no numeric prefix leads, a bare or dotted identifier is a dynamic
+            // scale reference (`-> unit gbp: rate`, `-> unit gbp: fx.rate`) unless a
+            // compound operator (`*`, `/`, `^`) follows, in which case it is the
+            // first factor of a compound unit expression (`-> unit mps: meter/second`).
+            match numeric_prefix {
+                None => {
+                    let checkpoint = self.checkpoint();
+                    let reference = self.parse_reference()?;
+                    let next_kind = self.peek()?.kind;
+                    if matches!(
+                        next_kind,
+                        TokenKind::Star | TokenKind::Slash | TokenKind::Caret
+                    ) {
+                        self.restore(checkpoint);
+                        let factors = self.parse_unit_factors()?;
+                        let prefix = Decimal::ONE;
+                        Ok(UnitArg::Expr(prefix, factors))
+                    } else {
+                        Ok(UnitArg::Reference(reference))
+                    }
+                }
+                Some(prefix) => {
+                    let factors = self.parse_unit_factors()?;
+                    Ok(UnitArg::Expr(prefix, factors))
+                }
+            }
         } else if let Some(factor) = numeric_prefix {
             Ok(UnitArg::Factor(factor))
         } else {
-            let tok = self.peek()?.clone();
+            let tok = *self.peek()?;
             Err(self.error_at_token_with_suggestion(
                 &tok,
                 "Expected a unit conversion factor or compound unit expression after `:`.",
@@ -1411,7 +1762,7 @@ impl Parser {
             return Ok(Vec::new());
         };
         if self.at(&TokenKind::Comma)? || self.command_arg_starts_without_comma()? {
-            let tok = self.peek()?.clone();
+            let tok = *self.peek()?;
             return Err(self.error_at_token_with_suggestion(
                 &tok,
                 format!("`-> {cmd}` takes one value"),
@@ -1431,7 +1782,7 @@ impl Parser {
             return Ok(None);
         }
 
-        let peek_kind = self.peek()?.kind.clone();
+        let peek_kind = self.peek()?.kind;
         match peek_kind {
             TokenKind::NumberLit | TokenKind::Minus | TokenKind::Plus | TokenKind::StringLit => {
                 let value = self.parse_literal_value()?;
@@ -1443,7 +1794,9 @@ impl Parser {
             }
             ref k if can_be_label(k) => {
                 let tok = self.next()?;
-                Ok(Some(CommandArg::Label(tok.text)))
+                Ok(Some(CommandArg::Label(
+                    tok.text.of(&self.source).to_string(),
+                )))
             }
             _ => Ok(None),
         }
@@ -1465,7 +1818,7 @@ impl Parser {
 
         loop {
             let Some(arg) = self.try_parse_one_command_arg()? else {
-                let tok = self.peek()?.clone();
+                let tok = *self.peek()?;
                 return Err(self.error_at_token_with_suggestion(
                     &tok,
                     "Expected a value after comma".to_string(),
@@ -1477,7 +1830,7 @@ impl Parser {
             if self.at(&TokenKind::Comma)? {
                 self.next()?;
                 if self.at_command_terminator()? || self.at(&TokenKind::Comma)? {
-                    let tok = self.peek()?.clone();
+                    let tok = *self.peek()?;
                     return Err(self.error_at_token_with_suggestion(
                         &tok,
                         "Trailing or empty comma in list".to_string(),
@@ -1488,7 +1841,7 @@ impl Parser {
             }
 
             if self.command_arg_starts_without_comma()? {
-                let tok = self.peek()?.clone();
+                let tok = *self.peek()?;
                 return Err(self.error_at_token_with_suggestion(
                     &tok,
                     "Expected a comma between items".to_string(),
@@ -1504,7 +1857,7 @@ impl Parser {
         if self.at_command_terminator()? || self.at(&TokenKind::Comma)? {
             return Ok(false);
         }
-        let peek_kind = self.peek()?.kind.clone();
+        let peek_kind = self.peek()?.kind;
         Ok(matches!(
             peek_kind,
             TokenKind::NumberLit | TokenKind::Minus | TokenKind::Plus | TokenKind::StringLit
@@ -1521,7 +1874,7 @@ impl Parser {
         match &peeked.kind {
             TokenKind::StringLit => {
                 let tok = self.next()?;
-                Ok(Value::Text(tok.text))
+                Ok(Value::Text(tok.text.of(&self.source).to_string()))
             }
             k if is_boolean_keyword(k) => {
                 let tok = self.next()?;
@@ -1531,8 +1884,13 @@ impl Parser {
             TokenKind::Minus | TokenKind::Plus => self.parse_signed_number_literal(),
             _ => {
                 let tok = self.next()?;
-                Err(self
-                    .error_at_token(&tok, format!("Expected a {expected}, found '{}'", tok.text)))
+                Err(self.error_at_token(
+                    &tok,
+                    format!(
+                        "Expected a {expected}, found '{}'",
+                        tok.text.of(&self.source)
+                    ),
+                ))
             }
         }
     }
@@ -1613,7 +1971,7 @@ impl Parser {
             }
 
             // A label is a measure reference.
-            let peek_kind = self.peek()?.kind.clone();
+            let peek_kind = self.peek()?.kind;
             if !can_be_unit_name(&peek_kind) {
                 break;
             }
@@ -1650,12 +2008,12 @@ impl Parser {
                 }
 
                 let exp_tok = self.next()?;
-                let raw: i32 = exp_tok.text.parse::<i32>().map_err(|_| {
+                let raw: i32 = exp_tok.text.of(&self.source).parse::<i32>().map_err(|_| {
                     self.error_at_token(
                         &exp_tok,
                         format!(
                             "Exponent '{}' is not a valid integer in unit expression",
-                            exp_tok.text
+                            exp_tok.text.of(&self.source)
                         ),
                     )
                 })?;
@@ -1713,10 +2071,10 @@ impl Parser {
 
     fn parse_meta(&mut self) -> Result<MetaField, Error> {
         let meta_tok = self.expect(&TokenKind::Meta)?;
-        let start_span = meta_tok.span.clone();
+        let start_span = meta_tok.span;
 
         let key_tok = self.next()?;
-        let key = key_tok.text.clone();
+        let key = key_tok.text.of(&self.source).to_string();
 
         self.expect(&TokenKind::Colon)?;
 
@@ -1737,7 +2095,7 @@ impl Parser {
 
     fn parse_meta_literal_value(&mut self) -> Result<Value, Error> {
         if self.at(&TokenKind::Ellipsis)? {
-            let tok = self.peek()?.clone();
+            let tok = *self.peek()?;
             return Err(self.error_at_token(&tok, "Expected a meta literal, found a range"));
         }
         self.parse_scalar_literal_value_with_context("meta literal")
@@ -1756,16 +2114,17 @@ impl Parser {
 
     fn parse_signed_number_literal(&mut self) -> Result<Value, Error> {
         let sign_tok = self.next()?;
-        let sign_span = sign_tok.span.clone();
+        let sign_span = sign_tok.span;
         let is_negative = sign_tok.kind == TokenKind::Minus;
 
         if !self.at(&TokenKind::NumberLit)? {
-            let tok = self.peek()?.clone();
+            let tok = *self.peek()?;
             return Err(self.error_at_token(
                 &tok,
                 format!(
                     "Expected a number after '{}', found '{}'",
-                    sign_tok.text, tok.text
+                    sign_tok.text.of(&self.source),
+                    tok.text.of(&self.source)
                 ),
             ));
         }
@@ -1786,22 +2145,23 @@ impl Parser {
 
     fn parse_number_literal(&mut self) -> Result<Value, Error> {
         let num_tok = self.next()?;
-        let num_text = &num_tok.text;
-        let num_span = num_tok.span.clone();
+        let source = Arc::clone(&self.source);
+        let num_text = num_tok.text.of(&source);
+        let num_span = num_tok.span;
 
         if self.at(&TokenKind::Comma)? {
-            let comma = self.peek()?.clone();
-            let next = self.lexer.peek_second()?.clone();
+            let comma = *self.peek()?;
+            let next = *self.lexer.peek_second()?;
             let digits_grouped = next.kind == TokenKind::NumberLit
                 && comma.span.start == num_span.end
                 && next.span.start == comma.span.end;
             if digits_grouped {
-                let grouped = format!("{}_{}", num_text, next.text);
+                let grouped = format!("{}_{}", num_text, next.text.of(&self.source));
                 return Err(self.error_at_token_with_suggestion(
                     &comma,
                     format!(
                         "`,` is a list separator, not a digit separator. Write `{grouped}` instead of `{num_text},{}`",
-                        next.text
+                        next.text.of(&self.source)
                     ),
                     format!("Use `{grouped}`"),
                 ));
@@ -1813,7 +2173,7 @@ impl Parser {
             && num_text.chars().all(|c| c.is_ascii_digit())
             && self.at(&TokenKind::Minus)?
         {
-            return self.parse_date_literal(num_text.clone(), num_span);
+            return self.parse_date_literal(num_text, num_span);
         }
 
         // Check what follows the number
@@ -1830,7 +2190,7 @@ impl Parser {
             // The grammar handles this at the grammar level. For us,
             // we need to check if the context is right.
             // Let's try to parse as time if the following pattern matches.
-            return self.try_parse_time_literal(num_text.clone(), num_span);
+            return self.try_parse_time_literal(num_text, num_span);
         }
 
         // Check for %% (permille) - must be before %
@@ -1893,8 +2253,8 @@ impl Parser {
                 format!("Expected a unit name, found {}", first.kind),
             ));
         }
-        let mut path = first.text.clone();
-        let mut end_span = first.span.clone();
+        let mut path = first.text.of(&self.source).to_string();
+        let mut end_span = first.span;
         while self.at(&TokenKind::Dot)? {
             self.next()?;
             let seg = self.next()?;
@@ -1905,57 +2265,58 @@ impl Parser {
                 ));
             }
             path.push('.');
-            path.push_str(&seg.text);
-            end_span = seg.span.clone();
+            path.push_str(seg.text.of(&self.source));
+            end_span = seg.span;
         }
         Ok((path, end_span))
     }
 
-    fn parse_date_literal(&mut self, year_text: String, start_span: Span) -> Result<Value, Error> {
-        let mut dt_str = year_text;
+    fn parse_date_literal(&mut self, year_text: &str, start_span: Span) -> Result<Value, Error> {
+        let mut dt_str = year_text.to_string();
 
         // Consume -MM
         self.expect(&TokenKind::Minus)?;
         dt_str.push('-');
         let month_tok = self.expect(&TokenKind::NumberLit)?;
-        dt_str.push_str(&month_tok.text);
+        dt_str.push_str(month_tok.text.of(&self.source));
 
         // Consume -DD
         self.expect(&TokenKind::Minus)?;
         dt_str.push('-');
         let day_tok = self.expect(&TokenKind::NumberLit)?;
-        dt_str.push_str(&day_tok.text);
+        dt_str.push_str(day_tok.text.of(&self.source));
 
         // Check for T (time component)
         if self.at(&TokenKind::Identifier)? {
-            let peeked = self.peek()?;
-            if peeked.text.len() >= 2
-                && (peeked.text.starts_with('T') || peeked.text.starts_with('t'))
+            let peeked = *self.peek()?;
+            if peeked.text.of(&self.source).len() >= 2
+                && (peeked.text.of(&self.source).starts_with('T')
+                    || peeked.text.of(&self.source).starts_with('t'))
             {
                 // The lexer may have tokenized T14 as a single identifier
                 let t_tok = self.next()?;
-                dt_str.push_str(&t_tok.text);
+                dt_str.push_str(t_tok.text.of(&self.source));
 
                 // Consume :MM
                 if self.at(&TokenKind::Colon)? {
                     self.next()?;
                     dt_str.push(':');
                     let min_tok = self.next()?;
-                    dt_str.push_str(&min_tok.text);
+                    dt_str.push_str(min_tok.text.of(&self.source));
 
                     // Consume :SS and optional fractional second
                     if self.at(&TokenKind::Colon)? {
                         self.next()?;
                         dt_str.push(':');
                         let sec_tok = self.next()?;
-                        dt_str.push_str(&sec_tok.text);
+                        dt_str.push_str(sec_tok.text.of(&self.source));
 
                         // Check for fractional second .NNNNNN
                         if self.at(&TokenKind::Dot)? {
                             self.next()?;
                             dt_str.push('.');
                             let frac_tok = self.expect(&TokenKind::NumberLit)?;
-                            dt_str.push_str(&frac_tok.text);
+                            dt_str.push_str(frac_tok.text.of(&self.source));
                         }
                     }
                 }
@@ -1979,37 +2340,40 @@ impl Parser {
     fn try_consume_timezone(&mut self, dt_str: &mut String) -> Result<(), Error> {
         // Z timezone
         if self.at(&TokenKind::Identifier)? {
-            let peeked = self.peek()?;
-            if (peeked.text == "Z" || peeked.text == "z") && peeked.span.start == self.last_span.end
+            let peeked = *self.peek()?;
+            if (peeked.text.of(&self.source) == "Z" || peeked.text.of(&self.source) == "z")
+                && peeked.span.start == self.last_span.end
             {
                 let z_tok = self.next()?;
-                dt_str.push_str(&z_tok.text);
+                dt_str.push_str(z_tok.text.of(&self.source));
                 return Ok(());
             }
         }
 
         // +HH:MM or -HH:MM, only when attached directly to the preceding token.
         if self.at(&TokenKind::Plus)? || self.at(&TokenKind::Minus)? {
-            let mut lookahead = self.lexer.clone();
-            let sign_tok = lookahead.next_token()?;
-            let hour_tok = lookahead.next_token()?;
-            let colon_tok = lookahead.next_token()?;
-            let minute_tok = lookahead.next_token()?;
+            let checkpoint = self.lexer.checkpoint();
+            let sign_tok = self.lexer.next_token()?;
+            let hour_tok = self.lexer.next_token()?;
+            let colon_tok = self.lexer.next_token()?;
+            let minute_tok = self.lexer.next_token()?;
 
             let attached = sign_tok.span.start == self.last_span.end;
             let is_timezone_shape = hour_tok.kind == TokenKind::NumberLit
                 && colon_tok.kind == TokenKind::Colon
                 && minute_tok.kind == TokenKind::NumberLit;
 
+            self.lexer.restore(checkpoint);
+
             if attached && is_timezone_shape {
                 let sign_tok = self.next()?;
-                dt_str.push_str(&sign_tok.text);
+                dt_str.push_str(sign_tok.text.of(&self.source));
                 let hour_tok = self.expect(&TokenKind::NumberLit)?;
-                dt_str.push_str(&hour_tok.text);
+                dt_str.push_str(hour_tok.text.of(&self.source));
                 self.expect(&TokenKind::Colon)?;
                 dt_str.push(':');
                 let min_tok = self.expect(&TokenKind::NumberLit)?;
-                dt_str.push_str(&min_tok.text);
+                dt_str.push_str(min_tok.text.of(&self.source));
             }
         }
 
@@ -2018,30 +2382,30 @@ impl Parser {
 
     fn try_parse_time_literal(
         &mut self,
-        hour_text: String,
+        hour_text: &str,
         start_span: Span,
     ) -> Result<Value, Error> {
-        let mut time_str = hour_text;
+        let mut time_str = hour_text.to_string();
 
         // Consume :MM
         self.expect(&TokenKind::Colon)?;
         time_str.push(':');
         let min_tok = self.expect(&TokenKind::NumberLit)?;
-        time_str.push_str(&min_tok.text);
+        time_str.push_str(min_tok.text.of(&self.source));
 
         // Optional :SS
         if self.at(&TokenKind::Colon)? {
             self.next()?;
             time_str.push(':');
             let sec_tok = self.expect(&TokenKind::NumberLit)?;
-            time_str.push_str(&sec_tok.text);
+            time_str.push_str(sec_tok.text.of(&self.source));
 
             // Optional fractional second .NNNNNN
             if self.at(&TokenKind::Dot)? {
                 self.next()?;
                 time_str.push('.');
                 let frac_tok = self.expect(&TokenKind::NumberLit)?;
-                time_str.push_str(&frac_tok.text);
+                time_str.push_str(frac_tok.text.of(&self.source));
             }
         }
 
@@ -2070,7 +2434,7 @@ impl Parser {
     // ========================================================================
 
     fn expr_span(&self, id: ExprId) -> Option<Span> {
-        self.table.source(id).map(|source| source.span.clone())
+        self.table.source(id).map(|source| source.span)
     }
 
     fn expr_source(&self, id: ExprId) -> Option<Source> {
@@ -2100,7 +2464,7 @@ impl Parser {
 
     fn check_depth(&mut self) -> Result<(), Error> {
         if let Err(actual) = self.depth_tracker.push_depth() {
-            let span = self.peek()?.span.clone();
+            let span = self.peek()?.span;
             self.depth_tracker.pop_depth();
             return Err(Error::resource_limit_exceeded(
                 "max_expression_depth",
@@ -2165,13 +2529,11 @@ impl Parser {
         start_span: Span,
     ) -> Result<ExprId, Error> {
         let negate = operator_is_not ^ keyword_was_negated;
-        let end_span = self
-            .expr_span(operand)
-            .unwrap_or_else(|| start_span.clone());
+        let end_span = self.expr_span(operand).unwrap_or(start_span);
         let span = self.span_covering(&start_span, &end_span);
         let core = self.new_expression(
             ExpressionKind::ResultIsVeto(operand),
-            self.make_source(span.clone()),
+            self.make_source(span),
         )?;
         if negate {
             self.new_expression(
@@ -2186,7 +2548,10 @@ impl Parser {
     fn next_is_list_type_suffix(&mut self) -> Result<bool, Error> {
         let checkpoint = self.checkpoint();
         self.next()?;
-        let list_after_range = if self.at(&TokenKind::Identifier)? && self.peek()?.text == "range" {
+        let list_after_range = if self.at(&TokenKind::Identifier)? && {
+            let peeked = *self.peek()?;
+            peeked.text.of(&self.source) == "range"
+        } {
             self.next()?;
             self.at(&TokenKind::List)?
         } else {
@@ -2197,6 +2562,14 @@ impl Parser {
     }
 
     fn wrap_list_type_suffix(&mut self, expr: ExprId, start_span: Span) -> Result<ExprId, Error> {
+        if self.pin_before_list_ahead()? {
+            let tok = *self.peek()?;
+            return Err(self.error_at_token_with_suggestion(
+                &tok,
+                "An effective pin is not valid on a type or list element",
+                "Write `uses Spec <pin>`, then `data name: Spec list` or `rule name: Spec list`.",
+            ));
+        }
         if !self.at_list_type_suffix()? {
             return Ok(expr);
         }
@@ -2204,7 +2577,10 @@ impl Parser {
             return Ok(expr);
         };
         let mut parent = parent_type_from_reference(&reference);
-        if self.at(&TokenKind::Identifier)? && self.peek()?.text == "range" {
+        if self.at(&TokenKind::Identifier)? && {
+            let peeked = *self.peek()?;
+            peeked.text.of(&self.source) == "range"
+        } {
             self.next()?;
             parent = ParentType::Ranged {
                 inner: Box::new(parent),
@@ -2215,17 +2591,40 @@ impl Parser {
             inner: Box::new(parent),
         };
         let span = self.span_covering(&start_span, &self.last_span);
-        self.new_expression(
-            ExpressionKind::ListType { element: parent },
-            self.make_source(span),
-        )
+        *self.table.kind_mut(expr) = ExpressionKind::ListType { element: parent };
+        self.table.set_source(expr, self.make_source(span));
+        Ok(expr)
+    }
+
+    fn pin_before_list_ahead(&mut self) -> Result<bool, Error> {
+        if !self.at(&TokenKind::NumberLit)? {
+            return Ok(false);
+        }
+        let year = *self.peek()?;
+        if year.text.of(&self.source).len() != 4
+            || !year
+                .text
+                .of(&self.source)
+                .chars()
+                .all(|c| c.is_ascii_digit())
+        {
+            return Ok(false);
+        }
+        let checkpoint = self.checkpoint();
+        self.next()?;
+        let list = self.at(&TokenKind::List)?;
+        self.restore(checkpoint);
+        Ok(list)
     }
 
     fn at_list_type_suffix(&mut self) -> Result<bool, Error> {
         if self.at(&TokenKind::List)? {
             return Ok(true);
         }
-        if self.at(&TokenKind::Identifier)? && self.peek()?.text == "range" {
+        if self.at(&TokenKind::Identifier)? && {
+            let peeked = *self.peek()?;
+            peeked.text.of(&self.source) == "range"
+        } {
             let checkpoint = self.checkpoint();
             self.next()?;
             let list = self.at(&TokenKind::List)?;
@@ -2236,24 +2635,17 @@ impl Parser {
     }
 
     fn parse_expression_parent_type(&mut self) -> Result<ParentType, Error> {
-        let peek_kind = self.peek()?.kind.clone();
-        let base = if let Some(primitive) = token_kind_to_primitive(&peek_kind) {
+        let peek = *self.peek()?;
+        let base = if let Some(primitive) = token_kind_to_primitive(&peek.kind) {
             self.next()?;
             ParentType::Primitive { primitive }
         } else {
-            let (name, _) = self.parse_spec_name()?;
-            if let Some((alias, type_name)) = name.rsplit_once('.') {
-                ParentType::Qualified {
-                    spec_alias: alias.to_string(),
-                    inner: Box::new(ParentType::Custom {
-                        name: type_name.to_string(),
-                    }),
-                }
-            } else {
-                ParentType::Custom { name }
-            }
+            self.parse_custom_or_spec_element_parent()?
         };
-        let base = if self.at(&TokenKind::Identifier)? && self.peek()?.text == "range" {
+        let base = if self.at(&TokenKind::Identifier)? && {
+            let peeked = *self.peek()?;
+            peeked.text.of(&self.source) == "range"
+        } {
             self.next()?;
             ParentType::Ranged {
                 inner: Box::new(base),
@@ -2270,7 +2662,7 @@ impl Parser {
     /// A token that starts a bare (unparenthesised) command argument. Never a sign:
     /// after a command, `+` / `-` is the binary operator. Never `is`: `items -> count is 0`.
     fn at_bare_operand_start(&mut self) -> Result<bool, Error> {
-        let kind = self.peek()?.kind.clone();
+        let kind = self.peek()?.kind;
         if kind == TokenKind::Is {
             return Ok(false);
         }
@@ -2310,23 +2702,23 @@ impl Parser {
 
     fn bare_argument_error(&mut self, command: &str) -> Error {
         let tok = match self.peek() {
-            Ok(tok) => tok.clone(),
+            Ok(tok) => *tok,
             Err(error) => return error,
         };
         self.error_at_token(
             &tok,
             format!(
                 "`{command}` without parentheses takes one operand, found '{}' after it; \
-                 write `{command}(...)` around the whole argument, or `(list -> {command} ...)` \
+                 write `{command}(...)` around the whole argument, or `(... -> {command} ...)` \
                  to use the result",
-                tok.text
+                tok.text.of(&self.source)
             ),
         )
     }
 
     fn reject_comma_after_call(&mut self, command: &str) -> Result<(), Error> {
         if self.call_argument_depth == 0 && self.at(&TokenKind::Comma)? {
-            let tok = self.peek()?.clone();
+            let tok = *self.peek()?;
             return Err(self.error_at_token(
                 &tok,
                 format!(
@@ -2340,7 +2732,7 @@ impl Parser {
 
     fn reject_command_argument(&mut self, command: &str) -> Result<(), Error> {
         if self.at_command_argument_start()? {
-            let tok = self.peek()?.clone();
+            let tok = *self.peek()?;
             return Err(self.error_at_token(&tok, format!("`{command}` takes no argument")));
         }
         Ok(())
@@ -2360,15 +2752,16 @@ impl Parser {
 
     fn condition_error(&mut self, command: &str) -> Error {
         let tok = match self.peek() {
-            Ok(tok) => tok.clone(),
+            Ok(tok) => *tok,
             Err(error) => return error,
         };
         self.error_at_token(
             &tok,
             format!(
                 "`{command}` condition without parentheses is one comparison between single \
-                 operands, found '{}'; write `{command}(...)` around the whole condition",
-                tok.text
+                 operands, found '{}'; write `{command}(...)` around the whole condition, \
+                 for example `{command}(> 5 or is 3)`",
+                tok.text.of(&self.source)
             ),
         )
     }
@@ -2417,7 +2810,7 @@ impl Parser {
         self.expect(&TokenKind::In)?;
         self.expect_calendar_period_marker()?;
         let unit = self.parse_calendar_unit()?;
-        let end = self.peek()?.span.clone();
+        let end = self.peek()?.span;
         let span = self.span_covering(&start_span, &end);
         self.new_expression(
             ExpressionKind::DateCalendar(DateCalendarKind::NotIn, unit, repository),
@@ -2433,11 +2826,17 @@ impl Parser {
                 ConversionTarget::Unit {
                     unit_name: "permille".to_string(),
                 }
-            } else if let Some(primitive) = token_kind_to_primitive(&target_tok.kind) {
-                ConversionTarget::Type(primitive)
+            } else if matches!(target_tok.kind, TokenKind::TextKw) {
+                return Err(self.error_at_token_with_suggestion(
+                    &target_tok,
+                    "'text' is not a valid conversion target.".to_string(),
+                    "Use `as number`, `as boolean`, `as date`, `as time`, `as measure`, `as ratio`, or a unit name (e.g. `as eur`).".to_string(),
+                ));
+            } else if let Some(kind) = token_kind_to_conversion_type_kind(&target_tok.kind) {
+                ConversionTarget::Type(kind)
             } else if can_be_label(&target_tok.kind) {
-                let mut unit_path = target_tok.text.clone();
-                let mut end_span = target_tok.span.clone();
+                let mut unit_path = target_tok.text.of(&self.source).to_string();
+                let mut end_span = target_tok.span;
                 while self.at(&TokenKind::Dot)? {
                     self.next()?;
                     let seg = self.next()?;
@@ -2448,8 +2847,8 @@ impl Parser {
                         ));
                     }
                     unit_path.push('.');
-                    unit_path.push_str(&seg.text);
-                    end_span = seg.span.clone();
+                    unit_path.push_str(seg.text.of(&self.source));
+                    end_span = seg.span;
                 }
                 let target = ConversionTarget::Unit {
                     unit_name: unit_path,
@@ -2492,7 +2891,7 @@ impl Parser {
     /// Must include every token that can start the next spec-body item, a new `spec`/`repo`,
     /// or end the file. See `parse_unit_conversion_before_expression_boundaries` in `parsing/mod.rs`.
     fn at_expression_suffix_end(&mut self) -> Result<bool, Error> {
-        Ok(self.at(&TokenKind::And)?
+        Ok(self.at_any(&[TokenKind::And, TokenKind::Or])?
             || self.at(&TokenKind::Unless)?
             || self.at(&TokenKind::Then)?
             || self.at(&TokenKind::RParen)?
@@ -2507,12 +2906,15 @@ impl Parser {
 
     fn parse_calendar_unit(&mut self) -> Result<CalendarPeriodUnit, Error> {
         let tok = self.next()?;
-        if let Some(unit) = CalendarPeriodUnit::from_keyword(&tok.text) {
+        if let Some(unit) = CalendarPeriodUnit::from_keyword(tok.text.of(&self.source)) {
             return Ok(unit);
         }
         Err(self.error_at_token(
             &tok,
-            format!("Expected 'year', 'month', or 'week', found '{}'", tok.text),
+            format!(
+                "Expected 'year', 'month', or 'week', found '{}'",
+                tok.text.of(&self.source)
+            ),
         ))
     }
 
@@ -2535,8 +2937,9 @@ impl Parser {
 
     fn parse_number_expression(&mut self) -> Result<ExprId, Error> {
         let num_tok = self.next()?;
-        let num_text = num_tok.text.clone();
-        let start_span = num_tok.span.clone();
+        let source = Arc::clone(&self.source);
+        let num_text = num_tok.text.of(&source);
+        let start_span = num_tok.span;
 
         // Check if this is a date literal (YYYY-MM-DD)
         if num_text.len() == 4
@@ -2549,10 +2952,10 @@ impl Parser {
             // This is ambiguous at the token level. Let's check if the pattern matches.
             // Since dates use -NN- pattern and arithmetic uses - N pattern (with spaces),
             // we can use the span positions to disambiguate.
-            let minus_span = self.peek()?.span.clone();
+            let minus_span = self.peek()?.span;
             // If minus is immediately adjacent to the number (no space), it's a date
             if minus_span.start == start_span.end {
-                let value = self.parse_date_literal(num_text, start_span.clone())?;
+                let value = self.parse_date_literal(num_text, start_span)?;
                 return self
                     .new_expression(ExpressionKind::Literal(value), self.make_source(start_span));
             }
@@ -2563,9 +2966,9 @@ impl Parser {
             && num_text.chars().all(|c| c.is_ascii_digit())
             && self.at(&TokenKind::Colon)?
         {
-            let colon_span = self.peek()?.span.clone();
+            let colon_span = self.peek()?.span;
             if colon_span.start == start_span.end {
-                let value = self.try_parse_time_literal(num_text, start_span.clone())?;
+                let value = self.try_parse_time_literal(num_text, start_span)?;
                 return self
                     .new_expression(ExpressionKind::Literal(value), self.make_source(start_span));
             }
@@ -2582,7 +2985,7 @@ impl Parser {
                     ));
                 }
             }
-            let decimal = parse_decimal_string(&num_text, &start_span, self)?;
+            let decimal = parse_decimal_string(num_text, &start_span, self)?;
             return self.new_expression(
                 ExpressionKind::Literal(Value::NumberWithUnit(decimal, "permille".to_string())),
                 self.make_source(start_span),
@@ -2591,7 +2994,7 @@ impl Parser {
 
         // Check for % (percent)
         if self.at(&TokenKind::Percent)? {
-            let pct_span = self.peek()?.span.clone();
+            let pct_span = self.peek()?.span;
             // Only consume % if it's directly adjacent (no space) for the shorthand syntax
             // Or if it's "50 %" (space separated is also valid per the grammar)
             let pct_tok = self.next()?;
@@ -2603,7 +3006,7 @@ impl Parser {
                     ));
                 }
             }
-            let decimal = parse_decimal_string(&num_text, &start_span, self)?;
+            let decimal = parse_decimal_string(num_text, &start_span, self)?;
             return self.new_expression(
                 ExpressionKind::Literal(Value::NumberWithUnit(decimal, "percent".to_string())),
                 self.make_source(self.span_covering(&start_span, &pct_span)),
@@ -2613,7 +3016,7 @@ impl Parser {
         // Check for "permille" keyword
         if self.at(&TokenKind::Permille)? {
             self.next()?;
-            let decimal = parse_decimal_string(&num_text, &start_span, self)?;
+            let decimal = parse_decimal_string(num_text, &start_span, self)?;
             return self.new_expression(
                 ExpressionKind::Literal(Value::NumberWithUnit(decimal, "permille".to_string())),
                 self.make_source(start_span),
@@ -2622,7 +3025,7 @@ impl Parser {
 
         if can_be_unit_name(&self.peek()?.kind) {
             let (unit_path, end_span) = self.parse_unit_path()?;
-            let decimal = parse_decimal_string(&num_text, &start_span, self)?;
+            let decimal = parse_decimal_string(num_text, &start_span, self)?;
             return self.new_expression(
                 ExpressionKind::Literal(Value::NumberWithUnit(decimal, unit_path)),
                 self.make_source(self.span_covering(&start_span, &end_span)),
@@ -2630,7 +3033,7 @@ impl Parser {
         }
 
         // Plain number
-        let decimal = parse_decimal_string(&num_text, &start_span, self)?;
+        let decimal = parse_decimal_string(num_text, &start_span, self)?;
         self.new_expression(
             ExpressionKind::Literal(Value::Number(decimal)),
             self.make_source(start_span),
@@ -2641,7 +3044,7 @@ impl Parser {
         let mut segments = Vec::new();
 
         let first = self.next()?;
-        segments.push(first.text.clone());
+        segments.push(first.text.of(&self.source).to_string());
 
         while self.at(&TokenKind::Dot)? {
             self.next()?; // consume .
@@ -2652,7 +3055,7 @@ impl Parser {
                     format!("Expected an identifier after '.', found {}", seg.kind),
                 ));
             }
-            segments.push(seg.text.clone());
+            segments.push(seg.text.of(&self.source).to_string());
         }
 
         Ok(Reference::from_path(segments))
@@ -2669,7 +3072,6 @@ impl Parser {
 
     fn save_flags(&self) -> ExprFlags {
         ExprFlags {
-            bare_operand: self.bare_operand,
             call_argument_depth: self.call_argument_depth,
         }
     }
@@ -2709,7 +3111,6 @@ impl Parser {
         while let Some(cont) = frames.pop() {
             match cont {
                 ExprCont::Restore(flags) => {
-                    self.bare_operand = flags.bare_operand;
                     self.call_argument_depth = flags.call_argument_depth;
                 }
                 ExprCont::PopDepth => self.depth_tracker.pop_depth(),
@@ -2727,14 +3128,21 @@ impl Parser {
             ExprTask::Expression => {
                 self.check_depth()?;
                 frames.push(ExprCont::PopDepth);
-                Ok(ExprStep::Enter(ExprTask::AndExpression))
+                Ok(ExprStep::Enter(ExprTask::LogicalExpression {
+                    connective: LogicalConnective::Or,
+                }))
             }
-            ExprTask::AndExpression => {
-                let start_span = self.peek()?.span.clone();
-                frames.push(ExprCont::AndFirst { start_span });
-                Ok(ExprStep::Enter(ExprTask::AndOperand))
+            ExprTask::LogicalExpression { connective } => {
+                let start_span = self.peek()?.span;
+                let kind = LogicalChainKind::Expression;
+                frames.push(ExprCont::LogicalFirst {
+                    connective,
+                    start_span,
+                    kind,
+                });
+                Ok(ExprStep::Enter(logical_operand_task(connective, kind)))
             }
-            ExprTask::AndOperand => {
+            ExprTask::LogicalOperand => {
                 if self.at_not_bare_veto_followed_by_is()? || self.at_bare_veto_followed_by_is()? {
                     Ok(ExprStep::Enter(ExprTask::VetoStatus))
                 } else if self.at(&TokenKind::Not)? {
@@ -2744,7 +3152,7 @@ impl Parser {
                 }
             }
             ExprTask::VetoStatus => {
-                let start_span = self.peek()?.span.clone();
+                let start_span = self.peek()?.span;
                 let keyword_was_negated = if self.at(&TokenKind::Not)? {
                     self.next()?;
                     true
@@ -2753,7 +3161,7 @@ impl Parser {
                 };
                 self.expect(&TokenKind::Veto)?;
                 if self.at(&TokenKind::StringLit)? {
-                    let tok = self.peek()?.clone();
+                    let tok = *self.peek()?;
                     return Err(self.error_at_token(
                         &tok,
                         "veto with a message is only valid as a rule or unless result, not in `is veto` comparisons",
@@ -2765,7 +3173,7 @@ impl Parser {
                     operator,
                     ComparisonComputation::Is | ComparisonComputation::IsNot
                 ) {
-                    let tok = self.peek()?.clone();
+                    let tok = *self.peek()?;
                     return Err(self.error_at_token(
                         &tok,
                         "Expected `is` or `is not` after `veto` in a veto-status comparison",
@@ -2776,7 +3184,7 @@ impl Parser {
                     keyword_was_negated,
                     start_span,
                 });
-                Ok(ExprStep::Enter(ExprTask::RepositoryExpression))
+                Ok(ExprStep::Enter(ExprTask::Pipe))
             }
             ExprTask::NotExpression => {
                 let not_tok = self.expect(&TokenKind::Not)?;
@@ -2788,8 +3196,13 @@ impl Parser {
                 }))
             }
             ExprTask::RepositoryWithSuffix => {
-                let start_span = self.peek()?.span.clone();
+                let start_span = self.peek()?.span;
                 frames.push(ExprCont::RepositorySuffix { start_span });
+                Ok(ExprStep::Enter(ExprTask::Pipe))
+            }
+            ExprTask::Pipe => {
+                let start_span = self.peek()?.span;
+                frames.push(ExprCont::PipeFirst { start_span });
                 Ok(ExprStep::Enter(ExprTask::RepositoryExpression))
             }
             ExprTask::ComparisonSuffix { left, start_span } => {
@@ -2800,12 +3213,12 @@ impl Parser {
                 start_span,
             } => self.enter_in_suffix(repository, start_span, frames),
             ExprTask::RepositoryExpression => {
-                let start_span = self.peek()?.span.clone();
+                let start_span = self.peek()?.span;
                 frames.push(ExprCont::RepositoryFirst { start_span });
                 Ok(ExprStep::Enter(ExprTask::Term { allow_as: true }))
             }
             ExprTask::Term { allow_as } => {
-                let start_span = self.peek()?.span.clone();
+                let start_span = self.peek()?.span;
                 frames.push(ExprCont::TermFirst {
                     allow_as,
                     start_span,
@@ -2813,7 +3226,7 @@ impl Parser {
                 Ok(ExprStep::Enter(ExprTask::Power))
             }
             ExprTask::Power => {
-                let start_span = self.peek()?.span.clone();
+                let start_span = self.peek()?.span;
                 frames.push(ExprCont::PowerLeft {
                     start_span,
                     range_bound: false,
@@ -2821,7 +3234,7 @@ impl Parser {
                 Ok(ExprStep::Enter(ExprTask::RangeOperand))
             }
             ExprTask::RangeOperand => {
-                let start_span = self.peek()?.span.clone();
+                let start_span = self.peek()?.span;
                 let flags = self.save_flags();
                 if self.no_range_at.get(&start_span.start) == Some(&flags) {
                     return Ok(ExprStep::Enter(ExprTask::Factor));
@@ -2830,12 +3243,12 @@ impl Parser {
                 Ok(ExprStep::Enter(ExprTask::Factor))
             }
             ExprTask::RangeEllipsisBound => {
-                let start_span = self.peek()?.span.clone();
+                let start_span = self.peek()?.span;
                 frames.push(ExprCont::EllipsisFirst { start_span });
                 Ok(ExprStep::Enter(ExprTask::PowerForRangeBound))
             }
             ExprTask::PowerForRangeBound => {
-                let start_span = self.peek()?.span.clone();
+                let start_span = self.peek()?.span;
                 frames.push(ExprCont::PowerLeft {
                     start_span,
                     range_bound: true,
@@ -2844,8 +3257,8 @@ impl Parser {
             }
             ExprTask::Factor => {
                 let peeked = self.peek()?;
-                let start_span = peeked.span.clone();
-                let kind = peeked.kind.clone();
+                let start_span = peeked.span;
+                let kind = peeked.kind;
                 if kind == TokenKind::Minus {
                     self.next()?;
                     frames.push(ExprCont::FactorNegate { start_span });
@@ -2857,10 +3270,10 @@ impl Parser {
                 Ok(ExprStep::Enter(ExprTask::PrimaryOrMath))
             }
             ExprTask::PrimaryOrMath => {
-                let peeked = self.peek()?;
-                let start_span = peeked.span.clone();
-                let kind = peeked.kind.clone();
-                frames.push(ExprCont::PrimaryOrMathSuffix { start_span });
+                let kind = self.peek()?.kind;
+                if is_prefix_rounding(&kind) {
+                    return Ok(ExprStep::Enter(ExprTask::PrefixRoundingRejected));
+                }
                 if is_math_function(&kind) {
                     return Ok(ExprStep::Enter(ExprTask::MathFunction));
                 }
@@ -2869,9 +3282,18 @@ impl Parser {
                 }
                 Ok(ExprStep::Enter(ExprTask::Primary))
             }
+            ExprTask::PrefixRoundingRejected => {
+                let tok = self.next()?;
+                let keyword = tok.text.of(&self.source).to_string();
+                frames.push(ExprCont::PrefixRoundingRejected {
+                    keyword: keyword.clone(),
+                    keyword_span: tok.span,
+                });
+                Ok(ExprStep::Enter(ExprTask::PrefixArgument { keyword }))
+            }
             ExprTask::MathFunction => {
                 let func_tok = self.next()?;
-                let start_span = func_tok.span.clone();
+                let start_span = func_tok.span;
                 let operator = match func_tok.kind {
                     TokenKind::Sqrt => MathematicalComputation::Sqrt,
                     TokenKind::Sin => MathematicalComputation::Sin,
@@ -2883,9 +3305,6 @@ impl Parser {
                     TokenKind::Log => MathematicalComputation::Log,
                     TokenKind::Exp => MathematicalComputation::Exp,
                     TokenKind::Abs => MathematicalComputation::Abs,
-                    TokenKind::Floor => MathematicalComputation::Floor,
-                    TokenKind::Ceil => MathematicalComputation::Ceil,
-                    TokenKind::Round => MathematicalComputation::Round,
                     _ => unreachable!("BUG: only math functions should reach here"),
                 };
                 frames.push(ExprCont::Math {
@@ -2893,12 +3312,12 @@ impl Parser {
                     start_span,
                 });
                 Ok(ExprStep::Enter(ExprTask::PrefixArgument {
-                    keyword: func_tok.text,
+                    keyword: func_tok.text.of(&self.source).to_string(),
                 }))
             }
             ExprTask::LowerUpper => {
                 let bound_tok = self.next()?;
-                let start_span = bound_tok.span.clone();
+                let start_span = bound_tok.span;
                 let bound = match bound_tok.kind {
                     TokenKind::Lower => RangeBound::Lower,
                     TokenKind::Upper => RangeBound::Upper,
@@ -2906,7 +3325,7 @@ impl Parser {
                 };
                 frames.push(ExprCont::LowerUpperEnd { bound, start_span });
                 Ok(ExprStep::Enter(ExprTask::PrefixArgument {
-                    keyword: bound_tok.text,
+                    keyword: bound_tok.text.of(&self.source).to_string(),
                 }))
             }
             ExprTask::PrefixArgument { keyword } => self.enter_prefix_argument(keyword, frames),
@@ -2923,7 +3342,7 @@ impl Parser {
                     return Ok(ExprStep::Enter(ExprTask::CallArguments { command: "find" }));
                 }
                 if !self.at_bare_operand_start()? {
-                    let tok = self.peek()?.clone();
+                    let tok = *self.peek()?;
                     return Err(self.error_at_token(&tok, "`find` needs a key"));
                 }
                 frames.push(ExprCont::FindKey { keys: Vec::new() });
@@ -2932,7 +3351,6 @@ impl Parser {
             ExprTask::CallArguments { command } => {
                 self.expect(&TokenKind::LParen)?;
                 let saved = self.save_flags();
-                self.bare_operand = false;
                 self.call_argument_depth += 1;
                 frames.push(ExprCont::CallArgumentsEnd { command });
                 frames.push(ExprCont::Restore(saved));
@@ -2963,40 +3381,44 @@ impl Parser {
                 if self.at_bare_operand_start()? {
                     return Ok(ExprStep::Enter(ExprTask::BareArgument { command }));
                 }
-                let tok = self.peek()?.clone();
+                let tok = *self.peek()?;
                 Err(self.error_at_token(&tok, format!("`{command}` needs an argument")))
             }
             ExprTask::BareArgument { command } => {
                 frames.push(ExprCont::BareArgumentEnd { command });
                 Ok(ExprStep::Enter(ExprTask::BareOperand))
             }
-            ExprTask::BareOperand => {
-                let saved = self.save_flags();
-                self.bare_operand = true;
-                frames.push(ExprCont::Restore(saved));
-                Ok(ExprStep::Enter(ExprTask::RangeOperand))
-            }
+            ExprTask::BareOperand => Ok(ExprStep::Enter(ExprTask::RangeOperand)),
             ExprTask::ListPredicate { command } => self.enter_list_predicate(command, frames),
             ExprTask::CallListPredicate { command } => {
                 let checkpoint = self.checkpoint();
                 self.expect(&TokenKind::LParen)?;
-                if !self.at_row_condition_operator()? {
+                if !self.starts_value_predicate()? {
                     self.restore(checkpoint);
                     frames.push(ExprCont::WrapInstance);
                     return Ok(ExprStep::Enter(ExprTask::SingleCallArgument { command }));
                 }
-                let saved = self.save_flags();
-                self.bare_operand = false;
-                frames.push(ExprCont::CallPredicateEnd { command });
-                frames.push(ExprCont::Restore(saved));
-                Ok(ExprStep::Enter(ExprTask::ValuePredicateInParentheses {
+                frames.push(ExprCont::ValuePredicateCallEnd { command });
+                Ok(ExprStep::Enter(ExprTask::ValuePredicate {
                     command,
+                    connective: LogicalConnective::Or,
                 }))
             }
-            ExprTask::ValuePredicateInParentheses { command } => {
-                let op = self.parse_row_condition_operator()?;
-                frames.push(ExprCont::ValuePredicateEnd { op, command });
-                Ok(ExprStep::Enter(ExprTask::RepositoryExpression))
+            ExprTask::ValuePredicate {
+                command,
+                connective,
+            } => {
+                let start_span = self.peek()?.span;
+                let kind = LogicalChainKind::ValuePredicate { command };
+                frames.push(ExprCont::LogicalFirst {
+                    connective,
+                    start_span,
+                    kind,
+                });
+                Ok(ExprStep::Enter(logical_operand_task(connective, kind)))
+            }
+            ExprTask::ValuePredicateFactor { command } => {
+                self.enter_value_predicate_factor(command, frames)
             }
             ExprTask::SortCommand => {
                 if self.at(&TokenKind::LParen)? {
@@ -3044,7 +3466,6 @@ impl Parser {
     ) -> Result<ExprStep, Error> {
         match cont {
             ExprCont::Restore(flags) => {
-                self.bare_operand = flags.bare_operand;
                 self.call_argument_depth = flags.call_argument_depth;
                 Ok(ExprStep::Yield(value))
             }
@@ -3052,25 +3473,34 @@ impl Parser {
                 self.depth_tracker.pop_depth();
                 Ok(ExprStep::Yield(value))
             }
-            ExprCont::AndFirst { start_span } => {
-                self.and_chain(expr_of(value), Vec::new(), start_span, frames)
-            }
-            ExprCont::AndOperand {
+            ExprCont::LogicalFirst {
+                connective,
+                start_span,
+                kind,
+            } => self.logical_chain(
+                connective,
+                expr_of(value),
+                Vec::new(),
+                start_span,
+                kind,
+                frames,
+            ),
+            ExprCont::LogicalOperand {
+                connective,
                 first,
                 mut steps,
                 start_span,
+                kind,
             } => {
                 let operand = expr_of(value);
-                let end_span = self
-                    .expr_span(operand)
-                    .unwrap_or_else(|| start_span.clone());
+                let end_span = self.expr_span(operand).unwrap_or(start_span);
                 let span = self.span_covering(&start_span, &end_span);
                 steps.push(ChainStep {
                     op: (),
                     operand,
                     source_location: self.make_source(span),
                 });
-                self.and_chain(first, steps, start_span, frames)
+                self.logical_chain(connective, first, steps, start_span, kind, frames)
             }
             ExprCont::VetoStatus {
                 operator_is_not,
@@ -3084,9 +3514,18 @@ impl Parser {
             )),
             ExprCont::Negation { start_span } => {
                 let operand = expr_of(value);
-                let end_span = self
-                    .expr_span(operand)
-                    .unwrap_or_else(|| start_span.clone());
+                if self.at(&TokenKind::Arrow)? {
+                    let tok = *self.peek()?;
+                    let operand_text = display_expression(&self.table, operand);
+                    return Err(self.error_at_token(
+                        &tok,
+                        format!(
+                            "`not` without parentheses takes one operand, found '->' after it; \
+                             write `not ({operand_text} -> ...)` to negate the command's result"
+                        ),
+                    ));
+                }
+                let end_span = self.expr_span(operand).unwrap_or(start_span);
                 let span = self.span_covering(&start_span, &end_span);
                 expr_step(self.new_expression(
                     ExpressionKind::LogicalNegation(operand, NegationType::Not),
@@ -3105,7 +3544,7 @@ impl Parser {
                 start_span,
             } => {
                 let right = expr_of(value);
-                let end_span = self.expr_span(right).unwrap_or_else(|| start_span.clone());
+                let end_span = self.expr_span(right).unwrap_or(start_span);
                 let span = self.span_covering(&start_span, &end_span);
                 expr_step(self.new_expression(
                     ExpressionKind::Comparison(left, operator, right),
@@ -3119,7 +3558,7 @@ impl Parser {
                 start_span,
             } => {
                 let offset = expr_of(value);
-                let offset_end_span = self.expr_span(offset).unwrap_or_else(|| start_span.clone());
+                let offset_end_span = self.expr_span(offset).unwrap_or(start_span);
                 let range = self.new_expression(
                     ExpressionKind::PastFutureRange(rel_kind, offset),
                     self.make_source(self.span_covering(&direction, &offset_end_span)),
@@ -3135,7 +3574,7 @@ impl Parser {
                 start_span,
             } => {
                 let range = expr_of(value);
-                let end_span = self.expr_span(range).unwrap_or_else(|| start_span.clone());
+                let end_span = self.expr_span(range).unwrap_or(start_span);
                 let span = self.span_covering(&start_span, &end_span);
                 expr_step(self.new_expression(
                     ExpressionKind::RangeContainment(repository, range),
@@ -3158,7 +3597,7 @@ impl Parser {
                 {
                     let source = self
                         .expr_source(operand)
-                        .unwrap_or_else(|| self.make_source(start_span.clone()));
+                        .unwrap_or_else(|| self.make_source(start_span));
                     return Err(Error::parsing(
                         "Cannot add a plain number to a converted value; convert each operand before \
                          '+' (e.g. '5 as usd + c as usd')",
@@ -3166,9 +3605,7 @@ impl Parser {
                         None::<String>,
                     ));
                 }
-                let end_span = self
-                    .expr_span(operand)
-                    .unwrap_or_else(|| start_span.clone());
+                let end_span = self.expr_span(operand).unwrap_or(start_span);
                 let span = self.span_covering(&start_span, &end_span);
                 steps.push(ChainStep {
                     op: operation,
@@ -3183,7 +3620,7 @@ impl Parser {
             } => {
                 let mut first = expr_of(value);
                 if allow_as {
-                    first = self.parse_as_chain(first, start_span.clone())?;
+                    first = self.parse_as_chain(first, start_span)?;
                 }
                 self.term_chain(first, Vec::new(), allow_as, start_span, frames)
             }
@@ -3199,9 +3636,7 @@ impl Parser {
                 if allow_as {
                     operand = self.parse_as_chain(operand, right_start_span)?;
                 }
-                let end_span = self
-                    .expr_span(operand)
-                    .unwrap_or_else(|| start_span.clone());
+                let end_span = self.expr_span(operand).unwrap_or(start_span);
                 let span = self.span_covering(&start_span, &end_span);
                 steps.push(ChainStep {
                     op: operation,
@@ -3216,7 +3651,7 @@ impl Parser {
             } => self.power_tail(expr_of(value), start_span, range_bound, frames),
             ExprCont::PowerRight { left, start_span } => {
                 let right = expr_of(value);
-                let end_span = self.expr_span(right).unwrap_or_else(|| start_span.clone());
+                let end_span = self.expr_span(right).unwrap_or(start_span);
                 let span = self.span_covering(&start_span, &end_span);
                 let step = ChainStep {
                     op: ArithmeticComputation::Power,
@@ -3240,13 +3675,11 @@ impl Parser {
                 }
                 frames.push(ExprCont::RangeLeft {
                     factor,
-                    start_span: start_span.clone(),
+                    start_span,
                     checkpoint: Box::new(self.checkpoint()),
                     flags,
                 });
-                frames.push(ExprCont::EllipsisFirst {
-                    start_span: start_span.clone(),
-                });
+                frames.push(ExprCont::EllipsisFirst { start_span });
                 self.power_tail(factor, start_span, true, frames)
             }
             ExprCont::RangeLeft {
@@ -3270,7 +3703,7 @@ impl Parser {
             }
             ExprCont::RangeRight { left, start_span } => {
                 let right = expr_of(value);
-                let end_span = self.expr_span(right).unwrap_or_else(|| start_span.clone());
+                let end_span = self.expr_span(right).unwrap_or(start_span);
                 let span = self.span_covering(&start_span, &end_span);
                 expr_step(self.new_expression(
                     ExpressionKind::RangeLiteral(left, right),
@@ -3289,9 +3722,7 @@ impl Parser {
                 starts,
             } => {
                 let operand = expr_of(value);
-                let end_span = self
-                    .expr_span(operand)
-                    .unwrap_or_else(|| start_span.clone());
+                let end_span = self.expr_span(operand).unwrap_or(start_span);
                 let span = self.span_covering(&start_span, &end_span);
                 steps.push(ChainStep {
                     op: operation,
@@ -3302,9 +3733,7 @@ impl Parser {
             }
             ExprCont::FactorNegate { start_span } => {
                 let operand = expr_of(value);
-                let end_span = self
-                    .expr_span(operand)
-                    .unwrap_or_else(|| start_span.clone());
+                let end_span = self.expr_span(operand).unwrap_or(start_span);
                 let span = self.span_covering(&start_span, &end_span);
                 if let ExpressionKind::Literal(literal) = self.table.kind(operand) {
                     if let Ok(negated) = try_negate_numeric_literal(literal.clone()) {
@@ -3325,18 +3754,42 @@ impl Parser {
                 };
                 expr_step(self.arithmetic_chain(zero, vec![step]))
             }
-            ExprCont::PrimaryOrMathSuffix { start_span } => {
-                let expr = expr_of(value);
-                if !self.bare_operand && self.at(&TokenKind::Arrow)? {
-                    frames.push(ExprCont::PrimaryOrMathSuffix {
-                        start_span: start_span.clone(),
-                    });
-                    return Ok(ExprStep::Enter(ExprTask::ListCommandSuffix {
-                        list: expr,
-                        start_span,
-                    }));
-                }
-                Ok(ExprStep::Yield(ExprVal::Expr(expr)))
+            ExprCont::PipeFirst { start_span } => {
+                self.pipe_chain(expr_of(value), start_span, false, frames)
+            }
+            ExprCont::PipeCommand { start_span } => {
+                self.pipe_chain(expr_of(value), start_span, true, frames)
+            }
+            ExprCont::StepRoundingDone {
+                operand,
+                mode,
+                start_span,
+            } => {
+                let step = optional_of(value);
+                let span = self.span_covering(&start_span, &self.last_span);
+                let rounded = self.new_expression(
+                    ExpressionKind::StepRounding {
+                        operand,
+                        mode,
+                        step,
+                    },
+                    self.make_source(span),
+                )?;
+                self.pipe_chain(rounded, start_span, true, frames)
+            }
+            ExprCont::PrefixRoundingRejected {
+                keyword,
+                keyword_span,
+            } => {
+                let operand = expr_of(value);
+                let operand_text = display_expression(&self.table, operand);
+                Err(Error::parsing(
+                    format!(
+                        "`{keyword}` is written after `->`; write `{operand_text} -> {keyword}`"
+                    ),
+                    Source::new(self.source_type(), keyword_span),
+                    None::<String>,
+                ))
             }
             ExprCont::ListCommandDone { list, start_span } => {
                 let command = command_of(value);
@@ -3365,7 +3818,7 @@ impl Parser {
             ExprCont::SingleCallArgumentCheck { command } => {
                 let mut arguments = exprs_of(value);
                 if arguments.len() != 1 {
-                    let tok = self.peek()?.clone();
+                    let tok = *self.peek()?;
                     return Err(self.error_at_token(
                         &tok,
                         format!("`{command}` takes one argument, got {}", arguments.len()),
@@ -3397,7 +3850,7 @@ impl Parser {
             }
             ExprCont::PastFuture { kind, start_span } => {
                 let offset = expr_of(value);
-                let offset_span = self.expr_span(offset).unwrap_or_else(|| start_span.clone());
+                let offset_span = self.expr_span(offset).unwrap_or(start_span);
                 let span = self.span_covering(&start_span, &offset_span);
                 expr_step(self.new_expression(
                     ExpressionKind::PastFutureRange(kind, offset),
@@ -3409,9 +3862,7 @@ impl Parser {
                 start_span,
             } => {
                 let operand = expr_of(value);
-                let end_span = self
-                    .expr_span(operand)
-                    .unwrap_or_else(|| start_span.clone());
+                let end_span = self.expr_span(operand).unwrap_or(start_span);
                 let span = self.span_covering(&start_span, &end_span);
                 expr_step(self.new_expression(
                     ExpressionKind::MathematicalComputation(operator, operand),
@@ -3420,9 +3871,7 @@ impl Parser {
             }
             ExprCont::LowerUpperEnd { bound, start_span } => {
                 let operand = expr_of(value);
-                let end_span = self
-                    .expr_span(operand)
-                    .unwrap_or_else(|| start_span.clone());
+                let end_span = self.expr_span(operand).unwrap_or(start_span);
                 let span = self.span_covering(&start_span, &end_span);
                 expr_step(self.new_expression(
                     ExpressionKind::RangeBound(bound, operand),
@@ -3432,13 +3881,13 @@ impl Parser {
             ExprCont::PrefixArgumentEnd { keyword } => {
                 let argument = expr_of(value);
                 if !self.at_bare_argument_end()? {
-                    let tok = self.peek()?.clone();
+                    let tok = *self.peek()?;
                     return Err(self.error_at_token(
                         &tok,
                         format!(
                             "`{keyword}` without parentheses takes one operand, found '{op}' after it; \
                              write `{keyword}(a {op} b)` or `{keyword}(a) {op} b`",
-                            op = tok.text
+                            op = tok.text.of(&self.source)
                         ),
                     ));
                 }
@@ -3449,9 +3898,26 @@ impl Parser {
                 if !self.at_bare_argument_end()? {
                     return Err(self.condition_error(command));
                 }
+                let left = self.new_expression(
+                    ExpressionKind::ImplicitRowValue,
+                    self.table
+                        .source(right)
+                        .cloned()
+                        .expect("BUG: parsed predicate operand has source"),
+                )?;
+                let kind = match op {
+                    RowCondition::Compare(op) => ExpressionKind::Comparison(left, op, right),
+                    RowCondition::In => ExpressionKind::RangeContainment(left, right),
+                };
+                let expr = self.new_expression(
+                    kind,
+                    self.table
+                        .source(right)
+                        .cloned()
+                        .expect("BUG: parsed predicate operand has source"),
+                )?;
                 Ok(ExprStep::Yield(ExprVal::Predicate(ListPredicate::Value {
-                    op,
-                    right,
+                    expr,
                 })))
             }
             ExprCont::PredicateLeft {
@@ -3491,29 +3957,6 @@ impl Parser {
                     expr: expr_of(value),
                 },
             ))),
-            ExprCont::ValuePredicateEnd { op, command } => {
-                let right = expr_of(value);
-                if !self.at(&TokenKind::RParen)? {
-                    let tok = self.peek()?.clone();
-                    return Err(self.error_at_token(
-                        &tok,
-                        format!(
-                            "a value-list `{command}` condition is one comparison, found '{}'; chain \
-                             `where` or use `in` with a range",
-                            tok.text
-                        ),
-                    ));
-                }
-                Ok(ExprStep::Yield(ExprVal::Predicate(ListPredicate::Value {
-                    op,
-                    right,
-                })))
-            }
-            ExprCont::CallPredicateEnd { command } => {
-                self.expect(&TokenKind::RParen)?;
-                self.reject_comma_after_call(command)?;
-                Ok(ExprStep::Yield(value))
-            }
             ExprCont::SortArgument { check_bare } => {
                 let argument = expr_of(value);
                 if check_bare
@@ -3542,34 +3985,132 @@ impl Parser {
                 values.push(expr_of(value));
                 self.value_item_next(values, frames)
             }
+            ExprCont::ValuePredicateCallEnd { command } => {
+                self.expect(&TokenKind::RParen)?;
+                self.reject_comma_after_call(command)?;
+                Ok(ExprStep::Yield(ExprVal::Predicate(ListPredicate::Value {
+                    expr: expr_of(value),
+                })))
+            }
+            ExprCont::ValuePredicateGroupEnd => {
+                self.expect(&TokenKind::RParen)?;
+                Ok(ExprStep::Yield(value))
+            }
+            ExprCont::ValuePredicateLeaf { op, start } => {
+                let right = expr_of(value);
+                let left =
+                    self.new_expression(ExpressionKind::ImplicitRowValue, self.make_source(start))?;
+                let kind = match op {
+                    RowCondition::Compare(op) => ExpressionKind::Comparison(left, op, right),
+                    RowCondition::In => ExpressionKind::RangeContainment(left, right),
+                };
+                expr_step(self.new_expression(
+                    kind,
+                    self.make_source(self.span_covering(&start, &self.last_span.clone())),
+                ))
+            }
         }
     }
 
-    fn and_chain(
+    fn logical_chain(
         &mut self,
+        connective: LogicalConnective,
         first: ExprId,
         steps: Vec<ChainStep<()>>,
         start_span: Span,
+        kind: LogicalChainKind,
         frames: &mut Vec<ExprCont>,
     ) -> Result<ExprStep, Error> {
-        if !self.at(&TokenKind::And)? {
+        let token = match connective {
+            LogicalConnective::And => TokenKind::And,
+            LogicalConnective::Or => TokenKind::Or,
+        };
+        if !self.at(&token)? {
             return match steps.last() {
                 None => Ok(ExprStep::Yield(ExprVal::Expr(first))),
                 Some(last) => {
                     let source = last.source_location.clone();
-                    expr_step(
-                        self.new_expression(ExpressionKind::LogicalAnd { first, steps }, source),
-                    )
+                    expr_step(self.new_expression(
+                        ExpressionKind::Logical {
+                            connective,
+                            first,
+                            steps,
+                        },
+                        source,
+                    ))
                 }
             };
         }
         self.next()?;
-        frames.push(ExprCont::AndOperand {
+        frames.push(ExprCont::LogicalOperand {
+            connective,
             first,
             steps,
             start_span,
+            kind,
         });
-        Ok(ExprStep::Enter(ExprTask::AndOperand))
+        Ok(ExprStep::Enter(logical_operand_task(connective, kind)))
+    }
+
+    /// `operand -> command -> ...`. Each `->` applies to everything on its left up to the
+    /// nearest comparison or logic operator. `piped` is true once a command was applied:
+    /// an arithmetic operator may not follow it.
+    fn pipe_chain(
+        &mut self,
+        operand: ExprId,
+        start_span: Span,
+        piped: bool,
+        frames: &mut Vec<ExprCont>,
+    ) -> Result<ExprStep, Error> {
+        if self.at(&TokenKind::Arrow)? {
+            let mode = match self.lexer.peek_second()?.kind {
+                TokenKind::Round => Some(RoundingMode::Round),
+                TokenKind::Floor => Some(RoundingMode::Floor),
+                TokenKind::Ceil => Some(RoundingMode::Ceil),
+                _ => None,
+            };
+            let Some(mode) = mode else {
+                frames.push(ExprCont::PipeCommand { start_span });
+                return Ok(ExprStep::Enter(ExprTask::ListCommandSuffix {
+                    list: operand,
+                    start_span,
+                }));
+            };
+            self.next()?;
+            self.next()?;
+            frames.push(ExprCont::StepRoundingDone {
+                operand,
+                mode,
+                start_span,
+            });
+            return Ok(ExprStep::Enter(ExprTask::OptionalArgument {
+                command: mode.keyword(),
+            }));
+        }
+        if piped
+            && self.at_any(&[
+                TokenKind::Plus,
+                TokenKind::Minus,
+                TokenKind::Star,
+                TokenKind::Slash,
+                TokenKind::Mod,
+                TokenKind::Caret,
+                TokenKind::As,
+            ])?
+        {
+            let tok = *self.peek()?;
+            let op = tok.text.of(&self.source);
+            let command = display_pipe_command(&self.table, operand);
+            return Err(self.error_at_token(
+                &tok,
+                format!(
+                    "found '{op}' after `-> {command}`; `->` applies to everything on its left, \
+                     so put parentheses around the command to use its result: \
+                     `(... -> {command}) {op} ...`"
+                ),
+            ));
+        }
+        expr_step(Ok(operand))
     }
 
     fn continue_repository(
@@ -3579,7 +4120,7 @@ impl Parser {
         frames: &mut Vec<ExprCont>,
     ) -> Result<ExprStep, Error> {
         loop {
-            let kind = self.peek()?.kind.clone();
+            let kind = self.peek()?.kind;
             if is_comparison_operator(&kind) {
                 return Ok(ExprStep::Enter(ExprTask::ComparisonSuffix {
                     left: expr,
@@ -3587,33 +4128,58 @@ impl Parser {
                 }));
             }
             if kind == TokenKind::Not {
-                expr = self.parse_not_in_calendar_suffix(expr, start_span.clone())?;
+                expr = self.parse_not_in_calendar_suffix(expr, start_span)?;
                 continue;
             }
             if kind == TokenKind::In {
-                frames.push(ExprCont::ContinueRepository {
-                    start_span: start_span.clone(),
-                });
+                frames.push(ExprCont::ContinueRepository { start_span });
                 return Ok(ExprStep::Enter(ExprTask::InSuffix {
                     repository: expr,
                     start_span,
                 }));
             }
             if kind == TokenKind::As {
-                expr = self.parse_as_chain(expr, start_span.clone())?;
+                expr = self.parse_as_chain(expr, start_span)?;
                 continue;
             }
             break;
+        }
+
+        if self.at(&TokenKind::Arrow)? {
+            let tok = *self.peek()?;
+            let message = match self.table.kind(expr) {
+                ExpressionKind::RangeContainment(value, range)
+                    if !matches!(self.table.kind(*range), ExpressionKind::PastFutureRange(..)) =>
+                {
+                    let value_text = display_expression(&self.table, *value);
+                    let range_text = display_expression(&self.table, *range);
+                    format!(
+                        "found '->' after `{value_text} in {range_text}`; `in` takes one range operand, \
+                         so put parentheses around the command: `{value_text} in ({range_text} -> ...)`"
+                    )
+                }
+                _ => {
+                    let expr_text = display_expression(&self.table, expr);
+                    format!(
+                        "found '->' after `{expr_text}`; put parentheses around what `->` applies to: \
+                         `({expr_text}) -> ...`"
+                    )
+                }
+            };
+            return Err(self.error_at_token(&tok, message));
         }
 
         if self.at_expression_suffix_end()? {
             return expr_step(Ok(expr));
         }
 
-        let tok = self.peek()?.clone();
+        let tok = *self.peek()?;
         Err(self.error_at_token(
             &tok,
-            format!("Unexpected token '{}' after expression", tok.text),
+            format!(
+                "Unexpected token '{}' after expression",
+                tok.text.of(&self.source)
+            ),
         ))
     }
 
@@ -3633,7 +4199,7 @@ impl Parser {
         {
             self.expect(&TokenKind::Veto)?;
             if self.at(&TokenKind::StringLit)? {
-                let tok = self.peek()?.clone();
+                let tok = *self.peek()?;
                 return Err(self.error_at_token(
                     &tok,
                     "veto with a message is only valid as a rule or unless result, not in `is veto` comparisons",
@@ -3650,7 +4216,7 @@ impl Parser {
         let right = if self.at(&TokenKind::Not)? {
             ExprTask::NotExpression
         } else {
-            ExprTask::RepositoryExpression
+            ExprTask::Pipe
         };
         frames.push(ExprCont::ComparisonRight {
             left,
@@ -3668,7 +4234,7 @@ impl Parser {
     ) -> Result<ExprStep, Error> {
         self.expect(&TokenKind::In)?;
 
-        let peeked = self.peek()?.clone();
+        let peeked = *self.peek()?;
         if peeked.kind == TokenKind::Past || peeked.kind == TokenKind::Future {
             let direction = self.next()?;
             let rel_kind = if direction.kind == TokenKind::Past {
@@ -3685,7 +4251,7 @@ impl Parser {
                     DateCalendarKind::Future
                 };
                 let unit = self.parse_calendar_unit()?;
-                let end = self.peek()?.span.clone();
+                let end = self.peek()?.span;
                 let span = self.span_covering(&start_span, &end);
                 return expr_step(self.new_expression(
                     ExpressionKind::DateCalendar(cal_kind, unit, repository),
@@ -3693,7 +4259,7 @@ impl Parser {
                 ));
             }
 
-            if self.at(&TokenKind::And)?
+            if self.at_any(&[TokenKind::And, TokenKind::Or])?
                 || self.at(&TokenKind::Unless)?
                 || self.at(&TokenKind::Then)?
                 || self.at(&TokenKind::RParen)?
@@ -3702,7 +4268,7 @@ impl Parser {
                 || is_spec_body_keyword(&self.peek()?.kind)
                 || is_comparison_operator(&self.peek()?.kind)
             {
-                let end = self.peek()?.span.clone();
+                let end = self.peek()?.span;
                 let span = self.span_covering(&start_span, &end);
                 return expr_step(self.new_expression(
                     ExpressionKind::DateRelative(rel_kind, repository),
@@ -3719,10 +4285,10 @@ impl Parser {
             return Ok(ExprStep::Enter(ExprTask::RepositoryExpression));
         }
 
-        if token_is_calendar_period_marker(&peeked) {
+        if token_is_calendar_period_marker(&self.source, &peeked) {
             self.next_calendar_period_marker()?;
             let unit = self.parse_calendar_unit()?;
-            let end = self.peek()?.span.clone();
+            let end = self.peek()?.span;
             let span = self.span_covering(&start_span, &end);
             return expr_step(self.new_expression(
                 ExpressionKind::DateCalendar(DateCalendarKind::Current, unit, repository),
@@ -3746,12 +4312,12 @@ impl Parser {
             return Ok(ExprStep::Enter(ExprTask::Primary));
         }
         if !self.at_bare_operand_start()? {
-            let tok = self.peek()?.clone();
+            let tok = *self.peek()?;
             return Err(self.error_at_token(
                 &tok,
                 format!(
                     "`{keyword}` takes one operand or `{keyword}(...)`, found '{}'",
-                    tok.text
+                    tok.text.of(&self.source)
                 ),
             ));
         }
@@ -3762,13 +4328,12 @@ impl Parser {
     }
 
     fn enter_primary(&mut self, frames: &mut Vec<ExprCont>) -> Result<ExprStep, Error> {
-        let start_span = self.peek()?.span.clone();
-        let kind = self.peek()?.kind.clone();
+        let start_span = self.peek()?.span;
+        let kind = self.peek()?.kind;
         match &kind {
             TokenKind::LParen => {
                 self.next()?;
                 let saved = self.save_flags();
-                self.bare_operand = false;
                 self.call_argument_depth = 0;
                 frames.push(ExprCont::ParenEnd { start_span });
                 frames.push(ExprCont::Restore(saved));
@@ -3794,7 +4359,7 @@ impl Parser {
             TokenKind::StringLit => {
                 let tok = self.next()?;
                 expr_step(self.new_expression(
-                    ExpressionKind::Literal(Value::Text(tok.text)),
+                    ExpressionKind::Literal(Value::Text(tok.text.of(&self.source).to_string())),
                     self.make_source(tok.span),
                 ))
             }
@@ -3818,7 +4383,10 @@ impl Parser {
                     let tok = self.next()?;
                     return Err(self.error_at_token(
                         &tok,
-                        format!("Expected an expression, found '{}'", tok.text),
+                        format!(
+                            "Expected an expression, found '{}'",
+                            tok.text.of(&self.source)
+                        ),
                     ));
                 }
                 let parent = self.parse_expression_parent_type()?;
@@ -3829,10 +4397,21 @@ impl Parser {
                 ))
             }
             _ => {
+                let tok = *self.peek()?;
+                if tok.text.of(&self.source).starts_with('@') {
+                    return Err(self.error_at_token_with_suggestion(
+                        &tok,
+                        "A repository qualifier is not valid on a type or list element",
+                        "Write `uses @repo Spec [pin]`, then `data name: Spec list` or `rule name: Spec list`.",
+                    ));
+                }
                 let tok = self.next()?;
                 Err(self.error_at_token(
                     &tok,
-                    format!("Expected an expression, found '{}'", tok.text),
+                    format!(
+                        "Expected an expression, found '{}'",
+                        tok.text.of(&self.source)
+                    ),
                 ))
             }
         }
@@ -3915,7 +4494,20 @@ impl Parser {
                 frames.push(ExprCont::Command(CommandBuild::With));
                 Ok(ExprStep::Enter(ExprTask::ListWithCommand))
             }
-            _ => Err(self.error_at_token(&name, format!("Unknown list command '{}'", name.text))),
+            TokenKind::Key => {
+                let mut fields = vec![self.parse_reference()?];
+                while self.at(&TokenKind::Comma)? {
+                    self.next()?;
+                    fields.push(self.parse_reference()?);
+                }
+                Ok(ExprStep::Yield(ExprVal::Command(ListCommand::Key {
+                    fields,
+                })))
+            }
+            _ => Err(self.error_at_token(
+                &name,
+                format!("Unknown list command '{}'", name.text.of(&self.source)),
+            )),
         }
     }
 
@@ -3933,18 +4525,59 @@ impl Parser {
             return Ok(ExprStep::Enter(ExprTask::BareOperand));
         }
         if !self.at_bare_operand_start()? {
-            let tok = self.peek()?.clone();
+            let tok = *self.peek()?;
             return Err(self.error_at_token(
                 &tok,
                 format!("`{command}` needs a condition; write `{command}(...)`"),
             ));
         }
-        let start_span = self.peek()?.span.clone();
+        let start_span = self.peek()?.span;
         frames.push(ExprCont::PredicateLeft {
             start_span,
             command,
         });
         Ok(ExprStep::Enter(ExprTask::BareOperand))
+    }
+
+    fn starts_value_predicate(&mut self) -> Result<bool, Error> {
+        let checkpoint = self.checkpoint();
+        while self.at(&TokenKind::LParen)? {
+            self.next()?;
+        }
+        let result = self.at_row_condition_operator();
+        self.restore(checkpoint);
+        result
+    }
+
+    fn enter_value_predicate_factor(
+        &mut self,
+        command: &'static str,
+        frames: &mut Vec<ExprCont>,
+    ) -> Result<ExprStep, Error> {
+        if self.at(&TokenKind::LParen)? {
+            self.next()?;
+            self.check_depth()?;
+            frames.push(ExprCont::ValuePredicateGroupEnd);
+            frames.push(ExprCont::PopDepth);
+            return Ok(ExprStep::Enter(ExprTask::ValuePredicate {
+                command,
+                connective: LogicalConnective::Or,
+            }));
+        }
+        if !self.at_row_condition_operator()? {
+            let token = *self.peek()?;
+            return Err(self.error_at_token(
+                &token,
+                format!(
+                    "value-list `{command}` predicates require a headless comparison, found '{}'",
+                    token.text.of(&self.source)
+                ),
+            ));
+        }
+        let start = self.peek()?.span;
+        let op = self.parse_row_condition_operator()?;
+        frames.push(ExprCont::ValuePredicateLeaf { op, start });
+        Ok(ExprStep::Enter(ExprTask::RepositoryExpression))
     }
 
     fn predicate_instance_end(
@@ -3983,7 +4616,7 @@ impl Parser {
         }
         self.next()?;
         if !self.at_path_then_colon()? {
-            let tok = self.peek()?.clone();
+            let tok = *self.peek()?;
             return Err(self.error_at_token_with_suggestion(
                 &tok,
                 "Expected a field pair after comma".to_string(),
@@ -4003,7 +4636,7 @@ impl Parser {
         }
         self.next()?;
         if self.at_expression_suffix_end()? || self.at(&TokenKind::Comma)? {
-            let tok = self.peek()?.clone();
+            let tok = *self.peek()?;
             return Err(self.error_at_token_with_suggestion(
                 &tok,
                 "Trailing or empty comma in list".to_string(),
@@ -4090,7 +4723,7 @@ impl Parser {
             TokenKind::Mod => ArithmeticComputation::Modulo,
             _ => unreachable!("BUG: only *, /, mod should reach here"),
         };
-        let right_start_span = self.peek()?.span.clone();
+        let right_start_span = self.peek()?.span;
         frames.push(ExprCont::TermOperand {
             first,
             steps,
@@ -4156,15 +4789,41 @@ impl Parser {
 /// Expression grammar state saved and restored around nested parses.
 #[derive(Clone, Copy, PartialEq, Eq)]
 struct ExprFlags {
-    bare_operand: bool,
     call_argument_depth: usize,
+}
+
+/// Which operand grammar a logical chain continues with.
+#[derive(Clone, Copy)]
+enum LogicalChainKind {
+    Expression,
+    ValuePredicate { command: &'static str },
+}
+
+fn logical_operand_task(connective: LogicalConnective, kind: LogicalChainKind) -> ExprTask {
+    match kind {
+        LogicalChainKind::Expression => match connective {
+            LogicalConnective::And => ExprTask::LogicalOperand,
+            LogicalConnective::Or => ExprTask::LogicalExpression {
+                connective: LogicalConnective::And,
+            },
+        },
+        LogicalChainKind::ValuePredicate { command } => match connective {
+            LogicalConnective::And => ExprTask::ValuePredicateFactor { command },
+            LogicalConnective::Or => ExprTask::ValuePredicate {
+                command,
+                connective: LogicalConnective::And,
+            },
+        },
+    }
 }
 
 /// A grammar nonterminal the expression machine can enter.
 enum ExprTask {
     Expression,
-    AndExpression,
-    AndOperand,
+    LogicalExpression {
+        connective: LogicalConnective,
+    },
+    LogicalOperand,
     VetoStatus,
     NotExpression,
     RepositoryWithSuffix,
@@ -4176,6 +4835,8 @@ enum ExprTask {
         repository: ExprId,
         start_span: Span,
     },
+    /// Comparison operand: an arithmetic expression followed by any `->` commands.
+    Pipe,
     RepositoryExpression,
     Term {
         allow_as: bool,
@@ -4186,6 +4847,8 @@ enum ExprTask {
     PowerForRangeBound,
     Factor,
     PrimaryOrMath,
+    /// Prefix `round` / `floor` / `ceil`: parse the operand, then reject with a rewrite.
+    PrefixRoundingRejected,
     MathFunction,
     LowerUpper,
     PrefixArgument {
@@ -4222,7 +4885,11 @@ enum ExprTask {
     CallListPredicate {
         command: &'static str,
     },
-    ValuePredicateInParentheses {
+    ValuePredicate {
+        command: &'static str,
+        connective: LogicalConnective,
+    },
+    ValuePredicateFactor {
         command: &'static str,
     },
     SortCommand,
@@ -4250,13 +4917,17 @@ enum CommandBuild {
 enum ExprCont {
     Restore(ExprFlags),
     PopDepth,
-    AndFirst {
+    LogicalFirst {
+        connective: LogicalConnective,
         start_span: Span,
+        kind: LogicalChainKind,
     },
-    AndOperand {
+    LogicalOperand {
+        connective: LogicalConnective,
         first: ExprId,
         steps: Vec<ChainStep<()>>,
         start_span: Span,
+        kind: LogicalChainKind,
     },
     VetoStatus {
         operator_is_not: bool,
@@ -4346,7 +5017,17 @@ enum ExprCont {
     FactorNegate {
         start_span: Span,
     },
-    PrimaryOrMathSuffix {
+    /// Arithmetic operand of a `->` chain is parsed; commands may follow.
+    PipeFirst {
+        start_span: Span,
+    },
+    /// A list command was applied; more commands may follow.
+    PipeCommand {
+        start_span: Span,
+    },
+    StepRoundingDone {
+        operand: ExprId,
+        mode: RoundingMode,
         start_span: Span,
     },
     ListCommandDone {
@@ -4381,6 +5062,10 @@ enum ExprCont {
         operator: MathematicalComputation,
         start_span: Span,
     },
+    PrefixRoundingRejected {
+        keyword: String,
+        keyword_span: Span,
+    },
     LowerUpperEnd {
         bound: RangeBound,
         start_span: Span,
@@ -4402,14 +5087,15 @@ enum ExprCont {
         start_span: Span,
         command: &'static str,
     },
-    WrapInstance,
-    ValuePredicateEnd {
+    ValuePredicateCallEnd {
+        command: &'static str,
+    },
+    ValuePredicateGroupEnd,
+    ValuePredicateLeaf {
         op: RowCondition,
-        command: &'static str,
+        start: Span,
     },
-    CallPredicateEnd {
-        command: &'static str,
-    },
+    WrapInstance,
     SortArgument {
         check_bare: bool,
     },
@@ -4522,23 +5208,17 @@ fn build_command(builder: CommandBuild, value: ExprVal) -> ListCommand {
 
 fn parent_type_from_reference(reference: &Reference) -> ParentType {
     if reference.segments.is_empty() {
-        return ParentType::Custom {
-            name: reference.name.clone(),
-        };
+        return ParentType::custom(reference.name.clone());
     }
     if reference.segments.len() == 1 {
         return ParentType::Qualified {
             spec_alias: reference.segments[0].clone(),
-            inner: Box::new(ParentType::Custom {
-                name: reference.name.clone(),
-            }),
+            inner: Box::new(ParentType::custom(reference.name.clone())),
         };
     }
     ParentType::Qualified {
         spec_alias: reference.segments[0].clone(),
-        inner: Box::new(ParentType::Custom {
-            name: reference.name.clone(),
-        }),
+        inner: Box::new(ParentType::custom(reference.name.clone())),
     }
 }
 
@@ -4549,9 +5229,7 @@ fn parent_type_from_reference(reference: &Reference) -> ParentType {
 fn parse_decimal_string(text: &str, span: &Span, parser: &Parser) -> Result<Decimal, Error> {
     text.parse::<crate::literals::NumberLiteral>()
         .map(|parsed| parsed.0)
-        .map_err(|message| {
-            Error::parsing(message, parser.make_source(span.clone()), None::<String>)
-        })
+        .map_err(|message| Error::parsing(message, parser.make_source(*span), None::<String>))
 }
 
 /// Negate a numeric literal value. Returns `Err(value)` when the value is not a number.

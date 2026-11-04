@@ -28,18 +28,36 @@ pub fn rational_from_parsed_decimal(decimal: Decimal) -> Result<RationalInteger,
     rational::decimal_to_rational(decimal).map_err(|failure| failure.to_string())
 }
 
+/// Conversion factor of a measure unit: a plan-time rational, or a data/rule
+/// reference whose value is known only during evaluation.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum UnitScale {
+    /// 1 of this unit equals this many canonical units.
+    Literal(RationalInteger),
+    /// Written path before graph resolution (`rate`, `fx.rate`). Replaced by
+    /// [`Self::Reference`] when the declaring spec's scales are resolved.
+    Unresolved {
+        written: String,
+        segments: Vec<String>,
+        name: String,
+    },
+    /// Resolved `number` data field or rule. After planning succeeds every
+    /// dynamic unit is this variant — never [`Self::Unresolved`].
+    Reference(crate::planning::semantics::ReferenceTarget),
+}
+
 /// A single unit within a Measure type.
 ///
-/// `factor` is the conversion factor: 1 of this unit equals `factor` canonical units.
+/// `scale` is the conversion factor: 1 of this unit equals `scale` canonical units
+/// when the scale is a literal, or a referenced `number` when it is dynamic.
 /// `derived_measure_factors` stores `(measure_ref, exponent)` pairs from compound unit declarations
 /// (e.g., `meter/second` produces `[("meter", 1), ("second", -1)]`). Empty for base units.
 /// `decomposition` is the dimensional decomposition vector, populated during the planning
 /// decomposition pass. It is empty until that pass completes.
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct MeasureUnit {
     pub name: String,
-    /// Conversion factor: 1 of this unit equals `value` canonical units.
-    pub factor: RationalInteger,
+    pub scale: UnitScale,
     pub derived_measure_factors: Vec<(String, i32)>,
     pub decomposition: BaseMeasureVector,
     /// Minimum magnitude in this unit (schema/UI); canonical bound is on the type.
@@ -60,7 +78,7 @@ impl MeasureUnit {
             rational::decimal_to_rational(decimal_factor).map_err(|failure| failure.to_string())?;
         Ok(MeasureUnit {
             name,
-            factor,
+            scale: UnitScale::Literal(factor),
             derived_measure_factors,
             decomposition: BaseMeasureVector::new(),
             minimum: None,
@@ -69,23 +87,151 @@ impl MeasureUnit {
         })
     }
 
+    pub fn from_reference(
+        name: String,
+        written: String,
+        segments: Vec<String>,
+        reference_name: String,
+    ) -> Self {
+        MeasureUnit {
+            name,
+            scale: UnitScale::Unresolved {
+                written,
+                segments,
+                name: reference_name,
+            },
+            derived_measure_factors: Vec::new(),
+            decomposition: BaseMeasureVector::new(),
+            minimum: None,
+            maximum: None,
+            suggestion_magnitude: None,
+        }
+    }
+
     pub fn clear_constraint_magnitudes(&mut self) {
         self.minimum = None;
         self.maximum = None;
         self.suggestion_magnitude = None;
     }
 
+    #[must_use]
+    pub fn is_dynamic(&self) -> bool {
+        matches!(
+            self.scale,
+            UnitScale::Unresolved { .. } | UnitScale::Reference(_)
+        )
+    }
+
+    /// Source spelling of a reference scale (`rate`, `fx.rate`).
+    #[must_use]
+    pub fn scale_written(&self) -> Option<String> {
+        match &self.scale {
+            UnitScale::Unresolved { written, .. } => Some(written.clone()),
+            UnitScale::Reference(target) => Some(target.to_string()),
+            UnitScale::Literal(_) => None,
+        }
+    }
+
+    /// Declaring-spec target after graph resolution.
+    #[must_use]
+    pub fn resolved_scale_target(&self) -> Option<&crate::planning::semantics::ReferenceTarget> {
+        match &self.scale {
+            UnitScale::Reference(target) => Some(target),
+            UnitScale::Literal(_) | UnitScale::Unresolved { .. } => None,
+        }
+    }
+
+    /// Written reference path (`segments` + `name`) of an unresolved dynamic unit.
+    #[must_use]
+    pub fn scale_reference_parts(&self) -> Option<(&[String], &str)> {
+        match &self.scale {
+            UnitScale::Unresolved { segments, name, .. } => {
+                Some((segments.as_slice(), name.as_str()))
+            }
+            UnitScale::Literal(_) | UnitScale::Reference(_) => None,
+        }
+    }
+
+    /// Literal conversion factor, when this unit's scale is known at plan time.
+    #[must_use]
+    pub fn literal_factor(&self) -> Option<&RationalInteger> {
+        match &self.scale {
+            UnitScale::Literal(factor) => Some(factor),
+            UnitScale::Unresolved { .. } | UnitScale::Reference(_) => None,
+        }
+    }
+
+    /// Literal conversion factor. Panics if this unit is reference-scaled:
+    /// planning keeps every static path away from dynamic units.
+    pub fn require_literal_factor(&self) -> &RationalInteger {
+        self.literal_factor().unwrap_or_else(|| {
+            panic!(
+                "BUG: literal factor required for unit '{}'; planning must keep static paths away from reference-scaled units",
+                self.name
+            )
+        })
+    }
+
+    /// Whether this unit and `other` have the same scale in consumer coordinates:
+    /// equal literal factors, or equal reference paths after prefixing each
+    /// owner's import path.
+    #[must_use]
+    pub fn same_consumer_scale(
+        &self,
+        other: &Self,
+        self_import_path: &[String],
+        other_import_path: &[String],
+    ) -> bool {
+        match (&self.scale, &other.scale) {
+            (UnitScale::Literal(left), UnitScale::Literal(right)) => left == right,
+            (
+                UnitScale::Unresolved {
+                    segments: left_segments,
+                    name: left_name,
+                    ..
+                },
+                UnitScale::Unresolved {
+                    segments: right_segments,
+                    name: right_name,
+                    ..
+                },
+            ) => {
+                let left: Vec<&str> = self_import_path
+                    .iter()
+                    .map(String::as_str)
+                    .chain(left_segments.iter().map(String::as_str))
+                    .chain(std::iter::once(left_name.as_str()))
+                    .collect();
+                let right: Vec<&str> = other_import_path
+                    .iter()
+                    .map(String::as_str)
+                    .chain(right_segments.iter().map(String::as_str))
+                    .chain(std::iter::once(right_name.as_str()))
+                    .collect();
+                left == right
+            }
+            (UnitScale::Reference(left), UnitScale::Reference(right)) => {
+                left == right && self_import_path == other_import_path
+            }
+            _ => false,
+        }
+    }
+
     pub fn is_canonical_factor(&self) -> bool {
-        self.factor == rational::rational_one()
+        self.literal_factor()
+            .is_some_and(|factor| *factor == rational::rational_one())
     }
 
     pub fn is_positive_factor(&self) -> bool {
-        self.factor.numer_is_positive()
+        match &self.scale {
+            UnitScale::Literal(factor) => factor.numer_is_positive(),
+            UnitScale::Unresolved { .. } | UnitScale::Reference(_) => true,
+        }
     }
 
     /// Conversion factor as decimal (schema unit factors always commit).
     pub fn factor_decimal(&self) -> Decimal {
-        rational::RationalInteger::try_to_decimal(&self.factor)
+        rational::RationalInteger::try_to_decimal(self.require_literal_factor())
             .expect("BUG: measure unit factor must convert to decimal")
     }
 
@@ -120,7 +266,7 @@ impl MeasureUnit {
     #[must_use]
     pub fn maximum_canonical_decimal(&self) -> Option<Decimal> {
         self.maximum.as_ref().map(|maximum| {
-            let canonical = rational::checked_mul(maximum, &self.factor)
+            let canonical = rational::checked_mul(maximum, self.require_literal_factor())
                 .expect("BUG: planned measure unit maximum canonical multiply must succeed");
             canonical
                 .try_to_decimal()
@@ -129,8 +275,7 @@ impl MeasureUnit {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(transparent)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct MeasureUnits(pub Vec<MeasureUnit>);
 
 impl MeasureUnits {
@@ -173,7 +318,36 @@ impl MeasureUnit {
         }
     }
     pub fn with_factor(self, factor: RationalInteger) -> Self {
-        Self { factor, ..self }
+        match self.scale {
+            UnitScale::Literal(_) => Self {
+                scale: UnitScale::Literal(factor),
+                ..self
+            },
+            UnitScale::Unresolved { .. } | UnitScale::Reference(_) => {
+                panic!(
+                    "BUG: with_factor on reference-scaled unit '{}'; compound resolution must reject dynamic units",
+                    self.name
+                )
+            }
+        }
+    }
+
+    pub fn with_resolved_scale(
+        self,
+        resolved: crate::planning::semantics::ReferenceTarget,
+    ) -> Self {
+        match self.scale {
+            UnitScale::Unresolved { .. } => Self {
+                scale: UnitScale::Reference(resolved),
+                ..self
+            },
+            UnitScale::Literal(_) | UnitScale::Reference(_) => {
+                panic!(
+                    "BUG: with_resolved_scale on non-unresolved unit '{}'",
+                    self.name
+                )
+            }
+        }
     }
     pub fn with_derived_measure_factors(self, derived_measure_factors: Vec<(String, i32)>) -> Self {
         Self {
@@ -203,7 +377,7 @@ impl<'a> IntoIterator for &'a MeasureUnits {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct RatioUnit {
     pub name: String,
     pub value: RationalInteger,
@@ -266,8 +440,7 @@ impl RatioUnit {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(transparent)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct RatioUnits(pub Vec<RatioUnit>);
 
 impl RatioUnits {
@@ -323,7 +496,7 @@ impl<'a> IntoIterator for &'a RatioUnits {
 // Literal value types
 // -----------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum BooleanValue {
     True,
@@ -692,33 +865,15 @@ impl fmt::Display for DateTimeValue {
     }
 }
 
-/// Postcard / in-process serde for [`Decimal`]: mantissa + scale (no strings, no floats).
-///
-/// JSON API types in `lemma::api` use `serde-with-str` instead. Do not put this on
-/// JSON-facing DTOs.
-pub mod decimal_binary_serde {
-    use rust_decimal::Decimal;
-    use serde::{Deserialize, Deserializer, Serialize, Serializer};
-
-    pub fn serialize<S: Serializer>(value: &Decimal, serializer: S) -> Result<S::Ok, S::Error> {
-        (value.mantissa(), value.scale()).serialize(serializer)
-    }
-
-    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Decimal, D::Error> {
-        let (mantissa, scale): (i128, u32) = Deserialize::deserialize(deserializer)?;
-        Decimal::try_from_i128_with_scale(mantissa, scale).map_err(serde::de::Error::custom)
-    }
-}
-
 /// Literal value data (no type information). Single source of truth in literals.
 ///
 /// `NumberWithUnit` is type-agnostic at parse time (`10 eur` and `50%` share this shape).
 /// Planning resolves ratio vs measure via the unit index and target [`TypeSpecification`].
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Value {
-    Number(#[serde(with = "decimal_binary_serde")] Decimal),
-    NumberWithUnit(#[serde(with = "decimal_binary_serde")] Decimal, String),
+    Number(Decimal),
+    NumberWithUnit(Decimal, String),
     Text(String),
     Date(DateTimeValue),
     Time(TimeValue),
@@ -1193,5 +1348,17 @@ mod tests {
                 "'{invalid}' must not parse as boolean"
             );
         }
+    }
+
+    #[test]
+    #[should_panic(expected = "BUG: literal factor required")]
+    fn require_literal_factor_panics_on_reference_scale() {
+        let unit = super::MeasureUnit::from_reference(
+            "gbp".to_string(),
+            "rate".to_string(),
+            Vec::new(),
+            "rate".to_string(),
+        );
+        let _ = unit.require_literal_factor();
     }
 }

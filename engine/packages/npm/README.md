@@ -9,7 +9,6 @@ spec pricing 2026-01-01
 
 data money: measure
   -> unit eur: 1.00
-  -> decimals 2
 
 data quantity: number
 data is_vip:   false
@@ -114,7 +113,6 @@ A pre-wired Monaco adapter ships at `@lemmabase/lemma-engine/monaco`.
 | `load(code)` | Load inline Lemma source as a volatile source in the default repository |
 | `load(sources)` | Load multiple sources in one planning pass (`Record<label, text>` or `[label, code][]`; object keys keep insertion order; `@org/pkg` keys tag LemmaBase repositories) |
 | `Engine.withLimits(limits)` | Static: create engine with named limit overrides (unknown keys throw) |
-| `Engine.fromSnapshot(bytes)` | Static: restore engine from `snapshot()` bytes (`Uint8Array`) |
 | `install(name)` | Download a repository from LemmaBase; resolves with `{ source, id }`. Does not load. Rejects with `EngineError[]`. |
 | `specs()` | Loaded specs: `Repository[]` with `repository` and temporal `specs` rows (`SpecVersion`). Always includes embedded `lemma` / `spec units`. |
 | `show(repo, name, effective?)` | Spec interface + temporal window; `repo` null for the default repository. |
@@ -123,22 +121,11 @@ A pre-wired Monaco adapter ships at `@lemmabase/lemma-engine/monaco`.
 | `remove(repo, name, effective?)` | Remove a temporal spec slice. |
 | `update(repo, code, attribute?)` | Upsert identities from `code`; Path/Dependency prune siblings with that label. |
 | `limits()` | Resource limits for this engine. |
-| `snapshot()` | Opaque bytes of parsed specs + plans + limits. Restore with `Engine.fromSnapshot`. |
 | `quality()` | Structural quality recommendations across loaded specs (advisory only). |
 | `format(code, attribute?)` | Canonical formatting; throws `EngineError` on parse error. |
 | `version` | Semver of the loaded WASM build (e.g. `"0.9.12"`). |
 
 Full TypeScript types are bundled - see `lemma.d.ts`.
-
-Persist and restore without re-parsing (Node):
-
-```javascript
-import { writeFileSync, readFileSync } from 'node:fs';
-
-const bytes = engine.snapshot();
-writeFileSync('engine.lems', bytes);
-const restored = Engine.fromSnapshot(readFileSync('engine.lems'));
-```
 
 ### Install from LemmaBase
 

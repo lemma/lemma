@@ -37,11 +37,11 @@ uses d: dimensions
 
 data capacity: number
 
-rule crates: ceil(d.volume / capacity)
+rule crates: d.volume / capacity -> ceil
 rule leftover: d.volume mod capacity
 rule raw_ratio: d.volume / capacity
-rule floored_crates: floor(raw_ratio)
-rule rounded_ratio: round(raw_ratio)
+rule floored_crates: raw_ratio -> floor
+rule rounded_ratio: raw_ratio -> round
 rule crate_gap: abs(crates - floored_crates)
 rule geometry_check: d.face_diagonal + d.excess - d.volume
 

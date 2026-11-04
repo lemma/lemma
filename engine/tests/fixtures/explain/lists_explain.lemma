@@ -9,15 +9,17 @@ data size: number
 
 spec coffee_order
 
-uses menu: menu_item list
+uses menu_item
+
+data menu: menu_item list
   -> key drink
   -> with drink: "espresso", price: 2.50 eur, size: 1
   -> with drink: "latte",    price: 3.50 eur, size: 2
 
-data ordered: menu.drink
+data ordered: menu_item.drink
   -> with "latte"
 
-data fares: menu.price list
+data fares: menu_item.price list
   -> with 89 eur, 120 eur
 
 rule selected:
@@ -66,7 +68,8 @@ rule top_two:
   menu -> top 2
 
 rule extended:
-  menu -> with drink: "mocha", price: 4 eur, size: 2
+  menu
+  -> with drink: "mocha", price: 4 eur, size: 2
 
 rule high_fares:
   fares -> where >= 100 eur

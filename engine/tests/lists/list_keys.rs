@@ -2,7 +2,7 @@
 
 use crate::lists::{
     assert_contains, data, date, evaluate, evaluate_at, list, lit, load_files,
-    load_files_planning_err, load_ok, load_planning_err, map, value, veto_reason,
+    load_files_planning_err, load_ok, load_parse_err, load_planning_err, map, value, veto_reason,
 };
 use indexmap::IndexMap;
 
@@ -15,13 +15,231 @@ data drink: text
 data price: measure
   -> unit eur: 1.00
 spec coffee_order
-uses menu: menu_item list
+uses menu_item
+data menu: menu_item list
   -> key drink
   -> with drink: "espresso", price: 2.50 eur
   -> with drink: "espresso", price: 3.00 eur
 "#,
     );
     assert_contains(&err, "espresso");
+}
+
+#[test]
+fn sealed_alias_rows_use_their_literal_keys() {
+    let engine = load_ok(
+        r#"
+spec item
+data name: text
+data children: item list
+  -> key name
+spec catalog
+uses root: item
+  -> with name: "root", children: left, right
+uses left: item
+  -> with name: "left"
+uses right: item
+  -> with name: "right"
+rule child_count: root.children -> count
+"#,
+    );
+    assert_eq!(
+        value(&evaluate(&engine, "catalog", data(&[])), "child_count"),
+        "2"
+    );
+}
+
+#[test]
+fn find_on_sealed_alias_nested_rows() {
+    let engine = load_ok(
+        r#"
+spec item
+data name: text
+data children: item list
+  -> key name
+spec catalog
+uses root: item
+  -> with name: "root", children: left, right
+uses left: item
+  -> with name: "left"
+uses right: item
+  -> with name: "right"
+rule found: (root.children -> find "right").name
+"#,
+    );
+    assert_eq!(
+        value(&evaluate(&engine, "catalog", data(&[])), "found"),
+        "right"
+    );
+}
+
+#[test]
+fn find_on_filtered_keyed_list() {
+    let engine = load_ok(
+        r#"
+spec menu_item
+data drink: text
+data price: number
+spec coffee_order
+uses menu_item
+data menu: menu_item list
+  -> key drink
+  -> with drink: "espresso", price: 2
+  -> with drink: "latte", price: 4
+  -> with drink: "mocha", price: 5
+rule found: (menu -> where price > 3 -> find "mocha").price
+"#,
+    );
+    assert_eq!(
+        value(&evaluate(&engine, "coffee_order", data(&[])), "found"),
+        "5"
+    );
+}
+
+#[test]
+fn rule_key_with_duplicate_keys_vetoes() {
+    let engine = load_ok(
+        r#"
+spec menu_item
+data drink: text
+data price: number
+spec coffee_order
+uses menu_item
+data menu: menu_item list
+  -> with drink: "espresso", price: 2
+  -> with drink: "espresso", price: 3
+rule keyed_count: menu -> key drink -> count
+"#,
+    );
+    let response = evaluate(&engine, "coffee_order", data(&[]));
+    assert_contains(&veto_reason(&response, "keyed_count"), "espresso");
+}
+
+#[test]
+fn spec_instance_as_key_value_is_a_planning_error() {
+    let message = load_planning_err(
+        r#"
+spec roaster
+data name: text
+spec menu_item
+data drink: text
+data price: number
+spec coffee_order
+uses menu_item
+uses house: roaster
+data menu: menu_item list
+  -> key drink
+rule extended: menu -> with drink: house, price: 2 -> count
+"#,
+    );
+    assert_contains(
+        &message,
+        "row field `drink` of `menu_item` is drink, got roaster",
+    );
+}
+
+#[test]
+fn stored_row_reference_type_error_points_at_the_row() {
+    let message = load_planning_err(
+        r#"spec menu_item
+data drink: text
+data price: number
+spec coffee_order
+uses menu_item
+data base_price: 3
+data menu: menu_item list
+  -> with drink: "espresso", price: 2
+  -> with drink: base_price, price: 4
+"#,
+    );
+    assert_contains(&message, "Data reference");
+    assert_contains(&message, "test.lemma:9:");
+}
+
+#[test]
+fn find_after_rule_key_reads_keyed_row() {
+    let engine = load_ok(
+        r#"
+spec menu_item
+data drink: text
+data price: number
+spec coffee_order
+uses menu_item
+data menu: menu_item list
+  -> with drink: "espresso", price: 2
+  -> with drink: "latte", price: 4
+rule latte: (menu -> key drink -> find "latte").price
+"#,
+    );
+    assert_eq!(
+        value(&evaluate(&engine, "coffee_order", data(&[])), "latte"),
+        "4"
+    );
+}
+
+#[test]
+fn find_reads_key_supplied_for_spec_written_row() {
+    let engine = load_ok(
+        r#"
+spec menu_item
+data drink: "espresso"
+data price: number
+spec coffee_order
+uses menu_item
+data menu: menu_item list
+  -> key drink
+  -> with price: 2
+  -> with drink: "latte", price: 4
+rule mocha: (menu -> find "mocha").price
+rule espresso: (menu -> find "espresso").price
+"#,
+    );
+    let response = evaluate(
+        &engine,
+        "coffee_order",
+        data(&[("menu.1.drink", lit("mocha"))]),
+    );
+    assert_eq!(value(&response, "mocha"), "2");
+    assert_contains(&veto_reason(&response, "espresso"), "espresso");
+}
+
+#[test]
+fn duplicate_sealed_alias_key_is_planning_error() {
+    let err = load_planning_err(
+        r#"
+spec item
+data name: text
+data children: item list
+  -> key name
+spec catalog
+uses root: item
+  -> with name: "root", children: left, left
+uses left: item
+  -> with name: "left"
+"#,
+    );
+    assert_contains(&err, "left");
+}
+
+#[test]
+fn repeated_alias_is_valid_on_numbered_list() {
+    let engine = load_ok(
+        r#"
+spec item
+data name: text
+data children: item list
+spec catalog
+uses root: item
+  -> with name: "root", children: left, left
+uses left: item
+  -> with name: "left"
+rule child_count: root.children -> count
+"#,
+    );
+    assert_eq!(
+        value(&evaluate(&engine, "catalog", data(&[])), "child_count"),
+        "2"
+    );
 }
 
 #[test]
@@ -34,7 +252,8 @@ data drink: text
 data price: measure
   -> unit eur: 1.00
 spec coffee_order
-uses menu: menu_item list
+uses menu_item
+data menu: menu_item list
   -> key drink
   -> with price: 2.50 eur
   -> with drink: "espresso", price: 3.00 eur
@@ -53,10 +272,11 @@ data drink: text
 data price: measure
   -> unit eur: 1.00
 spec coffee_order
-uses menu: menu_item list
+uses menu_item
+data menu: menu_item list
   -> key drink
   -> with drink: "espresso", price: 2.50 eur
-data ordered: menu.drink
+data ordered: menu_item.drink
 rule selected:
   (menu -> find ordered).price
 rule n:
@@ -78,7 +298,8 @@ data drink: text
 data price: measure
   -> unit eur: 1.00
 spec coffee_order
-uses menu: menu_item list
+uses menu_item
+data menu: menu_item list
   -> key drink
 rule n:
   menu -> count
@@ -99,13 +320,14 @@ data drink: text
   -> options "espresso", "latte"
 data price: measure
   -> unit eur: 1.00
-  -> decimals 2
+
 spec coffee_order
-uses menu: menu_item list
+uses menu_item
+data menu: menu_item list
   -> key drink
   -> with drink: "espresso", price: 2.50 eur
   -> with drink: "latte", price: 3.50 eur
-data ordered: menu.drink
+data ordered: menu_item.drink
 rule selected:
   (menu -> find ordered).price
 "#,
@@ -115,7 +337,7 @@ rule selected:
             &evaluate(&engine, "coffee_order", data(&[("ordered", lit("latte"))])),
             "selected"
         ),
-        "3.50 eur"
+        "3.5 eur"
     );
 }
 
@@ -129,9 +351,10 @@ data drink: text
 data price: measure
   -> unit eur: 1.00
 spec coffee_order
-uses menu: menu_item list
+uses menu_item
+data menu: menu_item list
   -> key drink
-data ordered: menu.drink
+data ordered: menu_item.drink
 rule selected:
   (menu -> find ordered).price
 rule n:
@@ -165,10 +388,11 @@ data drink: text
 data price: measure
   -> unit eur: 1.00
 spec coffee_order
-uses menu: menu_item list
+uses menu_item
+data menu: menu_item list
   -> key drink
   -> with drink: "espresso", price: 2.50 eur
-data ordered: menu.drink
+data ordered: menu_item.drink
 rule selected:
   (menu -> find ordered).price
 "#,
@@ -190,11 +414,12 @@ data money: measure
 data band: weight range
 data price: money
 spec parcel
-uses rates: rate list
+uses rate
+data rates: rate list
   -> key band
   -> with band: 0 kilogram...2 kilogram, price: 4.95 eur
   -> with band: 2 kilogram...10 kilogram, price: 6.95 eur
-data parcel_weight: rates.weight
+data parcel_weight: rate.weight
 rule shipping:
   (rates -> find parcel_weight).price
 "#,
@@ -224,11 +449,12 @@ data money: measure
 data band: weight range
 data price: money
 spec parcel
-uses rates: rate list
+uses rate
+data rates: rate list
   -> key band
   -> with band: 0 kilogram...2 kilogram, price: 4.95 eur
   -> with band: 2 kilogram...10 kilogram, price: 6.95 eur
-data parcel_weight: rates.weight
+data parcel_weight: rate.weight
 rule shipping:
   (rates -> find parcel_weight).price
 "#,
@@ -258,7 +484,8 @@ data money: measure
 data band: weight range
 data price: money
 spec parcel
-uses rates: rate list
+uses rate
+data rates: rate list
   -> key band
   -> with band: 0 kilogram...3 kilogram, price: 4.95 eur
   -> with band: 2 kilogram...10 kilogram, price: 6.95 eur
@@ -279,10 +506,11 @@ data money: measure
 data band: weight range
 data price: money
 spec parcel
-uses rates: rate list
+uses rate
+data rates: rate list
   -> key band
   -> with band: 0 kilogram...2 kilogram, price: 4.95 eur
-data parcel_weight: rates.weight
+data parcel_weight: rate.weight
 rule shipping:
   (rates -> find parcel_weight).price
 "#,
@@ -309,10 +537,11 @@ data volume_band: volume range
 data price: measure
   -> unit eur: 1.00
 spec freight
-uses rates: freight_rate list
+uses freight_rate
+data rates: freight_rate list
   -> key band, volume_band
   -> with band: 0 kilogram...5 kilogram, volume_band: 0 liter...2 liter, price: 6.95 eur
-data parcel_weight: rates.weight
+data parcel_weight: freight_rate.weight
 rule shipping:
   (rates -> find parcel_weight).price
 "#,
@@ -334,10 +563,11 @@ data volume_band: volume range
 data price: measure
   -> unit eur: 1.00
 spec freight
-uses rates: freight_rate list
+uses freight_rate
+data rates: freight_rate list
   -> key band, volume_band
   -> with band: 0 kilogram...5 kilogram, volume_band: 0 liter...2 liter, price: 6.95 eur
-data parcel_weight: rates.weight
+data parcel_weight: freight_rate.weight
 data label: text
 rule shipping:
   (rates -> find parcel_weight, label).price
@@ -360,12 +590,13 @@ data volume_band: volume range
 data price: measure
   -> unit eur: 1.00
 spec freight
-uses rates: freight_rate list
+uses freight_rate
+data rates: freight_rate list
   -> key band, volume_band
   -> with band: 0 kilogram...5 kilogram, volume_band: 0 liter...2 liter, price: 6.95 eur
   -> with band: 0 kilogram...5 kilogram, volume_band: 2 liter...20 liter, price: 9.95 eur
-data parcel_weight: rates.weight
-data parcel_volume: rates.volume
+data parcel_weight: freight_rate.weight
+data parcel_volume: freight_rate.volume
 rule shipping:
   (rates -> find parcel_weight, parcel_volume).price
 "#,
@@ -398,13 +629,14 @@ data volume: text
 data price: measure
   -> unit eur: 1.00
 spec freight
-uses rates: cell list
+uses cell
+data rates: cell list
   -> key band, volume
   -> with band: "light", volume: "small", price: 6.95 eur
   -> with band: "light", volume: "large", price: 9.95 eur
   -> with band: "heavy", volume: "small", price: 14.95 eur
-data band: rates.band
-data volume: rates.volume
+data band: cell.band
+data volume: cell.volume
 rule selected:
   (rates -> find band, volume).price
 rule n:
@@ -427,7 +659,8 @@ fn same_field_twice_in_key_is_planning_error() {
 spec rate
 data band: text
 spec parcel
-uses rates: rate list
+uses rate
+data rates: rate list
   -> key band, band
 "#,
     );
@@ -509,11 +742,13 @@ data price: number
             "menu_card.lemma",
             r#"
 spec menu_card 2024-01-01
-uses menu: menu_item list
+uses menu_item
+data menu: menu_item list
   -> key drink
 
 spec menu_card 2025-01-01
-uses menu: menu_item list
+uses menu_item
+data menu: menu_item list
   -> key drink, size
 "#,
         ),
@@ -549,8 +784,9 @@ data drink: text
         (
             "order.lemma",
             r#"
-spec coffee_order
-uses menu: menu_item list
+spec coffee_order 2024-01-01
+uses menu_item
+data menu: menu_item list
   -> key drink
   -> with drink: "espresso"
   -> with drink: "latte"
@@ -559,6 +795,135 @@ uses menu: menu_item list
     ]);
     assert_contains(&err, "drink");
     assert_contains(&err, "changed");
+}
+
+#[test]
+fn data_key_before_with_is_ok() {
+    let engine = load_ok(
+        r#"
+spec row
+data name: text
+data score: number
+spec catalog
+uses row
+data items: row list
+  -> key name
+  -> with name: "Ada", score: 10
+rule n:
+  items -> count
+"#,
+    );
+    assert_eq!(value(&evaluate(&engine, "catalog", data(&[])), "n"), "1");
+}
+
+#[test]
+fn data_with_before_key_is_parse_error() {
+    let err = load_parse_err(
+        r#"
+spec row
+data name: text
+data score: number
+spec catalog
+uses row
+data items: row list
+  -> with name: "Ada", score: 10
+  -> key name
+"#,
+    );
+    assert_contains(&err, "key");
+    assert_contains(&err, "with");
+}
+
+#[test]
+fn data_second_key_is_parse_error() {
+    let err = load_parse_err(
+        r#"
+spec row
+data name: text
+data tag: text
+spec catalog
+uses row
+data items: row list
+  -> key name
+  -> key tag
+  -> with name: "Ada", tag: "a"
+"#,
+    );
+    assert_contains(&err, "twice");
+}
+
+#[test]
+fn rule_second_key_is_planning_error() {
+    let err = load_planning_err(
+        r#"
+spec row
+data name: text
+data tag: text
+spec catalog
+uses row
+rule items:
+  row list
+  -> key name
+  -> key tag
+  -> with name: "Ada", tag: "a"
+"#,
+    );
+    assert_contains(&err, "key");
+}
+
+#[test]
+fn rule_with_before_key_is_planning_error() {
+    let err = load_planning_err(
+        r#"
+spec row
+data name: text
+data score: number
+spec catalog
+uses row
+rule items:
+  row list
+  -> with name: "Ada", score: 10
+  -> key name
+"#,
+    );
+    assert_contains(&err, "key");
+    assert_contains(&err, "with");
+}
+
+#[test]
+fn rule_key_after_where_is_planning_error() {
+    let err = load_planning_err(
+        r#"
+spec row
+data name: text
+data score: number
+spec catalog
+uses row
+data items: row list
+  -> with name: "Ada", score: 10
+  -> with name: "Grace", score: 20
+rule keyed:
+  items -> where score > 5 -> key name
+"#,
+    );
+    assert_contains(&err, "key");
+}
+
+#[test]
+fn sealed_catalog_without_uses_is_planning_error() {
+    let err = load_planning_err(
+        r#"
+spec row
+data name: text
+data score: number
+spec catalog
+rule items:
+  row list
+  -> key name
+  -> with name: "Ada", score: 10
+"#,
+    );
+    assert_contains(&err, "uses");
 }
 
 #[test]
@@ -581,7 +946,8 @@ data price: number
             "order.lemma",
             r#"
 spec coffee_order
-uses menu: menu_item 2024 list
+uses menu_item 2024
+data menu: menu_item list
   -> key drink
   -> with drink: "espresso", price: 1
 rule n:

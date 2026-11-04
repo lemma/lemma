@@ -1,4 +1,4 @@
 any_large: true
 └─ menu -> any size > 1
-   ["espresso"] size: 1
-   ["latte"] size: 2
+   ├─ drink: espresso, size: 1
+   └─ drink: latte,    size: 2

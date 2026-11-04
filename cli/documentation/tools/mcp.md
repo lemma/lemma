@@ -124,7 +124,7 @@ Once connected, ask the assistant in natural language, for example:
 
 `specs`, `show` and `check` return JSON by default: `show` is the spec's evaluation-data JSON Schema, the same document as `lemma show --json`. Pass `text: true` for the human-readable view: `specs` and `show` as `lemma specs` and `lemma show` print them, `check` one recommendation per line (or `No recommendations.`). `specs` lists local specs and their `uses`; pass `all: true` for every loaded repository (`lemma specs --all`). A non-boolean `text` or `all` is an invalid-arguments error.
 
-`evaluate` takes list data as one JSON array per list, which replaces every source row: strings for a value list, objects keyed by row data names for an instance list. When a row field is missing (for example `staff.2.salary`), the assistant re-sends the whole array with the field filled in.
+`evaluate` takes list data as a whole JSON array per list (strings for a value list, objects keyed by row data names for an instance list), which replaces every source row, and/or dotted keys that match ask keys (`staff.2.salary`) to fill unbound cells. Do not send both the whole list key and a dotted key for the same list in one request.
 
 The server already ships authoring and evaluate guidance for the model. For learning the language yourself, see [Learn](../learn/readme.md) and [LLMs.txt](../llms.md).
 

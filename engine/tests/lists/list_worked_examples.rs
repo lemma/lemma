@@ -10,17 +10,16 @@ data drink: text
 
 data price: measure
   -> unit eur: 1.00
-  -> decimals 2
-
 
 spec coffee_order
 
-uses menu: menu_item list
+uses menu_item
+data menu: menu_item list
   -> key drink
   -> with drink: "espresso", price: 2.50 eur
   -> with drink: "latte",    price: 3.50 eur
 
-data ordered:  menu.drink
+data ordered: menu_item.drink
 data quantity: number
 
 
@@ -42,27 +41,25 @@ data weight: measure
 
 data money: measure
   -> unit eur: 1.00
-  -> decimals 2
-
 data band:  weight range
 data price: money
 
 
 spec parcel_shipping
 
-uses standard_rates: rate list
+uses rate
+data standard_rates: rate list
   -> key band
   -> with band: 0 kilogram...2 kilogram,     price: 4.95 eur
   -> with band: 2 kilogram...10 kilogram,    price: 6.95 eur
   -> with band: 10 kilogram...23 kilogram,   price: 13.95 eur
-
-uses express_rates: rate list
+data express_rates: rate list
   -> key band
   -> with band: 0 kilogram...2 kilogram,     price: 9.95 eur
   -> with band: 2 kilogram...10 kilogram,    price: 12.95 eur
   -> with band: 10 kilogram...23 kilogram,   price: 19.95 eur
 
-data parcel_weight: standard_rates.weight
+data parcel_weight: rate.weight
 data express:       boolean
 
 
@@ -85,8 +82,6 @@ data volume: measure
 
 data money: measure
   -> unit eur: 1.00
-  -> decimals 2
-
 data band:        weight range
 data volume_band: volume range
 data price:       money
@@ -94,14 +89,15 @@ data price:       money
 
 spec freight
 
-uses rates: freight_rate list
+uses freight_rate
+data rates: freight_rate list
   -> key band, volume_band
   -> with band: 0 kilogram...5 kilogram,    volume_band: 0 liter...2 liter,    price: 6.95 eur
   -> with band: 0 kilogram...5 kilogram,    volume_band: 2 liter...20 liter,   price: 9.95 eur
   -> with band: 5 kilogram...20 kilogram,   volume_band: 0 liter...20 liter,   price: 14.95 eur
 
-data parcel_weight: rates.weight
-data parcel_volume: rates.volume
+data parcel_weight: freight_rate.weight
+data parcel_volume: freight_rate.volume
 
 
 rule shipping_cost:
@@ -114,8 +110,6 @@ spec employee
 data name: text
 data salary: measure
   -> unit eur: 1.00
-  -> decimals 2
-
 
 rule bonus:
   salary * 10%
@@ -123,7 +117,8 @@ rule bonus:
 
 spec payroll
 
-uses staff: employee list
+uses employee
+data staff: employee list
   -> with name: "Ada",   salary: 9000 eur
   -> with name: "Grace", salary: 9500 eur
 
@@ -160,7 +155,8 @@ uses finance
 
 data income: finance.money
 
-uses brackets: tax_bracket list
+uses tax_bracket
+data brackets: tax_bracket list
   -> with band: 0 eur...38000 eur,       rate: 36%,  income: income
   -> with band: 38000 eur...76000 eur,   rate: 37%,  income: income
 
@@ -183,8 +179,8 @@ fn coffee_order() {
         "coffee_order",
         data(&[("ordered", lit("espresso")), ("quantity", lit("2"))]),
     );
-    assert_eq!(value(&response, "total"), "5.00 eur");
-    assert_eq!(value(&response, "cheapest"), "2.50 eur");
+    assert_eq!(value(&response, "total"), "5 eur");
+    assert_eq!(value(&response, "cheapest"), "2.5 eur");
 }
 
 #[test]
@@ -218,10 +214,12 @@ spec rate
 data band: text
 data price: number
 spec parcel_shipping
-uses standard_rates: rate list
+uses rate
+data standard_rates: rate list
   -> key band
   -> with band: "light", price: 1
-uses express_rates: rate list
+uses rate
+data express_rates: rate list
   -> with band: "light", price: 2
 data express: boolean
 rule rates:
@@ -250,8 +248,8 @@ fn freight_find_4kg_1l_is_6_95() {
 fn payroll() {
     let engine = load_ok(PAYROLL);
     let response = evaluate(&engine, "payroll", data(&[]));
-    assert_eq!(value(&response, "total_bonus"), "1850.00 eur");
-    assert_eq!(value(&response, "top_bonus"), "950.00 eur");
+    assert_eq!(value(&response, "total_bonus"), "1850 eur");
+    assert_eq!(value(&response, "top_bonus"), "950 eur");
 }
 
 #[test]

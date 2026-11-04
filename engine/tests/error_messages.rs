@@ -680,6 +680,37 @@ rule r: flag and 5
 }
 
 #[test]
+fn logical_or_non_boolean_left_uses_lowercase() {
+    let joined = load_and_join_errors(
+        r#"
+spec test
+rule r: 1 or true
+"#,
+    );
+    assert!(
+        joined.contains("Logical OR requires boolean left operand"),
+        "expected OR non-boolean error: {joined}"
+    );
+    assert_lowercase_type_in_errors(&joined, &["number"], &["Number"]);
+}
+
+#[test]
+fn logical_or_non_boolean_right_uses_lowercase() {
+    let joined = load_and_join_errors(
+        r#"
+spec test
+data flag: boolean
+rule r: flag or 5
+"#,
+    );
+    assert!(
+        joined.contains("Logical OR requires boolean right operand"),
+        "expected OR non-boolean right error: {joined}"
+    );
+    assert_lowercase_type_in_errors(&joined, &["number"], &["Number"]);
+}
+
+#[test]
 fn logical_negation_non_boolean_uses_lowercase() {
     let joined = load_and_join_errors(
         r#"

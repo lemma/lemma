@@ -13,7 +13,6 @@ pub(crate) mod conversion_trace;
 pub mod evaluate_data;
 pub mod explanations;
 pub mod expression;
-pub(crate) mod imports;
 pub(crate) mod list_ops;
 pub(crate) mod narration;
 pub mod response;
@@ -24,90 +23,134 @@ pub use crate::computation::OperationResult;
 use crate::computation::VetoType;
 use crate::evaluation::response::EvaluatedRule;
 use crate::planning::execution_plan::{
-    reachable_data_paths, validate_value_against_type, ExecutionPlan, ReachableInput,
+    reachable_data_paths, ExecutableRule, ExecutionPlan, ReachableInput,
 };
-use crate::planning::graph::absolute_import_member_path;
-use crate::planning::normalize::NormalFormId;
+use crate::planning::normalize::{LeafKind, NormalFormId, NormalFormKind};
 use crate::planning::semantics::{
-    BoundValueKind, DataDefinition, DataPath, ImportOverlay, LemmaType, LiteralValue,
-    ReferenceTarget, RowInstance, RulePath, SpecIdentity, ValueKind,
+    lemma_type_arc_with_display_binding, BoundValueKind, DataDefinition, DataPath,
+    ImportEffectivePin, InstanceKey, LemmaType, ListValue, LiteralValue, ReferenceEnd,
+    ReferenceTarget, RowBinding, RowEnd, RulePath, TypedLiteral, ValueKind,
 };
+use crate::string_distance::closest_name;
 pub use evaluate_data::{EvaluateData, EvaluateDataValue};
 use indexmap::IndexMap;
 pub use response::{Response, RuleResult};
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
+use std::rc::Rc;
 use std::sync::Arc;
 
 fn closest_ignored_key(needed: &str, ignored: &[String]) -> Option<String> {
-    crate::string_distance::closest_name(needed, ignored)
+    closest_name(needed, ignored)
 }
 
-/// Unknown keys under `prefix.`, with the prefix stripped, for a body the prefix addresses.
-pub(super) fn ignored_under_prefix(ignored: &[String], prefix: &str) -> Vec<String> {
-    let dotted = format!("{prefix}.");
-    ignored
-        .iter()
-        .filter_map(|key| {
-            let canonical = crate::parsing::ast::ascii_lowercase_logical_name(key.clone());
-            canonical
-                .strip_prefix(&dotted)
-                .filter(|rest| !rest.is_empty())
-                .map(str::to_string)
-        })
-        .collect()
-}
-
-/// Constant value of a DataPath that peels through named `uses` into a template: a site
-/// overlay literal or a template default. `None` when the member has no constant.
-fn resolve_import_member_value(plan: &ExecutionPlan, path: &DataPath) -> Option<OperationResult> {
-    match plan.import_overlay_entry(path) {
-        Some(ImportOverlay::Literal(bound)) => {
-            return Some(OperationResult::from_bound(bound.clone()));
+/// Resolve every `uses … -> effective` pin on `plan` into selected import rows (or failures).
+///
+/// Plans with no dynamic pins leave [`EvaluationContext::dynamic_imports`] as `None` so
+/// the common evaluate path allocates nothing for this feature.
+fn resolve_dynamic_imports(plan: &ExecutionPlan, context: &mut EvaluationContext) {
+    let mut selected = HashMap::new();
+    let mut failures = HashMap::new();
+    let mut saw_pin = false;
+    for (path, definition) in &plan.data {
+        let DataDefinition::Import { pin: Some(pin), .. } = definition else {
+            continue;
+        };
+        saw_pin = true;
+        match evaluate_effective_pin(plan, context, pin) {
+            Ok(at) => match plan.select_dynamic_import_row(path, &at) {
+                Some(row) => {
+                    selected.insert(path.clone(), Arc::clone(row));
+                }
+                None => {
+                    failures.insert(
+                        path.clone(),
+                        OperationResult::Veto(VetoType::computation(format!(
+                            "no version of this import is active at {at}"
+                        ))),
+                    );
+                }
+            },
+            Err(failure) => {
+                failures.insert(path.clone(), failure);
+            }
         }
-        // Reference overlays validate against the template field type in the
-        // import scope; do not prefill here.
-        Some(ImportOverlay::Reference { .. }) => return None,
-        None => {}
     }
-    let mut plan: &ExecutionPlan = plan;
-    let mut path = path.clone();
-    loop {
-        let mut hops = path.segments.iter();
-        let first = hops
-            .next()
-            .unwrap_or_else(|| panic!("BUG: resolve_import_member_value on local path '{path}'"));
-        let import_marker = DataPath::local(first.uses.clone());
-        let Some(DataDefinition::Import { identity, .. }) = plan.data.get(&import_marker) else {
-            panic!("BUG: member '{path}' first hop is not a local Import marker");
-        };
-        let relative = DataPath {
-            segments: hops.cloned().collect(),
-            data: path.data.clone(),
-        };
-        let template = plan.row_template(identity);
-        if relative.segments.is_empty() {
-            let definition = template.data.get(&relative).unwrap_or_else(|| {
-                panic!(
-                    "BUG: member '{path}' absent from template '{}'",
-                    template.spec_name
-                )
-            });
-            if let Some(fill) = definition.bound_value() {
-                return Some(OperationResult::from_bound(fill.clone()));
+    if !saw_pin {
+        return;
+    }
+    context.dynamic_imports = Some(DynamicImportSelection {
+        rows: Rc::new(selected),
+        failures: Rc::new(failures),
+    });
+}
+
+fn evaluate_effective_pin(
+    plan: &ExecutionPlan,
+    context: &mut EvaluationContext,
+    pin: &ImportEffectivePin,
+) -> Result<crate::parsing::ast::EffectiveDate, OperationResult> {
+    match pin {
+        ImportEffectivePin::Data(path) => {
+            let Some(slot) = plan.data.get_index_of(path) else {
+                panic!("BUG: effective pin data '{path}' missing from plan");
+            };
+            let leaf = plan.data_slot_leaves[slot];
+            match &context.values[leaf.index()] {
+                None => Err(OperationResult::Veto(VetoType::missing_data(
+                    path.clone(),
+                    None,
+                ))),
+                Some(OperationResult::Veto(_)) => {
+                    Err(context.values[leaf.index()].clone().expect("veto"))
+                }
+                Some(OperationResult::Value(literal)) => match &literal.value {
+                    ValueKind::Date(date) => Ok(crate::parsing::ast::EffectiveDate::DateTimeValue(
+                        semantic_date_to_datetime(date),
+                    )),
+                    other => panic!(
+                        "BUG: `-> effective` pin '{path}' is not a date after planning, got {other:?}"
+                    ),
+                },
             }
-            if let Some(literal) = definition.value() {
-                let unit = definition
-                    .schema_type()
-                    .and_then(|schema| schema.unit().map(Arc::from));
-                return Some(OperationResult::from_bound(BoundValueKind {
-                    value: literal.value,
-                    unit,
-                }));
-            }
-            return None;
         }
-        plan = template;
-        path = relative;
+        ImportEffectivePin::Rule(rule_path) => {
+            let index = plan.rule_index(rule_path);
+            tree::ensure_rule_values(index, plan, context);
+            match &context.rule_values[index.index()] {
+                None => panic!("BUG: effective pin rule '{rule_path}' has no value after ensure"),
+                Some(OperationResult::Veto(_)) => {
+                    Err(context.rule_values[index.index()].clone().expect("veto"))
+                }
+                Some(OperationResult::Value(literal)) => match &literal.value {
+                    ValueKind::Date(date) => Ok(crate::parsing::ast::EffectiveDate::DateTimeValue(
+                        semantic_date_to_datetime(date),
+                    )),
+                    other => panic!(
+                        "BUG: `-> effective` pin rule '{rule_path}' is not a date after planning, got {other:?}"
+                    ),
+                },
+            }
+        }
+    }
+}
+
+fn semantic_date_to_datetime(
+    date: &crate::planning::semantics::SemanticDateTime,
+) -> crate::parsing::ast::DateTimeValue {
+    crate::parsing::ast::DateTimeValue {
+        year: date.year,
+        month: date.month,
+        day: date.day,
+        hour: date.hour,
+        minute: date.minute,
+        second: date.second,
+        microsecond: date.microsecond,
+        timezone: date
+            .timezone
+            .as_ref()
+            .map(crate::literals::TimezoneValue::from),
+        granularity: crate::literals::DateGranularity::Full,
     }
 }
 
@@ -128,31 +171,57 @@ pub(crate) struct EvaluationContext {
     now: LiteralValue,
     /// Ignored input keys from run data (typo hints for MissingData).
     ignored_unknown: Vec<String>,
-    /// Whether this run data left any of the plan's promptable data paths unbound.
-    any_promptable_data_unbound: bool,
     /// Evaluation policy: visit every cell narration displays (rewrite
     /// pre-images, arithmetic siblings after a definitive veto). Set for explain
     /// runs. Never changes a value. Unless arms after the winner are already
     /// visited by the last-wins reverse scan.
     pub(crate) exhaustive: bool,
     /// Explain runs only: arena ids of narrated rules in this context, filled in
-    /// plan order after the walk.
-    pub(crate) rule_explanations: HashMap<RulePath, narration::ArenaId>,
-    /// Current row of each enclosing instance-list command, by level.
-    pub(crate) row_stack: Vec<Arc<RowInstance>>,
-    /// Template-plan context of every row read so far.
-    pub(crate) row_contexts: HashMap<Arc<RowInstance>, EvaluationContext>,
+    /// plan order after the walk. Interior mutability: row contexts narrate
+    /// through shared borrows of [`RequestCaches::row_contexts`].
+    pub(crate) rule_explanations: RefCell<HashMap<RulePath, narration::ArenaId>>,
+    /// Current row of each enclosing list command, by level (`Value` or `Instance`).
+    pub(crate) row_stack: Vec<CurrentRow>,
+    /// The caches of this request. Cleared when the response is built: a cached
+    /// row context holds the same handle, so it would otherwise cycle and leak.
+    pub(crate) caches: Rc<RequestCaches>,
+    /// The row instance whose context this is; `None` for the root context. Stored-row
+    /// references defer with this owner so their targets resolve in the scope
+    /// that materialized the list even when the read lands in a deeper scope.
+    pub(crate) owner_row: Option<InstanceKey>,
     /// Missing row field keys in read order; may repeat.
     pub(crate) missing_row_keys: Vec<String>,
+    /// Data-leaf cells whose stored value has not been settled yet (options
+    /// check and/or unscaled measure). `ready` does not return their prefilled
+    /// binding until that step runs.
+    unsettled_leaves: HashSet<usize>,
     /// Missing row field keys read under each row-reading cell, deduplicated.
     pub(crate) row_missing: HashMap<NormalFormId, Vec<String>>,
     /// Exhaustive runs only: row field reads in read order; may repeat.
     pub(crate) row_reads_log: Vec<rows::RowRead>,
     /// Exhaustive runs only: row field reads under each row-reading cell, deduplicated.
     pub(crate) row_reads: HashMap<NormalFormId, Vec<rows::RowRead>>,
-    /// Template contexts for named `uses` aliases, keyed by local Import path on the
-    /// plan that owns the alias.
-    pub(crate) import_contexts: HashMap<DataPath, EvaluationContext>,
+    /// Selected bodies and pin failures for root-plan `uses … -> effective` slots.
+    /// `None` when the plan has no dynamic pins (no allocation).
+    pub(crate) dynamic_imports: Option<DynamicImportSelection>,
+}
+
+/// Selected bodies and pin failures for `uses … -> effective` on one evaluation request.
+#[derive(Clone)]
+pub(crate) struct DynamicImportSelection {
+    pub(crate) rows: Rc<HashMap<DataPath, Arc<crate::planning::semantics::RowInstance>>>,
+    pub(crate) failures: Rc<HashMap<DataPath, OperationResult>>,
+}
+
+#[derive(Clone)]
+pub(crate) enum CurrentRow {
+    Value(TypedLiteral),
+    /// A row of an instance list, read through its template context. `position` is its
+    /// 0-based place in the iterated list.
+    Instance {
+        key: InstanceKey,
+        position: usize,
+    },
 }
 
 /// Lengths of the row logs before a row-reading cell evaluates.
@@ -162,169 +231,210 @@ pub(crate) struct RowLogMark {
     reads: usize,
 }
 
+/// The caches of one request, shared by every layer of the walk so a lookup never
+/// depends on which scope filled the cache.
+pub(crate) struct RequestCaches {
+    /// Template-plan context of every row read so far: a row's context is cached
+    /// here no matter how deep the scope that produced it, and re-entered from
+    /// wherever a read lands.
+    pub(crate) row_contexts: RefCell<IndexMap<InstanceKey, EvaluationContext>>,
+    /// Run-data values for unset fields of rows the plan holds (`i.x`, `staff.1.salary`),
+    /// by row and template slot. Bound in the row's context when it is built.
+    row_overrides: HashMap<InstanceKey, Vec<(usize, RowBinding)>>,
+    /// Stored lists, by owning row and path, whose rows have a key field set by run
+    /// data: their store index does not hold the run-data keys.
+    key_overridden_lists: HashSet<(Option<InstanceKey>, DataPath)>,
+}
+
+impl RequestCaches {
+    /// Caches of a request of `plan` with `evaluate_data` bound.
+    fn new(evaluate_data: &EvaluateData) -> Rc<Self> {
+        let overrides = &evaluate_data.row_overrides;
+        Rc::new(Self {
+            row_contexts: RefCell::new(IndexMap::new()),
+            row_overrides: overrides
+                .fields
+                .iter()
+                .map(|(key, fields)| {
+                    (
+                        key.clone(),
+                        fields
+                            .iter()
+                            .map(|(&slot, value)| (slot, RowBinding::Bound(value.clone())))
+                            .collect(),
+                    )
+                })
+                .collect(),
+            key_overridden_lists: overrides.keyed_lists.clone(),
+        })
+    }
+
+    /// Binding of template slot `slot` of row `key` in this request: the row's own,
+    /// or the run-data value of a field the row leaves unset.
+    pub(crate) fn row_binding<'a>(
+        &'a self,
+        key: &'a InstanceKey,
+        slot: usize,
+    ) -> Option<&'a RowBinding> {
+        match &key.row.bindings[slot] {
+            Some(binding) => Some(binding),
+            None if self.row_overrides.is_empty() => None,
+            None => self
+                .row_overrides
+                .get(key)?
+                .iter()
+                .find(|(overridden, _)| *overridden == slot)
+                .map(|(_, binding)| binding),
+        }
+    }
+
+    pub(crate) fn key_overridden(&self, owner: &Option<InstanceKey>, list: &DataPath) -> bool {
+        !self.key_overridden_lists.is_empty()
+            && self
+                .key_overridden_lists
+                .contains(&(owner.clone(), list.clone()))
+    }
+}
+
 impl EvaluationContext {
+    pub(crate) fn dynamic_import_rows(
+        &self,
+    ) -> Option<&HashMap<DataPath, Arc<crate::planning::semantics::RowInstance>>> {
+        self.dynamic_imports
+            .as_ref()
+            .map(|selection| selection.rows.as_ref())
+    }
+
+    pub(crate) fn dynamic_import_failure(&self, slot: &DataPath) -> Option<&OperationResult> {
+        self.dynamic_imports
+            .as_ref()
+            .and_then(|selection| selection.failures.get(slot))
+    }
+
+    /// Context of a row of `template`, nested in this one, with `bindings` bound:
+    /// values by template data slot, in slot order. `unbound` lists, in slot order,
+    /// the slots the row binds but whose value is not resolved yet: they stay empty
+    /// rather than holding the template's value, which the row's binding replaces.
+    pub(crate) fn child_row(
+        &self,
+        template: &ExecutionPlan,
+        bindings: &[(usize, OperationResult)],
+        unbound: &[usize],
+    ) -> Self {
+        assert!(
+            bindings.windows(2).all(|pair| pair[0].0 < pair[1].0),
+            "BUG: row bindings of '{}' out of slot order",
+            template.spec_name
+        );
+        assert!(
+            unbound.windows(2).all(|pair| pair[0] < pair[1]),
+            "BUG: unbound row slots of '{}' out of slot order",
+            template.spec_name
+        );
+        let mut values = Self::template_values(template);
+        if !bindings.is_empty() || !unbound.is_empty() {
+            for (slot, binding) in bindings {
+                values[template.data_slot_leaves[*slot].index()] = Some(binding.clone());
+            }
+            for slot in unbound {
+                values[template.data_slot_leaves[*slot].index()] = None;
+            }
+            template.copy_reference_targets(&mut values, |slot, _| {
+                bindings
+                    .binary_search_by_key(&slot, |(bound, _)| *bound)
+                    .is_ok()
+                    || unbound.binary_search(&slot).is_ok()
+            });
+        }
+        Self::with_values(
+            template,
+            values,
+            self.now.clone(),
+            Vec::new(),
+            self.exhaustive,
+            Rc::clone(&self.caches),
+            self.dynamic_imports.clone(),
+        )
+    }
+
+    /// Context of `plan` with `evaluate_data` bound.
     fn new(
         plan: &ExecutionPlan,
         evaluate_data: &EvaluateData,
         now: LiteralValue,
         exhaustive: bool,
+        caches: Rc<RequestCaches>,
     ) -> Self {
-        let mut values: Vec<Option<OperationResult>> = vec![None; plan.normal_forms.len()];
-
-        // Caller bindings into their data-leaf slots.
-        for (path, binding) in &evaluate_data.bindings {
-            let leaf = *plan
-                .data_leaf
-                .get(path)
-                .unwrap_or_else(|| panic!("BUG: run binding for '{path}' has no data_leaf entry"));
-            values[leaf.index()] = Some(binding.clone());
+        let mut values = Self::template_values(plan);
+        if !evaluate_data.bindings.is_empty() {
+            for (slot, binding) in &evaluate_data.bindings {
+                values[plan.data_slot_leaves[*slot].index()] = Some(binding.clone());
+            }
+            plan.copy_reference_targets(&mut values, |slot, _| {
+                evaluate_data.bindings.contains_key(&slot)
+            });
         }
+        Self::with_values(
+            plan,
+            values,
+            now,
+            evaluate_data.ignored_unknown.clone(),
+            exhaustive,
+            caches,
+            None,
+        )
+    }
 
-        // Plan defaults into unbound data-leaf slots.
-        for (path, definition) in &plan.data {
-            let leaf = *plan
-                .data_leaf
-                .get(path)
-                .expect("BUG: every plan.data path must have a data_leaf entry");
+    fn template_values(plan: &ExecutionPlan) -> Vec<Option<OperationResult>> {
+        assert_eq!(
+            plan.initial_values.len(),
+            plan.normal_forms.len(),
+            "BUG: plan evaluation tables not populated"
+        );
+        plan.initial_values.clone()
+    }
+
+    fn with_values(
+        plan: &ExecutionPlan,
+        values: Vec<Option<OperationResult>>,
+        now: LiteralValue,
+        ignored_unknown: Vec<String>,
+        exhaustive: bool,
+        caches: Rc<RequestCaches>,
+        dynamic_imports: Option<DynamicImportSelection>,
+    ) -> Self {
+        let mut unsettled_leaves = HashSet::new();
+        for &leaf in &plan.walk_settled_leaves {
             if values[leaf.index()].is_some() {
-                continue;
-            }
-            if let Some(fill) = definition.bound_value() {
-                values[leaf.index()] = Some(OperationResult::from_bound(fill.clone()));
-            } else if let Some(literal) = definition.value() {
-                let unit = definition
-                    .schema_type()
-                    .and_then(|schema| schema.unit().map(Arc::from));
-                values[leaf.index()] = Some(OperationResult::from_bound(BoundValueKind {
-                    value: literal.value,
-                    unit,
-                }));
+                unsettled_leaves.insert(leaf.index());
             }
         }
-
-        // Named-`uses` members: site overlay and template defaults into expression leaves.
-        // Skip when the plan has no Import rows (no segmented data_leaf keys to fill).
-        if plan
-            .data
-            .values()
-            .any(|definition| matches!(definition, DataDefinition::Import { .. }))
-        {
-            for (path, &leaf) in &plan.data_leaf {
-                if values[leaf.index()].is_some() || path.segments.is_empty() {
-                    continue;
-                }
-                if let Some(result) = resolve_import_member_value(plan, path) {
-                    values[leaf.index()] = Some(result);
-                }
-            }
-        }
-
-        // Reference chains: copy target into reference leaf (data_reference_order).
-        for reference_path in &plan.data_reference_order {
-            let leaf = *plan
-                .data_leaf
-                .get(reference_path)
-                .expect("BUG: reference path missing from data_leaf");
-            if values[leaf.index()].is_some() {
-                continue;
-            }
-            match plan.data.get(reference_path) {
-                Some(DataDefinition::Reference {
-                    target: ReferenceTarget::Data(target_path),
-                    resolved_type,
-                    ..
-                }) => {
-                    let target_leaf = *plan
-                        .data_leaf
-                        .get(target_path)
-                        .expect("BUG: reference target missing from data_leaf");
-                    match values[target_leaf.index()].as_ref() {
-                        Some(OperationResult::Veto(veto)) => {
-                            values[leaf.index()] = Some(OperationResult::Veto(veto.clone()));
-                        }
-                        Some(OperationResult::Value(bound)) => {
-                            let copied = bound.to_literal();
-                            match validate_value_against_type(
-                                resolved_type.as_ref(),
-                                &copied,
-                                &plan.resolved_types.unit_index,
-                            ) {
-                                Ok(()) => {
-                                    values[leaf.index()] =
-                                        Some(OperationResult::from_bound(bound.clone()));
-                                }
-                                Err(msg) => {
-                                    values[leaf.index()] = Some(OperationResult::Veto(
-                                        VetoType::computation(format!(
-                                            "Reference '{}' violates its declared constraint: {}",
-                                            reference_path, msg
-                                        )),
-                                    ));
-                                }
-                            }
-                        }
-                        None => {}
-                    }
-                }
-                Some(DataDefinition::Reference {
-                    target: ReferenceTarget::Rule(_),
-                    ..
-                }) => unreachable!(
-                    "BUG: data_reference_order holds only data-target references; '{}' targets a rule",
-                    reference_path
-                ),
-                Some(
-                    DataDefinition::Value { .. }
-                    | DataDefinition::TypeDeclaration { .. }
-                    | DataDefinition::Import { .. }
-                    | DataDefinition::InstanceList { .. },
-                ) => unreachable!(
-                    "BUG: data_reference_order entry '{}' is not a reference",
-                    reference_path
-                ),
-                None => unreachable!(
-                    "BUG: data_reference_order references missing data path '{}'",
-                    reference_path
-                ),
-            }
-        }
-
-        let any_promptable_data_unbound = plan.promptable_data_paths().any(|path| {
-            let leaf = *plan
-                .data_leaf
-                .get(path)
-                .expect("BUG: promptable path missing from data_leaf");
-            values[leaf.index()].is_none()
-        }) || plan.data_leaf.keys().any(|path| {
-            if path.segments.is_empty() {
-                return false;
-            }
-            let Some(promptable) = plan.promptable_data_path(path) else {
-                return false;
-            };
-            let leaf = *plan
-                .data_leaf
-                .get(promptable)
-                .unwrap_or_else(|| panic!("BUG: promptable '{promptable}' has no data_leaf"));
-            values[leaf.index()].is_none()
-        });
 
         Self {
             values,
             rule_values: vec![None; plan.rules.len()],
             now,
-            ignored_unknown: evaluate_data.ignored_unknown.clone(),
-            any_promptable_data_unbound,
+            ignored_unknown,
             exhaustive,
-            rule_explanations: HashMap::new(),
+            rule_explanations: RefCell::new(HashMap::new()),
             row_stack: Vec::new(),
-            row_contexts: HashMap::new(),
+            caches,
+            owner_row: None,
             missing_row_keys: Vec::new(),
+            unsettled_leaves,
             row_missing: HashMap::new(),
             row_reads_log: Vec::new(),
             row_reads: HashMap::new(),
-            import_contexts: HashMap::new(),
+            dynamic_imports,
         }
+    }
+
+    pub(crate) fn leaf_unsettled(&self, leaf: usize) -> bool {
+        self.unsettled_leaves.contains(&leaf)
+    }
+
+    pub(crate) fn settle_leaf(&mut self, leaf: usize) {
+        self.unsettled_leaves.remove(&leaf);
     }
 
     pub(crate) fn row_log_mark(&self) -> RowLogMark {
@@ -384,16 +494,14 @@ impl EvaluationContext {
         path: &DataPath,
         settled: &OperationResult,
     ) -> Arc<LemmaType> {
-        let def = crate::planning::normalize::lookup_data_definition(
-            &plan.data,
-            &plan.row_templates,
-            path,
-        )
-        .expect("BUG: data path leaf missing from plan.data and import templates");
+        let def = plan
+            .data
+            .get(path)
+            .expect("BUG: data path leaf missing from plan.data");
         let schema = def
             .resolved_type_arc()
             .expect("BUG: data path leaf missing schema type");
-        crate::planning::semantics::lemma_type_arc_with_display_binding(
+        lemma_type_arc_with_display_binding(
             schema,
             settled.value(),
             def.bound_value(),
@@ -409,7 +517,7 @@ impl EvaluationContext {
     pub(crate) fn rule_result_type(
         &self,
         plan: &ExecutionPlan,
-        rule: &crate::planning::execution_plan::ExecutableRule,
+        rule: &ExecutableRule,
     ) -> Arc<LemmaType> {
         let planned = &rule.rule_type;
         if planned.unit().is_some() {
@@ -424,22 +532,18 @@ impl EvaluationContext {
             crate::planning::normalize::NormalFormKind::Leaf(
                 crate::planning::normalize::LeafKind::DataPath(path),
             ) => {
-                let def = crate::planning::normalize::lookup_data_definition(
-                    &plan.data,
-                    &plan.row_templates,
-                    path,
-                )
-                .expect("BUG: rule DataPath leaf missing from plan.data and import templates");
-                crate::planning::semantics::lemma_type_arc_with_display_binding(
+                let def = plan
+                    .data
+                    .get(path)
+                    .expect("BUG: rule DataPath leaf missing from plan.data");
+                lemma_type_arc_with_display_binding(
                     planned,
                     settled,
                     def.bound_value(),
                     def.bound_suggestion(),
                 )
             }
-            _ => crate::planning::semantics::lemma_type_arc_with_display_binding(
-                planned, settled, None, None,
-            ),
+            _ => lemma_type_arc_with_display_binding(planned, settled, None, None),
         }
     }
 
@@ -456,53 +560,98 @@ impl EvaluationContext {
         self.values[leaf.index()].as_ref()
     }
 
+    /// Bind data-leaf slots left unbound when this row context was built (deferred row
+    /// bindings resolved after the context already existed), then refresh the
+    /// references that copy them. Already-bound slots keep their value: resolution is
+    /// deterministic, so it is the same value. `row_bound` marks the slots the row
+    /// binds; their references keep the row's value.
+    pub(crate) fn bind_resolved_slots(
+        &mut self,
+        plan: &ExecutionPlan,
+        resolved: Vec<(DataPath, OperationResult)>,
+        row_bound: impl Fn(usize) -> bool,
+    ) {
+        if resolved.is_empty() {
+            return;
+        }
+        for (data_path, value) in resolved {
+            let leaf = *plan
+                .data_leaf
+                .get(&data_path)
+                .unwrap_or_else(|| panic!("BUG: data path '{data_path}' has no data_leaf entry"));
+            if self.values[leaf.index()].is_none() {
+                self.values[leaf.index()] = Some(value);
+            }
+        }
+        plan.copy_reference_targets(&mut self.values, |slot, _| row_bound(slot));
+    }
+
     pub(crate) fn missing_data_suggestion(&self, data_path: &DataPath) -> Option<String> {
         closest_ignored_key(&data_path.input_key(), &self.ignored_unknown)
     }
 
-    /// Whether this evaluation has a value or a veto for `data_path`.
-    fn is_data_bound(&self, plan: &ExecutionPlan, data_path: &DataPath) -> bool {
-        self.data_slot(plan, data_path).is_some()
-    }
-
-    /// Whether any row-reading cell in this context or a named `uses` context beneath it
-    /// recorded a missing row field.
-    fn has_row_missing_logs(&self) -> bool {
-        !self.row_missing.is_empty()
-            || self
-                .import_contexts
-                .values()
-                .any(EvaluationContext::has_row_missing_logs)
-    }
-
     /// Promptable data paths this rule still needs, in evaluation / decision-tree order.
     ///
-    /// First key is the next fact the live tree needs. Returns immediately when the run
-    /// data bound every promptable path: no rule can report missing data. Otherwise walks
-    /// from `rule_root` deriving liveness from filled condition/scrutinee slots, maps each
-    /// leaf through [`ExecutionPlan::promptable_data_path`], and keeps unbound keys.
-    /// A named-`uses` rule contributes its template's walk under the import context,
-    /// each field mapped through the site overlay (see [`missing_candidates`]).
+    /// First key is the next fact the live tree needs. Walks from `rule_root` deriving
+    /// liveness from filled condition/scrutinee slots, maps each leaf through
+    /// [`ExecutionPlan::promptable_data_path`], and keeps unbound keys, and the key of a
+    /// slot a deferred binding filled with missing data of the context that wrote it.
+    /// When this context is `instance`'s, its own data keys are named under the
+    /// instance's path; an unset field of an inline row has no key (the rule's veto
+    /// names it). Row keys are recorded named already.
     pub(crate) fn missing_data_for_rule(
         &self,
         plan: &ExecutionPlan,
         rule_root: NormalFormId,
+        instance: Option<&InstanceKey>,
     ) -> Vec<String> {
-        if !self.any_promptable_data_unbound && !self.has_row_missing_logs() {
-            return Vec::new();
-        }
-        let mut candidates = Vec::new();
-        missing_candidates(plan, Some(self), rule_root, &mut candidates);
+        self.collect_missing(
+            missing_candidates(plan, self, rule_root, None),
+            plan,
+            instance,
+        )
+    }
+
+    /// Live inputs of `rule_root` on `template` when `instance`'s context was never
+    /// built: the walk names each input under the instance.
+    pub(crate) fn missing_data_for_unreached_instance(
+        &self,
+        root_plan: &ExecutionPlan,
+        template: &ExecutionPlan,
+        rule_root: NormalFormId,
+        instance: &InstanceKey,
+    ) -> Vec<String> {
+        self.collect_missing(
+            missing_candidates(root_plan, self, rule_root, Some((instance, template, None))),
+            template,
+            Some(instance),
+        )
+    }
+
+    fn collect_missing(
+        &self,
+        candidates: Vec<MissingCandidate>,
+        plan: &ExecutionPlan,
+        instance: Option<&InstanceKey>,
+    ) -> Vec<String> {
         let mut out = Vec::new();
         let mut seen = HashSet::new();
         for candidate in candidates {
             let key = match candidate {
-                MissingCandidate::Data(path) => {
-                    if self.is_data_bound(plan, &path) {
-                        continue;
+                MissingCandidate::Data(path) => match self.data_slot(plan, &path) {
+                    Some(OperationResult::Veto(VetoType::MissingRowData { key })) => key.clone(),
+                    Some(OperationResult::Veto(VetoType::MissingData { data, .. })) => {
+                        data.input_key()
                     }
-                    path.input_key()
-                }
+                    Some(_) => continue,
+                    None => match instance {
+                        None => path.input_key(),
+                        Some(instance) => match rows::row_key(instance, &path.input_key()) {
+                            Some(key) => key,
+                            None => continue,
+                        },
+                    },
+                },
                 MissingCandidate::Row(key) => key,
             };
             if seen.insert(key.clone()) {
@@ -521,246 +670,457 @@ enum MissingCandidate {
     Row(String),
 }
 
-/// One unit of the missing-candidate walk. Tasks run depth first; a task that has
-/// inner candidates pushes its follow-up tasks, so no Rust call stack grows with the
-/// named-`uses` nesting.
-enum MissingTask<'a> {
-    /// Walk the rule root `root` of `plan`, writing candidates to buffer `dest`.
-    Walk {
-        plan: &'a ExecutionPlan,
-        ctx: Option<&'a EvaluationContext>,
-        root: NormalFormId,
-        dest: usize,
-    },
-    /// Walk named-`uses` rule `path` of `plan`: its template walk is collected into a
-    /// fresh buffer, then mapped through the import overlay by [`MissingTask::MapInner`].
-    ImportRule {
-        plan: &'a ExecutionPlan,
-        ctx: Option<&'a EvaluationContext>,
-        path: RulePath,
-        dest: usize,
-    },
-    /// Map the candidates of buffer `inner` (collected for the import `marker` of `plan`)
-    /// through its overlay into buffer `dest`.
-    MapInner {
-        plan: &'a ExecutionPlan,
-        ctx: Option<&'a EvaluationContext>,
-        marker: DataPath,
-        identity: &'a SpecIdentity,
-        overlay: &'a IndexMap<DataPath, ImportOverlay>,
-        inner: usize,
-        dest: usize,
-    },
-    Emit {
-        candidate: MissingCandidate,
-        dest: usize,
-    },
+/// Live inputs under `root` on `plan`, in evaluation order, as evaluated in `ctx`.
+///
+/// A member read of a `uses` instance the evaluation did not reach (an arm a missing
+/// condition left undecided) has the live inputs of the member in the instance, walked
+/// in its context when built, else over its template: each named under the instance.
+///
+/// `at` starts the walk on a `uses` instance: its template and context (`None` when
+/// the context was never built).
+fn missing_candidates<'a>(
+    plan: &'a ExecutionPlan,
+    ctx: &'a EvaluationContext,
+    root: NormalFormId,
+    at: Option<(
+        &'a InstanceKey,
+        &'a ExecutionPlan,
+        Option<&'a EvaluationContext>,
+    )>,
+) -> Vec<MissingCandidate> {
+    struct Walk<'c> {
+        inputs: std::vec::IntoIter<ReachableInput>,
+        template: &'c ExecutionPlan,
+        /// The instance walked; `None` for `ctx` itself.
+        instance: Option<InstanceKey>,
+        /// Context the walk reads values in: `ctx`, or the instance's when built.
+        context: Option<&'c EvaluationContext>,
+    }
+
+    let contexts = ctx.caches.row_contexts.borrow();
+    let mut out = Vec::new();
+    let mut walks = match at {
+        None => vec![Walk {
+            inputs: reachable_data_paths(plan, root, &ctx.values).into_iter(),
+            template: plan,
+            instance: None,
+            context: Some(ctx),
+        }],
+        Some((instance, template, context)) => {
+            let values: &[Option<OperationResult>] = match context {
+                Some(context) => &context.values,
+                None => &[],
+            };
+            vec![Walk {
+                inputs: reachable_data_paths(template, root, values).into_iter(),
+                template,
+                instance: Some(instance.clone()),
+                context,
+            }]
+        }
+    };
+    while let Some(walk) = walks.last_mut() {
+        let Some(input) = walk.inputs.next() else {
+            walks.pop();
+            continue;
+        };
+        let template = walk.template;
+        match input {
+            ReachableInput::Data(path) => {
+                let Some(promptable) = template.promptable_data_path(&path) else {
+                    continue;
+                };
+                let Some(instance) = &walk.instance else {
+                    out.push(MissingCandidate::Data(promptable.clone()));
+                    continue;
+                };
+                let key = rows::row_key(instance, &promptable.input_key());
+                match walk.context {
+                    Some(context) => match context.data_slot(template, promptable) {
+                        Some(OperationResult::Veto(VetoType::MissingRowData { key })) => {
+                            out.push(MissingCandidate::Row(key.clone()));
+                        }
+                        Some(OperationResult::Veto(VetoType::MissingData { data, .. })) => {
+                            out.push(MissingCandidate::Row(data.input_key()));
+                        }
+                        Some(_) => {}
+                        None => out.extend(key.map(MissingCandidate::Row)),
+                    },
+                    None => {
+                        let slot = template
+                            .data
+                            .get_index_of(promptable)
+                            .expect("BUG: promptable path is data of its template");
+                        match ctx.caches.row_binding(instance, slot) {
+                            None => {
+                                let leaf = template
+                                    .data_leaf
+                                    .get(promptable)
+                                    .expect("BUG: promptable path has a data_leaf entry");
+                                if template.initial_values[leaf.index()].is_none() {
+                                    out.extend(key.map(MissingCandidate::Row));
+                                }
+                            }
+                            Some(RowBinding::Deferred { target, hops }) => {
+                                let owner = instance.scope(*hops);
+                                let owner_plan = match owner {
+                                    None => plan,
+                                    Some(owner_key) => plan.row_template(&owner_key.row.identity),
+                                };
+                                let owner_ctx = match owner {
+                                    None => Some(ctx),
+                                    Some(owner_key) => contexts.get(owner_key),
+                                };
+                                let owner_instance = owner.cloned();
+                                match target {
+                                    ReferenceTarget::Data(path) => {
+                                        if let Some(promptable) =
+                                            owner_plan.promptable_data_path(path)
+                                        {
+                                            match &owner_instance {
+                                                None => out.push(MissingCandidate::Data(
+                                                    promptable.clone(),
+                                                )),
+                                                Some(owner_key) => {
+                                                    out.extend(
+                                                        rows::row_key(
+                                                            owner_key,
+                                                            &promptable.input_key(),
+                                                        )
+                                                        .map(MissingCandidate::Row),
+                                                    );
+                                                }
+                                            }
+                                        } else if let Some(ReferenceEnd::Rule(rule)) =
+                                            owner_plan.reference_ends.get(path)
+                                        {
+                                            let body = owner_plan
+                                                .rules
+                                                .get(rule)
+                                                .unwrap_or_else(|| {
+                                                    panic!(
+                                                        "BUG: deferred data target '{path}' ends at missing rule '{rule}'"
+                                                    )
+                                                })
+                                                .normal_form;
+                                            let values: &[Option<OperationResult>] = match owner_ctx
+                                            {
+                                                Some(context) => &context.values,
+                                                None => &[],
+                                            };
+                                            walks.push(Walk {
+                                                inputs: reachable_data_paths(
+                                                    owner_plan, body, values,
+                                                )
+                                                .into_iter(),
+                                                template: owner_plan,
+                                                instance: owner_instance,
+                                                context: owner_ctx,
+                                            });
+                                        }
+                                    }
+                                    ReferenceTarget::Rule(rule) => {
+                                        let body = owner_plan
+                                            .rules
+                                            .get(rule)
+                                            .unwrap_or_else(|| {
+                                                panic!(
+                                                    "BUG: deferred rule target '{rule}' missing from its owner plan"
+                                                )
+                                            })
+                                            .normal_form;
+                                        let values: &[Option<OperationResult>] = match owner_ctx {
+                                            Some(context) => &context.values,
+                                            None => &[],
+                                        };
+                                        walks.push(Walk {
+                                            inputs: reachable_data_paths(owner_plan, body, values)
+                                                .into_iter(),
+                                            template: owner_plan,
+                                            instance: owner_instance,
+                                            context: owner_ctx,
+                                        });
+                                    }
+                                }
+                            }
+                            Some(
+                                RowBinding::Bound(_)
+                                | RowBinding::Rows { .. }
+                                | RowBinding::Instance(_),
+                            ) => {}
+                        }
+                    }
+                }
+            }
+            ReachableInput::RowReads(id) => {
+                if let Some(context) = walk.context {
+                    if let Some(keys) = context.row_missing.get(&id) {
+                        out.extend(keys.iter().cloned().map(MissingCandidate::Row));
+                        continue;
+                    }
+                    if context.values[id.index()].is_some() {
+                        continue;
+                    }
+                }
+                let NormalFormKind::SpecMember { base, row, .. } = &template.normal_form(id).kind
+                else {
+                    continue;
+                };
+                let NormalFormKind::Leaf(LeafKind::DataPath(slot)) =
+                    &template.normal_form(*base).kind
+                else {
+                    continue;
+                };
+                if !matches!(template.data.get(slot), Some(DataDefinition::Import { .. })) {
+                    continue;
+                }
+                if ctx.dynamic_import_failure(slot).is_some() {
+                    continue;
+                }
+                let holder = match &walk.instance {
+                    Some(instance) => Some(instance.clone()),
+                    None => ctx.owner_row.clone(),
+                };
+                let (end, hops) = row
+                    .ends
+                    .split_last()
+                    .expect("BUG: a member read has a last end");
+                let dynamic_rows = ctx.dynamic_import_rows();
+                let mut instance = InstanceKey::new(
+                    Arc::clone(template.import_row(
+                        holder.as_ref().map(|key| key.row.as_ref()),
+                        slot,
+                        dynamic_rows,
+                    )),
+                    holder,
+                );
+                let mut member_template = template.row_template(&instance.row.identity);
+                for hop in hops {
+                    let RowEnd::Data(hop) = hop else {
+                        panic!("BUG: member hop '{hop:?}' is a rule, not a `uses` slot");
+                    };
+                    instance = InstanceKey::new(
+                        Arc::clone(member_template.import_row(
+                            Some(&instance.row),
+                            hop,
+                            dynamic_rows,
+                        )),
+                        Some(instance),
+                    );
+                    member_template = template.row_template(&instance.row.identity);
+                }
+                let context = contexts.get(&instance);
+                let inputs = match end {
+                    RowEnd::Data(path) => vec![ReachableInput::Data(path.clone())],
+                    RowEnd::Rule(rule) => {
+                        let body = member_template
+                            .rules
+                            .get(rule)
+                            .unwrap_or_else(|| {
+                                panic!("BUG: member rule '{rule}' missing from its template")
+                            })
+                            .normal_form;
+                        let values: &[Option<OperationResult>] = match context {
+                            Some(context) => &context.values,
+                            None => &[],
+                        };
+                        reachable_data_paths(member_template, body, values)
+                    }
+                };
+                walks.push(Walk {
+                    inputs: inputs.into_iter(),
+                    template: member_template,
+                    instance: Some(instance),
+                    context,
+                });
+            }
+        }
+    }
+    out
 }
 
-/// Live inputs under `root` on `plan`, in evaluation order. `ctx` is the context that
-/// evaluated `plan`; `None` when the enclosing import rule cell never ran, so no
-/// slot is filled and liveness is that of unevaluated cells.
-fn missing_candidates(
+fn closed_missing(
+    ctx: &mut EvaluationContext,
     plan: &ExecutionPlan,
-    ctx: Option<&EvaluationContext>,
-    root: NormalFormId,
-    out: &mut Vec<MissingCandidate>,
-) {
-    let mut buffers: Vec<Vec<MissingCandidate>> = vec![Vec::new()];
-    let mut stack = vec![MissingTask::Walk {
-        plan,
-        ctx,
-        root,
-        dest: 0,
-    }];
-    while let Some(task) = stack.pop() {
-        let mut next = Vec::new();
-        match task {
-            MissingTask::Walk {
-                plan,
-                ctx,
-                root,
-                dest,
-            } => {
-                let values: &[Option<OperationResult>] = match ctx {
-                    Some(ctx) => &ctx.values,
-                    None => &[],
-                };
-                for input in reachable_data_paths(plan, root, values) {
-                    match input {
-                        ReachableInput::Data(path) => {
-                            if let Some(promptable) = plan.promptable_data_path(&path).cloned() {
-                                next.push(MissingTask::Emit {
-                                    candidate: MissingCandidate::Data(promptable),
-                                    dest,
-                                });
+    keys: Vec<String>,
+) -> (Vec<String>, IndexMap<String, Vec<EvaluateDataValue>>) {
+    let mut keys = keys;
+    let mut missing_data_options = IndexMap::new();
+    let mut index = 0;
+    while index < keys.len() {
+        let key = keys[index].clone();
+        let Some(path) = plan
+            .data
+            .keys()
+            .find(|path| path.input_key() == key)
+            .cloned()
+        else {
+            if let Some((template, definition, instance, field)) =
+                evaluate_data::row_field_definition(plan, &key)
+            {
+                if let Some(lemma_type) = definition.schema_type() {
+                    if let Some(rule_name) = lemma_type.options_rule() {
+                        let rule_path = template.options_rule_of(field).unwrap_or_else(|| {
+                            panic!(
+                                "BUG: options rule '{rule_name}' of '{key}' missing after planning"
+                            )
+                        });
+                        let rule = template.rules.get(&rule_path).unwrap_or_else(|| {
+                            panic!(
+                                "BUG: options rule '{rule_path}' missing after options_rule_of asserted it"
+                            )
+                        });
+                        let built = ctx.caches.row_contexts.borrow().contains_key(&instance);
+                        if built {
+                            let contexts = ctx.caches.row_contexts.borrow();
+                            let instance_ctx = contexts.get(&instance).unwrap_or_else(|| {
+                                panic!("BUG: instance context of '{key}' vanished under borrow")
+                            });
+                            if let Some(rows) =
+                                options_rule_list(instance_ctx, template, &rule_path)
+                            {
+                                missing_data_options
+                                    .insert(key, options_for(lemma_type, Some(&rows)));
+                                index += 1;
+                                continue;
                             }
-                        }
-                        ReachableInput::RowReads(id) => {
-                            if let Some(ctx) = ctx {
-                                for key in ctx.row_missing.get(&id).into_iter().flatten() {
-                                    next.push(MissingTask::Emit {
-                                        candidate: MissingCandidate::Row(key.clone()),
-                                        dest,
-                                    });
+                            let blockers = instance_ctx.missing_data_for_rule(
+                                template,
+                                rule.normal_form,
+                                Some(&instance),
+                            );
+                            drop(contexts);
+                            keys.remove(index);
+                            for blocker in blockers.into_iter().rev() {
+                                if !keys.iter().any(|existing| existing == &blocker) {
+                                    keys.insert(index, blocker);
+                                }
+                            }
+                        } else {
+                            keys.remove(index);
+                            let blockers = ctx.missing_data_for_unreached_instance(
+                                plan,
+                                template,
+                                rule.normal_form,
+                                &instance,
+                            );
+                            for blocker in blockers.into_iter().rev() {
+                                if !keys.iter().any(|existing| existing == &blocker) {
+                                    keys.insert(index, blocker);
                                 }
                             }
                         }
-                        ReachableInput::ImportRule(path) => {
-                            next.push(MissingTask::ImportRule {
-                                plan,
-                                ctx,
-                                path,
-                                dest,
-                            });
-                        }
+                        continue;
+                    }
+                    let options = options_for(lemma_type, None);
+                    if !options.is_empty() {
+                        missing_data_options.insert(key, options);
                     }
                 }
             }
-            MissingTask::ImportRule {
-                plan,
-                ctx,
-                path,
-                dest,
-            } => {
-                let (first, rest) = path.segments.split_first().unwrap_or_else(|| {
-                    panic!("BUG: import rule walk on local rule '{}'", path.rule)
-                });
-                let marker = DataPath::local(first.uses.clone());
-                let Some(DataDefinition::Import {
-                    identity, overlay, ..
-                }) = plan.data.get(&marker)
-                else {
-                    panic!(
-                        "BUG: import rule '{}' first hop is not Import",
-                        path.input_key()
-                    );
-                };
-                let template = plan.row_template(identity);
-                let import_ctx = ctx.and_then(|ctx| ctx.import_contexts.get(&marker));
-                let relative = RulePath {
-                    segments: rest.to_vec(),
-                    rule: path.rule.clone(),
-                };
-                let inner = buffers.len();
-                buffers.push(Vec::new());
-                let child = if relative.segments.is_empty() {
-                    let root = template
-                        .rules
-                        .get(&relative)
-                        .unwrap_or_else(|| {
-                            panic!(
-                                "BUG: import rule '{}' missing from its template",
-                                path.input_key()
-                            )
-                        })
-                        .normal_form;
-                    MissingTask::Walk {
-                        plan: template,
-                        ctx: import_ctx,
-                        root,
-                        dest: inner,
-                    }
-                } else {
-                    MissingTask::ImportRule {
-                        plan: template,
-                        ctx: import_ctx,
-                        path: relative,
-                        dest: inner,
-                    }
-                };
-                stack.push(MissingTask::MapInner {
-                    plan,
-                    ctx,
-                    marker,
-                    identity,
-                    overlay,
-                    inner,
-                    dest,
-                });
-                stack.push(child);
-                continue;
+            index += 1;
+            continue;
+        };
+        let Some(lemma_type) = plan
+            .data
+            .get(&path)
+            .and_then(|definition| definition.schema_type())
+        else {
+            index += 1;
+            continue;
+        };
+        let Some(rule_name) = lemma_type.options_rule() else {
+            let options = options_for(lemma_type, None);
+            if !options.is_empty() {
+                missing_data_options.insert(key, options);
             }
-            MissingTask::MapInner {
-                plan,
-                ctx,
-                marker,
-                identity,
-                overlay,
-                inner,
-                dest,
-            } => {
-                assert_eq!(
-                    buffers.len(),
-                    inner + 1,
-                    "BUG: missing-candidate buffers closed out of order"
-                );
-                let collected = buffers.pop().expect("BUG: inner candidate buffer exists");
-                for candidate in collected {
-                    let field = match candidate {
-                        MissingCandidate::Data(field) => field,
-                        row @ MissingCandidate::Row(_) => {
-                            next.push(MissingTask::Emit {
-                                candidate: row,
-                                dest,
-                            });
-                            continue;
-                        }
-                    };
-                    let absolute = absolute_import_member_path(&marker, identity, &field);
-                    match overlay.get(&field) {
-                        Some(ImportOverlay::Literal(_)) => {}
-                        Some(ImportOverlay::Reference { .. })
-                            if ctx.is_some_and(|c| c.is_data_bound(plan, &absolute)) =>
-                        {
-                            // Evaluate override on the nested LHS; wire source not needed.
-                        }
-                        Some(ImportOverlay::Reference {
-                            target: ReferenceTarget::Data(target),
-                            ..
-                        }) => {
-                            if let Some(promptable) = plan.promptable_data_path(target).cloned() {
-                                next.push(MissingTask::Emit {
-                                    candidate: MissingCandidate::Data(promptable),
-                                    dest,
-                                });
-                            }
-                        }
-                        Some(ImportOverlay::Reference {
-                            target: ReferenceTarget::Rule(rule),
-                            ..
-                        }) => {
-                            let root = plan
-                                .rules
-                                .get(rule)
-                                .unwrap_or_else(|| {
-                                    panic!(
-                                        "BUG: overlay rule target '{rule}' missing from owner plan"
-                                    )
-                                })
-                                .normal_form;
-                            next.push(MissingTask::Walk {
-                                plan,
-                                ctx,
-                                root,
-                                dest,
-                            });
-                        }
-                        None => next.push(MissingTask::Emit {
-                            candidate: MissingCandidate::Data(absolute),
-                            dest,
-                        }),
+            index += 1;
+            continue;
+        };
+        let rule_path = plan.options_rule_of(&path).unwrap_or_else(|| {
+            panic!("BUG: options rule '{rule_name}' of '{key}' missing after planning")
+        });
+        match options_rule_list(ctx, plan, &rule_path) {
+            Some(rows) => {
+                missing_data_options.insert(key, options_for(lemma_type, Some(&rows)));
+                index += 1;
+            }
+            None => {
+                keys.remove(index);
+                let rule = plan
+                    .rules
+                    .get(&rule_path)
+                    .expect("BUG: options rule missing after options_rule_of asserted it");
+                let blockers = ctx.missing_data_for_rule(plan, rule.normal_form, None);
+                for blocker in blockers.into_iter().rev() {
+                    if !keys.iter().any(|existing| existing == &blocker) {
+                        keys.insert(index, blocker);
                     }
                 }
-            }
-            MissingTask::Emit { candidate, dest } => {
-                buffers[dest].push(candidate);
-                continue;
             }
         }
-        stack.extend(next.into_iter().rev());
     }
-    out.extend(buffers.pop().expect("BUG: root candidate buffer exists"));
+    (keys, missing_data_options)
+}
+
+fn options_rule_list(
+    ctx: &EvaluationContext,
+    plan: &ExecutionPlan,
+    rule_path: &RulePath,
+) -> Option<ListValue> {
+    let index = plan.rules.get_index_of(rule_path)?;
+    let result = ctx.rule_values.get(index)?.as_ref()?;
+    match result.value().map(|bound| &bound.value) {
+        Some(ValueKind::List(rows)) => Some(rows.clone()),
+        _ => None,
+    }
+}
+
+fn options_for(lemma_type: &LemmaType, rule_rows: Option<&ListValue>) -> Vec<EvaluateDataValue> {
+    let mut options = Vec::new();
+    push_type_options(lemma_type, &mut options);
+    if let crate::planning::semantics::TypeSpecification::List { element, .. } =
+        &lemma_type.specifications
+    {
+        push_type_options(element, &mut options);
+    }
+    if let Some(rows) = rule_rows {
+        for row in rows.iter() {
+            push_option(&mut options, publish_typed(&row));
+        }
+    }
+    options
+}
+
+fn push_type_options(lemma_type: &LemmaType, options: &mut Vec<EvaluateDataValue>) {
+    for option in &lemma_type.options.values {
+        push_option(options, publish_bound(lemma_type, &option.value));
+    }
+}
+
+fn publish_bound(lemma_type: &LemmaType, bound: &BoundValueKind) -> EvaluateDataValue {
+    match &bound.value {
+        ValueKind::Boolean(bit) => EvaluateDataValue::Boolean(*bit),
+        ValueKind::Spec(_) => unreachable!("BUG: {SPEC_OPTIONS_NEVER_MISSING}"),
+        _ => EvaluateDataValue::Literal(lemma_type.display_bound(bound)),
+    }
+}
+
+fn publish_typed(typed: &TypedLiteral) -> EvaluateDataValue {
+    match &typed.value {
+        ValueKind::Boolean(bit) => EvaluateDataValue::Boolean(*bit),
+        ValueKind::Spec(_) => unreachable!("BUG: {SPEC_OPTIONS_NEVER_MISSING}"),
+        _ => EvaluateDataValue::Literal(typed.display_value()),
+    }
+}
+
+const SPEC_OPTIONS_NEVER_MISSING: &str = "missing-data options hold no spec value: a spec type is only a list element, a list of spec instances takes no options, and a spec list has its rows (possibly none) and is never missing data";
+
+fn push_option(options: &mut Vec<EvaluateDataValue>, option: EvaluateDataValue) {
+    if options.iter().any(|existing| existing == &option) {
+        return;
+    }
+    options.push(option);
 }
 
 /// Evaluates Lemma rules within their spec context
@@ -783,20 +1143,21 @@ impl Evaluator {
         plan: &ExecutionPlan,
         evaluate_data: &EvaluateData,
         now: LiteralValue,
-        response_rules: &std::collections::HashSet<&RulePath>,
+        requested: Vec<&RulePath>,
         explain: bool,
     ) -> Response {
         let effective = match &now.value {
             ValueKind::Date(date) => date.to_string(),
             other => panic!("BUG: evaluation now must be a date, got {other:?}"),
         };
-        let mut context = EvaluationContext::new(plan, evaluate_data, now, explain);
-
-        let requested: Vec<&crate::planning::execution_plan::ExecutableRule> = plan
-            .rules
-            .values()
-            .filter(|rule| response_rules.contains(&rule.path))
-            .collect();
+        let mut context = EvaluationContext::new(
+            plan,
+            evaluate_data,
+            now,
+            explain,
+            RequestCaches::new(evaluate_data),
+        );
+        resolve_dynamic_imports(plan, &mut context);
 
         let mut response = Response {
             spec_name: plan.spec_name.clone(),
@@ -810,46 +1171,79 @@ impl Evaluator {
         };
         let mut rows = response::RowTable::default();
 
-        for exec_rule in &requested {
-            tree::ensure_rule_values(plan.rule_index(&exec_rule.path), plan, &mut context);
+        for path in &requested {
+            assert!(
+                plan.rules.contains_key(*path),
+                "BUG: non-local rule in validated response set: {path}"
+            );
+            tree::ensure_rule_values(plan.rule_index(path), plan, &mut context);
         }
 
         let mut arena = narration::ExplanationArena::default();
         if explain {
-            narration::narrate_row_contexts(plan, &mut context, &mut arena);
+            narration::narrate_row_contexts(plan, &context, &mut arena);
             for (index, rule) in plan.rules.values().enumerate() {
                 if context.rule_values[index].is_some() {
-                    narration::narrate_rule(rule, plan, &mut context, &mut arena);
+                    narration::narrate_rule(rule, plan, &context, &mut arena, None);
                 }
             }
         }
 
-        for exec_rule in requested {
-            let result = context.rule_value(plan, &exec_rule.path).clone();
-            let rule_type = context.rule_result_type(plan, exec_rule);
-
-            let explanation = explain.then(|| {
-                narration::explanation_for(
-                    exec_rule,
-                    plan,
-                    &context,
-                    &arena,
-                    &result,
-                    Arc::clone(&rule_type),
+        for path in requested {
+            let (rule_type, explanation, missing_keys, source, result, runtime_scales) = {
+                let exec_rule = &plan.rules[path];
+                let result = context.rule_value(plan, path).clone();
+                let rule_type = context.rule_result_type(plan, exec_rule);
+                let explanation = explain.then(|| {
+                    narration::explanation_for(
+                        path,
+                        exec_rule,
+                        plan,
+                        &context,
+                        &arena,
+                        &result,
+                        Arc::clone(&rule_type),
+                    )
+                });
+                let missing_keys = result.is_missing_data().then(|| {
+                    let mut keys = context.missing_data_for_rule(plan, exec_rule.normal_form, None);
+                    // The veto itself names the live hole when the walk did not re-derive it
+                    // (e.g. instance-list `where` short-circuit on a row MissingRowData).
+                    if keys.is_empty() {
+                        match &result {
+                            OperationResult::Veto(VetoType::MissingRowData { key }) => {
+                                keys.push(key.clone());
+                            }
+                            OperationResult::Veto(VetoType::MissingData { data, .. }) => {
+                                keys.push(data.input_key());
+                            }
+                            OperationResult::Value(_) | OperationResult::Veto(_) => {}
+                        }
+                    }
+                    keys
+                });
+                let runtime_scales =
+                    tree::runtime_scale_factors_for(rule_type.as_ref(), plan, &context);
+                (
+                    rule_type,
+                    explanation,
+                    missing_keys,
+                    exec_rule.source.clone(),
+                    result,
+                    runtime_scales,
                 )
-            });
-
-            let missing_data = if result.is_missing_data() {
-                context.missing_data_for_rule(plan, exec_rule.normal_form)
-            } else {
-                Vec::new()
             };
 
-            let mut rule_result = RuleResult::from_operation_result(
+            let (missing_data, missing_data_options) = match missing_keys {
+                Some(keys) => closed_missing(&mut context, plan, keys),
+                None => (Vec::new(), IndexMap::new()),
+            };
+
+            let mut rule_result = RuleResult::from_evaluated(
                 EvaluatedRule {
-                    name: exec_rule.path.input_key(),
-                    path: exec_rule.path.clone(),
-                    source_location: exec_rule.source.clone(),
+                    name: path.input_key(),
+                    path: path.clone(),
+                    source_location: source,
                     rule_type: Arc::clone(&rule_type),
                 },
                 &result,
@@ -857,22 +1251,19 @@ impl Evaluator {
                 &plan.family_units,
                 explanation,
                 missing_data,
-            );
+                Some(&runtime_scales),
+            )
+            .with_missing_data_options(missing_data_options);
             if let (OperationResult::Value(bound), Some(value)) =
                 (&result, rule_result.result.as_mut())
             {
-                response::fill_spec_values(
-                    &bound.value,
-                    value,
-                    plan,
-                    &mut context,
-                    &mut rows,
-                    &mut Vec::new(),
-                );
+                response::fill_spec_values(&bound.value, value, plan, &mut context, &mut rows);
             }
             response.add_result(rule_result);
         }
         response.rows = rows.into_rows();
+        // Break the handle cycle: cached contexts hold this same map.
+        context.caches.row_contexts.borrow_mut().clear();
 
         response
     }
@@ -915,27 +1306,28 @@ rule r: i.slot
             .and_then(|plans| plans.values().next())
             .expect("must plan");
 
-        let reference_path = DataPath {
-            segments: vec![crate::planning::semantics::PathSegment {
-                uses: "i".to_string(),
-                repository: None,
-                spec: "inner".to_string(),
-            }],
-            data: "slot".to_string(),
+        let crate::planning::semantics::DataDefinition::Import { row, .. } = plan_basis
+            .data
+            .get(&DataPath::local("i".to_string()))
+            .expect("`uses i` is data of the consumer plan")
+        else {
+            panic!("`i` must be an import");
         };
+        let template = plan_basis.row_template(&row.identity);
+        let slot_path = DataPath::local("slot".to_string());
         assert!(
-            !plan_basis.data.contains_key(&reference_path),
-            "named-`uses` member must not be materialized into consumer data"
+            matches!(
+                row.get_binding(template, &slot_path),
+                Some(RowBinding::Deferred { hops: 0, .. })
+            ),
+            "`slot` of `i` is bound by `uses -> with` to a reference of the consumer"
         );
-
-        let resolved_type = crate::planning::normalize::lookup_data_definition(
-            &plan_basis.data,
-            &plan_basis.row_templates,
-            &reference_path,
-        )
-        .and_then(DataDefinition::resolved_type_arc)
-        .map(Arc::clone)
-        .expect("`i.slot` must peel to typed template data");
+        let resolved_type = template
+            .data
+            .get(&slot_path)
+            .and_then(|definition| definition.resolved_type_arc())
+            .map(Arc::clone)
+            .expect("`slot` must be typed by the imported field");
 
         let evaluate_data = EvaluateData::default();
 
@@ -945,13 +1337,16 @@ rule r: i.slot
                 crate::planning::semantics::date_time_to_semantic(&now),
             ),
         };
-        let mut context = EvaluationContext::new(plan_basis, &evaluate_data, now_lit, false);
-
-        let stored = crate::evaluation::imports::eval_import_member(
-            &reference_path,
+        let mut context = EvaluationContext::new(
             plan_basis,
-            &mut context,
+            &evaluate_data,
+            now_lit,
+            false,
+            RequestCaches::new(&evaluate_data),
         );
+        let rule = RulePath::new(Vec::new(), "r".to_string());
+        tree::ensure_rule_values(plan_basis.rule_index(&rule), plan_basis, &mut context);
+        let stored = context.rule_value(plan_basis, &rule).clone();
 
         let OperationResult::Value(value) = stored else {
             panic!("reference path must hold a value, got {stored:?}");
@@ -977,21 +1372,6 @@ rule r: i.slot
             ),
             "stored value must be the copied number, got {:?}",
             value.value
-        );
-    }
-
-    #[test]
-    fn ignored_under_prefix_strips_dotted_prefix_only() {
-        let ignored = vec![
-            "p.amountt".to_string(),
-            "P.Qty".to_string(),
-            "pq.other".to_string(),
-            "p.".to_string(),
-            "p".to_string(),
-        ];
-        assert_eq!(
-            ignored_under_prefix(&ignored, "p"),
-            vec!["amountt".to_string(), "qty".to_string()]
         );
     }
 }

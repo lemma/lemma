@@ -1,7 +1,8 @@
 //! List declarations: value lists, uses lists, empty defaults, type positions.
 
 use crate::lists::{
-    assert_contains, data, evaluate, list, lit, load_ok, load_parse_err, load_planning_err, value,
+    assert_contains, data, evaluate, list, lit, load_err, load_ok, load_parse_err,
+    load_planning_err, value,
 };
 
 #[test]
@@ -184,20 +185,23 @@ rule fares:
 }
 
 #[test]
-fn rule_list_of_spec_is_planning_error() {
-    let message = load_planning_err(
+fn rule_list_of_spec_plans_when_row_fields_are_written() {
+    let engine = load_ok(
         r#"
 spec employee
 data name: text
 
 spec payroll
+uses employee
 rule staff:
-  employee list -> with "Ada"
+  employee list -> with name: "Ada"
+rule first_name:
+  (staff -> first).name
 "#,
     );
-    assert_contains(
-        &message,
-        "'employee' names a spec. Instance lists are declared as data with `uses`, not built in a rule",
+    assert_eq!(
+        value(&evaluate(&engine, "payroll", data(&[])), "first_name"),
+        "Ada"
     );
 }
 
@@ -221,8 +225,8 @@ rule n:
 }
 
 #[test]
-fn uses_instance_list() {
-    let engine = load_ok(
+fn uses_instance_list_is_error() {
+    let err = load_err(
         r#"
 spec employee
 data name: text
@@ -233,24 +237,45 @@ rule n:
   staff -> count
 "#,
     );
-    assert_eq!(value(&evaluate(&engine, "payroll", data(&[])), "n"), "1");
+    assert_contains(&err, "uses");
 }
 
 #[test]
-fn data_spec_list_suggests_uses() {
-    let err = load_planning_err(
+fn sealed_staff_list_is_a_rule() {
+    let engine = load_ok(
         r#"
 spec employee
 data name: text
 spec payroll
-data staff: employee list
+uses employee
+rule staff:
+  employee list
+    -> with name: "Ada"
+rule n:
+  staff -> count
 "#,
     );
-    assert_contains(&err, "uses staff: employee list");
+    assert_eq!(value(&evaluate(&engine, "payroll", data(&[])), "n"), "1");
 }
 
 #[test]
-fn type_position_through_list_alias() {
+fn data_spec_list_plans() {
+    let engine = load_ok(
+        r#"
+spec employee
+data name: text
+spec payroll
+uses employee
+data staff: employee list
+rule n:
+  staff -> count
+"#,
+    );
+    assert_eq!(value(&evaluate(&engine, "payroll", data(&[])), "n"), "0");
+}
+
+#[test]
+fn type_position_through_data_list_alias_plans() {
     let engine = load_ok(
         r#"
 spec menu_item
@@ -260,7 +285,8 @@ data price: measure
   -> unit eur: 1.00
 
 spec coffee_order
-uses menu: menu_item list
+uses menu_item
+data menu: menu_item list
   -> key drink
   -> with drink: "espresso", price: 2.50 eur
   -> with drink: "latte", price: 3.50 eur
@@ -283,6 +309,30 @@ rule chosen:
 }
 
 #[test]
+fn type_position_through_rule_list_alias_is_error() {
+    let err = load_err(
+        r#"
+spec menu_item
+data drink: text
+  -> options "espresso", "latte"
+data price: measure
+  -> unit eur: 1.00
+
+spec coffee_order
+uses menu_item
+rule menu:
+  menu_item list
+    -> key drink
+    -> with drink: "espresso", price: 2.50 eur
+data ordered: menu.drink
+rule chosen:
+  ordered
+"#,
+    );
+    assert_contains(&err, "menu");
+}
+
+#[test]
 fn dot_on_list_alias_outside_command_is_error() {
     let err = load_planning_err(
         r#"
@@ -290,7 +340,8 @@ spec employee
 data salary: measure
   -> unit eur: 1.00
 spec payroll
-uses staff: employee list
+uses employee
+data staff: employee list
 rule all_salaries:
   staff.salary
 "#,
@@ -314,17 +365,24 @@ rule first_code:
 }
 
 #[test]
-fn rule_instance_list_with_rows_is_rejected() {
-    let err = load_planning_err(
+fn rule_instance_list_with_rows_plans() {
+    let engine = load_ok(
         r#"
 spec menu_item
 data drink: text
 spec coffee_order
-rule menu: menu_item list
-  -> with drink: "espresso"
+uses menu_item
+rule menu:
+  menu_item list
+    -> with drink: "espresso"
+rule first_drink:
+  (menu -> first).drink
 "#,
     );
-    assert_contains(&err, "uses");
+    assert_eq!(
+        value(&evaluate(&engine, "coffee_order", data(&[])), "first_drink"),
+        "espresso"
+    );
 }
 
 #[test]
@@ -334,8 +392,9 @@ fn row_type_checked_on_instance_list() {
 spec employee
 data name: text
 spec payroll
-uses staff: employee list
-  -> with "Ada"
+uses employee
+data staff: employee list
+  -> with Ada
 "#,
     );
     assert_contains(&err, "employee");
@@ -354,8 +413,24 @@ data salaries: number list
 }
 
 #[test]
-fn query_command_on_uses_is_parse_error() {
+fn query_command_on_data_instance_list_is_parse_error() {
     let err = load_parse_err(
+        r#"
+spec employee
+data salary: measure
+  -> unit eur: 1.00
+spec payroll
+uses employee
+data staff: employee list
+  -> min salary
+"#,
+    );
+    assert_contains(&err, "data supplies values");
+}
+
+#[test]
+fn uses_x_list_is_error() {
+    let err = load_err(
         r#"
 spec employee
 data salary: measure
@@ -365,12 +440,62 @@ uses staff: employee list
   -> min salary
 "#,
     );
-    assert_contains(&err, "data supplies values");
+    assert_contains(&err, "uses");
+}
+
+#[test]
+fn pin_on_data_list_is_parse_error() {
+    let err = load_parse_err(
+        r#"
+spec tax_bracket
+data rate: number
+spec income_tax
+data brackets: tax_bracket 2024 list
+"#,
+    );
+    assert_contains(&err, "uses");
+}
+
+#[test]
+fn repo_on_data_list_is_parse_error() {
+    let err = load_parse_err(
+        r#"
+spec income_tax
+data rates: @carrier/tariffs rate list
+"#,
+    );
+    assert_contains(&err, "uses");
+}
+
+#[test]
+fn pin_on_rule_list_is_parse_error() {
+    let err = load_parse_err(
+        r#"
+spec tax_bracket
+data rate: number
+spec income_tax
+rule brackets:
+  tax_bracket 2024 list
+"#,
+    );
+    assert_contains(&err, "uses");
+}
+
+#[test]
+fn repo_on_rule_list_is_parse_error() {
+    let err = load_parse_err(
+        r#"
+spec income_tax
+rule rates:
+  @carrier/tariffs rate list
+"#,
+    );
+    assert_contains(&err, "uses");
 }
 
 #[test]
 fn key_on_value_list_is_parse_error() {
-    let err = load_parse_err(
+    let err = load_planning_err(
         r#"
 spec fares_card
 data money: measure

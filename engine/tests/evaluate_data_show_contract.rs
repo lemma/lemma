@@ -133,16 +133,19 @@ fn samples() -> Vec<(&'static str, Vec<Value>)> {
     ]
 }
 
+/// Show states JSON shape (`type`, `oneOf`, boolean text `pattern`, unit-map keys).
+/// Number, measure and ratio string *content* is validated on evaluate, not by Show.
+/// So Show may accept strings evaluate rejects; it must not reject what evaluate binds.
 #[test]
-fn show_accepts_only_what_evaluate_data_binds() {
+fn evaluate_bindings_validate_against_show() {
     let engine = engine();
     for (key, samples) in samples() {
         let property = show_property(&engine, key);
         for sample in samples {
-            if jsonschema::is_valid(&property, &sample) {
+            if engine_binds(key, &sample) {
                 assert!(
-                    engine_binds(key, &sample),
-                    "{key}: Show accepts {sample} but run data does not bind it"
+                    jsonschema::is_valid(&property, &sample),
+                    "{key}: run data binds {sample} but Show rejects it"
                 );
             }
         }

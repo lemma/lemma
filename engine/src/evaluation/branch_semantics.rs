@@ -1,20 +1,20 @@
 //! Single source of truth for branch and veto decision semantics.
 //!
 //! The tree evaluator consults [`condition_outcome`] for piecewise unless-arm
-//! conditions and `and` conjuncts. One rule for both: a vetoed condition
-//! propagates its veto; a `true` boolean takes; a `false` boolean does not.
+//! conditions and logical operands (`and` / `or`). One rule: a vetoed condition
+//! propagates its veto; a `true` boolean is [`BranchOutcome::Taken`]; a `false`
+//! boolean is [`BranchOutcome::NotTaken`]. Connectives interpret those outcomes
+//! via their absorbing / identity literals; this module does not.
 
 use crate::computation::OperationResult;
 use crate::planning::semantics::ValueKind;
 
 /// Outcome of inspecting a branch condition or a boolean operand.
 #[derive(Debug, Clone)]
-pub(crate) enum BranchOutcome {
-    /// The condition decided positively: the branch wins or the conjunct passes.
+pub enum BranchOutcome {
+    /// The boolean was `true`.
     Taken,
-    /// The condition decided negatively: continue with the next branch or
-    /// operand (for the deciding operand of a conjunction this means the
-    /// conjunction resolves to `false`).
+    /// The boolean was `false`.
     NotTaken,
     /// This result becomes the value of the enclosing computation (vetoes
     /// that propagate).
@@ -35,11 +35,12 @@ fn boolean_value(result: &OperationResult, context: &str) -> bool {
     }
 }
 
-/// How a piecewise unless-arm condition or an `and` conjunct decides.
+/// How a piecewise unless-arm condition or a logical operand decides.
 ///
 /// A vetoed condition propagates its veto as the enclosing result. A `true`
-/// boolean takes the branch; a `false` boolean does not.
-pub(crate) fn condition_outcome(condition: &OperationResult) -> BranchOutcome {
+/// boolean is [`BranchOutcome::Taken`]; a `false` boolean is
+/// [`BranchOutcome::NotTaken`].
+pub fn condition_outcome(condition: &OperationResult) -> BranchOutcome {
     if condition.vetoed() {
         return BranchOutcome::Propagate(condition.clone());
     }
@@ -53,7 +54,7 @@ pub(crate) fn condition_outcome(condition: &OperationResult) -> BranchOutcome {
 /// Where the Piecewise arm scan stopped. Arm 0 is the default; unless arms
 /// `1..arm_count` are scanned from the highest index down, like the evaluator.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum PiecewiseDecision {
+pub enum PiecewiseDecision {
     /// Arm `arm` wins: every condition above it was `NotTaken`.
     Taken { arm: usize },
     /// Every unless condition was `NotTaken`; the default body wins.
@@ -65,7 +66,7 @@ pub(crate) enum PiecewiseDecision {
 
 /// Scan unless-arm conditions high to low. `outcome(arm)` reports the
 /// condition's decision, or `None` when there is none to read.
-pub(crate) fn piecewise_decision(
+pub fn piecewise_decision(
     arm_count: usize,
     mut outcome: impl FnMut(usize) -> Option<BranchOutcome>,
 ) -> PiecewiseDecision {

@@ -38,6 +38,11 @@ pub(crate) fn run_npm(dir: &Path, args: &[&str]) -> Result<(), String> {
     Ok(())
 }
 
+fn audit_npm(dir: &Path) -> Result<(), String> {
+    eprintln!("xtask: npm audit --audit-level=low");
+    run_npm(dir, &["audit", "--audit-level=low"])
+}
+
 fn run_npm_exec_capture(vscode_dir: &Path, bin: &str, args: &[&str]) -> Result<String, String> {
     let mut cmd_args = vec!["exec", "--no", "--", bin];
     cmd_args.extend_from_slice(args);
@@ -89,6 +94,7 @@ fn prepare_extension(root: &Path, vscode_dir: &Path) -> Result<(), String> {
     build_release_lemma(root)?;
     eprintln!("xtask: npm ci (vscode extension)");
     run_npm(vscode_dir, &["ci"])?;
+    audit_npm(vscode_dir)?;
     eprintln!("xtask: npm run compile (vscode extension)");
     run_npm(vscode_dir, &["run", "compile"])?;
     Ok(())
@@ -113,6 +119,7 @@ fn package_vsix(vscode_dir: &Path) -> Result<(), String> {
 pub fn ci_compile_package(vscode_dir: &Path) -> Result<(), String> {
     eprintln!("xtask: npm ci (vscode extension)");
     run_npm(vscode_dir, &["ci"])?;
+    audit_npm(vscode_dir)?;
     eprintln!("xtask: npm run compile (vscode extension)");
     run_npm(vscode_dir, &["run", "compile"])?;
     package_vsix(vscode_dir)?;

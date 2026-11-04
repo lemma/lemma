@@ -186,6 +186,7 @@ fn rush_and_cap_ok_import_rule_is_rule_ref() {
 }
 
 /// ImportRule ExplainedRule must carry the underlying expression, not the ref name.
+/// The import is flattened into the consumer, so its names are qualified by the alias.
 #[test]
 fn rush_and_cap_ok_import_rule_body_is_underlying_expression() {
     let engine = load();
@@ -202,7 +203,7 @@ fn rush_and_cap_ok_import_rule_body_is_underlying_expression() {
         .expect("order.is_rush in rules table");
     assert_eq!(
         is_rush.body.as_str(),
-        "is_express and estimated_delivery_days <= 2",
+        "order.is_express and order.estimated_delivery_days <= 2",
         "ImportRule body must be the source rule expression, not the ref name"
     );
     let savings = explanation
@@ -212,7 +213,7 @@ fn rush_and_cap_ok_import_rule_body_is_underlying_expression() {
         .expect("order.savings_percent in rules table");
     assert_eq!(
         savings.body.as_str(),
-        "(savings_total / subtotal) as percent",
+        "(order.savings_total / order.subtotal) as percent",
         "ImportRule body must be the source rule expression, not the ref name"
     );
 }
@@ -229,10 +230,13 @@ fn final_status_import_rule_bodies_are_underlying_expressions() {
     for (key, expected_body) in [
         (
             "order.savings_percent",
-            "(savings_total / subtotal) as percent",
+            "(order.savings_total / order.subtotal) as percent",
         ),
-        ("order.grand_total", "final_before_fees + processing_fee"),
-        ("order.subtotal", "base_price * quantity"),
+        (
+            "order.grand_total",
+            "order.final_before_fees + order.processing_fee",
+        ),
+        ("order.subtotal", "order.base_price * order.quantity"),
     ] {
         let rule = explanation
             .rules

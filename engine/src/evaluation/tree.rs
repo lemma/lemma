@@ -11,50 +11,55 @@
 //! winner are already visited by the last-wins reverse scan.
 //!
 //! Machine: every evaluation is a [`Frame`] on one heap stack. A frame's step either
-//! finishes with a value, spawns a child frame and waits for it, or enters / leaves a
-//! nested context scope (a named `uses` import or an instance-list row). Scopes are
-//! owned by a second heap stack, so no Rust call stack grows with expression depth,
-//! rule chains, import nesting, self-referencing row trees or list nesting.
+//! finishes with a value, spawns a child frame and waits for it, or enters / leaves the
+//! context of an instance-list row supplied by evaluation data. Scopes are owned by a
+//! second heap stack, so no Rust call stack grows with expression depth, rule chains,
+//! self-referencing row trees or list nesting. A `uses` import is a row: its slot reads
+//! as the instance, and member reads enter the instance's context like any row.
 
+use crate::computation::arithmetic::divisive_operation_results;
+use crate::computation::datetime::{
+    compute_date_calendar, compute_date_relative, evaluate_past_future_range,
+};
+use crate::computation::measure_math::{integer_rounding, step_rounding};
+use crate::computation::range::{check_containment, ordered_endpoints};
+use crate::computation::rational::{checked_mul, rational_one, rational_zero};
 use crate::computation::{
     arithmetic_operation, comparison_operation, convert_unit_operand, OperationResult, VetoType,
 };
 use crate::evaluation::branch_semantics::{condition_outcome, BranchOutcome};
 use crate::evaluation::expression::{evaluate_mathematical_operator, resolve_data_path_value};
-use crate::evaluation::imports;
 use crate::evaluation::list_ops::{self, ListFold};
 use crate::evaluation::rows::{self, RowRead};
-use crate::evaluation::{ignored_under_prefix, EvaluateData, EvaluationContext, RowLogMark};
-use crate::planning::execution_plan::{ExecutionPlan, RuleIndex};
+use crate::evaluation::{CurrentRow, EvaluationContext, RowLogMark};
+use crate::parsing::ast::{ConversionTypeKind, LogicalConnective};
+use crate::planning::execution_plan::{validate_value_against_type, ExecutionPlan, RuleIndex};
 use crate::planning::instance_list::{
-    absolute_reference, row_end_type, typed_from_bound, DataSource, InstanceListSource, KeyedRow,
+    row_end_type, typed_from_bound, InstanceListSource, KeyIndex,
 };
 use crate::planning::normalize::{
     ArithmeticTerm, LeafKind, NormalFormId, NormalFormKind, NormalFormListOp,
 };
 use crate::planning::ordered_dispatch::{region_count, region_of_scrutinee};
 use crate::planning::semantics::{
-    ArithmeticComputation, BoundValueKind, ComparisonComputation, DataDefinition, DataPath,
-    ImportOverlay, LemmaType, ListKey, LiteralValue, RangeBound, ReferenceEnd, ReferenceTarget,
-    RowEnd, RowInstance, RowOrigin, RulePath, SpecInstance, SpecValue, TypeSpecification,
+    primitive_boolean_arc, primitive_number_arc, typed_literal_from_bound, ArithmeticComputation,
+    BoundValueKind, ComparisonComputation, DataDefinition, DataPath, InstanceKey, KeyField,
+    LemmaType, ListKey, ListValue, LiteralValue, RangeBound, ReferenceEnd, ReferenceTarget,
+    RowBinding, RowEnd, RowOrigin, RulePath, SemanticConversionTarget, SemanticDateTime, SpecValue,
     TypedLiteral, ValueKind,
 };
-use indexmap::IndexMap;
 use std::cmp::Ordering;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-pub(crate) fn borrow_value<'a>(
-    result: &'a OperationResult,
-    operand: &str,
-) -> &'a crate::planning::semantics::BoundValueKind {
+pub(crate) fn borrow_value<'a>(result: &'a OperationResult, operand: &str) -> &'a BoundValueKind {
     match result {
         OperationResult::Value(v) => v,
         OperationResult::Veto(_) => panic!("BUG: {operand} passed veto check but has no value"),
     }
 }
 
-fn now_date(ctx: &EvaluationContext) -> &crate::planning::semantics::SemanticDateTime {
+fn now_date(ctx: &EvaluationContext) -> &SemanticDateTime {
     match &ctx.now().value {
         ValueKind::Date(dt) => dt,
         other => panic!("BUG: context.now() must be a date, got {other:?}"),
@@ -70,29 +75,24 @@ pub(crate) fn ensure_rule_values(
     run(plan, ctx, Frame::rule(rule));
 }
 
-/// Value of the named-`uses` member `path` of `plan`, peeled into its template scope.
-pub(crate) fn evaluate_import_member(
-    path: &DataPath,
-    plan: &ExecutionPlan,
-    ctx: &mut EvaluationContext,
-) -> OperationResult {
-    run(plan, ctx, Frame::import_member(path))
-        .expect("BUG: import member evaluation produced no value")
-}
-
-/// Context of `row` over `template`, taken from `ctx` when built or built bottom-up.
+/// Context of `row` over `template`, taken from `ctx` when built or built
+/// bottom-up. `plan` owns the list the row was read from: deferred bindings resolve
+/// against its rules and data. The row is materialized: every binding resolves.
 pub(crate) fn build_row_context(
-    row: &Arc<RowInstance>,
+    key: &InstanceKey,
+    plan: &ExecutionPlan,
     template: &ExecutionPlan,
     ctx: &mut EvaluationContext,
 ) -> EvaluationContext {
     run(
-        template,
+        plan,
         ctx,
-        Frame::row_scope(Arc::clone(row), template, RowBody::Nothing),
+        Frame::row_scope(key.clone(), template, RowBody::Materialize),
     );
-    ctx.row_contexts
-        .remove(row)
+    ctx.caches
+        .row_contexts
+        .borrow_mut()
+        .swap_remove(key)
         .expect("BUG: row context missing after its scope was built")
 }
 
@@ -103,6 +103,9 @@ type WalkDone = HashMap<NormalFormId, OperationResult>;
 type Delivered = Option<OperationResult>;
 
 fn ready(id: NormalFormId, ctx: &EvaluationContext, walk: &WalkDone) -> Option<OperationResult> {
+    if ctx.leaf_unsettled(id.index()) {
+        return None;
+    }
     walk.get(&id)
         .cloned()
         .or_else(|| ctx.values[id.index()].clone())
@@ -110,13 +113,21 @@ fn ready(id: NormalFormId, ctx: &EvaluationContext, walk: &WalkDone) -> Option<O
 
 /// Store policy for a finished cell. Unbound data leaves must stay None so
 /// missing_data walks still see them as unbound. Cells that read a list row change
-/// value per row and are never cached.
+/// value per row and are never cached. A value this plan cannot express in any unit
+/// finishes as a veto.
 fn finish(
     id: NormalFormId,
     result: OperationResult,
     plan: &ExecutionPlan,
     ctx: &mut EvaluationContext,
 ) -> OperationResult {
+    let result = match result {
+        OperationResult::Value(_) => match inexpressible_family_veto(plan.result_type(id), plan) {
+            Some(veto) => veto,
+            None => result,
+        },
+        veto @ OperationResult::Veto(_) => veto,
+    };
     let cell = plan.normal_form(id);
     let store = plan.row_mask[id.index()] == 0
         && !matches!(
@@ -138,12 +149,6 @@ struct Scope<'p> {
     ctx: EvaluationContext,
 }
 
-/// Where a scope's context goes back to when the scope is left.
-enum Home {
-    Import(DataPath),
-    Row(Arc<RowInstance>),
-}
-
 #[derive(Clone, Copy)]
 enum WalkMode {
     /// Child shares the spawner's walk memo.
@@ -159,8 +164,13 @@ enum Outcome<'p> {
     Spawn(Frame<'p>, WalkMode),
     /// The frame's context becomes current; the frame runs again inside it.
     Enter(Scope<'p>),
-    /// The current scope is left, its context returned home; the frame completes.
-    Exit(Delivered, Home),
+    /// The current row scope is left, its context returned to the row's cache; the
+    /// frame completes.
+    Exit(Delivered, InstanceKey),
+}
+
+fn spawn<'p>(frame: Frame<'p>, mode: WalkMode) -> Outcome<'p> {
+    Outcome::Spawn(frame, mode)
 }
 
 struct Frame<'p> {
@@ -168,21 +178,24 @@ struct Frame<'p> {
     /// Index of the walk memo this frame reads and writes.
     walk: usize,
     owns_walk: bool,
+    /// Scope this frame steps in: 0 for the root scope, `n` for the `n`-th
+    /// entered scope. Suspended frames keep their depth while deeper scopes
+    /// run above them, so a deferred row reference can spawn its target rule
+    /// in the ancestor scope that owns it. [`SCOPE_INHERIT`] until placed.
+    depth: usize,
     /// Value delivered by the child this frame waits for.
     inbox: Delivered,
 }
 
+/// [`Frame::depth`] of a frame not yet placed: the spawner's depth, or the root
+/// scope for the run's first frame.
+const SCOPE_INHERIT: usize = usize::MAX;
+
 enum Kind<'p> {
-    Cell(CellFrame<'p>),
+    Cell(CellFrame),
     Rule(RuleFrame),
-    ImportRule(&'p RulePath),
-    ImportMember(&'p DataPath),
-    ImportScope(ImportScopeFrame),
-    Relative(RelativeFrame),
-    ImportRuleFrom(ImportRuleFromFrame),
     RowScope(RowScopeFrame<'p>),
     ReadRow(ReadRowFrame),
-    Materialize(MaterializeFrame<'p>),
     ListOp(ListOpFrame<'p>),
 }
 
@@ -192,6 +205,7 @@ impl<'p> Frame<'p> {
             kind,
             walk: 0,
             owns_walk: false,
+            depth: SCOPE_INHERIT,
             inbox: None,
         }
     }
@@ -204,6 +218,7 @@ impl<'p> Frame<'p> {
             veto: None,
             settled: None,
             resume: None,
+            member_mark: None,
         }))
     }
 
@@ -212,74 +227,39 @@ impl<'p> Frame<'p> {
             index,
             depth: 0,
             saved_rows: None,
+            scale_cursor: 0,
+            body_spawned: false,
         }))
     }
 
-    fn import_rule(path: &'p RulePath) -> Self {
-        Self::of(Kind::ImportRule(path))
-    }
-
-    fn import_member(path: &'p DataPath) -> Self {
-        Self::of(Kind::ImportMember(path))
-    }
-
-    fn import_scope(
-        import_path: DataPath,
-        extras: IndexMap<DataPath, OperationResult>,
-        body: Option<Body>,
-    ) -> Self {
-        Self::of(Kind::ImportScope(ImportScopeFrame {
-            import_path,
-            extras,
-            body,
-            phase: ScopePhase::Overlay,
-            overlay_cursor: 0,
-            overlay_values: IndexMap::new(),
-            seeds: Vec::new(),
-            seed_cursor: 0,
-        }))
-    }
-
-    fn relative(relative: DataPath, overlay: IndexMap<DataPath, OperationResult>) -> Self {
-        Self::of(Kind::Relative(RelativeFrame { relative, overlay }))
-    }
-
-    fn import_rule_from(path: RulePath, overlay: IndexMap<DataPath, OperationResult>) -> Self {
-        Self::of(Kind::ImportRuleFrom(ImportRuleFromFrame { path, overlay }))
-    }
-
-    fn row_scope(row: Arc<RowInstance>, template: &'p ExecutionPlan, body: RowBody) -> Self {
+    fn row_scope(key: InstanceKey, template: &'p ExecutionPlan, body: RowBody) -> Self {
         Self::of(Kind::RowScope(RowScopeFrame {
-            row,
+            key,
             template,
             body,
             phase: RowPhase::Acquire,
+            read_slots: Vec::new(),
+            scale_cursor: 0,
         }))
     }
 
-    fn read_row(row: Arc<RowInstance>, end: RowEnd) -> Self {
+    /// Field `end` of row `key`, read in the row's context. `position` is the row's
+    /// 0-based place in the list a list command iterates.
+    fn read_row(key: InstanceKey, end: RowEnd, position: Option<usize>) -> Self {
+        let read = rows::ReadRow {
+            key: key.clone(),
+            position,
+        };
         Self::of(Kind::ReadRow(ReadRowFrame {
-            row,
+            read,
+            key,
             end,
             rule_root: None,
         }))
     }
 
-    fn materialize(path: &'p DataPath, source: &'p InstanceListSource) -> Self {
-        Self::of(Kind::Materialize(MaterializeFrame {
-            path,
-            source,
-            row_type: Arc::new(LemmaType::primitive(TypeSpecification::Spec {
-                spec: source.identity.clone(),
-            })),
-            rows: Vec::with_capacity(source.rows.len()),
-            row: 0,
-            field: 0,
-            bindings: IndexMap::new(),
-        }))
-    }
-
     fn list_op(
+        id: NormalFormId,
         list: NormalFormId,
         op: &'p NormalFormListOp,
         args: &'p [NormalFormId],
@@ -287,6 +267,7 @@ impl<'p> Frame<'p> {
         result_type: &'p Arc<LemmaType>,
     ) -> Self {
         Self::of(Kind::ListOp(ListOpFrame {
+            id,
             list,
             op,
             args,
@@ -299,7 +280,7 @@ impl<'p> Frame<'p> {
 
 /// One cell being evaluated. Children are evaluated by spawning frames, so no Rust call
 /// stack grows with expression depth.
-struct CellFrame<'p> {
+struct CellFrame {
     id: NormalFormId,
     /// Progress through a sequence of children: piecewise arms from the top, fold
     /// operands from the first, list command arguments from the first.
@@ -309,68 +290,38 @@ struct CellFrame<'p> {
     /// Value computed while the exhaustive origin visit is still pending.
     settled: Option<OperationResult>,
     /// Set while an operator child (not a cell of this walk) is awaited.
-    resume: Option<Resume<'p>>,
+    resume: Option<Resume>,
+    /// Row log mark of a member read past its first hop.
+    member_mark: Option<RowLogMark>,
 }
 
-enum Resume<'p> {
+enum Resume {
     Plain,
-    /// Import member read: a value that is not missing is stored in the leaf slot.
-    Import(&'p DataPath),
     /// Row read or list command: the row logs written since `mark` are recorded.
     RowLog(RowLogMark),
+    /// One hop of a member read: the next hop reads on the instance it yields; the row
+    /// logs written since `mark` are recorded when the last hop is read.
+    Member(RowLogMark),
 }
 
 struct RuleFrame {
     index: RuleIndex,
-    /// Scope depth the rule runs in; a rule active twice in one scope is a cycle.
+    /// Depth of the active scope stack; names the current evaluation context.
     depth: usize,
     /// Row stack of the requesting walk, cleared while the rule evaluates.
-    saved_rows: Option<Vec<Arc<RowInstance>>>,
+    saved_rows: Option<Vec<CurrentRow>>,
+    /// Next entry of the rule's `scale_dependencies` to evaluate before the body.
+    scale_cursor: usize,
+    /// The body is spawned; the next delivered value is the rule's value.
+    body_spawned: bool,
 }
 
-#[derive(Clone)]
-enum Body {
-    /// Relative member read inside the import scope.
-    Relative(DataPath),
-    /// Named-`uses` rule read inside the import scope.
-    ImportRuleFrom(RulePath),
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum ScopePhase {
-    /// Overlay values resolved in the owner scope (rule overlays may spawn rules).
-    Overlay,
-    /// Nested overlay import scopes built inside the new scope.
-    Seed,
-    Body,
-    Await,
-}
-
-struct ImportScopeFrame {
-    import_path: DataPath,
-    extras: IndexMap<DataPath, OperationResult>,
-    body: Option<Body>,
-    phase: ScopePhase,
-    overlay_cursor: usize,
-    overlay_values: IndexMap<DataPath, OperationResult>,
-    seeds: Vec<(DataPath, IndexMap<DataPath, OperationResult>)>,
-    seed_cursor: usize,
-}
-
-struct RelativeFrame {
-    relative: DataPath,
-    overlay: IndexMap<DataPath, OperationResult>,
-}
-
-struct ImportRuleFromFrame {
-    path: RulePath,
-    overlay: IndexMap<DataPath, OperationResult>,
-}
-
-#[derive(Clone, Copy)]
 enum RowBody {
-    /// Only the row context is built.
+    /// Only the row context is built; nothing is forced beyond the row's bindings.
     Nothing,
+    /// The row is materialized: every binding resolves, the whole self-list tree is
+    /// built. Used by response and options walks, never mid-evaluation.
+    Materialize,
     /// The row's rule value, read after the context is built.
     Rule(RuleIndex),
     /// A row data leaf, read after the context is built.
@@ -379,40 +330,40 @@ enum RowBody {
 
 enum RowPhase {
     Acquire,
+    /// Deferred bindings of the fields the upcoming body reads, whose rule targets
+    /// are not evaluated yet; forced one at a time from this index.
+    Resolve(usize),
     /// Self-list rows still to build, last first.
-    Children(Vec<Arc<RowInstance>>),
-    /// Self-list rules of the row, from this index.
-    Rules(usize),
+    Children(Vec<InstanceKey>),
     Body,
     Await,
 }
 
 struct RowScopeFrame<'p> {
-    row: Arc<RowInstance>,
+    key: InstanceKey,
     template: &'p ExecutionPlan,
     body: RowBody,
     phase: RowPhase,
+    /// Fields the body reads; deferred bindings there resolve in [`RowPhase::Resolve`]
+    /// before the context opens.
+    read_slots: Vec<DataPath>,
+    /// Next entry of the template's `unit_scale_targets` to evaluate before the body:
+    /// a row's context holds its own scales.
+    scale_cursor: usize,
 }
 
 struct ReadRowFrame {
-    row: Arc<RowInstance>,
+    key: InstanceKey,
+    /// Field read in the row's plan.
     end: RowEnd,
+    /// The row as narration sees the read.
+    read: rows::ReadRow,
     /// Root of the row's rule when the field is a rule, for missing-data keys.
     rule_root: Option<NormalFormId>,
 }
 
-struct MaterializeFrame<'p> {
-    path: &'p DataPath,
-    source: &'p InstanceListSource,
-    row_type: Arc<LemmaType>,
-    rows: Vec<TypedLiteral>,
-    row: usize,
-    field: usize,
-    bindings: IndexMap<DataPath, OperationResult>,
-}
-
 struct ListData {
-    rows: Vec<TypedLiteral>,
+    rows: ListValue,
     unit: Option<Arc<str>>,
 }
 
@@ -425,7 +376,7 @@ enum ListState {
         data: ListData,
         values: Vec<OperationResult>,
         count: usize,
-        key_fields: Option<Vec<String>>,
+        key_fields: Option<Vec<KeyField>>,
     },
     /// Per-row argument values of an instance list, in row order.
     PerRow {
@@ -434,30 +385,43 @@ enum ListState {
         values: Vec<TypedLiteral>,
         first_veto: Option<OperationResult>,
     },
+    /// Deferred rule targets inside `WithRow` operand values, forced one at a time in
+    /// the command's scope before the inline row binds them: the row spec's rules read
+    /// the bound rows from the row's template scope, where only values survive.
+    InlineDeferred {
+        data: ListData,
+        values: Vec<OperationResult>,
+        count: usize,
+        key_fields: Option<Vec<KeyField>>,
+        pending: std::vec::IntoIter<TargetForce>,
+    },
     /// Key-field reads over rows of an instance list.
     Scan(KeyScan),
 }
 
+/// Key values of a keyed list's rows, read one field at a time, then checked for
+/// conflicts and indexed.
 struct KeyScan {
-    rows: Vec<TypedLiteral>,
-    fields: Vec<String>,
+    rows: ListValue,
+    fields: Vec<KeyField>,
     row: usize,
     field: usize,
     key: Vec<TypedLiteral>,
-    purpose: ScanPurpose,
+    keyed: Vec<Vec<TypedLiteral>>,
+    then: ScanThen,
 }
 
-enum ScanPurpose {
-    Find {
-        wanted: Vec<TypedLiteral>,
-    },
-    Append {
-        keyed: Vec<KeyedRow>,
-        unit: Option<Arc<str>>,
-    },
+/// What a finished [`KeyScan`] yields.
+enum ScanThen {
+    /// The scanned list itself, as `-> with` on a keyed list returns it.
+    List(Option<Arc<str>>),
+    /// The row with these key values, for `find` on a list not indexed yet.
+    Find(Vec<TypedLiteral>),
 }
 
 struct ListOpFrame<'p> {
+    /// The list command cell.
+    id: NormalFormId,
     list: NormalFormId,
     op: &'p NormalFormListOp,
     args: &'p [NormalFormId],
@@ -472,29 +436,42 @@ fn run<'p>(
     root: &mut EvaluationContext,
     first: Frame<'p>,
 ) -> Delivered {
+    let mut active_rules: HashSet<(usize, RuleIndex)> = HashSet::new();
+    if let Kind::Rule(rule) = &first.kind {
+        active_rules.insert((rule.depth, rule.index));
+    }
     let mut frames = vec![first];
     let mut walks: Vec<WalkDone> = Vec::new();
     let mut scopes: Vec<Scope<'p>> = Vec::new();
     loop {
-        let mut frame = frames
-            .pop()
+        let frame = frames
+            .last_mut()
             .expect("BUG: evaluation machine ran out of frames");
-        let outcome = {
-            let (plan, ctx) = top(root_plan, &mut *root, &mut scopes);
-            step(&mut frame, plan, ctx, &walks)
-        };
+        if frame.depth == SCOPE_INHERIT {
+            frame.depth = 0;
+        }
+        let outcome = step(frame, root_plan, &mut *root, &mut scopes, &walks);
         if let Outcome::Spawn(child, WalkMode::New) = &outcome {
             if let Kind::Cell(cell) = &child.kind {
-                let (_, ctx) = top(root_plan, &mut *root, &mut scopes);
+                let depth = if child.depth == SCOPE_INHERIT {
+                    frame.depth
+                } else {
+                    child.depth
+                };
+                let (_, ctx) = layer(depth, root_plan, &mut *root, &mut scopes);
                 if let Some(cached) = ctx.values[cell.id.index()].clone() {
-                    frame.inbox = Some(cached);
-                    frames.push(frame);
-                    continue;
+                    if !ctx.leaf_unsettled(cell.id.index()) {
+                        frame.inbox = Some(cached);
+                        continue;
+                    }
                 }
             }
         }
         match outcome {
             Outcome::Spawn(mut child, mode) => {
+                if child.depth == SCOPE_INHERIT {
+                    child.depth = frame.depth;
+                }
                 match mode {
                     WalkMode::Same => child.walk = frame.walk,
                     WalkMode::New => {
@@ -504,24 +481,15 @@ fn run<'p>(
                     }
                 }
                 if let Kind::Rule(rule) = &mut child.kind {
-                    let depth = scopes.len();
-                    rule.depth = depth;
-                    let index = rule.index;
-                    let cyclic = frames
-                        .iter()
-                        .chain(std::iter::once(&frame))
-                        .any(|active| {
-                            matches!(&active.kind, Kind::Rule(r) if r.index == index && r.depth == depth)
-                        });
-                    if cyclic {
-                        let (plan, _) = top(root_plan, &mut *root, &mut scopes);
+                    rule.depth = child.depth;
+                    if !active_rules.insert((rule.depth, rule.index)) {
+                        let (plan, _) = layer(rule.depth, root_plan, &mut *root, &mut scopes);
                         panic!(
                             "BUG: cyclic rule reference while ensuring values for '{}'",
-                            plan.rule_at(index).path.rule
+                            plan.rule_at(rule.index).path
                         );
                     }
                 }
-                frames.push(frame);
                 frames.push(child);
             }
             Outcome::Enter(scope) => {
@@ -529,12 +497,20 @@ fn run<'p>(
                 walks.push(WalkDone::new());
                 frame.walk = walks.len() - 1;
                 frame.owns_walk = true;
-                frames.push(frame);
+                frame.depth = scopes.len();
             }
             Outcome::Finish(value) => {
+                let frame = frames.pop().expect("BUG: the stepped frame is on top");
+                if let Kind::Rule(rule) = &frame.kind {
+                    assert!(
+                        active_rules.remove(&(rule.depth, rule.index)),
+                        "BUG: finished rule frame was not active"
+                    );
+                }
                 let stored = match &frame.kind {
                     Kind::Cell(cell) => {
-                        let (_, ctx) = top(root_plan, &mut *root, &mut scopes);
+                        let depth = frame.depth;
+                        let (_, ctx) = layer(depth, root_plan, &mut *root, &mut scopes);
                         ctx.values[cell.id.index()].is_some()
                     }
                     _ => false,
@@ -543,17 +519,16 @@ fn run<'p>(
                     return result;
                 }
             }
-            Outcome::Exit(value, home) => {
+            Outcome::Exit(value, row) => {
+                let frame = frames.pop().expect("BUG: the stepped frame is on top");
+                assert!(
+                    scopes.len() == frame.depth,
+                    "BUG: row scope at depth {} exited above {} entered scopes",
+                    frame.depth,
+                    scopes.len()
+                );
                 let scope = scopes.pop().expect("BUG: scope left without being entered");
-                let (_, parent) = top(root_plan, &mut *root, &mut scopes);
-                match home {
-                    Home::Import(marker) => {
-                        parent.import_contexts.insert(marker, scope.ctx);
-                    }
-                    Home::Row(row) => {
-                        parent.row_contexts.insert(row, scope.ctx);
-                    }
-                }
+                root.caches.row_contexts.borrow_mut().insert(row, scope.ctx);
                 if let Some(result) = complete(frame, value, false, &mut frames, &mut walks) {
                     return result;
                 }
@@ -562,16 +537,63 @@ fn run<'p>(
     }
 }
 
-/// Plan and context of the innermost scope; the root scope when none is entered.
-fn top<'a, 'p>(
+/// Plan and context of scope `depth`: the root scope at 0, the `depth`-th
+/// entered scope above it. A suspended frame's scope stays on the stack while
+/// deeper scopes run, so any depth a live frame holds is valid.
+fn layer<'a, 'p>(
+    depth: usize,
     root_plan: &'p ExecutionPlan,
     root: &'a mut EvaluationContext,
-    scopes: &'a mut Vec<Scope<'p>>,
+    scopes: &'a mut [Scope<'p>],
 ) -> (&'p ExecutionPlan, &'a mut EvaluationContext) {
-    match scopes.last_mut() {
-        Some(scope) => (scope.plan, &mut scope.ctx),
-        None => (root_plan, root),
+    if depth == 0 {
+        return (root_plan, root);
     }
+    let scope = scopes
+        .get_mut(depth - 1)
+        .expect("BUG: frame holds a scope that already left");
+    (scope.plan, &mut scope.ctx)
+}
+
+/// Scope owning a deferred binding's target: a live layer on the scope stack
+/// (0 = root), or the owner row's cached context when its scope already left;
+/// a row scope frame re-enters the cache entry.
+enum DeferredOwner {
+    Layer(usize),
+    Cached,
+}
+
+/// Where the target of `owner` lives: the root scope for root-born
+/// bindings; the current or a suspended ancestor scope while the owner row's
+/// context is on the stack; the owner row's cache entry after its scope left.
+fn deferred_owner(
+    owner: Option<&InstanceKey>,
+    depth: usize,
+    root: &EvaluationContext,
+    scopes: &[Scope],
+) -> DeferredOwner {
+    let Some(owner_row) = owner else {
+        return DeferredOwner::Layer(0);
+    };
+    let current = if depth == 0 {
+        &root.owner_row
+    } else {
+        &scopes
+            .get(depth - 1)
+            .expect("BUG: frame holds a scope that already left")
+            .ctx
+            .owner_row
+    };
+    if current.as_ref() == Some(owner_row) {
+        return DeferredOwner::Layer(depth);
+    }
+    if let Some(position) = scopes
+        .iter()
+        .position(|scope| scope.ctx.owner_row.as_ref() == Some(owner_row))
+    {
+        return DeferredOwner::Layer(position + 1);
+    }
+    DeferredOwner::Cached
 }
 
 /// Finishes `frame` with `value` and delivers the value to the frame that spawned it.
@@ -603,29 +625,28 @@ fn complete<'p>(
 
 fn step<'p>(
     frame: &mut Frame<'p>,
-    plan: &'p ExecutionPlan,
-    ctx: &mut EvaluationContext,
+    root_plan: &'p ExecutionPlan,
+    root: &mut EvaluationContext,
+    scopes: &mut Vec<Scope<'p>>,
     walks: &[WalkDone],
 ) -> Outcome<'p> {
     let inbox = frame.inbox.take();
     let walk = frame.walk;
+    if let Kind::RowScope(scope) = &mut frame.kind {
+        return step_row_scope(scope, inbox, frame.depth, root_plan, root, scopes);
+    }
+    let (plan, ctx) = layer(frame.depth, root_plan, root, scopes);
     match &mut frame.kind {
         Kind::Cell(cell) => step_cell(cell, inbox, &walks[walk], plan, ctx),
         Kind::Rule(rule) => step_rule(rule, inbox, plan, ctx),
-        Kind::ImportRule(path) => step_import_rule(path, inbox, plan, ctx),
-        Kind::ImportMember(path) => step_import_member(path, inbox, plan, ctx),
-        Kind::ImportScope(scope) => step_import_scope(scope, inbox, plan, ctx),
-        Kind::Relative(relative) => step_relative(relative, inbox, plan, ctx),
-        Kind::ImportRuleFrom(from) => step_import_rule_from(from, inbox, plan, ctx),
-        Kind::RowScope(scope) => step_row_scope(scope, inbox, ctx),
         Kind::ReadRow(read) => step_read_row(read, inbox, plan, ctx),
-        Kind::Materialize(materialize) => step_materialize(materialize, inbox, plan),
         Kind::ListOp(list) => step_list_op(list, inbox, plan, ctx),
+        Kind::RowScope(_) => unreachable!("BUG: row scope frame stepped outside its arm"),
     }
 }
 
-/// Rule `index` of `plan`: its normal form is evaluated once per request and stored in
-/// `rule_values`. A rule that is its own named `uses` import evaluates through the import.
+/// Rule `index` of `plan`: its scale dependencies are evaluated first, then its normal
+/// form, once per request; the value is stored in `rule_values`.
 fn step_rule<'p>(
     frame: &mut RuleFrame,
     inbox: Delivered,
@@ -634,16 +655,10 @@ fn step_rule<'p>(
 ) -> Outcome<'p> {
     let index = frame.index;
     let rule = plan.rule_at(index);
-    let self_import = matches!(
-        &plan.normal_form(rule.normal_form).kind,
-        NormalFormKind::Leaf(LeafKind::ImportRule(path)) if *path == rule.path
-    );
-    if let Some(value) = inbox {
+    if frame.body_spawned {
+        let value = inbox.expect("BUG: rule body finished without a value");
         if let Some(rows) = frame.saved_rows.take() {
             ctx.row_stack = rows;
-        }
-        if self_import {
-            ctx.values[rule.normal_form.index()] = Some(value.clone());
         }
         ctx.rule_values[index.index()] = Some(value);
         return Outcome::Finish(None);
@@ -651,308 +666,228 @@ fn step_rule<'p>(
     if ctx.rule_values[index.index()].is_some() {
         return Outcome::Finish(None);
     }
-    frame.saved_rows = Some(std::mem::take(&mut ctx.row_stack));
-    match &plan.normal_form(rule.normal_form).kind {
-        NormalFormKind::Leaf(LeafKind::ImportRule(path)) if *path == rule.path => {
-            Outcome::Spawn(Frame::import_rule(path), WalkMode::Same)
+    if frame.saved_rows.is_none() {
+        frame.saved_rows = Some(std::mem::take(&mut ctx.row_stack));
+    }
+    while let Some(target) = rule.scale_dependencies.get(frame.scale_cursor) {
+        frame.scale_cursor += 1;
+        if let Some(force) = unforced_target(target, plan, ctx) {
+            let (child, mode) = force_frame(force);
+            return spawn(child, mode);
         }
-        _ => Outcome::Spawn(Frame::cell(rule.normal_form), WalkMode::New),
     }
+    frame.body_spawned = true;
+    spawn(Frame::cell(rule.normal_form), WalkMode::New)
 }
 
-/// Named `uses` rule `path` read from the owner scope: the rule's value inside the
-/// import scope, mapped back into the owner's frame.
-fn step_import_rule<'p>(
-    path: &'p RulePath,
-    inbox: Delivered,
-    plan: &'p ExecutionPlan,
-    ctx: &mut EvaluationContext,
-) -> Outcome<'p> {
-    if let Some(result) = inbox {
-        return Outcome::Finish(Some(imports::into_owner_frame(path, plan, result)));
-    }
-    let mut hops = path.segments.iter();
-    let first = hops
-        .next()
-        .unwrap_or_else(|| panic!("BUG: eval_import_rule on local rule '{}'", path.rule));
-    let marker = DataPath::local(first.uses.clone());
-    if !matches!(plan.data.get(&marker), Some(DataDefinition::Import { .. })) {
-        panic!("BUG: import rule '{}' first hop is not Import", path.rule);
-    }
-    let extras = imports::consumer_values_under_hop(plan, ctx, &first.uses);
-    let nested = RulePath {
-        segments: hops.cloned().collect(),
-        rule: path.rule.clone(),
+/// Data paths of the row spec the row scope reads once open: exactly the body's
+/// fields. Deferred bindings at these slots resolve in [`RowPhase::Resolve`];
+/// bindings elsewhere stay unresolved until a read lands there. `Materialize`
+/// resolves every binding of the row.
+fn row_scope_read_slots(frame: &RowScopeFrame) -> Vec<DataPath> {
+    let template = frame.template;
+    let mut slots: Vec<DataPath> = Vec::new();
+    let mut push = |slot: DataPath| {
+        if !slots.contains(&slot) {
+            slots.push(slot);
+        }
     };
-    Outcome::Spawn(
-        Frame::import_scope(marker, extras, Some(Body::ImportRuleFrom(nested))),
-        WalkMode::Same,
-    )
+    match &frame.body {
+        RowBody::Nothing => {}
+        RowBody::Materialize => {
+            for (slot, binding) in frame.key.row.bindings.iter().enumerate() {
+                if binding.is_some() {
+                    let (path, _) = template
+                        .data
+                        .get_index(slot)
+                        .expect("BUG: row binding slot is template data");
+                    push(path.clone());
+                }
+            }
+        }
+        RowBody::Rule(index) => {
+            let end = RowEnd::Rule(template.rule_at(*index).path.clone());
+            for read in template.row_end_reads(&end) {
+                push(read.slot);
+            }
+        }
+        RowBody::Leaf(id) => {
+            if let NormalFormKind::Leaf(LeafKind::DataPath(path)) = &template.normal_form(*id).kind
+            {
+                push(path.clone());
+            }
+        }
+    }
+    slots
 }
 
-/// Member `path` of a named `uses` import, read from the owner scope.
-fn step_import_member<'p>(
-    path: &'p DataPath,
-    inbox: Delivered,
-    plan: &'p ExecutionPlan,
-    ctx: &mut EvaluationContext,
-) -> Outcome<'p> {
-    if let Some(result) = inbox {
-        return Outcome::Finish(Some(imports::qualify_import_member_missing(
-            path, plan, result,
-        )));
+/// Rule a deferred binding's target ends at: the rule itself, or the rule end of the
+/// data target's reference chain.
+fn deferred_target_rule<'a>(target: &'a ReferenceTarget, plan: &'a ExecutionPlan) -> &'a RulePath {
+    match target {
+        ReferenceTarget::Rule(rule) => rule,
+        ReferenceTarget::Data(path) => match plan.reference_ends.get(path) {
+            Some(ReferenceEnd::Rule(rule)) => rule,
+            _ => panic!("BUG: deferred binding '{path}' does not end at a rule"),
+        },
     }
-    let mut hops = path.segments.iter();
-    let first = hops.next().unwrap_or_else(|| {
-        panic!(
-            "BUG: eval_import_member on local path '{}'",
-            path.input_key()
-        )
-    });
-    let marker = DataPath::local(first.uses.clone());
-    if !matches!(plan.data.get(&marker), Some(DataDefinition::Import { .. })) {
-        panic!(
-            "BUG: import member '{}' first hop is not Import",
-            path.input_key()
-        );
-    }
-    let relative = DataPath {
-        segments: hops.cloned().collect(),
-        data: path.data.clone(),
-    };
-    let extras = imports::consumer_values_under_hop(plan, ctx, &first.uses);
-    Outcome::Spawn(
-        Frame::import_scope(marker, extras, Some(Body::Relative(relative))),
-        WalkMode::Same,
-    )
 }
 
-/// Enters the import context of `import_path`: the overlay is resolved in the owner scope
-/// (rule overlays spawn rules there), the context is taken from the owner's cache or built
-/// with its nested overlay imports, the body runs inside it, and the context goes back to
-/// the owner's cache.
-fn step_import_scope<'p>(
-    frame: &mut ImportScopeFrame,
-    mut inbox: Delivered,
-    plan: &'p ExecutionPlan,
-    ctx: &mut EvaluationContext,
-) -> Outcome<'p> {
-    loop {
-        match frame.phase {
-            ScopePhase::Overlay => {
-                let Some(DataDefinition::Import {
-                    identity, overlay, ..
-                }) = plan.data.get(&frame.import_path)
-                else {
-                    panic!(
-                        "BUG: import context for non-import '{}'",
-                        frame.import_path.input_key()
-                    );
-                };
-                let template = plan.row_template(identity);
-                while frame.overlay_cursor < overlay.len() {
-                    let (path, entry) = overlay
-                        .get_index(frame.overlay_cursor)
-                        .expect("BUG: overlay cursor is within the overlay");
-                    // Evaluate / parent extras already bind this relative path: skip the
-                    // wire (do not require the source or force a rule eval).
-                    if frame.extras.contains_key(path) {
-                        frame.overlay_cursor += 1;
-                        continue;
-                    }
-                    let raw = match entry {
-                        ImportOverlay::Literal(bound) => OperationResult::from_bound(bound.clone()),
-                        ImportOverlay::Reference {
-                            target: ReferenceTarget::Data(target),
-                            ..
-                        } => ctx.data_slot(plan, target).cloned().unwrap_or_else(|| {
-                            // Owner slot still open: imported field carries that MissingData.
-                            OperationResult::Veto(VetoType::missing_data(
-                                target.clone(),
-                                ctx.missing_data_suggestion(target),
-                            ))
-                        }),
-                        ImportOverlay::Reference {
-                            target: ReferenceTarget::Rule(rule),
-                            ..
-                        } => {
-                            let index = plan.rule_index(rule);
-                            match &ctx.rule_values[index.index()] {
-                                Some(value) => value.clone(),
-                                None => return Outcome::Spawn(Frame::rule(index), WalkMode::Same),
-                            }
-                        }
+/// What resolving a deferred target in its owner's context evaluates first.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TargetForce {
+    /// The rule the target ends at.
+    Rule(RuleIndex),
+    /// The member cell of a target read through `uses` hops (`i.x`).
+    Member(NormalFormId),
+}
+
+/// What `target` still needs evaluated in `ctx` over `plan`, its owner, before it
+/// resolves; `None` when it resolves as is.
+fn unforced_target(
+    target: &ReferenceTarget,
+    plan: &ExecutionPlan,
+    ctx: &EvaluationContext,
+) -> Option<TargetForce> {
+    if let Some(&cell) = plan.member_targets.get(target) {
+        return ctx.values[cell.index()]
+            .is_none()
+            .then_some(TargetForce::Member(cell));
+    }
+    if !rule_bound_target(target, plan) {
+        return None;
+    }
+    let index = plan.rule_index(deferred_target_rule(target, plan));
+    ctx.rule_values[index.index()]
+        .is_none()
+        .then_some(TargetForce::Rule(index))
+}
+
+/// The frame that evaluates `force` in its owner's context.
+fn force_frame<'p>(force: TargetForce) -> (Frame<'p>, WalkMode) {
+    match force {
+        TargetForce::Rule(index) => (Frame::rule(index), WalkMode::Same),
+        TargetForce::Member(cell) => (Frame::cell(cell), WalkMode::New),
+    }
+}
+
+/// Row body that evaluates `force` in the owner row's context.
+fn force_body(force: TargetForce) -> RowBody {
+    match force {
+        TargetForce::Rule(index) => RowBody::Rule(index),
+        TargetForce::Member(cell) => RowBody::Leaf(cell),
+    }
+}
+
+/// Targets a deferred row binding anywhere in `values` ends at that are not
+/// evaluated yet, in first-seen order.
+fn unforced_deferred_in_values(
+    values: &[OperationResult],
+    plan: &ExecutionPlan,
+    ctx: &EvaluationContext,
+) -> Vec<TargetForce> {
+    let rows = values
+        .iter()
+        .filter_map(OperationResult::value)
+        .flat_map(|bound| value_rows(&bound.value))
+        .collect();
+    unforced_deferred_targets(rows, true, plan, ctx)
+        .into_iter()
+        .map(|(_, force)| force)
+        .collect()
+}
+
+/// Where a deferred target of [`unforced_deferred_targets`] is evaluated.
+#[derive(Clone, PartialEq, Eq)]
+enum ForceAt {
+    /// The context the targets were gathered in.
+    Here,
+    /// The cached context of this row.
+    Row(InstanceKey),
+}
+
+/// Targets that deferred bindings of `rows`, and of the rows their bindings hold, end
+/// at and their owner context has not evaluated, in first-seen order. With
+/// `owned_only`, only bindings `ctx` owns count: another scope resolves the rest.
+/// Otherwise a binding owned by a cached row context is forced there.
+fn unforced_deferred_targets(
+    rows: Vec<InstanceKey>,
+    owned_only: bool,
+    plan: &ExecutionPlan,
+    ctx: &EvaluationContext,
+) -> Vec<(ForceAt, TargetForce)> {
+    let mut pending = Vec::new();
+    let mut stack = rows;
+    stack.reverse();
+    while let Some(key) = stack.pop() {
+        let mut held = Vec::new();
+        for binding in key.row.bindings.iter().flatten() {
+            match binding {
+                RowBinding::Deferred { target, hops } => {
+                    let owner = key.scope(*hops);
+                    let unforced = if owner == ctx.owner_row.as_ref() {
+                        unforced_target(target, plan, ctx).map(|force| (ForceAt::Here, force))
+                    } else if owned_only {
+                        None
+                    } else {
+                        owner.and_then(|owner| {
+                            let contexts = ctx.caches.row_contexts.borrow();
+                            let owner_ctx = contexts.get(owner)?;
+                            let owner_plan = plan.row_template(&owner.row.identity);
+                            unforced_target(target, owner_plan, owner_ctx)
+                                .map(|force| (ForceAt::Row(owner.clone()), force))
+                        })
                     };
-                    let value = imports::check_overlay_value(
-                        entry,
-                        raw,
-                        plan,
-                        template,
-                        &frame.import_path,
-                        path,
-                    );
-                    frame.overlay_values.insert(path.clone(), value);
-                    frame.overlay_cursor += 1;
-                }
-                // Parent-frame values for this alias override the nested site overlay: the outermost binding wins.
-                for (path, value) in std::mem::take(&mut frame.extras) {
-                    frame.overlay_values.insert(path, value);
-                }
-                if let Some(cached) = ctx.import_contexts.remove(&frame.import_path) {
-                    frame.phase = ScopePhase::Body;
-                    return Outcome::Enter(Scope {
-                        plan: template,
-                        ctx: cached,
-                    });
-                }
-                let mut bindings = IndexMap::new();
-                for (path, value) in &frame.overlay_values {
-                    if path.segments.is_empty() {
-                        bindings.insert(path.clone(), value.clone());
+                    if let Some(force) = unforced {
+                        if !pending.contains(&force) {
+                            pending.push(force);
+                        }
                     }
                 }
-                let mut body = EvaluationContext::new(
-                    template,
-                    &EvaluateData {
-                        bindings,
-                        ignored_unknown: ignored_under_prefix(
-                            &ctx.ignored_unknown,
-                            &frame.import_path.input_key(),
-                        ),
-                    },
-                    ctx.now().clone(),
-                    ctx.exhaustive,
-                );
-                for (path, value) in &frame.overlay_values {
-                    if path.segments.is_empty() {
-                        continue;
-                    }
-                    if let Some(&leaf) = template.data_leaf.get(path) {
-                        body.values[leaf.index()] = Some(value.clone());
-                    }
-                }
-                frame.seeds = imports::seed_queue(template, &frame.overlay_values);
-                frame.phase = ScopePhase::Seed;
-                return Outcome::Enter(Scope {
-                    plan: template,
-                    ctx: body,
-                });
-            }
-            ScopePhase::Seed => {
-                if let Some((marker, extras)) = frame.seeds.get_mut(frame.seed_cursor) {
-                    let marker = marker.clone();
-                    let extras = std::mem::take(extras);
-                    frame.seed_cursor += 1;
-                    return Outcome::Spawn(
-                        Frame::import_scope(marker, extras, None),
-                        WalkMode::Same,
+                RowBinding::Rows { rows, hops, .. } => {
+                    let owner = key.scope(*hops);
+                    held.extend(
+                        rows.iter()
+                            .map(|nested| InstanceKey::new(Arc::clone(nested), owner.cloned())),
                     );
                 }
-                frame.phase = ScopePhase::Body;
-            }
-            ScopePhase::Body => match frame.body.take() {
-                None => {
-                    return Outcome::Exit(None, Home::Import(frame.import_path.clone()));
+                RowBinding::Instance(nested) => {
+                    held.push(InstanceKey::new(Arc::clone(nested), Some(key.clone())));
                 }
-                Some(Body::Relative(relative)) => {
-                    frame.phase = ScopePhase::Await;
-                    let overlay = std::mem::take(&mut frame.overlay_values);
-                    return Outcome::Spawn(Frame::relative(relative, overlay), WalkMode::Same);
+                RowBinding::Bound(OperationResult::Value(bound)) => {
+                    held.extend(value_rows(&bound.value));
                 }
-                Some(Body::ImportRuleFrom(path)) => {
-                    frame.phase = ScopePhase::Await;
-                    let overlay = std::mem::take(&mut frame.overlay_values);
-                    return Outcome::Spawn(Frame::import_rule_from(path, overlay), WalkMode::Same);
-                }
-            },
-            ScopePhase::Await => {
-                let result = inbox
-                    .take()
-                    .expect("BUG: import scope resumed without its body value");
-                return Outcome::Exit(Some(result), Home::Import(frame.import_path.clone()));
+                RowBinding::Bound(OperationResult::Veto(_)) => {}
             }
         }
+        stack.extend(held.into_iter().rev());
     }
+    pending
 }
 
-/// Relative member `relative` inside an import scope: a value from the overlay, a data
-/// slot, or the next named import hop entered as its own scope.
-fn step_relative<'p>(
-    frame: &mut RelativeFrame,
-    inbox: Delivered,
-    plan: &'p ExecutionPlan,
-    ctx: &mut EvaluationContext,
-) -> Outcome<'p> {
-    if let Some(result) = inbox {
-        return Outcome::Finish(Some(result));
-    }
-    if let Some(value) = frame.overlay.get(&frame.relative) {
-        return Outcome::Finish(Some(value.clone()));
-    }
-    if frame.relative.segments.is_empty() {
-        if let Some(slot) = ctx.data_slot(plan, &frame.relative) {
-            return Outcome::Finish(Some(slot.clone()));
+/// Rows `value` holds: the row it is, or the rows of a list.
+fn value_rows(value: &ValueKind) -> Vec<InstanceKey> {
+    fn row(value: &ValueKind) -> Option<InstanceKey> {
+        match value {
+            ValueKind::Spec(SpecValue::Row(key)) => Some(key.clone()),
+            _ => None,
         }
-        let target = plan
-            .promptable_data_path(&frame.relative)
-            .unwrap_or(&frame.relative);
-        return Outcome::Finish(Some(OperationResult::Veto(VetoType::missing_data(
-            target.clone(),
-            ctx.missing_data_suggestion(target),
-        ))));
     }
-    let hop = &frame.relative.segments[0];
-    let marker = DataPath::local(hop.uses.clone());
-    if !matches!(plan.data.get(&marker), Some(DataDefinition::Import { .. })) {
-        panic!(
-            "BUG: nested hop '{}' is not Import on template while peeling '{}'",
-            hop.uses,
-            frame.relative.input_key()
-        );
+    match value {
+        ValueKind::List(items) => match items.stored() {
+            Some(stored) => stored
+                .rows
+                .iter()
+                .map(|row| InstanceKey::new(Arc::clone(row), stored.owner.cloned()))
+                .collect(),
+            None => items
+                .values()
+                .iter()
+                .filter_map(|item| row(&item.value))
+                .collect(),
+        },
+        other => row(other).into_iter().collect(),
     }
-    let extras = imports::values_under_hop(&frame.overlay, &hop.uses);
-    let nested = DataPath {
-        segments: frame.relative.segments[1..].to_vec(),
-        data: frame.relative.data.clone(),
-    };
-    Outcome::Spawn(
-        Frame::import_scope(marker, extras, Some(Body::Relative(nested))),
-        WalkMode::Same,
-    )
-}
-
-/// Named `uses` rule `path` inside an import scope: the template's rule value, or the
-/// next named import hop entered as its own scope.
-fn step_import_rule_from<'p>(
-    frame: &mut ImportRuleFromFrame,
-    inbox: Delivered,
-    plan: &'p ExecutionPlan,
-    ctx: &mut EvaluationContext,
-) -> Outcome<'p> {
-    if let Some(result) = inbox {
-        return Outcome::Finish(Some(result));
-    }
-    if frame.path.segments.is_empty() {
-        let index = plan.rule_index(&frame.path);
-        return match &ctx.rule_values[index.index()] {
-            Some(value) => Outcome::Finish(Some(value.clone())),
-            None => Outcome::Spawn(Frame::rule(index), WalkMode::Same),
-        };
-    }
-    let hop = &frame.path.segments[0];
-    let marker = DataPath::local(hop.uses.clone());
-    if !matches!(plan.data.get(&marker), Some(DataDefinition::Import { .. })) {
-        panic!("BUG: nested hop for import rule is not Import");
-    }
-    let extras = imports::values_under_hop(&frame.overlay, &hop.uses);
-    let nested = RulePath {
-        segments: frame.path.segments[1..].to_vec(),
-        rule: frame.path.rule.clone(),
-    };
-    Outcome::Spawn(
-        Frame::import_scope(marker, extras, Some(Body::ImportRuleFrom(nested))),
-        WalkMode::Same,
-    )
 }
 
 /// Row context of `row`: built bottom-up over its self-list rows, then the row's
@@ -960,37 +895,182 @@ fn step_import_rule_from<'p>(
 fn step_row_scope<'p>(
     frame: &mut RowScopeFrame<'p>,
     mut inbox: Delivered,
-    ctx: &mut EvaluationContext,
+    depth: usize,
+    root_plan: &'p ExecutionPlan,
+    root: &mut EvaluationContext,
+    scopes: &mut Vec<Scope<'p>>,
 ) -> Outcome<'p> {
     loop {
         match &mut frame.phase {
             RowPhase::Acquire => {
+                frame.read_slots = row_scope_read_slots(frame);
+                frame.phase = RowPhase::Resolve(0);
+            }
+            RowPhase::Resolve(cursor) => {
+                while let Some(slot) = frame.read_slots.get(*cursor) {
+                    *cursor += 1;
+                    let Some(RowBinding::Deferred { target, hops }) =
+                        frame.key.row.get_binding(frame.template, slot)
+                    else {
+                        continue;
+                    };
+                    let owner_key = frame.key.scope(*hops);
+                    match deferred_owner(owner_key, depth, root, scopes) {
+                        DeferredOwner::Layer(owner_depth) => {
+                            let (oplan, octx) =
+                                layer(owner_depth, root_plan, &mut *root, &mut *scopes);
+                            if let Some(force) = unforced_target(target, oplan, octx) {
+                                let (mut child, mode) = force_frame(force);
+                                child.depth = owner_depth;
+                                return spawn(child, mode);
+                            }
+                        }
+                        DeferredOwner::Cached => {
+                            let owner_key =
+                                owner_key.expect("BUG: cached deferred owner without a row");
+                            let oplan = root_plan.row_template(&owner_key.row.identity);
+                            let force = {
+                                let contexts = root.caches.row_contexts.borrow();
+                                let octx = contexts.get(owner_key).expect(
+                                    "BUG: deferred owner row's context missing from the cache",
+                                );
+                                unforced_target(target, oplan, octx)
+                            };
+                            if let Some(force) = force {
+                                return spawn(
+                                    Frame::row_scope(owner_key.clone(), oplan, force_body(force)),
+                                    WalkMode::Same,
+                                );
+                            }
+                        }
+                    }
+                }
+                // Deferred bindings the read touches (or whose target is already
+                // evaluated) resolve against their owner scope before the row's
+                // context is seeded.
+                let mut resolved: Vec<(DataPath, OperationResult)> = Vec::new();
+                for (slot_idx, binding) in frame.key.row.bindings.iter().enumerate() {
+                    let Some(RowBinding::Deferred { target, hops }) = binding else {
+                        continue;
+                    };
+                    let (path, _) = frame
+                        .template
+                        .data
+                        .get_index(slot_idx)
+                        .expect("BUG: row binding slot is template data");
+                    let owner_key = frame.key.scope(*hops);
+                    match deferred_owner(owner_key, depth, root, scopes) {
+                        DeferredOwner::Layer(owner_depth) => {
+                            let (oplan, octx) =
+                                layer(owner_depth, root_plan, &mut *root, &mut *scopes);
+                            if frame.read_slots.contains(path)
+                                || unforced_target(target, oplan, octx).is_none()
+                            {
+                                resolved.push((
+                                    path.clone(),
+                                    rows::checked_deferred_field(
+                                        &frame.key,
+                                        frame.template,
+                                        path,
+                                        rows::owner_result(
+                                            resolve_stored_target(target, oplan, octx),
+                                            owner_key,
+                                            oplan,
+                                        ),
+                                    ),
+                                ));
+                            }
+                        }
+                        DeferredOwner::Cached => {
+                            let owner_key =
+                                owner_key.expect("BUG: cached deferred owner without a row");
+                            let oplan = root_plan.row_template(&owner_key.row.identity);
+                            let contexts = root.caches.row_contexts.borrow();
+                            let octx = contexts
+                                .get(owner_key)
+                                .expect("BUG: deferred owner row's context missing from the cache");
+                            if frame.read_slots.contains(path)
+                                || unforced_target(target, oplan, octx).is_none()
+                            {
+                                resolved.push((
+                                    path.clone(),
+                                    rows::checked_deferred_field(
+                                        &frame.key,
+                                        frame.template,
+                                        path,
+                                        rows::owner_result(
+                                            resolve_stored_target(target, oplan, octx),
+                                            Some(owner_key),
+                                            oplan,
+                                        ),
+                                    ),
+                                ));
+                            }
+                        }
+                    }
+                }
                 let template = frame.template;
-                if let Some(cached) = ctx.row_contexts.remove(&frame.row) {
+                let (_, ctx) = layer(depth, root_plan, &mut *root, &mut *scopes);
+                if let Some(mut cached) =
+                    ctx.caches.row_contexts.borrow_mut().swap_remove(&frame.key)
+                {
+                    let row = &frame.key.row;
+                    cached.bind_resolved_slots(template, resolved, |slot| {
+                        row.bindings[slot].is_some()
+                    });
+                    cached.owner_row = Some(frame.key.clone());
                     frame.phase = RowPhase::Body;
                     return Outcome::Enter(Scope {
                         plan: template,
                         ctx: cached,
                     });
                 }
-                let fresh = EvaluationContext::new(
-                    template,
-                    &EvaluateData {
-                        bindings: frame
-                            .row
-                            .bindings
-                            .iter()
-                            .map(|(path, value)| (path.clone(), value.clone()))
-                            .collect(),
-                        ignored_unknown: Vec::new(),
-                    },
-                    ctx.now().clone(),
-                    ctx.exhaustive,
-                );
-                frame.phase = if template.self_row_rules.is_empty() {
+                let bindings: Vec<(usize, OperationResult)> = (0..frame.key.row.bindings.len())
+                    .filter_map(|slot_idx| {
+                        let binding = ctx.caches.row_binding(&frame.key, slot_idx)?;
+                        let value = match binding {
+                            RowBinding::Bound(value) => value.clone(),
+                            RowBinding::Rows {
+                                rows,
+                                row_type,
+                                hops,
+                            } => RowBinding::rows_value(rows, row_type, frame.key.scope(*hops)),
+                            RowBinding::Instance(_) => return None,
+                            RowBinding::Deferred { .. } => {
+                                let (path, _) = template
+                                    .data
+                                    .get_index(slot_idx)
+                                    .expect("BUG: row binding slot is template data");
+                                resolved
+                                    .iter()
+                                    .find(|(slot, _)| slot == path)
+                                    .map(|(_, value)| value.clone())?
+                            }
+                        };
+                        Some((slot_idx, value))
+                    })
+                    .collect();
+                let unbound: Vec<usize> = frame
+                    .key
+                    .row
+                    .bindings
+                    .iter()
+                    .enumerate()
+                    .filter(|(slot_idx, binding)| {
+                        binding.is_some()
+                            && bindings
+                                .binary_search_by_key(slot_idx, |(bound, _)| *bound)
+                                .is_err()
+                    })
+                    .map(|(slot_idx, _)| slot_idx)
+                    .collect();
+                let children = rows::self_rows(&frame.key, template, &frame.read_slots, &bindings);
+                let mut fresh = ctx.child_row(template, &bindings, &unbound);
+                fresh.owner_row = Some(frame.key.clone());
+                frame.phase = if children.is_empty() {
                     RowPhase::Body
                 } else {
-                    RowPhase::Children(rows::self_rows(&frame.row, template))
+                    RowPhase::Children(children)
                 };
                 return Outcome::Enter(Scope {
                     plan: template,
@@ -999,55 +1079,79 @@ fn step_row_scope<'p>(
             }
             RowPhase::Children(children) => {
                 let Some(child) = children.pop() else {
-                    frame.phase = RowPhase::Rules(0);
+                    frame.phase = RowPhase::Body;
                     continue;
                 };
-                if ctx.row_contexts.contains_key(&child) {
+                let (_, ctx) = layer(depth, root_plan, &mut *root, &mut *scopes);
+                if ctx.caches.row_contexts.borrow().contains_key(&child) {
                     continue;
                 }
-                return Outcome::Spawn(
+                return spawn(
                     Frame::row_scope(child, frame.template, RowBody::Nothing),
                     WalkMode::Same,
                 );
             }
-            RowPhase::Rules(cursor) => {
+            RowPhase::Body => {
+                let (_, ctx) = layer(depth, root_plan, &mut *root, &mut *scopes);
                 let template = frame.template;
-                let Some(rule) = template.self_row_rules.get(*cursor) else {
-                    frame.phase = RowPhase::Body;
-                    continue;
-                };
-                let index = template.rule_index(rule);
-                if ctx.rule_values[index.index()].is_some() {
-                    *cursor += 1;
-                    continue;
-                }
-                return Outcome::Spawn(Frame::rule(index), WalkMode::Same);
-            }
-            RowPhase::Body => match frame.body {
-                RowBody::Nothing => {
-                    return Outcome::Exit(None, Home::Row(Arc::clone(&frame.row)));
-                }
-                RowBody::Rule(index) => match &ctx.rule_values[index.index()] {
-                    Some(value) => {
-                        return Outcome::Exit(
-                            Some(value.clone()),
-                            Home::Row(Arc::clone(&frame.row)),
-                        );
+                while let Some((_, target)) =
+                    template.unit_scale_targets.get_index(frame.scale_cursor)
+                {
+                    frame.scale_cursor += 1;
+                    if let Some(force) = unforced_target(target, template, ctx) {
+                        let (child, mode) = force_frame(force);
+                        return spawn(child, mode);
                     }
-                    None => return Outcome::Spawn(Frame::rule(index), WalkMode::Same),
-                },
-                RowBody::Leaf(id) => {
-                    frame.phase = RowPhase::Await;
-                    return Outcome::Spawn(Frame::cell(id), WalkMode::New);
                 }
-            },
+                match &frame.body {
+                    RowBody::Nothing | RowBody::Materialize => {
+                        return Outcome::Exit(None, frame.key.clone());
+                    }
+                    RowBody::Rule(index) => match &ctx.rule_values[index.index()] {
+                        Some(value) => {
+                            return Outcome::Exit(Some(value.clone()), frame.key.clone());
+                        }
+                        None => return spawn(Frame::rule(*index), WalkMode::Same),
+                    },
+                    RowBody::Leaf(id) => {
+                        frame.phase = RowPhase::Await;
+                        return spawn(Frame::cell(*id), WalkMode::New);
+                    }
+                }
+            }
             RowPhase::Await => {
                 let result = inbox
                     .take()
                     .expect("BUG: row scope resumed without its field value");
-                return Outcome::Exit(Some(result), Home::Row(Arc::clone(&frame.row)));
+                return Outcome::Exit(Some(result), frame.key.clone());
             }
         }
+    }
+}
+
+/// Body evaluating data `path` of a row's template, and the rule root when the path
+/// ends at a rule (for missing-data keys).
+fn data_row_body(template: &ExecutionPlan, path: &DataPath) -> (RowBody, Option<NormalFormId>) {
+    match template.reference_ends.get(path) {
+        Some(ReferenceEnd::Rule(rule)) => {
+            let executable = template
+                .rules
+                .get(rule)
+                .expect("BUG: row reference rule missing from its template");
+            (
+                RowBody::Rule(template.rule_index(rule)),
+                Some(executable.normal_form),
+            )
+        }
+        Some(ReferenceEnd::Promptable(_)) | None => (
+            RowBody::Leaf(
+                *template
+                    .data_leaf
+                    .get(path)
+                    .expect("BUG: row data end has no data_leaf entry in its template"),
+            ),
+            None,
+        ),
     }
 }
 
@@ -1060,53 +1164,90 @@ fn step_read_row<'p>(
     plan: &'p ExecutionPlan,
     ctx: &mut EvaluationContext,
 ) -> Outcome<'p> {
-    let template = plan.row_template(&frame.row.identity);
+    let template = plan.row_template(&frame.key.row.identity);
     let Some(raw) = inbox else {
-        let rule = match &frame.end {
-            RowEnd::Rule(rule) => Some(rule),
-            RowEnd::Data(path) => match template.reference_ends.get(path) {
-                Some(ReferenceEnd::Rule(rule)) => Some(rule),
-                Some(ReferenceEnd::Promptable(_) | ReferenceEnd::Import) | None => None,
-            },
+        let (body, rule_root) = match &frame.end {
+            RowEnd::Rule(rule) => {
+                let executable = template
+                    .rules
+                    .get(rule)
+                    .expect("BUG: row rule end missing from its template");
+                (
+                    RowBody::Rule(template.rule_index(rule)),
+                    Some(executable.normal_form),
+                )
+            }
+            RowEnd::Data(path) => {
+                let slot = template
+                    .data
+                    .get_index_of(path)
+                    .expect("BUG: row data end is template data");
+                let bound = match ctx.caches.row_binding(&frame.key, slot) {
+                    Some(RowBinding::Bound(value)) => Some(value.clone()),
+                    Some(RowBinding::Rows {
+                        rows,
+                        row_type,
+                        hops,
+                    }) => Some(RowBinding::rows_value(
+                        rows,
+                        row_type,
+                        frame.key.scope(*hops),
+                    )),
+                    Some(RowBinding::Instance(nested)) => Some(OperationResult::from_literal(
+                        LiteralValue::new(ValueKind::Spec(SpecValue::Row(InstanceKey::new(
+                            Arc::clone(nested),
+                            Some(frame.key.clone()),
+                        )))),
+                    )),
+                    Some(RowBinding::Deferred { .. }) | None => None,
+                };
+                if let Some(value) = bound {
+                    let needs_options = template
+                        .data
+                        .get(path)
+                        .and_then(|definition| definition.schema_type())
+                        .is_some_and(|schema| schema.needs_runtime_option_check());
+                    let unscaled = value
+                        .value()
+                        .is_some_and(|bound| bound.value.has_unscaled_measure());
+                    if !needs_options && !unscaled {
+                        let result = rows::from_row(value, &frame.key, template, ctx);
+                        if ctx.exhaustive {
+                            ctx.row_reads_log.push(RowRead {
+                                row: frame.read.clone(),
+                                end: frame.end.clone(),
+                                result: result.clone(),
+                                result_type: row_end_type(template, &frame.end),
+                            });
+                        }
+                        return Outcome::Finish(Some(result));
+                    }
+                }
+                data_row_body(template, path)
+            }
         };
-        let body = match (rule, &frame.end) {
-            (Some(rule), _) => RowBody::Rule(template.rule_index(rule)),
-            (None, RowEnd::Data(path)) => RowBody::Leaf(
-                *template
-                    .data_leaf
-                    .get(path)
-                    .expect("BUG: row data end has no data_leaf entry in its template"),
-            ),
-            (None, RowEnd::Rule(_)) => unreachable!("BUG: rule row end always names a rule"),
-        };
-        frame.rule_root = rule.map(|rule| {
-            template
-                .rules
-                .get(rule)
-                .expect("BUG: row rule end missing from its template")
-                .normal_form
-        });
-        return Outcome::Spawn(
-            Frame::row_scope(Arc::clone(&frame.row), template, body),
+        frame.rule_root = rule_root;
+        return spawn(
+            Frame::row_scope(frame.key.clone(), template, body),
             WalkMode::Same,
         );
     };
     if let Some(root) = frame.rule_root {
         if raw.is_missing_data() {
             let keys = ctx
+                .caches
                 .row_contexts
-                .get(&frame.row)
+                .borrow()
+                .get(&frame.key)
                 .expect("BUG: row context missing after its read")
-                .missing_data_for_rule(template, root);
-            for key in keys {
-                ctx.missing_row_keys.push(rows::row_key(&frame.row, &key));
-            }
+                .missing_data_for_rule(template, root, Some(&frame.key));
+            ctx.missing_row_keys.extend(keys);
         }
     }
-    let result = rows::from_row(raw, &frame.row, template, ctx);
+    let result = rows::from_row(raw, &frame.key, template, ctx);
     if ctx.exhaustive {
         ctx.row_reads_log.push(RowRead {
-            row: Arc::clone(&frame.row),
+            row: frame.read.clone(),
             end: frame.end.clone(),
             result: result.clone(),
             result_type: row_end_type(template, &frame.end),
@@ -1115,58 +1256,476 @@ fn step_read_row<'p>(
     Outcome::Finish(Some(result))
 }
 
-/// Instance-list rows of a list declared at `path`: one row per source row, its fields
-/// bound from literals or from consumer cells.
-fn step_materialize<'p>(
-    frame: &mut MaterializeFrame<'p>,
-    inbox: Delivered,
-    plan: &'p ExecutionPlan,
-) -> Outcome<'p> {
-    let template = plan.row_template(&frame.source.identity);
-    if let Some(value) = inbox {
-        let (name, _) = &frame.source.rows[frame.row].fields[frame.field];
-        frame
-            .bindings
-            .insert(name.clone(), rows::checked_row_field(template, name, value));
-        frame.field += 1;
+/// The stored list at `path`, its rows owned by `ctx.owner_row`. The store's index
+/// serves the list unless run data set a key field.
+fn stored_list(
+    path: &DataPath,
+    source: &InstanceListSource,
+    ctx: &EvaluationContext,
+) -> OperationResult {
+    let mut list = source.list(ctx.owner_row.clone());
+    if ctx.caches.key_overridden(&ctx.owner_row, path) {
+        list = list.unindexed();
     }
-    loop {
-        let Some(source_row) = frame.source.rows.get(frame.row) else {
-            return Outcome::Finish(Some(OperationResult::from_literal(LiteralValue {
-                value: ValueKind::List(std::mem::take(&mut frame.rows)),
-            })));
-        };
-        let Some((name, row_source)) = source_row.fields.get(frame.field) else {
-            let bindings = std::mem::take(&mut frame.bindings);
-            frame.rows.push(crate::planning::semantics::row_literal(
-                frame.source.identity.clone(),
-                RowOrigin::Numbered {
-                    list: frame.path.input_key(),
-                    number: frame.row + 1,
-                },
-                bindings,
-                Arc::clone(&frame.row_type),
-            ));
-            frame.row += 1;
-            frame.field = 0;
-            continue;
-        };
-        match row_source {
-            DataSource::Literal(bound) => {
-                frame
-                    .bindings
-                    .insert(name.clone(), OperationResult::from_bound(bound.clone()));
-                frame.field += 1;
+    OperationResult::from_literal(LiteralValue {
+        value: ValueKind::List(list),
+    })
+}
+
+/// The target forces a rule when resolved: a rule directly, or data whose reference
+/// chain ends at a rule.
+fn rule_bound_target(target: &ReferenceTarget, plan: &ExecutionPlan) -> bool {
+    match target {
+        ReferenceTarget::Rule(_) => true,
+        ReferenceTarget::Data(path) => {
+            matches!(plan.reference_ends.get(path), Some(ReferenceEnd::Rule(_)))
+        }
+    }
+}
+
+/// Value of a stored reference target in this context. Rules are already evaluated;
+/// data targets read their slot, materialize a referenced list's rows, or veto as
+/// missing exactly as a data-path cell would.
+/// Factor of a resolved unit-scale target: missing/veto pass through, `<= 0` is
+/// a computation veto, otherwise the number.
+fn resolved_scale_factor(
+    target: &ReferenceTarget,
+    plan: &ExecutionPlan,
+    ctx: &EvaluationContext,
+) -> Result<crate::computation::rational::RationalInteger, OperationResult> {
+    match resolve_stored_target(target, plan, ctx) {
+        OperationResult::Veto(veto) => Err(OperationResult::Veto(veto)),
+        OperationResult::Value(bound) => {
+            let ValueKind::Number(factor) = &bound.value else {
+                panic!(
+                    "BUG: unit scale target resolved to {} after planning required number",
+                    bound.value
+                );
+            };
+            if !factor.numer_is_positive() {
+                return Err(OperationResult::Veto(VetoType::computation(
+                    "unit conversion factor must be greater than zero",
+                )));
             }
-            DataSource::Reference(relative) => {
-                let consumer_path = absolute_reference(frame.path, relative);
-                let leaf = *plan
-                    .data_leaf
-                    .get(&consumer_path)
-                    .expect("BUG: row field source path has no data_leaf entry");
-                return Outcome::Spawn(Frame::cell(leaf), WalkMode::New);
+            Ok(factor.clone())
+        }
+    }
+}
+
+enum ScaleNodeType<'a> {
+    Borrowed(&'a LemmaType),
+    Shared(Arc<LemmaType>),
+}
+
+impl ScaleNodeType<'_> {
+    fn get(&self) -> &LemmaType {
+        match self {
+            Self::Borrowed(lemma_type) => lemma_type,
+            Self::Shared(lemma_type) => lemma_type.as_ref(),
+        }
+    }
+
+    fn into_arc(self) -> Arc<LemmaType> {
+        match self {
+            Self::Borrowed(lemma_type) => Arc::new(lemma_type.clone()),
+            Self::Shared(lemma_type) => lemma_type,
+        }
+    }
+}
+
+enum ScaleTask<'a> {
+    Visit {
+        value: ValueKind,
+        lemma_type: ScaleNodeType<'a>,
+        binding: Option<Arc<str>>,
+    },
+    AssembleRange {
+        lemma_type: Arc<LemmaType>,
+        binding: Option<Arc<str>>,
+    },
+    AssembleList {
+        lemma_type: Arc<LemmaType>,
+        binding: Option<Arc<str>>,
+        rows: usize,
+    },
+}
+
+fn scale_value(
+    value: ValueKind,
+    lemma_type: &LemmaType,
+    binding: Option<Arc<str>>,
+    plan: &ExecutionPlan,
+    ctx: &EvaluationContext,
+) -> OperationResult {
+    let mut tasks = vec![ScaleTask::Visit {
+        value,
+        lemma_type: ScaleNodeType::Borrowed(lemma_type),
+        binding: binding.clone(),
+    }];
+    let mut done: Vec<TypedLiteral> = Vec::new();
+    let mut root_unit = binding;
+    while let Some(task) = tasks.pop() {
+        match task {
+            ScaleTask::Visit {
+                value,
+                lemma_type,
+                binding,
+            } => match value {
+                ValueKind::UnscaledMeasure { magnitude, unit } => {
+                    let target = plan
+                        .scale_target_of(lemma_type.get(), &unit)
+                        .unwrap_or_else(|| {
+                            panic!(
+                                "BUG: unscaled measure unit '{unit}' on '{}' has no scale target",
+                                lemma_type.get().name()
+                            )
+                        });
+                    if tasks.is_empty() && done.is_empty() {
+                        root_unit = Some(Arc::clone(&unit));
+                    }
+                    assert!(
+                        unforced_target(target, plan, ctx).is_none(),
+                        "BUG: scale of unit '{unit}' on '{}' read before its scale dependency was evaluated",
+                        lemma_type.get().name()
+                    );
+                    match resolved_scale_factor(target, plan, ctx) {
+                        Err(veto) => return veto,
+                        Ok(factor) => match checked_mul(&magnitude, &factor) {
+                            Ok(canonical) => done.push(TypedLiteral {
+                                value: ValueKind::Measure(canonical),
+                                lemma_type: lemma_type.into_arc(),
+                            }),
+                            Err(failure) => {
+                                return OperationResult::Veto(VetoType::computation(
+                                    failure.to_string(),
+                                ));
+                            }
+                        },
+                    }
+                }
+                ValueKind::Range(left, right) => {
+                    let lemma_type = lemma_type.into_arc();
+                    tasks.push(ScaleTask::AssembleRange {
+                        lemma_type: Arc::clone(&lemma_type),
+                        binding,
+                    });
+                    let right = *right;
+                    let left = *left;
+                    tasks.push(ScaleTask::Visit {
+                        value: right.value,
+                        lemma_type: ScaleNodeType::Shared(right.lemma_type),
+                        binding: None,
+                    });
+                    tasks.push(ScaleTask::Visit {
+                        value: left.value,
+                        lemma_type: ScaleNodeType::Shared(left.lemma_type),
+                        binding: None,
+                    });
+                }
+                ValueKind::List(rows) => {
+                    let lemma_type = lemma_type.into_arc();
+                    let count = rows.len();
+                    tasks.push(ScaleTask::AssembleList {
+                        lemma_type,
+                        binding,
+                        rows: count,
+                    });
+                    for row in rows.iter().rev() {
+                        let row = row.into_owned();
+                        tasks.push(ScaleTask::Visit {
+                            value: row.value,
+                            lemma_type: ScaleNodeType::Shared(row.lemma_type),
+                            binding: None,
+                        });
+                    }
+                }
+                other => done.push(TypedLiteral {
+                    value: other,
+                    lemma_type: lemma_type.into_arc(),
+                }),
+            },
+            ScaleTask::AssembleRange {
+                lemma_type,
+                binding,
+            } => {
+                let right = done
+                    .pop()
+                    .expect("BUG: scaled range missing right endpoint");
+                let left = done.pop().expect("BUG: scaled range missing left endpoint");
+                if tasks.is_empty() && done.is_empty() {
+                    root_unit = binding;
+                }
+                done.push(TypedLiteral {
+                    value: ValueKind::Range(Box::new(left), Box::new(right)),
+                    lemma_type,
+                });
+            }
+            ScaleTask::AssembleList {
+                lemma_type,
+                binding,
+                rows,
+            } => {
+                let mut scaled = Vec::with_capacity(rows);
+                for _ in 0..rows {
+                    scaled.push(done.pop().expect("BUG: scaled list missing a row"));
+                }
+                scaled.reverse();
+                if tasks.is_empty() && done.is_empty() {
+                    root_unit = binding;
+                }
+                done.push(TypedLiteral {
+                    value: ValueKind::List(scaled.into()),
+                    lemma_type,
+                });
             }
         }
+    }
+    let result = done.pop().expect("BUG: scale walk leaves one result");
+    OperationResult::from_bound(BoundValueKind {
+        value: result.value,
+        unit: root_unit,
+    })
+}
+
+/// `bound` with every unscaled measure scaled. The scales were evaluated before the
+/// rule or row leaf that reads it (`scale_dependencies`).
+fn settle_stored(
+    bound: BoundValueKind,
+    lemma_type: &LemmaType,
+    plan: &ExecutionPlan,
+    ctx: &EvaluationContext,
+) -> OperationResult {
+    if !bound.value.has_unscaled_measure() {
+        return OperationResult::from_bound(bound);
+    }
+    scale_value(bound.value, lemma_type, bound.unit, plan, ctx)
+}
+
+fn conversion_scale_target<'a>(
+    target: &'a SemanticConversionTarget,
+    source_type: &'a LemmaType,
+    plan: &'a ExecutionPlan,
+) -> Option<&'a ReferenceTarget> {
+    match target {
+        SemanticConversionTarget::Unit {
+            unit_name,
+            owning_type,
+        } if owning_type.unit_is_dynamic(unit_name) => Some(
+            plan.scale_target_of(owning_type, unit_name)
+                .unwrap_or_else(|| {
+                    panic!(
+                        "BUG: dynamic unit '{unit_name}' on '{}' has no scale target",
+                        owning_type.name()
+                    )
+                }),
+        ),
+        SemanticConversionTarget::Type(ConversionTypeKind::Number) if source_type.is_measure() => {
+            let unit = source_type.measure_runtime_signature().into_iter().next()?;
+            if source_type.unit_is_dynamic(&unit.0) {
+                Some(
+                    plan.scale_target_of(source_type, &unit.0)
+                        .unwrap_or_else(|| {
+                            panic!(
+                                "BUG: dynamic unit '{}' on '{}' has no scale target",
+                                unit.0,
+                                source_type.name()
+                            )
+                        }),
+                )
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
+
+/// Factors of the dynamic units of `lemma_type`'s family that `plan` declares, as
+/// settled in `ctx`: a vetoed or missing scale has no entry. The rule or row leaf that
+/// produced a value of this family evaluated these scales first.
+pub(crate) fn runtime_scale_factors_for(
+    lemma_type: &LemmaType,
+    plan: &ExecutionPlan,
+    ctx: &EvaluationContext,
+) -> HashMap<String, crate::computation::rational::RationalInteger> {
+    let mut out = HashMap::new();
+    let Some(family) = lemma_type.measure_family() else {
+        return out;
+    };
+    for ((scale_family, unit), target) in &plan.unit_scale_targets {
+        if scale_family != family {
+            continue;
+        }
+        if let Ok(factor) = resolved_scale_factor(target, plan, ctx) {
+            out.insert(unit.clone(), factor);
+        }
+    }
+    out
+}
+
+/// Veto for a value `plan` cannot express in any unit: every unit of its measure
+/// family is dynamic and this spec declares none of their factors.
+fn inexpressible_family_veto(
+    lemma_type: &LemmaType,
+    plan: &ExecutionPlan,
+) -> Option<OperationResult> {
+    let held = lemma_type.held_value_type();
+    let family = held.measure_family()?;
+    let unit = held
+        .measure_fallback_unit()
+        .filter(|unit| unit.is_dynamic())?;
+    if plan
+        .unit_scale_targets
+        .keys()
+        .any(|(scale_family, _)| scale_family == family)
+    {
+        return None;
+    }
+    Some(OperationResult::Veto(VetoType::computation(format!(
+        "unit '{}' takes its conversion factor from spec '{}' and cannot be used in spec '{}'",
+        unit.name, family.spec, plan.spec_name
+    ))))
+}
+
+/// An empty `sum` has no operand that settled a scale. When every unit of its family
+/// is dynamic, its display unit is the fallback unit, so that unit's scale must
+/// resolve: its veto becomes the sum's result.
+fn empty_sum_scale_veto(
+    result_type: &LemmaType,
+    plan: &ExecutionPlan,
+    ctx: &EvaluationContext,
+) -> Option<OperationResult> {
+    if !result_type.is_measure() {
+        return None;
+    }
+    let unit = result_type
+        .measure_fallback_unit()
+        .filter(|unit| unit.is_dynamic())?;
+    let target = plan
+        .scale_target_of(result_type, &unit.name)
+        .unwrap_or_else(|| {
+            panic!(
+                "BUG: dynamic unit '{}' on '{}' has no scale target",
+                unit.name,
+                result_type.name()
+            )
+        });
+    assert!(
+        unforced_target(target, plan, ctx).is_none(),
+        "BUG: scale of unit '{}' on '{}' read before its scale dependency was evaluated",
+        unit.name,
+        result_type.name()
+    );
+    resolved_scale_factor(target, plan, ctx).err()
+}
+
+pub(crate) fn resolve_stored_target(
+    target: &ReferenceTarget,
+    plan: &ExecutionPlan,
+    ctx: &EvaluationContext,
+) -> OperationResult {
+    if let Some(&cell) = plan.member_targets.get(target) {
+        return ctx.values[cell.index()]
+            .clone()
+            .expect("BUG: member target resolved before its cell was evaluated");
+    }
+    match target {
+        ReferenceTarget::Rule(rule) => ctx.rule_value(plan, rule).clone(),
+        ReferenceTarget::Data(path) => resolve_stored_data_target(path, plan, ctx),
+    }
+}
+
+fn resolve_stored_data_target(
+    path: &DataPath,
+    plan: &ExecutionPlan,
+    ctx: &EvaluationContext,
+) -> OperationResult {
+    if let Some(slot) = ctx.data_slot(plan, path) {
+        return slot.clone();
+    }
+    match plan.reference_ends.get(path) {
+        Some(ReferenceEnd::Rule(_)) => resolve_data_path_value(path, plan, ctx),
+        Some(ReferenceEnd::Promptable(end)) => {
+            if let Some(slot) = ctx.data_slot(plan, end) {
+                return slot.clone();
+            }
+            if let Some(nested_source) = plan.instance_lists.get(end) {
+                return stored_list(end, nested_source, ctx);
+            }
+            resolve_data_path_value(path, plan, ctx)
+        }
+        None => {
+            if let Some(nested_source) = plan.instance_lists.get(path) {
+                return stored_list(path, nested_source, ctx);
+            }
+            resolve_data_path_value(path, plan, ctx)
+        }
+    }
+}
+
+/// A field an inline row (`-> with field: value`) writes: the value the command's own
+/// plan computed, read as that plan planned it and never through the row context, so
+/// instances of this plan inside it stay what the plan knows. `None` on every other
+/// row or field, which read through the row's context.
+fn inline_row_binding(
+    key: &InstanceKey,
+    position: Option<usize>,
+    end: &RowEnd,
+    plan: &ExecutionPlan,
+    ctx: &mut EvaluationContext,
+) -> Option<OperationResult> {
+    let row = &key.row;
+    if !row.origin.is_inline() {
+        return None;
+    }
+    let RowEnd::Data(path) = end else {
+        return None;
+    };
+    let template = plan.row_template(&row.identity);
+    let value = match row.get_binding(template, path)? {
+        RowBinding::Bound(value) => value,
+        RowBinding::Deferred { .. } | RowBinding::Rows { .. } | RowBinding::Instance(_) => {
+            unreachable!("BUG: an inline `-> with` row binds command values")
+        }
+    };
+    if ctx.exhaustive {
+        ctx.row_reads_log.push(RowRead {
+            row: rows::ReadRow {
+                key: key.clone(),
+                position,
+            },
+            end: end.clone(),
+            result: value.clone(),
+            result_type: row_end_type(template, end),
+        });
+    }
+    Some(value.clone())
+}
+
+/// The row a per-row operand evaluates against: row `position` (0-based) of the list.
+fn current_instance_row(row: &TypedLiteral, position: usize) -> CurrentRow {
+    match &row.value {
+        ValueKind::Spec(SpecValue::Row(key)) => CurrentRow::Instance {
+            key: key.clone(),
+            position,
+        },
+        other => panic!("BUG: instance list row is {other:?}, not a row"),
+    }
+}
+
+/// The row whose key field `key_field` a key scan reads, the field read on it, and
+/// the field's type.
+fn key_field_read(
+    plan: &ExecutionPlan,
+    row: &TypedLiteral,
+    key_field: &KeyField,
+) -> (InstanceKey, RowEnd, Arc<LemmaType>) {
+    match &row.value {
+        ValueKind::Spec(SpecValue::Row(key)) => {
+            let (end, field_type) = list_ops::key_field_type(plan, &key.row, key_field);
+            (key.clone(), end, field_type)
+        }
+        other => panic!("BUG: instance list row is {other:?}, not a row"),
     }
 }
 
@@ -1183,7 +1742,7 @@ fn step_list_op<'p>(
         match std::mem::replace(&mut frame.state, ListState::Start) {
             ListState::Start => {
                 frame.state = ListState::AwaitList;
-                return Outcome::Spawn(Frame::cell(frame.list), WalkMode::New);
+                return spawn(Frame::cell(frame.list), WalkMode::New);
             }
             ListState::AwaitList => {
                 let list_value = inbox
@@ -1221,8 +1780,13 @@ fn step_list_op<'p>(
                         return Outcome::Finish(Some(list_ops::first_or_last(&data.rows, false)));
                     }
                     (None, NormalFormListOp::Sum) => {
+                        if data.rows.is_empty() {
+                            if let Some(veto) = empty_sum_scale_veto(result_type, plan, ctx) {
+                                return Outcome::Finish(Some(veto));
+                            }
+                        }
                         return Outcome::Finish(Some(list_ops::reduce(
-                            &data.rows,
+                            data.rows.values(),
                             ListFold::Sum,
                             result_type,
                             plan,
@@ -1230,7 +1794,7 @@ fn step_list_op<'p>(
                     }
                     (None, NormalFormListOp::Product) => {
                         return Outcome::Finish(Some(list_ops::reduce(
-                            &data.rows,
+                            data.rows.values(),
                             ListFold::Product,
                             result_type,
                             plan,
@@ -1238,7 +1802,7 @@ fn step_list_op<'p>(
                     }
                     (None, NormalFormListOp::Avg) => {
                         return Outcome::Finish(Some(list_ops::reduce(
-                            &data.rows,
+                            data.rows.values(),
                             ListFold::Avg,
                             result_type,
                             plan,
@@ -1246,41 +1810,54 @@ fn step_list_op<'p>(
                     }
                     (None, NormalFormListOp::Min) => {
                         return Outcome::Finish(Some(list_ops::extrema(
-                            &data.rows,
+                            data.rows.values(),
                             Ordering::Less,
                         )));
                     }
                     (None, NormalFormListOp::Max) => {
                         return Outcome::Finish(Some(list_ops::extrema(
-                            &data.rows,
+                            data.rows.values(),
                             Ordering::Greater,
                         )));
                     }
                     (None, NormalFormListOp::Sort { descending }) => {
                         return Outcome::Finish(Some(list_ops::sort_rows(
-                            &data.rows,
+                            data.rows.values(),
                             *descending,
                             data.unit.clone(),
                         )));
                     }
-                    (None, NormalFormListOp::Find)
-                    | (None, NormalFormListOp::Top)
-                    | (None, NormalFormListOp::Any(_))
-                    | (None, NormalFormListOp::All(_))
-                    | (None, NormalFormListOp::Where(_))
-                    | (None, NormalFormListOp::With) => {
-                        let count = match op {
-                            NormalFormListOp::With => frame.args.len(),
-                            _ => 1,
+                    (Some(_), NormalFormListOp::Key { .. }) => {
+                        let ListKey::Fields(fields) =
+                            list_ops::list_key(plan.result_type(frame.id))
+                        else {
+                            unreachable!("BUG: `-> key` result type is keyed by fields");
                         };
+                        frame.state = ListState::Scan(KeyScan {
+                            rows: data.rows,
+                            fields: fields.clone(),
+                            row: 0,
+                            field: 0,
+                            key: Vec::new(),
+                            keyed: Vec::new(),
+                            then: ScanThen::List(data.unit),
+                        });
+                    }
+                    (None, NormalFormListOp::Key { .. }) => {
+                        unreachable!("BUG: planning rejects `-> key` on value lists")
+                    }
+                    (None, NormalFormListOp::With) | (Some(_), NormalFormListOp::With) => {
+                        let count = frame.args.len();
                         frame.state = ListState::Args {
                             data,
                             values: Vec::new(),
                             count,
-                            key_fields: None,
+                            key_fields,
                         };
                     }
-                    (Some(_), NormalFormListOp::Top) => {
+                    (None, NormalFormListOp::Find)
+                    | (None, NormalFormListOp::Top)
+                    | (Some(_), NormalFormListOp::Top) => {
                         frame.state = ListState::Args {
                             data,
                             values: Vec::new(),
@@ -1316,9 +1893,7 @@ fn step_list_op<'p>(
                     | (Some(_), NormalFormListOp::Min)
                     | (Some(_), NormalFormListOp::Max)
                     | (Some(_), NormalFormListOp::Sort { .. })
-                    | (Some(_), NormalFormListOp::AnyRow)
-                    | (Some(_), NormalFormListOp::AllRow)
-                    | (Some(_), NormalFormListOp::WhereRow) => {
+                    | (Some(_), NormalFormListOp::Predicate { .. }) => {
                         frame.state = ListState::PerRow {
                             data,
                             cursor: 0,
@@ -1326,17 +1901,9 @@ fn step_list_op<'p>(
                             first_veto: None,
                         };
                     }
-                    (None, NormalFormListOp::AnyRow)
-                    | (None, NormalFormListOp::AllRow)
-                    | (None, NormalFormListOp::WhereRow)
+                    (None, NormalFormListOp::Predicate { .. })
                     | (None, NormalFormListOp::WithRow { .. }) => {
-                        unreachable!("BUG: instance-row command {op:?} on a value list")
-                    }
-                    (Some(_), NormalFormListOp::Any(_))
-                    | (Some(_), NormalFormListOp::All(_))
-                    | (Some(_), NormalFormListOp::Where(_))
-                    | (Some(_), NormalFormListOp::With) => {
-                        unreachable!("BUG: value-list command {op:?} on instance rows")
+                        unreachable!("BUG: row command {op:?} has no row level")
                     }
                 }
             }
@@ -1360,7 +1927,7 @@ fn step_list_op<'p>(
                         count,
                         key_fields,
                     };
-                    return Outcome::Spawn(Frame::cell(arg), WalkMode::New);
+                    return spawn(Frame::cell(arg), WalkMode::New);
                 }
                 match (frame.row_level, op) {
                     (_, NormalFormListOp::Top) => {
@@ -1384,73 +1951,101 @@ fn step_list_op<'p>(
                             )));
                         }
                         Some(fields) => {
-                            let wanted = values
+                            let wanted: Vec<TypedLiteral> = values
                                 .into_iter()
                                 .zip(frame.args)
                                 .map(|(value, arg)| {
                                     list_ops::typed_operand(value, plan.result_type(*arg))
                                 })
                                 .collect();
+                            if let Some(index) = data.rows.index().filter(|index| {
+                                index
+                                    .fields
+                                    .iter()
+                                    .eq(fields.iter().map(|field| &field.name))
+                            }) {
+                                return Outcome::Finish(Some(find_keyed(
+                                    &data.rows, index, &fields, &wanted,
+                                )));
+                            }
                             frame.state = ListState::Scan(KeyScan {
                                 rows: data.rows,
                                 fields,
                                 row: 0,
                                 field: 0,
                                 key: Vec::new(),
-                                purpose: ScanPurpose::Find { wanted },
+                                keyed: Vec::new(),
+                                then: ScanThen::Find(wanted),
                             });
                         }
                     },
-                    (None, NormalFormListOp::Any(condition))
-                    | (None, NormalFormListOp::All(condition))
-                    | (None, NormalFormListOp::Where(condition)) => {
-                        let right_type = plan.result_type(
-                            *frame
-                                .args
-                                .first()
-                                .expect("BUG: list condition has a right cell"),
-                        );
-                        let flags = match list_ops::condition_flags(
-                            &data.rows,
-                            condition,
-                            &first_operand(&values),
-                            right_type,
-                        ) {
-                            Ok(flags) => flags,
-                            Err(veto) => return Outcome::Finish(Some(veto)),
-                        };
-                        return Outcome::Finish(Some(match op {
-                            NormalFormListOp::Where(_) => {
-                                list_ops::filter_rows(&data.rows, flags, data.unit.clone())
-                            }
-                            NormalFormListOp::All(_) => list_ops::predicate_result(&flags, false),
-                            _ => list_ops::predicate_result(&flags, true),
-                        }));
-                    }
                     (None, NormalFormListOp::With) => {
                         return Outcome::Finish(Some(list_ops::append_values(
-                            &data.rows,
+                            data.rows.values(),
                             values,
                             frame.args,
                             plan,
                             data.unit.clone(),
                         )));
                     }
+                    (Some(_), NormalFormListOp::With) => {
+                        let appended = list_ops::append_instance_operands(
+                            &data.rows,
+                            values,
+                            plan.result_type(frame.list),
+                            data.unit.clone(),
+                        );
+                        match key_fields {
+                            None => return Outcome::Finish(Some(appended)),
+                            Some(fields) => {
+                                let OperationResult::Value(bound) = appended else {
+                                    return Outcome::Finish(Some(appended));
+                                };
+                                let ValueKind::List(rows) = bound.value else {
+                                    unreachable!("BUG: append_instance_operands returned non-list");
+                                };
+                                frame.state = ListState::Scan(KeyScan {
+                                    rows,
+                                    fields,
+                                    row: 0,
+                                    field: 0,
+                                    key: Vec::new(),
+                                    keyed: Vec::new(),
+                                    then: ScanThen::List(bound.unit),
+                                });
+                            }
+                        }
+                    }
                     (
                         Some(_),
                         NormalFormListOp::WithRow {
+                            identity,
                             fields: append_fields,
                         },
                     ) => {
-                        let appended = list_ops::appended_instance_row(
+                        let pending = unforced_deferred_in_values(&values, plan, ctx);
+                        if !pending.is_empty() {
+                            frame.state = ListState::InlineDeferred {
+                                data,
+                                values,
+                                count,
+                                key_fields,
+                                pending: pending.into_iter(),
+                            };
+                            continue;
+                        }
+                        let inline = list_ops::inline_row(
                             plan,
-                            plan.result_type(frame.list),
+                            identity,
                             append_fields,
                             values,
-                            data.rows.len(),
+                            RowOrigin::Inline {
+                                node: frame.id,
+                                position: data.rows.len() + 1,
+                            },
                         );
-                        let mut rows = data.rows;
-                        rows.push(appended);
+                        let mut rows = data.rows.to_vec();
+                        rows.push(inline);
                         match key_fields {
                             None => {
                                 return Outcome::Finish(Some(list_ops::list_result(
@@ -1459,21 +2054,45 @@ fn step_list_op<'p>(
                             }
                             Some(fields) => {
                                 frame.state = ListState::Scan(KeyScan {
-                                    rows,
+                                    rows: rows.into(),
                                     fields,
                                     row: 0,
                                     field: 0,
                                     key: Vec::new(),
-                                    purpose: ScanPurpose::Append {
-                                        keyed: Vec::new(),
-                                        unit: data.unit,
-                                    },
+                                    keyed: Vec::new(),
+                                    then: ScanThen::List(data.unit),
                                 });
                             }
                         }
                     }
                     (_, other) => unreachable!("BUG: {other:?} does not take operands here"),
                 }
+            }
+            ListState::InlineDeferred {
+                data,
+                values,
+                count,
+                key_fields,
+                mut pending,
+            } => {
+                let Some(force) = pending.next() else {
+                    frame.state = ListState::Args {
+                        data,
+                        values,
+                        count,
+                        key_fields,
+                    };
+                    continue;
+                };
+                frame.state = ListState::InlineDeferred {
+                    data,
+                    values,
+                    count,
+                    key_fields,
+                    pending,
+                };
+                let (child, mode) = force_frame(force);
+                return spawn(child, mode);
             }
             ListState::PerRow {
                 data,
@@ -1487,9 +2106,10 @@ fn step_list_op<'p>(
                         .expect("BUG: per-row command without a row level"),
                 )
                 .expect("BUG: row level fits usize");
-                let argument = *frame.args.first().unwrap_or_else(|| {
-                    panic!("BUG: {op:?} over instance rows has no row argument")
-                });
+                let argument = *frame
+                    .args
+                    .first()
+                    .expect("BUG: row reduction must have a row argument");
                 if let Some(value) = inbox.take() {
                     ctx.row_stack.truncate(level);
                     match value {
@@ -1506,19 +2126,52 @@ fn step_list_op<'p>(
                     assert_eq!(
                         ctx.row_stack.len(),
                         level,
-                        "BUG: instance-list command entered at the wrong row depth"
+                        "BUG: list command entered at the wrong row depth"
                     );
-                    ctx.row_stack
-                        .push(Arc::clone(list_ops::row_instance(&data.rows[cursor])));
+                    let current = match op {
+                        NormalFormListOp::Predicate {
+                            form: crate::parsing::ast::ListPredicateForm::Value,
+                            ..
+                        } => CurrentRow::Value(
+                            data.rows
+                                .get(cursor)
+                                .expect("BUG: cursor below the list length")
+                                .into_owned(),
+                        ),
+                        NormalFormListOp::Predicate {
+                            form: crate::parsing::ast::ListPredicateForm::Instance,
+                            ..
+                        }
+                        | NormalFormListOp::Sum
+                        | NormalFormListOp::Product
+                        | NormalFormListOp::Avg
+                        | NormalFormListOp::Min
+                        | NormalFormListOp::Max
+                        | NormalFormListOp::Sort { .. } => current_instance_row(
+                            &data
+                                .rows
+                                .get(cursor)
+                                .expect("BUG: cursor below the list length"),
+                            cursor,
+                        ),
+                        other => unreachable!("BUG: {other:?} is not a per-row operation"),
+                    };
+                    ctx.row_stack.push(current);
                     frame.state = ListState::PerRow {
                         data,
                         cursor,
                         values,
                         first_veto,
                     };
-                    return Outcome::Spawn(Frame::cell(argument), WalkMode::New);
+                    return spawn(Frame::cell(argument), WalkMode::New);
                 }
-                return Outcome::Finish(Some(match first_veto {
+                let empty_sum_veto = match op {
+                    NormalFormListOp::Sum if data.rows.is_empty() => {
+                        empty_sum_scale_veto(result_type, plan, ctx)
+                    }
+                    _ => None,
+                };
+                return Outcome::Finish(Some(match first_veto.or(empty_sum_veto) {
                     Some(veto) => veto,
                     None => list_ops::per_row_result(
                         op,
@@ -1534,11 +2187,12 @@ fn step_list_op<'p>(
                 if let Some(value) = inbox.take() {
                     match value {
                         OperationResult::Value(bound) => {
-                            let (_, field_type) = list_ops::key_field_type(
-                                plan,
-                                list_ops::row_instance(&scan.rows[scan.row]),
-                                &scan.fields[scan.field],
-                            );
+                            let row = scan
+                                .rows
+                                .get(scan.row)
+                                .expect("BUG: scanned row below the list length");
+                            let (_, _, field_type) =
+                                key_field_read(plan, &row, &scan.fields[scan.field]);
                             scan.key.push(typed_from_bound(&bound, &field_type));
                         }
                         veto => return Outcome::Finish(Some(veto)),
@@ -1547,50 +2201,64 @@ fn step_list_op<'p>(
                 }
                 loop {
                     if scan.row == scan.rows.len() {
-                        return Outcome::Finish(Some(match scan.purpose {
-                            ScanPurpose::Find { wanted } => {
-                                list_ops::no_row_with_key(&scan.fields, &wanted)
+                        let names: Vec<String> =
+                            scan.fields.iter().map(|field| field.name.clone()).collect();
+                        let index = match KeyIndex::build_numbered(names, &scan.keyed) {
+                            Ok(index) => Arc::new(index),
+                            Err(conflict) => {
+                                return Outcome::Finish(Some(OperationResult::Veto(
+                                    VetoType::computation(conflict),
+                                )));
                             }
-                            ScanPurpose::Append { keyed, unit } => {
-                                match list_ops::key_conflict_result(&scan.fields, &keyed) {
-                                    Some(conflict) => conflict,
-                                    None => list_ops::list_result(scan.rows, unit),
-                                }
+                        };
+                        return Outcome::Finish(Some(match scan.then {
+                            ScanThen::List(unit) => {
+                                list_ops::list_result(scan.rows.with_index(index), unit)
+                            }
+                            ScanThen::Find(wanted) => {
+                                find_keyed(&scan.rows, &index, &scan.fields, &wanted)
                             }
                         }));
                     }
                     if scan.field == scan.fields.len() {
                         let key = std::mem::take(&mut scan.key);
-                        match &mut scan.purpose {
-                            ScanPurpose::Find { wanted } => {
-                                match list_ops::keys_match(&key, wanted) {
-                                    Ok(true) => {
-                                        return Outcome::Finish(Some(
-                                            OperationResult::from_literal(
-                                                scan.rows[scan.row].to_literal(),
-                                            ),
-                                        ));
-                                    }
-                                    Ok(false) => {}
-                                    Err(veto) => return Outcome::Finish(Some(veto)),
-                                }
-                            }
-                            ScanPurpose::Append { keyed, .. } => keyed.push(KeyedRow {
-                                label: format!("row {}", keyed.len() + 1),
-                                values: key,
-                            }),
-                        }
+                        scan.keyed.push(key);
                         scan.row += 1;
                         scan.field = 0;
                         continue;
                     }
-                    let row = Arc::clone(list_ops::row_instance(&scan.rows[scan.row]));
-                    let (end, _) = list_ops::key_field_type(plan, &row, &scan.fields[scan.field]);
+                    let (row, end, _) = key_field_read(
+                        plan,
+                        &scan
+                            .rows
+                            .get(scan.row)
+                            .expect("BUG: scanned row below the list length"),
+                        &scan.fields[scan.field],
+                    );
+                    let read = rows::ReadRow::listed(row.clone(), scan.row);
                     frame.state = ListState::Scan(scan);
-                    return Outcome::Spawn(Frame::read_row(row, end), WalkMode::Same);
+                    return spawn(Frame::read_row(row, end, read.position), WalkMode::Same);
                 }
             }
         }
+    }
+}
+
+/// The row of `rows` whose key values are `wanted`, through `index`.
+fn find_keyed(
+    rows: &ListValue,
+    index: &KeyIndex,
+    fields: &[KeyField],
+    wanted: &[TypedLiteral],
+) -> OperationResult {
+    match index.probe(wanted) {
+        Ok(Some(position)) => OperationResult::from_literal(
+            rows.get(position)
+                .expect("BUG: index position is a row of the list")
+                .to_literal(),
+        ),
+        Ok(None) => list_ops::no_row_with_key(fields, wanted),
+        Err(veto) => veto,
     }
 }
 
@@ -1601,9 +2269,74 @@ fn first_operand(values: &[OperationResult]) -> OperationResult {
         .expect("BUG: command operand collected before use")
 }
 
+fn options_rule_blocker(
+    plan: &ExecutionPlan,
+    ctx: &EvaluationContext,
+    path: &DataPath,
+) -> Option<OperationResult> {
+    let rule_path = plan.options_rule_of(path)?;
+    let index = plan.rule_index(&rule_path);
+    let result = ctx.rule_values.get(index.index())?.as_ref()?;
+    match result.value().map(|bound| &bound.value) {
+        Some(crate::planning::semantics::ValueKind::List(_)) => None,
+        _ => Some(result.clone()),
+    }
+}
+
+fn check_data_options(
+    id: NormalFormId,
+    slot: OperationResult,
+    plan: &ExecutionPlan,
+    ctx: &mut EvaluationContext,
+) -> OperationResult {
+    if slot.vetoed() || slot.is_missing_data() {
+        return slot;
+    }
+    let path = match &plan.normal_form(id).kind {
+        NormalFormKind::Leaf(LeafKind::DataPath(path)) => path,
+        other => panic!("BUG: options check on {other:?}"),
+    };
+    let lemma_type = plan
+        .data
+        .get(path)
+        .and_then(|definition| definition.schema_type())
+        .expect("BUG: options check on data without a type");
+    let rule_index = plan
+        .options_rule_of(path)
+        .map(|rule_path| plan.rule_index(&rule_path));
+    let rule_result = rule_index.map(|index| {
+        ctx.rule_values[index.index()]
+            .as_ref()
+            .expect("BUG: options rule checked before it was evaluated")
+    });
+    if let Some(rule_result) = rule_result {
+        if rule_result.vetoed() || rule_result.is_missing_data() {
+            return rule_result.clone();
+        }
+    }
+    let Some(slot_bound) = slot.value() else {
+        return slot;
+    };
+    let rule_rows = match rule_result {
+        Some(rule_result) => match rule_result.value().map(|bound| &bound.value) {
+            Some(ValueKind::List(rows)) => Some(rows),
+            _ => {
+                return OperationResult::Veto(VetoType::computation(
+                    "options rule did not return a list".to_string(),
+                ));
+            }
+        },
+        None => None,
+    };
+    match lemma_type.explain_disallowed(&slot_bound.value, rule_rows) {
+        None => slot,
+        Some(message) => OperationResult::Veto(VetoType::computation(message)),
+    }
+}
+
 /// Evaluate a cell of the walk. Returns the step outcome: a value, or a child to wait for.
 fn step_cell<'p>(
-    cell: &mut CellFrame<'p>,
+    cell: &mut CellFrame,
     mut inbox: Delivered,
     walk: &WalkDone,
     plan: &'p ExecutionPlan,
@@ -1612,25 +2345,25 @@ fn step_cell<'p>(
     let id = cell.id;
     if let Some(resume) = cell.resume.take() {
         let value = inbox.take().expect("BUG: resumed cell has no child value");
-        return match resume {
-            Resume::Plain => cell_done(cell, walk, value, plan, ctx),
+        match resume {
+            Resume::Plain => return cell_done(cell, walk, value, plan, ctx),
             Resume::RowLog(mark) => {
                 ctx.record_row_log(id, mark);
-                cell_done(cell, walk, value, plan, ctx)
+                return cell_done(cell, walk, value, plan, ctx);
             }
-            Resume::Import(path) => {
-                if !value.is_missing_data() {
-                    let leaf = *plan.data_leaf.get(path).unwrap_or_else(|| {
-                        panic!(
-                            "BUG: import member '{}' has no data_leaf entry after ensure_data_leaves",
-                            path.input_key()
-                        )
-                    });
-                    ctx.values[leaf.index()] = Some(value.clone());
+            Resume::Member(mark) => {
+                let NormalFormKind::SpecMember { row, .. } = &plan.normal_form(id).kind else {
+                    unreachable!("BUG: a member hop resumed a cell that is not a member read");
+                };
+                if cell.cursor + 1 == row.ends.len() || value.vetoed() {
+                    ctx.record_row_log(id, mark);
+                    return cell_done(cell, walk, value, plan, ctx);
                 }
-                cell_done(cell, walk, value, plan, ctx)
+                cell.cursor += 1;
+                cell.acc = Some(value);
+                cell.member_mark = Some(mark);
             }
-        };
+        }
     }
     if let Some(settled) = cell.settled.take() {
         return Outcome::Finish(Some(finish(id, settled, plan, ctx)));
@@ -1641,7 +2374,7 @@ fn step_cell<'p>(
             let child: NormalFormId = $child;
             match ready(child, ctx, walk) {
                 Some(value) => value,
-                None => return Outcome::Spawn(Frame::cell(child), WalkMode::Same),
+                None => return spawn(Frame::cell(child), WalkMode::Same),
             }
         }};
     }
@@ -1649,7 +2382,7 @@ fn step_cell<'p>(
         ($outcome:expr) => {
             match $outcome {
                 Ok(value) => return cell_done(cell, walk, value, plan, ctx),
-                Err(child) => return Outcome::Spawn(Frame::cell(child), WalkMode::Same),
+                Err(child) => return spawn(Frame::cell(child), WalkMode::Same),
             }
         };
     }
@@ -1660,10 +2393,9 @@ fn step_cell<'p>(
     }
 
     let cell_def = plan.normal_form(id);
-    if let Some(path) = &cell_def.rule_ref {
-        let index = plan.rule_index(path);
+    if let Some(index) = plan.rule_ref_indexes[id.index()] {
         return match &ctx.rule_values[index.index()] {
-            None => Outcome::Spawn(Frame::rule(index), WalkMode::Same),
+            None => spawn(Frame::rule(index), WalkMode::Same),
             Some(result) => {
                 let result = result.clone();
                 ctx.values[id.index()] = Some(result.clone());
@@ -1671,101 +2403,165 @@ fn step_cell<'p>(
             }
         };
     }
-    if let NormalFormKind::Leaf(LeafKind::ImportRule(path)) = &cell_def.kind {
-        if plan.rules.contains_key(path) {
-            let index = plan.rule_index(path);
-            if plan.rule_at(index).normal_form != id {
-                return match &ctx.rule_values[index.index()] {
-                    None => Outcome::Spawn(Frame::rule(index), WalkMode::Same),
-                    Some(result) => {
-                        let result = result.clone();
-                        ctx.values[id.index()] = Some(result.clone());
-                        Outcome::Finish(Some(result))
-                    }
-                };
-            }
-        }
-    }
-
     match &cell_def.kind {
         NormalFormKind::Leaf(LeafKind::Literal(literal)) => {
-            done!(OperationResult::from_literal(literal.clone()))
+            let lemma_type = plan.result_type(id).as_ref();
+            let unit = lemma_type.unit().map(Arc::<str>::from);
+            let bound = BoundValueKind::with_binding(literal.value.clone(), unit);
+            let result = settle_stored(bound, lemma_type, plan, ctx);
+            cell_done(cell, walk, result, plan, ctx)
         }
         NormalFormKind::Leaf(LeafKind::DataPath(path)) => {
-            if let Some(slot) = ctx.data_slot(plan, path) {
-                done!(slot.clone())
+            if let Some(DataDefinition::Import { .. }) = plan.data.get(path) {
+                if let Some(failure) = ctx.dynamic_import_failure(path) {
+                    done!(failure.clone())
+                }
+                let holder = ctx.owner_row.as_ref().map(|key| key.row.as_ref());
+                let row = Arc::clone(plan.import_row(holder, path, ctx.dynamic_import_rows()));
+                done!(OperationResult::from_literal(LiteralValue::new(
+                    ValueKind::Spec(SpecValue::Row(InstanceKey::new(row, ctx.owner_row.clone())))
+                )))
             }
-            if !path.segments.is_empty() {
-                cell.resume = Some(Resume::Import(path));
-                return Outcome::Spawn(Frame::import_member(path), WalkMode::Same);
+            let lemma_type = plan
+                .data
+                .get(path)
+                .and_then(|definition| definition.schema_type());
+            let needs_options =
+                lemma_type.is_some_and(|schema| schema.needs_runtime_option_check());
+            if needs_options {
+                if let Some(rule_path) = plan.options_rule_of(path) {
+                    let index = plan.rule_index(&rule_path);
+                    if ctx.rule_values[index.index()].is_none() {
+                        return spawn(Frame::rule(index), WalkMode::Same);
+                    }
+                }
+            }
+            if let Some(slot) = ctx.data_slot(plan, path).cloned() {
+                let slot = match (slot, lemma_type) {
+                    (OperationResult::Value(bound), Some(lemma_type)) => {
+                        settle_stored(bound, lemma_type, plan, ctx)
+                    }
+                    (slot, _) => slot,
+                };
+                if slot.vetoed() || slot.is_missing_data() {
+                    ctx.settle_leaf(id.index());
+                    done!(slot)
+                }
+                if let (Some(lemma_type), Some(bound)) = (lemma_type, slot.value()) {
+                    if let Err(msg) = validate_value_against_type(
+                        lemma_type,
+                        &bound.to_literal(),
+                        &plan.resolved_types.unit_index,
+                    ) {
+                        ctx.settle_leaf(id.index());
+                        done!(OperationResult::Veto(VetoType::computation(msg)))
+                    }
+                }
+                if needs_options {
+                    let checked = check_data_options(id, slot, plan, ctx);
+                    ctx.settle_leaf(id.index());
+                    done!(checked)
+                }
+                ctx.settle_leaf(id.index());
+                done!(slot)
             }
             let list_path = match plan.reference_ends.get(path) {
                 Some(ReferenceEnd::Promptable(target)) => target,
-                Some(ReferenceEnd::Rule(_) | ReferenceEnd::Import) | None => path,
+                Some(ReferenceEnd::Rule(rule)) => {
+                    let index = plan.rule_index(rule);
+                    if ctx.rule_values[index.index()].is_none() {
+                        return spawn(Frame::rule(index), WalkMode::Same);
+                    }
+                    let value = resolve_data_path_value(path, plan, ctx);
+                    ctx.values[id.index()] = Some(value.clone());
+                    return Outcome::Finish(Some(value));
+                }
+                None => path,
             };
+            if let Some(blocked) = options_rule_blocker(plan, ctx, path) {
+                done!(blocked);
+            }
             if let Some(source) = plan.instance_lists.get(list_path) {
                 if list_path == path {
-                    cell.resume = Some(Resume::Plain);
-                    return Outcome::Spawn(Frame::materialize(path, source), WalkMode::Same);
+                    done!(stored_list(path, source, ctx))
                 }
                 let leaf = *plan
                     .data_leaf
                     .get(list_path)
                     .expect("BUG: instance list has no data_leaf entry");
                 cell.resume = Some(Resume::Plain);
-                return Outcome::Spawn(Frame::cell(leaf), WalkMode::New);
+                return spawn(Frame::cell(leaf), WalkMode::New);
             }
             done!(resolve_data_path_value(path, plan, ctx))
         }
-        NormalFormKind::Leaf(LeafKind::ImportRule(path)) => {
-            cell.resume = Some(Resume::Plain);
-            Outcome::Spawn(Frame::import_rule(path), WalkMode::Same)
-        }
-        NormalFormKind::Leaf(LeafKind::Row { level, end, .. }) => {
+        NormalFormKind::RowField { level, end, .. } => {
             let level = usize::try_from(*level).expect("BUG: row level fits usize");
-            let row = Arc::clone(
-                ctx.row_stack
-                    .get(level)
-                    .expect("BUG: row leaf evaluated outside its list command"),
-            );
+            let (key, position) = match ctx
+                .row_stack
+                .get(level)
+                .expect("BUG: row field evaluated outside its list command")
+            {
+                CurrentRow::Instance { key, position } => (key.clone(), *position),
+                CurrentRow::Value(_) => {
+                    panic!("BUG: row field evaluated against a value-list row")
+                }
+            };
+            let read = rows::ReadRow::listed(key, position);
+            if let Some(written) = inline_row_binding(&read.key, read.position, end, plan, ctx) {
+                done!(written)
+            }
             cell.resume = Some(Resume::Plain);
-            Outcome::Spawn(Frame::read_row(row, end.clone()), WalkMode::Same)
+            spawn(
+                Frame::read_row(read.key, end.clone(), read.position),
+                WalkMode::Same,
+            )
+        }
+        NormalFormKind::Leaf(LeafKind::RowValue { level }) => {
+            let level = usize::try_from(*level).expect("BUG: row level fits usize");
+            let row = match ctx
+                .row_stack
+                .get(level)
+                .expect("BUG: row value evaluated outside its list command")
+            {
+                CurrentRow::Value(row) => row,
+                CurrentRow::Instance { .. } => {
+                    panic!("BUG: RowValue evaluated against an instance-list row")
+                }
+            };
+            done!(OperationResult::from_literal(row.to_literal()))
         }
         NormalFormKind::Now => done!(OperationResult::from_literal(ctx.now().clone())),
-        NormalFormKind::SpecMember {
-            base, targets, row, ..
-        } => {
-            let base_result = need!(*base);
-            if base_result.vetoed() {
-                done!(base_result)
-            }
-            let value = match &borrow_value(&base_result, "spec member").value {
-                ValueKind::Spec(value) => value.clone(),
+        NormalFormKind::SpecMember { base, row, .. } => {
+            let instance = match cell.acc.take() {
+                Some(instance) => instance,
+                None => {
+                    let base_result = need!(*base);
+                    if base_result.vetoed() {
+                        done!(base_result)
+                    }
+                    base_result
+                }
+            };
+            let key = match &borrow_value(&instance, "spec member").value {
+                ValueKind::Spec(SpecValue::Row(key)) => key.clone(),
                 other => panic!("BUG: spec member base was {other}, not a spec value"),
             };
-            match value {
-                SpecValue::Fixed(instance) => {
-                    let Some((_, target)) =
-                        targets.iter().find(|(candidate, _)| candidate == &instance)
-                    else {
-                        let candidates: Vec<&SpecInstance> =
-                            targets.iter().map(|(candidate, _)| candidate).collect();
-                        unreachable!(
-                            "BUG: spec member instance {instance:?} is not among {candidates:?}"
-                        );
-                    };
-                    let value = need!(*target);
-                    done!(value)
-                }
-                SpecValue::Row(instance) => {
-                    let read = row
-                        .as_ref()
-                        .expect("BUG: spec member on a row value has no row read");
-                    let mark = ctx.row_log_mark();
-                    cell.resume = Some(Resume::RowLog(mark));
-                    Outcome::Spawn(Frame::read_row(instance, read.end.clone()), WalkMode::Same)
+            let end = row
+                .ends
+                .get(cell.cursor)
+                .expect("BUG: member read past its last hop");
+            let mark = match cell.member_mark.take() {
+                Some(mark) => mark,
+                None => ctx.row_log_mark(),
+            };
+            if cell.cursor + 1 == row.ends.len() {
+                if let Some(written) = inline_row_binding(&key, None, end, plan, ctx) {
+                    ctx.record_row_log(id, mark);
+                    done!(written)
                 }
             }
+            cell.resume = Some(Resume::Member(mark));
+            spawn(Frame::read_row(key, end.clone(), None), WalkMode::Same)
         }
         NormalFormKind::ListCommand {
             list,
@@ -1791,8 +2587,8 @@ fn step_cell<'p>(
                 Some(_) => Resume::RowLog(ctx.row_log_mark()),
                 None => Resume::Plain,
             });
-            Outcome::Spawn(
-                Frame::list_op(*list, op, args, *row_level, plan.result_type(id)),
+            spawn(
+                Frame::list_op(id, *list, op, args, *row_level, plan.result_type(id)),
                 WalkMode::Same,
             )
         }
@@ -1831,16 +2627,14 @@ fn step_cell<'p>(
             },))
         }
         NormalFormKind::Divide(left, right) => {
-            settle!(binary_settle(*left, *right, ctx, walk, |l, r| {
-                binary_arithmetic_result(
-                    l,
-                    plan.result_type(*left),
-                    r,
-                    plan.result_type(*right),
-                    ArithmeticComputation::Divide,
-                    plan,
-                )
-            },))
+            settle!(divisive_settle(
+                *left,
+                *right,
+                ctx,
+                walk,
+                plan,
+                ArithmeticComputation::Divide,
+            ))
         }
         NormalFormKind::Power(left, right) => {
             settle!(binary_settle(*left, *right, ctx, walk, |l, r| {
@@ -1855,28 +2649,24 @@ fn step_cell<'p>(
             },))
         }
         NormalFormKind::Modulo(left, right) => {
-            settle!(binary_settle(*left, *right, ctx, walk, |l, r| {
-                binary_arithmetic_result(
-                    l,
-                    plan.result_type(*left),
-                    r,
-                    plan.result_type(*right),
-                    ArithmeticComputation::Modulo,
-                    plan,
-                )
-            },))
+            settle!(divisive_settle(
+                *left,
+                *right,
+                ctx,
+                walk,
+                plan,
+                ArithmeticComputation::Modulo,
+            ))
         }
         NormalFormKind::Negate(inner) => {
             let value = need!(*inner);
             if value.vetoed() {
                 done!(value)
             }
-            let zero = OperationResult::from_literal(LiteralValue::number(
-                crate::computation::rational::rational_zero(),
-            ));
+            let zero = OperationResult::from_literal(LiteralValue::number(rational_zero()));
             done!(binary_arithmetic_result(
                 &zero,
-                crate::planning::semantics::primitive_number_arc(),
+                primitive_number_arc(),
                 &value,
                 plan.result_type(*inner),
                 ArithmeticComputation::Subtract,
@@ -1888,12 +2678,10 @@ fn step_cell<'p>(
             if value.vetoed() {
                 done!(value)
             }
-            let one = OperationResult::from_literal(LiteralValue::number(
-                crate::computation::rational::rational_one(),
-            ));
+            let one = OperationResult::from_literal(LiteralValue::number(rational_one()));
             done!(binary_arithmetic_result(
                 &one,
-                crate::planning::semantics::primitive_number_arc(),
+                primitive_number_arc(),
                 &value,
                 plan.result_type(*inner),
                 ArithmeticComputation::Divide,
@@ -1915,7 +2703,9 @@ fn step_cell<'p>(
                 )
             },
         )),
-        NormalFormKind::And(children) => settle!(and_step(cell, children, ctx, walk)),
+        NormalFormKind::Logical(connective, children) => {
+            settle!(logical_step(cell, *connective, children, ctx, walk))
+        }
         NormalFormKind::Not(inner) => {
             let value = need!(*inner);
             if value.vetoed() {
@@ -1927,7 +2717,7 @@ fn step_cell<'p>(
                 plan.result_type(*inner),
                 &ComparisonComputation::Is,
                 &borrow_value(&false_lit, "not operand").value,
-                crate::planning::semantics::primitive_boolean_arc(),
+                primitive_boolean_arc(),
             ))
         }
         NormalFormKind::MathOp(op, inner) => {
@@ -1941,15 +2731,58 @@ fn step_cell<'p>(
                 plan.result_type(id),
             ))
         }
+        NormalFormKind::StepRounding(mode, operand, step) => match step {
+            None => {
+                let value = need!(*operand);
+                if value.vetoed() {
+                    done!(value)
+                }
+                done!(integer_rounding(
+                    *mode,
+                    borrow_value(&value, "rounded operand"),
+                ))
+            }
+            Some(step) => settle!(binary_settle(
+                *operand,
+                *step,
+                ctx,
+                walk,
+                |operand_result, step_result| {
+                    step_rounding(
+                        *mode,
+                        borrow_value(operand_result, "rounded operand"),
+                        borrow_value(step_result, "rounding step"),
+                        plan.result_type(id),
+                    )
+                },
+            )),
+        },
         NormalFormKind::UnitConversion(inner, target) => {
             let value = need!(*inner);
             if value.vetoed() {
                 done!(value)
             }
+            let source_type = plan.result_type(*inner).as_ref();
+            if let Some(scale) = conversion_scale_target(target, source_type, plan) {
+                assert!(
+                    unforced_target(scale, plan, ctx).is_none(),
+                    "BUG: conversion scale {scale:?} read before its scale dependency was evaluated"
+                );
+                match resolved_scale_factor(scale, plan, ctx) {
+                    Err(veto) => done!(veto),
+                    Ok(factor) => done!(convert_unit_operand(
+                        borrow_value(&value, "conversion operand"),
+                        source_type,
+                        target,
+                        Some(&factor),
+                    )),
+                }
+            }
             done!(convert_unit_operand(
                 borrow_value(&value, "conversion operand"),
-                plan.result_type(*inner).as_ref(),
+                source_type,
                 target,
+                None,
             ))
         }
         NormalFormKind::DateRelative(kind, inner) => {
@@ -1961,11 +2794,7 @@ fn step_cell<'p>(
                 ValueKind::Date(dt) => dt,
                 other => panic!("BUG: date-relative operand expected date, got {other:?}"),
             };
-            done!(crate::computation::datetime::compute_date_relative(
-                kind,
-                date,
-                now_date(ctx),
-            ))
+            done!(compute_date_relative(kind, date, now_date(ctx),))
         }
         NormalFormKind::DateCalendar(kind, unit, inner) => {
             let value = need!(*inner);
@@ -1976,12 +2805,7 @@ fn step_cell<'p>(
                 ValueKind::Date(dt) => dt,
                 other => panic!("BUG: date-calendar operand expected date, got {other:?}"),
             };
-            done!(crate::computation::datetime::compute_date_calendar(
-                kind,
-                unit,
-                date,
-                now_date(ctx),
-            ))
+            done!(compute_date_calendar(kind, unit, date, now_date(ctx),))
         }
         NormalFormKind::RangeLiteral(left_id, right_id) => settle!(binary_settle(
             *left_id,
@@ -1991,14 +2815,9 @@ fn step_cell<'p>(
             |left_result, right_result| {
                 let left_bound = borrow_value(left_result, "left endpoint");
                 let right_bound = borrow_value(right_result, "right endpoint");
-                let left_typed = crate::planning::semantics::typed_literal_from_bound(
-                    left_bound,
-                    plan.result_type(*left_id),
-                );
-                let right_typed = crate::planning::semantics::typed_literal_from_bound(
-                    right_bound,
-                    plan.result_type(*right_id),
-                );
+                let left_typed = typed_literal_from_bound(left_bound, plan.result_type(*left_id));
+                let right_typed =
+                    typed_literal_from_bound(right_bound, plan.result_type(*right_id));
                 OperationResult::from_literal(LiteralValue::range(left_typed, right_typed))
             },
         )),
@@ -2016,11 +2835,7 @@ fn step_cell<'p>(
                         .element_from_range()
                         .map(|element| Arc::new(LemmaType::primitive(element)))
                         .expect("BUG: lower/upper requires a range result type");
-                    match crate::computation::range::ordered_endpoints(
-                        &left.value,
-                        &right.value,
-                        &endpoint_type,
-                    ) {
+                    match ordered_endpoints(&left.value, &right.value, &endpoint_type) {
                         Ok((lo, hi)) => {
                             let picked = match bound {
                                 RangeBound::Lower => lo,
@@ -2048,7 +2863,7 @@ fn step_cell<'p>(
             if value.vetoed() {
                 done!(value)
             }
-            done!(crate::computation::datetime::evaluate_past_future_range(
+            done!(evaluate_past_future_range(
                 kind,
                 &borrow_value(&value, "offset operand").to_literal(),
                 plan.result_type(*inner),
@@ -2070,7 +2885,7 @@ fn step_cell<'p>(
                             .element_from_range()
                             .map(|element| Arc::new(LemmaType::primitive(element)))
                             .expect("BUG: range containment requires a range result type");
-                        crate::computation::range::check_containment(
+                        check_containment(
                             &borrow_value(value_result, "value operand").value,
                             plan.result_type(*value),
                             &range_left.value,
@@ -2134,7 +2949,7 @@ fn step_cell<'p>(
 /// Completes a cell: an exhaustive run first visits the cell's origin, then the value is
 /// stored by the store policy.
 fn cell_done<'p>(
-    cell: &mut CellFrame<'p>,
+    cell: &mut CellFrame,
     walk: &WalkDone,
     value: OperationResult,
     plan: &'p ExecutionPlan,
@@ -2149,7 +2964,7 @@ fn cell_done<'p>(
     if let Some(origin) = origin {
         if ready(origin, ctx, walk).is_none() {
             cell.settled = Some(value);
-            return Outcome::Spawn(Frame::cell(origin), WalkMode::Same);
+            return spawn(Frame::cell(origin), WalkMode::Same);
         }
     }
     Outcome::Finish(Some(finish(id, value, plan, ctx)))
@@ -2161,7 +2976,7 @@ fn cell_done<'p>(
 /// Progressive accumulator types come from the Sum/Product cell's `fold_types`.
 /// Operands left to right. Returns the child a step still needs when a child is pending.
 fn fold_step(
-    cell: &mut CellFrame<'_>,
+    cell: &mut CellFrame,
     terms: &[ArithmeticTerm],
     (direct_op, inverse_op): (ArithmeticComputation, ArithmeticComputation),
     plan: &ExecutionPlan,
@@ -2189,6 +3004,20 @@ fn fold_step(
         };
         cell.cursor += 1;
         if let Some(settled) = &cell.veto {
+            if settled.is_missing_data() && !result.vetoed() && term.inverse {
+                let combined = divisive_operation_results(
+                    settled,
+                    &fold_types[i - 1],
+                    &inverse_op,
+                    &result,
+                    plan.result_type(child),
+                    &plan.signature_index,
+                );
+                if combined.vetoed() && !combined.is_missing_data() {
+                    cell.veto = Some(combined);
+                }
+                continue;
+            }
             if settled.is_missing_data() && result.vetoed() && !result.is_missing_data() {
                 cell.veto = Some(result);
             }
@@ -2207,14 +3036,28 @@ fn fold_step(
                 } else {
                     direct_op.clone()
                 };
-                let combined = binary_arithmetic_result(
-                    &left,
-                    &fold_types[i - 1],
-                    &result,
-                    plan.result_type(child),
+                let combined = if matches!(
                     op,
-                    plan,
-                );
+                    ArithmeticComputation::Divide | ArithmeticComputation::Modulo
+                ) {
+                    divisive_operation_results(
+                        &left,
+                        &fold_types[i - 1],
+                        &op,
+                        &result,
+                        plan.result_type(child),
+                        &plan.signature_index,
+                    )
+                } else {
+                    binary_arithmetic_result(
+                        &left,
+                        &fold_types[i - 1],
+                        &result,
+                        plan.result_type(child),
+                        op,
+                        plan,
+                    )
+                };
                 if combined.vetoed() {
                     cell.veto = Some(combined);
                     continue;
@@ -2231,22 +3074,34 @@ fn fold_step(
         .expect("BUG: n-ary arithmetic produced neither value nor veto after evaluating children"))
 }
 
-/// Operands left to right, order-independent in value. Any `false` operand decides
-/// `false`, whatever its position and whatever the other operands are. Otherwise the
-/// first missing or vetoed operand in source order propagates; the remaining operands
-/// are still visited so a later `false` can decide. All true is `true`.
-fn and_step(
-    cell: &mut CellFrame<'_>,
+/// Operands left to right. The absorbing literal of `connective` decides regardless
+/// of position (`true` for `or`, `false` for `and`). Without an absorbing operand,
+/// the first missing or vetoed operand in source order propagates; remaining operands
+/// are still visited so a later absorbing literal can decide. Otherwise the identity
+/// literal (`false` for `or`, `true` for `and`).
+///
+/// An absorbing decision does not visit remaining operands (including under the
+/// exhaustive explain policy): unread siblings must not become required inputs.
+fn logical_step(
+    cell: &mut CellFrame,
+    connective: LogicalConnective,
     children: &[NormalFormId],
     ctx: &EvaluationContext,
     walk: &WalkDone,
 ) -> Result<OperationResult, NormalFormId> {
-    assert!(children.len() >= 2, "BUG: And has at least two operands");
+    assert!(
+        children.len() >= 2,
+        "BUG: Logical has at least two operands"
+    );
+    let absorbing = connective.absorbing_operand();
     loop {
         let child = children[cell.cursor];
         let result = ready(child, ctx, walk).ok_or(child)?;
         match condition_outcome(&result) {
-            BranchOutcome::NotTaken => {
+            BranchOutcome::Taken if absorbing => {
+                return Ok(OperationResult::from_literal(LiteralValue::from_bool(true)));
+            }
+            BranchOutcome::NotTaken if !absorbing => {
                 return Ok(OperationResult::from_literal(LiteralValue::from_bool(
                     false,
                 )));
@@ -2254,14 +3109,13 @@ fn and_step(
             BranchOutcome::Propagate(propagated) => {
                 cell.veto.get_or_insert(propagated);
             }
-            BranchOutcome::Taken => {}
+            BranchOutcome::Taken | BranchOutcome::NotTaken => {}
         }
         cell.cursor += 1;
         if cell.cursor == children.len() {
-            return Ok(cell
-                .veto
-                .take()
-                .unwrap_or_else(|| OperationResult::from_literal(LiteralValue::from_bool(true))));
+            return Ok(cell.veto.take().unwrap_or_else(|| {
+                OperationResult::from_literal(LiteralValue::from_bool(!absorbing))
+            }));
         }
     }
 }
@@ -2298,6 +3152,43 @@ where
         return Ok(right_result);
     }
     Ok(combine(&left_result, &right_result))
+}
+
+/// Divide / modulo: a MissingData dividend still visits the divisor; a present
+/// definitive Computation factor (zero divisor) settles and clears intake keys.
+fn divisive_settle(
+    left: NormalFormId,
+    right: NormalFormId,
+    ctx: &EvaluationContext,
+    walk: &WalkDone,
+    plan: &ExecutionPlan,
+    op: ArithmeticComputation,
+) -> Result<OperationResult, NormalFormId> {
+    let left_result = ready(left, ctx, walk).ok_or(left)?;
+    if left_result.vetoed() && !left_result.is_missing_data() {
+        if ctx.exhaustive {
+            ready(right, ctx, walk).ok_or(right)?;
+        }
+        return Ok(left_result);
+    }
+    let right_result = ready(right, ctx, walk).ok_or(right)?;
+    if right_result.vetoed() && !right_result.is_missing_data() {
+        return Ok(right_result);
+    }
+    if right_result.is_missing_data() {
+        if left_result.is_missing_data() {
+            return Ok(left_result);
+        }
+        return Ok(right_result);
+    }
+    Ok(divisive_operation_results(
+        &left_result,
+        plan.result_type(left),
+        &op,
+        &right_result,
+        plan.result_type(right),
+        &plan.signature_index,
+    ))
 }
 
 fn binary_arithmetic_result(

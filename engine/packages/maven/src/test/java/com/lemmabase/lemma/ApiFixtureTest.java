@@ -54,6 +54,7 @@ final class ApiFixtureTest {
           "rule",
           "rule_ref",
           "compose",
+          "list_command",
           "data",
           "data_unused",
           "conversion",
@@ -94,6 +95,7 @@ final class ApiFixtureTest {
         assertInstanceOf(RuleResultValue.Number.class, amount.suggestion());
         assertEquals(List.of("amount"), show.required());
         assertTrue(show.rows().isEmpty());
+        assertTrue(show.rowFieldNeededByRules().isEmpty());
         assertEquals(json, show.json());
         Show.ShowRule ok = show.rules().get("ok");
         assertNotNull(ok);
@@ -104,7 +106,7 @@ final class ApiFixtureTest {
       case "explanation_node_variants.json" -> parseExplanationNodeVariants(json);
       case "error_kind_variants.json" -> {
         List<EngineError> errors = JsonSupport.parseEngineErrors(json);
-        assertEquals(13, errors.size());
+        assertEquals(12, errors.size());
       }
       case "type_extends_variants.json" -> parseTypeExtendsVariants(json);
       case "type_specification_kinds.json" -> parseTypeSpecificationKinds(json);
@@ -151,6 +153,13 @@ final class ApiFixtureTest {
     assertInstanceOf(ShowPropertyType.Text.class, menuRow.data().get("drink").type());
     assertEquals(
         Map.of("$ref", "#/$defs/LemmaRow_menu__item"), show.data().get("menu").schema().get("items"));
+    assertTrue(menuRow.data().get("drink").neededByRules().isEmpty());
+    Map<String, List<String>> menuRowConsumers =
+        show.rowFieldNeededByRules().get("LemmaRow_menu__item");
+    assertNotNull(menuRowConsumers);
+    assertEquals(List.of("drink", "price", "size"), List.copyOf(menuRowConsumers.keySet()));
+    assertEquals(List.of("extended", "selected", "selected_price"), menuRowConsumers.get("drink"));
+    assertEquals(List.of("any_large", "large", "size_product"), menuRowConsumers.get("size"));
 
     Show.ShowData faresData = show.data().get("fares");
     ShowPropertyType.ListType fares =
@@ -165,18 +174,28 @@ final class ApiFixtureTest {
 
   private static void parseResponseList(String json) {
     Response response = JsonSupport.parseResponse(json);
-    RuleResult.Row selected =
-        assertInstanceOf(RuleResult.Row.class, response.results().get("selected"));
-    assertEquals("menu.2", selected.row().instance());
-    RuleResult.RowResult latte = response.rows().get(selected.row().index());
-    assertEquals("menu_item", latte.spec());
-    assertEquals("latte", latte.data().get("drink").result().result());
+    RuleResult.Spec selected =
+        assertInstanceOf(RuleResult.Spec.class, response.results().get("selected"));
+    assertEquals("menu.2", selected.spec().instance());
+    Show.PathSegment hop = selected.spec().path().get(0);
+    assertEquals("menu", hop.uses());
+    assertEquals(2, hop.row());
+    assertEquals("menu_item", hop.spec());
+    assertEquals("latte", selected.spec().data().get("drink").result().result());
 
     RuleResult.ListResult large =
         assertInstanceOf(RuleResult.ListResult.class, response.results().get("large"));
-    RuleResultValue.Row largeRow =
-        assertInstanceOf(RuleResultValue.Row.class, large.items().get(0));
-    assertEquals(selected.row().index(), largeRow.row().index());
+    RuleResultValue.Spec largeItem =
+        assertInstanceOf(RuleResultValue.Spec.class, large.items().get(0));
+    assertEquals("menu.2", largeItem.spec().instance());
+
+    RuleResult.ListResult extended =
+        assertInstanceOf(RuleResult.ListResult.class, response.results().get("extended"));
+    RuleResultValue.Row appended =
+        assertInstanceOf(RuleResultValue.Row.class, extended.items().get(2));
+    RuleResult.RowResult mocha = response.rows().get(appended.row().index());
+    assertEquals("menu_item", mocha.spec());
+    assertEquals("mocha", mocha.data().get("drink").result().result());
 
     RuleResult.ListResult highFares =
         assertInstanceOf(RuleResult.ListResult.class, response.results().get("high_fares"));
@@ -318,6 +337,11 @@ final class ApiFixtureTest {
       case ExplanationNode.RuleRef ignored -> {}
       case ExplanationNode.Compose compose -> {
         for (ExplanationNode child : compose.operands()) {
+          collectExplanationTypes(child, types);
+        }
+      }
+      case ExplanationNode.ListCommand listCommand -> {
+        for (ExplanationNode child : listCommand.operands()) {
           collectExplanationTypes(child, types);
         }
       }

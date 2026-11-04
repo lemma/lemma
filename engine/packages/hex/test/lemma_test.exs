@@ -81,45 +81,6 @@ defmodule LemmaTest do
     end
   end
 
-  describe "snapshot/1 and from_snapshot/1" do
-    test "round-trips list and run; corrupt bytes error" do
-      assert {:ok, source} = Lemma.new()
-
-      :ok =
-        Lemma.load(source, """
-        spec snap_demo
-        data x: number
-        rule y: x + 1
-        """)
-
-      assert {:ok, bytes} = Lemma.snapshot(source)
-      assert is_binary(bytes)
-      assert byte_size(bytes) > 0
-
-      assert {:ok, restored} = Lemma.from_snapshot(bytes)
-      assert {:ok, specs_source} = Lemma.specs(source)
-      assert {:ok, specs_restored} = Lemma.specs(restored)
-      assert specs_restored == specs_source
-
-      assert {:ok, run_source} =
-               Lemma.evaluate(source, %{spec: "snap_demo"}, %{data: %{"x" => 41}})
-
-      assert {:ok, run_restored} =
-               Lemma.evaluate(restored, %{spec: "snap_demo"}, %{data: %{"x" => 41}})
-
-      assert comparable_rule_result(run_restored["results"]["y"]) ==
-               comparable_rule_result(run_source["results"]["y"])
-
-      corrupt =
-        case bytes do
-          <<_::8, rest::binary>> -> <<0x58, rest::binary>>
-        end
-
-      assert {:error, err} = Lemma.from_snapshot(corrupt)
-      assert is_map(err)
-    end
-  end
-
   describe "quality/1" do
     test "clean spec has no recommendations" do
       {:ok, engine} = Lemma.new()
@@ -554,7 +515,8 @@ defmodule LemmaTest do
         rule cost: price * qty
 
         spec order
-        uses lines: line list
+        uses line
+        data lines: line list
         data discounts: number list
         rule total: lines -> sum cost
         rule priciest: lines -> sort cost desc -> first
@@ -721,7 +683,8 @@ defmodule LemmaTest do
           data size: number
 
           spec cafe
-          uses menu: menu_item list
+          uses menu_item
+          data menu: menu_item list
             -> with drink: "espresso", size: 1
             -> with drink: "latte"
           rule drinks: menu -> count
@@ -740,7 +703,7 @@ defmodule LemmaTest do
       assert Map.keys(latte["fields"]) == ["drink"]
     end
 
-    test "overrides evaluation data for a slot bound to data" do
+    test "rejects evaluation data for a slot sealed by uses" do
       {:ok, engine} = Lemma.new()
 
       :ok =
@@ -757,10 +720,11 @@ defmodule LemmaTest do
           """
         })
 
-      assert {:ok, response} =
+      assert {:error, err} =
                Lemma.evaluate(engine, %{spec: "outer"}, %{data: %{"i.slot" => "5"}})
 
-      assert response["results"]["r"]["number"] == "5"
+      assert err[:kind] == "request"
+      assert err[:related_data] == "i.slot"
     end
 
     test "rejects nested floats, non-boolean atoms, and colliding keys" do
@@ -906,6 +870,7 @@ defmodule LemmaTest do
       assert show.effective_from == show_map["x-lemma-effective-from"]
       assert show.required == ["amount"]
       assert show.rows == %{}
+      assert show.row_field_needed_by_rules == %{}
       assert show.meta == %{"title" => %{"text" => "t"}}
 
       amount = Map.fetch!(show.data, "amount")
@@ -924,6 +889,21 @@ defmodule LemmaTest do
       assert ok.path == []
       assert ok.depends_on_rules == []
       assert length(ok.branches) == 1
+    end
+
+    test "reads row field consumers from the list fixture" do
+      fixture_path = Path.expand("../../../tests/fixtures/api/show_list.json", __DIR__)
+      assert {:ok, raw} = File.read(fixture_path)
+      assert {:ok, show_map} = Jason.decode(raw)
+
+      show = Lemma.Show.from_map(show_map)
+      row = Map.fetch!(show.rows, "LemmaRow_menu__item")
+      assert Map.fetch!(row.data, "drink").needed_by_rules == []
+
+      consumers = Map.fetch!(show.row_field_needed_by_rules, "LemmaRow_menu__item")
+      assert Map.keys(consumers) == ["drink", "price", "size"]
+      assert consumers["drink"] == ["extended", "selected", "selected_price"]
+      assert consumers["size"] == ["any_large", "large", "size_product"]
     end
 
     test "preserves semantics after formatting" do

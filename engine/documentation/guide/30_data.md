@@ -42,7 +42,6 @@ spec shipping_threshold
 
 data money: measure
   -> unit eur: 1.00
-  -> decimals 2
 
 data order_total: money
   -> help "What is the order total?"
@@ -64,7 +63,6 @@ spec invoice
 
 data money: measure
   -> unit eur: 1.00
-  -> decimals 2
   -> minimum 0 eur
 
 data invoice_total: money
@@ -91,7 +89,7 @@ Primitives: `boolean`, `number`, `text`, `measure`, `ratio`, `date`, `time`, and
 |------|----------------|
 | `boolean` | `help`, `with`, `suggest` |
 | `number` | `decimals`, `minimum`, `maximum`, `help`, `with`, `suggest` |
-| `measure` | `unit`, `decimals`, `minimum`, `maximum`, `help`, `with`, `suggest` (see **Measure**, **Units**) |
+| `measure` | `unit`, `minimum`, `maximum`, `help`, `with`, `suggest` (see **Measure**, **Units**) |
 | `ratio` | `unit`, `minimum`, `maximum`, `help`, `with`, `suggest` |
 | `text` | `option`, `options`, `length`, `help`, `with`, `suggest` |
 | `date`, `time` | `minimum`, `maximum`, `help`, `with`, `suggest` |
@@ -113,9 +111,9 @@ On range types, `lower` / `upper` bound endpoints; `minimum` / `maximum` bound *
 
 **Lists**
 
-A list is ordered rows of one type. `data fares: money list` holds values; `uses staff: employee list` holds instances of spec `employee`, whose `data` are the columns and whose rules are computed per row. No list literals: each `-> with` adds rows, comma-separated. A list without rows is empty, never missing data. Evaluation data replaces a whole list with one JSON array (strings for values, objects keyed by row data names for instances). Do not name data, rules, specs, aliases, or units after list keywords (see **Syntax**).
+A list is ordered rows of one type. `data fares: money list` holds values; `data staff: employee list` holds instances of Spec `employee` (import the row Spec with `uses employee`), whose `data` are the columns and whose rules are computed per row. No list literals: each `-> with` adds rows, comma-separated. A list without rows is empty, never missing data. Evaluation data may replace a whole list with one JSON array (strings for values, objects keyed by row data names for instances) or patch unbound cells with dotted keys (`staff.2.salary`). Do not name data, rules, specs, aliases, or units after list keywords (see **Syntax**).
 
-Use a list when rows are uniform and combined (summed, searched, filtered, counted, or their number varies). Use named `uses` instances when each has its own role (`buyer`, `seller`).
+Use a data list when rows are uniform and combined (summed, searched, filtered, counted, or their number varies). Use named `uses` instances when each has its own role (`buyer`, `seller`); `uses -> with` seals those slots. Use a list-valued rule for a sealed catalog.
 
 ```lemma
 spec menu_item
@@ -125,17 +123,18 @@ data drink: text
 
 data price: measure
   -> unit eur: 1.00
-  -> decimals 2
 
 
 spec coffee_order
 
-uses menu: menu_item list
+uses menu_item
+
+data menu: menu_item list
   -> key drink
   -> with drink: "espresso", price: 2.50 eur
   -> with drink: "latte",    price: 3.50 eur
 
-data ordered:  menu.drink
+data ordered:  menu_item.drink
 data quantity: number
 
 rule selected_drink:
@@ -146,7 +145,7 @@ rule total:
 ```
 
 - `-> key drink` identifies rows by field; without it rows are numbered `1` to `n`. Duplicate source keys are planning errors; a row key must be an allowed option when the field has options; `find` with no row vetoes.
-- `menu.drink` in a type position reuses the row spec's type.
+- Type position uses the `uses` Spec alias (`menu_item.drink`), not the list name.
 - A row reads only its own data. A value the row needs from the enclosing spec is supplied per row (`-> with band: 0 eur...38000 eur, rate: 36%, income: income`).
-- A spec may hold a list of its own rows (`uses components: part list` inside `spec part`); rows come from evaluation data only.
+- A spec may hold a list of its own rows (`data components: part list` inside `spec part`); rows come from evaluation data only.
 - List commands (`find`, `sum`, `where`, ...) are rule expressions, never `data` commands (see **Rules**).

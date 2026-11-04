@@ -45,10 +45,10 @@ cargo deny check --config .cargo/deny.toml
 3. Run before submitting (from repo root):
 
    ```bash
-   cargo precommit --fuzz
+   cargo precommit
    ```
 
-   That is what CI runs. Bare `cargo precommit` is a faster local shortcut (same gate without fuzz). The gate: versions-verify, Hex `mix precommit`, VS Code `npm precommit`, fmt, clippy (`--all-features`), nextest (including ignored benches), WASM npm build+test, Maven `./mvnw -B verify` (after `lemma_jni` build), NuGet `dotnet test` (after `lemma_dotnet` + UniFFI generate), cargo-deny, `cargo coverage all --check`, then with `--fuzz` 5 minutes total across `engine/fuzz` targets. Requires `cargo-nextest`, `cargo-deny`, Elixir/Mix, Node.js, `wasm-pack`, a **JDK 21+**, and the **.NET 8 SDK** (`uniffi-bindgen-cs` tag `v0.11.0+v0.31.0`); `--fuzz` also needs nightly and `cargo-fuzz`. Regenerate coverage with `cargo coverage all` when engine/cli sources change (`cargo-llvm-cov` required). `cargo nextest` alone is Rust tests only.
+   That is the local gate. Pull requests run `cargo precommit --coverage` (same gate, then the committed coverage-report check). Push to `main` runs `cargo precommit --coverage --fuzz`. The gate: versions-verify, Hex `mix precommit`, VS Code `npm ci` + `npm audit --audit-level=low` + package, fmt, clippy (`--all-features`), nextest (including ignored benches), WASM npm build+test, Maven `./mvnw -B verify` (after `lemma_jni` build), NuGet `dotnet test` (after `lemma_dotnet` + UniFFI generate, formatted with CSharpier 1.3.0), cargo-deny. `cargo package --list` of the crates.io crates fails on a `warning:` line (package-set hygiene; release bottom-up publish owns registry compile). `--coverage` runs `cargo coverage all --check`. `--fuzz` runs 5 minutes total across `engine/fuzz` targets. Requires `cargo-nextest`, `cargo-deny`, Elixir/Mix, Node.js, `wasm-pack`, a **JDK 21+**, and the **.NET 8 SDK** (`uniffi-bindgen-cs` tag `v0.11.0+v0.31.0`); `--fuzz` also needs nightly and `cargo-fuzz`. Regenerate coverage with `cargo coverage all` when engine or CLI sources change (`cargo-llvm-cov` required). `cargo nextest` alone is Rust tests only.
 
 ### Release version (maintainers)
 
@@ -61,7 +61,7 @@ Do not hand-edit those copies unless you keep them in sync.
 
 ## Pull requests
 
-CI runs `cargo precommit --fuzz`. That must pass.
+A pull request runs `cargo precommit --coverage`. Push to `main` runs `cargo precommit --coverage --fuzz`. That must pass.
 
 ## Project structure
 
@@ -88,10 +88,10 @@ See [engine/tests/README.md](https://github.com/lemma/lemma/blob/main/engine/tes
 
 ### Fuzz testing
 
-CI / full gate (5 minutes fuzz total after the rest of precommit):
+Push to `main` checks committed coverage reports, then runs 5 minutes of fuzz total:
 
 ```bash
-cargo precommit --fuzz
+cargo precommit --coverage --fuzz
 ```
 
 Requires nightly Rust and `cargo-fuzz`. Manual single-target run:

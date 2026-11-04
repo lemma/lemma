@@ -224,43 +224,25 @@ rule r: price
 }
 
 #[test]
-fn overlay_measure_decimals_constraint_uses_declared_unit() {
+fn measure_input_keeps_supplied_precision() {
     let mut engine = Engine::new();
     load(
         &mut engine,
         r#"
 spec delivery
-data cost: measure -> decimals 2 -> unit eur: 1
+data cost: measure -> unit eur: 1 -> unit cent: 0.01
 rule r: cost
 "#,
     );
 
-    let rejected = run(
+    let response = run(
         &engine,
         "delivery",
         IndexMap::from([("cost".to_string(), "1.234 eur".into())]),
         false,
     );
-    let result = rule_result(&rejected, "r");
-    assert!(result.vetoed);
-    let reason = result.veto_reason.as_deref().unwrap_or("");
-    assert!(
-        reason.contains("exceeds the decimals constraint of 2"),
-        "expected decimals constraint message, got: {reason}"
-    );
-    assert!(
-        reason.contains("1.234"),
-        "veto must show rejected scale, not rounded 1.23, got: {reason}"
-    );
-
-    let accepted = run(
-        &engine,
-        "delivery",
-        IndexMap::from([("cost".to_string(), "1.23 eur".into())]),
-        false,
-    );
-    let result = rule_result(&accepted, "r");
-    assert!(!result.vetoed);
+    let result = rule_result(&response, "r");
+    assert!(!result.vetoed, "got: {:?}", result.veto_reason);
     let measure = result
         .result
         .as_ref()
@@ -270,6 +252,10 @@ rule r: cost
         .expect("measure map");
     assert_eq!(
         measure.get("eur").copied(),
-        Some(Decimal::from_str("1.23").expect("1.23"))
+        Some(Decimal::from_str("1.234").expect("1.234"))
+    );
+    assert_eq!(
+        measure.get("cent").copied(),
+        Some(Decimal::from_str("123.4").expect("123.4"))
     );
 }

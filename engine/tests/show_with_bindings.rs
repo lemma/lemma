@@ -47,31 +47,31 @@ data price_per_weight: measure
   -> unit eur_per_kg: eur/kg
 
 data item_cost: price_per_weight
-data roasting: price_per_weight
-data chocolatizing: price_per_weight
+data finish_a: price_per_weight
+data finish_b: price_per_weight
 
-rule total_price: weight * (item_cost + roasting + chocolatizing)
+rule total_price: weight * (item_cost + finish_a + finish_b)
 
 spec calc
 uses bag
   -> with item_cost: item_cost
-  -> with roasting: roasting
+  -> with finish_a: finish_a
 
-data type_of_nut: text -> options "peanut", "cashew"
+data kind: text -> options "red", "blue"
 
-rule price_peanut: 1.5 eur_per_kg
-rule price_peanut_roasting: 0.45 eur_per_kg
+rule price_red: 1.5 eur_per_kg
+rule price_red_finish_a: 0.45 eur_per_kg
 
-rule price_cashew: 2.0 eur_per_kg
-rule price_cashew_roasting: 0.55 eur_per_kg
+rule price_blue: 2.0 eur_per_kg
+rule price_blue_finish_a: 0.55 eur_per_kg
 
 rule item_cost: veto "No item cost"
-  unless type_of_nut is "peanut" then price_peanut
-  unless type_of_nut is "cashew" then price_cashew
+  unless kind is "red" then price_red
+  unless kind is "blue" then price_blue
 
-rule roasting: veto "No roasting"
-  unless type_of_nut is "peanut" then price_peanut_roasting
-  unless type_of_nut is "cashew" then price_cashew_roasting
+rule finish_a: veto "No finish_a"
+  unless kind is "red" then price_red_finish_a
+  unless kind is "blue" then price_blue_finish_a
 
 rule total_price: bag.total_price
 "#;
@@ -104,11 +104,11 @@ rule total_price: bag.total_price
         "with-bound rule ref must not appear in missing_data: {names:?}"
     );
     assert!(
-        !names.contains(&"bag.roasting".to_string()),
+        !names.contains(&"bag.finish_a".to_string()),
         "with-bound rule ref must not appear in missing_data"
     );
     assert!(
-        names.contains(&"bag.chocolatizing".to_string()),
+        names.contains(&"bag.finish_b".to_string()),
         "unbound nested data must still appear"
     );
     assert!(
@@ -116,7 +116,7 @@ rule total_price: bag.total_price
         "nested input data must appear"
     );
     assert!(
-        names.contains(&"type_of_nut".to_string()),
+        names.contains(&"kind".to_string()),
         "local input for bound rules must appear"
     );
 
@@ -128,15 +128,15 @@ rule total_price: bag.total_price
         data_names,
         vec![
             "bag.weight".to_string(),
-            "type_of_nut".to_string(),
-            "bag.chocolatizing".to_string()
+            "kind".to_string(),
+            "bag.finish_b".to_string()
         ],
         "scoped data must list inputs in evaluation order"
     );
 }
 
 #[test]
-fn show_lists_literal_with_binding_as_bound_not_promptable() {
+fn show_omits_sealed_literal_uses_binding() {
     let code = r#"
 spec inner
 data v: number
@@ -153,14 +153,10 @@ rule r: i.v
         .unwrap();
     let now = DateTimeValue::now();
     let show = engine.show(None, "outer", Some(&now)).unwrap();
-    let entry = show
-        .data
-        .get("i.v")
-        .expect("literal with still surfaces in show for documentation");
-
     assert!(
-        entry.value.is_some(),
-        "literal with is value; CLI skips, not a free input"
+        !show.data.contains_key("i.v"),
+        "sealed uses key must not be an input: {:?}",
+        show.data.keys().collect::<Vec<_>>()
     );
 }
 
@@ -197,38 +193,19 @@ rule r: i.a + input
     assert_eq!(
         missing_data_union(&response),
         vec!["i.b".to_string(), "input".to_string()],
-        "without override, missing_data still lists wire source i.b and input"
+        "without override, missing_data lists wire source i.b and input"
     );
 
     let show = engine.show(None, "outer", Some(&now)).unwrap();
     assert!(
-        show.data.contains_key("i.a"),
-        "wired nested slot must appear in Show.data for evaluate override: {:?}",
+        !show.data.contains_key("i.a"),
+        "sealed wire LHS must not appear for override: {:?}",
         show.data.keys().collect::<Vec<_>>()
     );
     assert!(
         show.data.contains_key("i.b"),
         "wire source must remain in Show.data: {:?}",
         show.data.keys().collect::<Vec<_>>()
-    );
-    let wired = show.data.get("i.a").expect("i.a");
-    assert_eq!(
-        wired.value.as_ref().and_then(|v| v.reference.as_deref()),
-        Some("i.b"),
-        "Show documents the wire target; not a literal default"
-    );
-    let document = lemma::api::show_document(&engine, &show);
-    let required = document["required"]
-        .as_array()
-        .map(|a| {
-            a.iter()
-                .filter_map(|v| v.as_str().map(str::to_string))
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
-    assert!(
-        !required.iter().any(|k| k == "i.a"),
-        "wired nested key must not be required (wire can fill): {required:?}"
     );
 }
 
@@ -340,7 +317,7 @@ fn evaluate_prunes_simple_branch_when_mode_is_complex() {
 }
 
 #[test]
-fn evaluate_prunes_inactive_nut_branches_when_type_of_nut_supplied() {
+fn evaluate_prunes_inactive_kind_branches_when_kind_supplied() {
     let code = r#"
 spec bag
 uses lemma units
@@ -355,31 +332,31 @@ data price_per_weight: measure
   -> unit eur_per_kg: eur/kg
 
 data item_cost: price_per_weight
-data roasting: price_per_weight
-data chocolatizing: price_per_weight
+data finish_a: price_per_weight
+data finish_b: price_per_weight
 
-rule total_price: weight * (item_cost + roasting + chocolatizing)
+rule total_price: weight * (item_cost + finish_a + finish_b)
 
 spec calc
 uses bag
   -> with item_cost: item_cost
-  -> with roasting: roasting
+  -> with finish_a: finish_a
 
-data type_of_nut: text -> options "peanut", "cashew"
+data kind: text -> options "red", "blue"
 
-rule price_peanut: 1.5 eur_per_kg
-rule price_peanut_roasting: 0.45 eur_per_kg
+rule price_red: 1.5 eur_per_kg
+rule price_red_finish_a: 0.45 eur_per_kg
 
-rule price_cashew: 2.0 eur_per_kg
-rule price_cashew_roasting: 0.55 eur_per_kg
+rule price_blue: 2.0 eur_per_kg
+rule price_blue_finish_a: 0.55 eur_per_kg
 
 rule item_cost: veto "No item cost"
-  unless type_of_nut is "peanut" then price_peanut
-  unless type_of_nut is "cashew" then price_cashew
+  unless kind is "red" then price_red
+  unless kind is "blue" then price_blue
 
-rule roasting: veto "No roasting"
-  unless type_of_nut is "peanut" then price_peanut_roasting
-  unless type_of_nut is "cashew" then price_cashew_roasting
+rule finish_a: veto "No finish_a"
+  unless kind is "red" then price_red_finish_a
+  unless kind is "blue" then price_blue_finish_a
 
 rule total_price: bag.total_price
 "#;
@@ -388,7 +365,7 @@ rule total_price: bag.total_price
     engine
         .load([(
             lemma::SourceType::Path(std::sync::Arc::new(std::path::PathBuf::from(
-                "calc_nut_prune.lemma",
+                "calc_kind_prune.lemma",
             ))),
             code.to_string(),
         )])
@@ -396,7 +373,7 @@ rule total_price: bag.total_price
 
     let now = DateTimeValue::now();
     let mut inputs = IndexMap::new();
-    inputs.insert("type_of_nut".to_string(), "peanut".into());
+    inputs.insert("kind".to_string(), "red".into());
     let response = engine
         .evaluate(
             None,
@@ -410,7 +387,7 @@ rule total_price: bag.total_price
 
     assert_eq!(
         missing_data_union(&response),
-        vec!["bag.weight".to_string(), "bag.chocolatizing".to_string(),],
-        "supplied type_of_nut and with-bound roasting/item_cost omitted"
+        vec!["bag.weight".to_string(), "bag.finish_b".to_string(),],
+        "supplied kind and with-bound finish_a/item_cost omitted"
     );
 }

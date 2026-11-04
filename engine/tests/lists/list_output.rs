@@ -17,7 +17,8 @@ data drink: text
 data price: measure
   -> unit eur: 1.00
 spec coffee_order
-uses menu: menu_item list
+uses menu_item
+data menu: menu_item list
   -> key drink
   -> with drink: "espresso"
   -> with drink: "latte"
@@ -39,7 +40,8 @@ data drink: text
 data price: measure
   -> unit eur: 1.00
 spec coffee_order
-uses menu: menu_item list
+uses menu_item
+data menu: menu_item list
   -> key drink
   -> with drink: "espresso", price: 2.50 eur
   -> with drink: "latte", price: 3.50 eur
@@ -56,24 +58,12 @@ rule cheapest:
         .as_ref()
         .expect("explanation");
     let text = format_explanation(explanation);
-    assert_contains(&text, "[\"latte\"] price: 3.5 eur");
-    assert_contains(&text, "[\"espresso\"] price: 2.5 eur");
+    assert_contains(&text, "drink: latte,");
+    assert_contains(&text, "drink: espresso,");
+    assert_contains(&text, "price: 3.5 eur");
+    assert_contains(&text, "price: 2.5 eur");
     let json = serde_json::to_value(explanation).expect("json");
-    let row = json["children"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .chain(
-            json["children"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .filter_map(|n| n.get("operands"))
-                .filter_map(|o| o.as_array())
-                .flatten(),
-        )
-        .find(|n| n["type"] == "row")
-        .expect("row node");
+    let row = find_type(&json, "row").expect("row node");
     assert!(row["number"].as_u64().is_some(), "{row}");
     assert!(!row["key"].as_array().unwrap().is_empty(), "{row}");
 }
@@ -87,7 +77,8 @@ data name: text
 data salary: measure
   -> unit eur: 1.00
 spec payroll
-uses staff: employee list
+uses employee
+data staff: employee list
   -> with name: "Ada", salary: 9000 eur
   -> with name: "Grace", salary: 9500 eur
 rule top_earner:
@@ -119,7 +110,8 @@ data salary: measure
 rule bonus:
   salary * 10%
 spec payroll
-uses staff: employee list
+uses employee
+data staff: employee list
   -> with salary: 9000 eur
   -> with salary: 9500 eur
 rule high_bonus:
@@ -135,13 +127,14 @@ rule high_bonus:
         .as_ref()
         .expect("explanation");
     let text = format_explanation(explanation);
-    assert_contains(&text, "1 of 2 are salary > 9200 eur");
+    assert_contains(&text, "staff -> where salary > 9200 eur -> sum bonus");
     assert_contains(&text, "2. bonus:");
     assert!(!text.contains("1. bonus"), "{text}");
-    assert!(
-        !text.contains("1. salary:") && !text.contains("2. salary:"),
-        "where predicate row reads must be hidden:\n{text}"
-    );
+    assert_contains(&text, "salary: 9500 eur");
+    let json = serde_json::to_value(explanation).expect("json");
+    let filter = find_type(&json, "filter").expect("filter");
+    assert_eq!(filter["matched"], 1);
+    assert_eq!(filter["total"], 2);
 }
 
 #[test]
@@ -179,7 +172,8 @@ data drink: text
 data price: measure
   -> unit eur: 1.00
 spec coffee_order
-uses menu: menu_item list
+uses menu_item
+data menu: menu_item list
   -> key drink
   -> with drink: "espresso", price: 2.50 eur
 data ordered: text
@@ -196,14 +190,23 @@ rule selected_drink:
         .result
         .as_ref()
         .expect("row result");
-    assert!(result.spec.is_none(), "a row is not a fixed instance");
-    let reference = result.row.as_ref().expect("row arm");
-    assert_eq!(reference.spec, "menu_item");
-    assert_eq!(reference.instance, "menu.1");
-    assert_eq!(response.rows.len(), 1);
-    let row = &response.rows[reference.index];
+    // A row written in the spec is a planned instance: it publishes as the `spec`
+    // arm with a `row` path segment, not as a run-data row.
+    assert!(
+        result.row.is_none(),
+        "a spec-written row is not a run-data row"
+    );
+    let instance = result.spec.as_ref().expect("spec arm");
+    assert_eq!(instance.spec, "menu_item");
+    assert_eq!(instance.instance, "menu.1");
+    assert_eq!(instance.path.len(), 1);
+    assert_eq!(instance.path[0].uses, "menu");
+    assert_eq!(instance.path[0].row, Some(1));
+    assert_eq!(instance.path[0].spec, "menu_item");
+    assert!(response.rows.is_empty());
     assert_eq!(
-        row.data
+        instance
+            .data
             .get("drink")
             .and_then(|slot| slot.result.as_ref())
             .and_then(|value| value.text.as_deref()),
@@ -218,7 +221,8 @@ fn list_of_rows_result_references_every_row() {
 spec line
 data qty: number
 spec order
-uses lines: line list
+uses line
+data lines: line list
   -> with qty: 1
   -> with qty: 0
   -> with qty: 3
@@ -235,13 +239,20 @@ rule positive:
     let rows = result.list.as_ref().expect("list arm");
     let instances: Vec<&str> = rows
         .iter()
-        .map(|row| row.row.as_ref().expect("row arm").instance.as_str())
+        .map(|row| row.spec.as_ref().expect("spec arm").instance.as_str())
         .collect();
     assert_eq!(instances, ["lines.1", "lines.3"]);
+    let row_segments: Vec<Option<usize>> = rows
+        .iter()
+        .map(|row| row.spec.as_ref().expect("spec arm").path[0].row)
+        .collect();
+    assert_eq!(row_segments, [Some(1), Some(3)]);
     let quantities: Vec<Option<&str>> = rows
         .iter()
         .map(|row| {
-            response.rows[row.row.as_ref().expect("row arm").index]
+            row.spec
+                .as_ref()
+                .expect("spec arm")
                 .data
                 .get("qty")
                 .and_then(|slot| slot.result.as_ref())
@@ -249,6 +260,10 @@ rule positive:
         })
         .collect();
     assert_eq!(quantities, [Some("1"), Some("3")]);
+    assert!(
+        response.rows.is_empty(),
+        "spec-written rows fill no row table"
+    );
 }
 
 #[test]
@@ -256,7 +271,7 @@ fn row_reached_by_several_rules_is_filled_once() {
     let engine = load_ok(
         r#"
 spec part
-uses components: part list
+data components: part list
 data own_cost: number
 rule first_child:
   components -> first
@@ -404,9 +419,10 @@ data drink: text
   -> options "espresso", "latte"
 data price: measure
   -> unit eur: 1.00
-  -> decimals 2
+
 spec coffee_order
-uses menu: menu_item list
+uses menu_item
+data menu: menu_item list
   -> key drink
   -> with drink: "espresso", price: 2.50 eur
   -> with drink: "latte"
@@ -423,7 +439,7 @@ rule cheapest:
         field_results(&rows[0]),
         [
             ("drink".to_string(), "espresso".to_string()),
-            ("price".to_string(), "2.50 eur".to_string()),
+            ("price".to_string(), "2.5 eur".to_string()),
         ]
     );
     assert_eq!(
@@ -439,7 +455,7 @@ rule cheapest:
         .to_string();
     assert_contains(
         &text,
-        "value:\n      1: drink espresso, price 2.50 eur\n      2: drink latte",
+        "value:\n      1: drink espresso, price 2.5 eur\n      2: drink latte",
     );
 }
 
@@ -454,7 +470,8 @@ data quantity: number
 uses article: article
 rule total: quantity * article.price
 spec order
-uses lines: line list
+uses line
+data lines: line list
   -> with quantity: 2, article.price: 5
 rule all_totals: lines -> sum total
 "#,
@@ -481,7 +498,8 @@ data income: number
 rule applies: income > threshold
 spec tax
 data income: number
-uses brackets: bracket list
+uses bracket
+data brackets: bracket list
   -> with threshold: 0, rate: 0.36, income: income
   -> with threshold: 38000, rate: 0.5, income: income
 rule applicable: brackets -> where applies -> count
@@ -515,7 +533,8 @@ uses ada: employee
   -> with name: "Ada", salary: 9000 eur
 uses grace: employee
   -> with name: "Grace", salary: 9500 eur
-uses staff: employee list
+uses employee
+data staff: employee list
   -> with ada, grace
 rule total: staff -> sum salary
 "#,
@@ -523,12 +542,38 @@ rule total: staff -> sum salary
     let value = show_list_value(&engine, "payroll", "staff").expect("staff value");
     let rows = value.list.as_ref().expect("list");
     assert_eq!(rows.len(), 2);
+    // Each row copies the named instance's written fields as its own cells.
     let first = rows[0].fields.as_ref().expect("fields");
-    assert_eq!(first["name"].reference.as_deref(), Some("ada.name"));
-    assert_eq!(first["salary"].reference.as_deref(), Some("ada.salary"));
+    assert_eq!(first["name"].result.as_deref(), Some("Ada"));
+    assert_eq!(first["salary"].result.as_deref(), Some("9000 eur"));
+    assert!(first["name"].reference.is_none());
     let second = rows[1].fields.as_ref().expect("fields");
-    assert_eq!(second["name"].reference.as_deref(), Some("grace.name"));
-    assert_eq!(second["salary"].reference.as_deref(), Some("grace.salary"));
+    assert_eq!(second["name"].result.as_deref(), Some("Grace"));
+    assert_eq!(second["salary"].result.as_deref(), Some("9500 eur"));
+    assert!(second["salary"].reference.is_none());
+}
+
+#[test]
+fn show_omits_sealed_import_list_input() {
+    let engine = load_ok(
+        r#"
+spec item
+data name: text
+data children: item list
+spec catalog
+uses root: item
+  -> with name: "root", children: left, right
+uses left: item
+  -> with name: "left"
+uses right: item
+  -> with name: "right"
+rule child_count: root.children -> count
+"#,
+    );
+    let show = engine
+        .show(None, "catalog", Some(&crate::lists::now()))
+        .expect("show");
+    assert!(!show.data.contains_key("root.children"));
 }
 
 #[test]
@@ -538,12 +583,13 @@ fn show_instance_list_without_source_rows_has_no_value() {
 spec employee
 data salary: number
 spec payroll
-uses staff: employee list
+uses employee
+data staff: employee list
 rule total: staff -> sum salary
 spec part
 data weight: number
-uses components: part list
-rule total: weight + components -> sum total
+data components: part list
+rule total: weight + (components -> sum total)
 "#,
     );
     assert_eq!(show_list_value(&engine, "payroll", "staff"), None);
@@ -568,7 +614,7 @@ rule r: n
 }
 
 #[test]
-fn pinda_shaped_row_rule_explanation() {
+fn left_shaped_row_rule_explanation() {
     let engine = load_ok(
         r#"
 spec units
@@ -576,16 +622,14 @@ uses lu: lemma units
 data money: measure
   -> unit eur: 1
   -> unit usd: 0.84
-  -> decimals 2
 data price_per_weight: measure
   -> unit eur_per_kg: eur/kilogram
-  -> decimals 2
 
 spec processing
 uses units
 uses lu: lemma units
 data type: text
-  -> options "roast", "chocolatize"
+  -> options "finish_a", "finish_b"
 data weight: lu.mass
 data price: units.price_per_weight
 data enabled: boolean
@@ -596,20 +640,22 @@ rule cost:
 spec line_item
 uses lu: lemma units
 uses units
-uses processing list
-  -> with weight: weight, price: processing_price, type: "roast", enabled: roast
-  -> with weight: weight, price: processing_price, type: "chocolatize", enabled: chocolatize
+uses step: processing
+data processing: step list
+  -> with weight: weight, price: processing_price, type: "finish_a", enabled: finish_a
+  -> with weight: weight, price: processing_price, type: "finish_b", enabled: finish_b
 data weight: lu.mass
 data price: units.price_per_weight
 data processing_price: units.price_per_weight
-data roast: boolean
-data chocolatize: boolean
+data finish_a: boolean
+data finish_b: boolean
 rule cost:
-  price * weight + processing -> where enabled -> sum cost
+  price * weight + (processing -> where enabled -> sum cost)
 
 spec calc
 uses units
-uses items: line_item list
+uses line_item
+data items: line_item list
 rule total_price:
   (items -> sum cost) as usd
 "#,
@@ -622,8 +668,8 @@ rule total_price:
             list(vec![map(&[
                 ("price", lit("14 eur_per_kg")),
                 ("weight", lit("50 kilogram")),
-                ("roast", boolean(false)),
-                ("chocolatize", boolean(true)),
+                ("finish_a", boolean(false)),
+                ("finish_b", boolean(true)),
                 ("processing_price", lit("4 eur_per_kg")),
             ])]),
         )]),
@@ -636,12 +682,21 @@ rule total_price:
         .as_ref()
         .expect("explanation");
     let text = format_explanation(explanation);
-    assert_contains(&text, "1. cost: 900.00 eur");
-    assert_contains(&text, "1 of 2 are enabled");
-    assert_contains(&text, "2. cost: 200.00 eur");
-    assert_contains(&text, "price: 14.00 eur_per_kg");
+    assert!(
+        text.contains("1.") && text.contains("cost: 900 eur"),
+        "outer row cost:\n{text}"
+    );
+    assert!(
+        text.contains("2.") && text.contains("cost: 200 eur"),
+        "processing row cost:\n{text}"
+    );
+    assert_contains(&text, "price: 14 eur_per_kg");
     assert_contains(&text, "weight: 50 kilogram");
     assert!(!text.contains("items: items.1"), "{text}");
+    assert!(
+        !text.contains("are enabled"),
+        "filter summary is JSON-only:\n{text}"
+    );
     let json = serde_json::to_value(explanation).expect("json");
     assert!(
         serde_json::to_string(&json)
@@ -680,12 +735,103 @@ rule total_price:
     );
 }
 
+/// List owned by an imported spec (`uses bag` where `bag` has the list). Root-owned
+/// lists (left_shaped above) already narrate row rules; import-owned lists must too.
+#[test]
+fn import_owned_list_row_rule_explanation() {
+    let engine = load_ok(
+        r#"
+spec line
+data amount: number
+rule aandeel:
+  amount * 2
+
+spec bag
+uses line
+data regels: line list
+  -> with amount: 1
+  -> with amount: 3
+rule total:
+  regels -> sum aandeel
+
+spec consumer
+uses bag
+rule answer:
+  bag.total
+"#,
+    );
+    let response = crate::lists::evaluate_at(
+        &engine,
+        "consumer",
+        &crate::lists::now(),
+        data(&[]),
+        Some(&["answer".to_string()]),
+        true,
+    );
+    let explanation = response
+        .results
+        .get("answer")
+        .expect("answer")
+        .explanation
+        .as_ref()
+        .expect("explanation");
+    let text = format_explanation(explanation);
+    assert!(
+        text.contains("aandeel:"),
+        "import-owned list must narrate row rule aandeel:\n{text}"
+    );
+    // `answer` children hold a RuleRef to `total`; row `aandeel` refs live under
+    // that rules-table entry (ImportRule peel), not on the root children slice.
+    let aandeel = explanation
+        .rules
+        .iter()
+        .find(|rule| rule.name.rule == "aandeel")
+        .expect("rules table must include narrated row rule aandeel");
+    assert!(
+        !aandeel.body.is_empty(),
+        "aandeel rules table entry must carry body"
+    );
+    let total = explanation
+        .rules
+        .iter()
+        .find(|rule| rule.name.rule == "total")
+        .expect("rules table must include imported total");
+    assert!(
+        first_rule_ref_named(&total.children, "aandeel").is_some(),
+        "total must RuleRef aandeel under its list rows:\n{text}"
+    );
+
+    let root_owned = crate::lists::evaluate_at(
+        &engine,
+        "bag",
+        &crate::lists::now(),
+        data(&[]),
+        Some(&["total".to_string()]),
+        true,
+    );
+    let root_explanation = root_owned
+        .results
+        .get("total")
+        .expect("total")
+        .explanation
+        .as_ref()
+        .expect("explanation");
+    assert!(
+        crate::explanation_support::rule_ref_names(&root_explanation.children)
+            .iter()
+            .any(|name| name == "aandeel"),
+        "root-owned bag.total must still narrate aandeel:\n{}",
+        format_explanation(root_explanation)
+    );
+}
+
 fn first_rule_ref(nodes: &[ExplanationNode]) -> Option<&ExplanationNode> {
     for node in nodes {
         match node {
             ExplanationNode::RuleRef { .. } => return Some(node),
             ExplanationNode::Compose { operands, .. }
-            | ExplanationNode::Conversion { operands, .. } => {
+            | ExplanationNode::Conversion { operands, .. }
+            | ExplanationNode::ListCommand { operands, .. } => {
                 if let Some(found) = first_rule_ref(operands) {
                     return Some(found);
                 }
@@ -711,6 +857,42 @@ fn first_rule_ref(nodes: &[ExplanationNode]) -> Option<&ExplanationNode> {
     None
 }
 
+fn first_rule_ref_named<'a>(
+    nodes: &'a [ExplanationNode],
+    rule: &str,
+) -> Option<&'a ExplanationNode> {
+    for node in nodes {
+        match node {
+            ExplanationNode::RuleRef { name, .. } if name.rule == rule => return Some(node),
+            ExplanationNode::Compose { operands, .. }
+            | ExplanationNode::Conversion { operands, .. }
+            | ExplanationNode::ListCommand { operands, .. } => {
+                if let Some(found) = first_rule_ref_named(operands, rule) {
+                    return Some(found);
+                }
+            }
+            ExplanationNode::Row { key, fields, .. } => {
+                if let Some(found) = first_rule_ref_named(key, rule) {
+                    return Some(found);
+                }
+                if let Some(found) = first_rule_ref_named(fields, rule) {
+                    return Some(found);
+                }
+            }
+            ExplanationNode::Filter { children, .. } => {
+                if let Some(found) = first_rule_ref_named(children, rule) {
+                    return Some(found);
+                }
+            }
+            ExplanationNode::RuleRef { .. }
+            | ExplanationNode::Data { .. }
+            | ExplanationNode::DataUnused { .. }
+            | ExplanationNode::Veto { .. } => {}
+        }
+    }
+    None
+}
+
 #[test]
 fn filter_zero_of_two_are_enabled() {
     let engine = load_ok(
@@ -721,7 +903,8 @@ data price: measure
   -> unit eur: 1.00
 rule cost: price
 spec bag
-uses items: item list
+uses item
+data items: item list
   -> with enabled: false, price: 1 eur
   -> with enabled: false, price: 2 eur
 rule total: items -> where enabled -> sum cost
@@ -736,8 +919,12 @@ rule total: items -> where enabled -> sum cost
         .as_ref()
         .expect("explanation");
     let text = format_explanation(explanation);
-    assert_contains(&text, "0 of 2 are enabled");
+    assert_contains(&text, "items -> where enabled -> sum cost");
     assert!(!text.contains("1. cost"), "{text}");
+    assert!(
+        !text.contains("0 of 2 are enabled"),
+        "filter summary is JSON-only:\n{text}"
+    );
     let json = serde_json::to_value(explanation).expect("json");
     let filter = find_type(&json, "filter").expect("filter");
     assert_eq!(filter["matched"], 0);
@@ -754,7 +941,8 @@ data salary: measure
   -> unit eur: 1.00
 rule pay: salary
 spec payroll
-uses staff: employee list
+uses employee
+data staff: employee list
   -> with active: true, salary: 1000 eur
   -> with active: true, salary: 2000 eur
   -> with active: false, salary: 3000 eur
@@ -771,9 +959,17 @@ rule total:
         .as_ref()
         .expect("explanation");
     let text = format_explanation(explanation);
-    assert_contains(&text, "2 of 3 are active");
-    assert_contains(&text, "1 of 2 are salary > 1500 eur");
+    assert_contains(
+        &text,
+        "staff -> where active -> where salary > 1500 eur -> sum pay",
+    );
     assert_contains(&text, "2. pay:");
+    let json = serde_json::to_value(explanation).expect("json");
+    assert_eq!(
+        json.to_string().matches("\"type\":\"filter\"").count(),
+        2,
+        "chained where keeps nested filters in JSON: {json}"
+    );
 }
 
 #[test]
@@ -797,7 +993,12 @@ rule high: fares -> where > 100 eur -> count
         .as_ref()
         .expect("explanation");
     let text = format_explanation(explanation);
-    assert_contains(&text, "1 of 2 are > 100 eur");
+    assert_contains(&text, "fares -> where > 100 eur -> count");
+    let json = serde_json::to_value(explanation).expect("json");
+    let filter = find_type(&json, "filter").expect("filter");
+    assert_eq!(filter["matched"], 1);
+    assert_eq!(filter["total"], 2);
+    assert_eq!(filter["condition"], "> 100 eur");
 }
 
 #[test]
@@ -808,7 +1009,8 @@ spec employee
 data salary: measure
   -> unit eur: 1.00
 spec payroll
-uses staff: employee list
+uses employee
+data staff: employee list
   -> with salary: 1000 eur
 rule total:
   staff -> with salary: 2000 eur -> sum salary
@@ -828,14 +1030,15 @@ rule total:
 }
 
 #[test]
-fn stacked_rows_have_no_connector() {
+fn stacked_rows_use_tree_connectors() {
     let engine = load_ok(
         r#"
 spec employee
 data salary: measure
   -> unit eur: 1.00
 spec payroll
-uses staff: employee list
+uses employee
+data staff: employee list
   -> with salary: 1000 eur
   -> with salary: 2000 eur
 rule total: staff -> sum salary
@@ -850,12 +1053,8 @@ rule total: staff -> sum salary
         .as_ref()
         .expect("explanation");
     let text = format_explanation(explanation);
-    assert_contains(&text, "\n   1. salary:");
-    assert_contains(&text, "\n   2. salary:");
-    assert!(
-        !text.contains("├─ 1.") && !text.contains("└─ 1.") && !text.contains("├─ 2."),
-        "row lines must be connector-less:\n{text}"
-    );
+    assert_contains(&text, "\n   ├─ 1. salary:");
+    assert_contains(&text, "\n   └─ 2. salary:");
 }
 
 fn find_type<'a>(value: &'a serde_json::Value, type_name: &str) -> Option<&'a serde_json::Value> {
@@ -867,4 +1066,183 @@ fn find_type<'a>(value: &'a serde_json::Value, type_name: &str) -> Option<&'a se
         serde_json::Value::Array(items) => items.iter().find_map(|v| find_type(v, type_name)),
         _ => None,
     }
+}
+
+#[test]
+fn appended_row_reference_has_no_instance_label() {
+    let engine = load_ok(
+        r#"
+spec menu_item
+data drink: text
+data price: measure
+  -> unit eur: 1.00
+spec coffee_order
+uses menu_item
+data menu: menu_item list
+  -> key drink
+  -> with drink: "espresso", price: 2.50 eur
+rule extended:
+  menu -> with drink: "mocha", price: 4 eur
+"#,
+    );
+    let response = evaluate(&engine, "coffee_order", data(&[]));
+    let extended = response
+        .results
+        .get("extended")
+        .and_then(|rule| rule.result.as_ref())
+        .expect("extended");
+    let items = extended.list.as_ref().expect("list arm");
+    let appended = &items[1];
+    let row = appended
+        .row
+        .as_ref()
+        .expect("appended row is a run-data row");
+    assert!(row.instance.is_none(), "an appended row has no data path");
+    let filled = &response.rows[row.index];
+    assert_eq!(filled.spec, "menu_item");
+    assert_eq!(
+        filled
+            .data
+            .get("drink")
+            .and_then(|slot| slot.result.as_ref())
+            .and_then(|value| value.text.as_deref()),
+        Some("mocha")
+    );
+}
+
+#[test]
+fn appended_row_bound_instance_publishes_row_relative_path() {
+    let engine = load_ok(
+        r#"
+spec item
+data target: number
+spec line
+data amount: number
+uses i1: item
+  -> with target: base
+rule base: amount * 10
+rule pick: i1
+spec order
+uses line
+data lines: line list
+  -> with amount: 1
+rule more:
+  lines -> with amount: 2
+rule final:
+  more -> last
+rule picked_target:
+  final.pick
+"#,
+    );
+    let response = evaluate(&engine, "order", data(&[]));
+    let picked = response
+        .results
+        .get("picked_target")
+        .and_then(|rule| rule.result.as_ref())
+        .expect("picked_target");
+    let row = picked.row.as_ref().expect("row arm");
+    assert_eq!(row.instance.as_deref(), Some("i1"));
+    assert_eq!(response.rows[row.index].spec, "line");
+}
+
+#[test]
+fn evaluation_data_row_reference_keeps_its_data_path() {
+    let engine = load_ok(
+        r#"
+spec line
+data qty: number
+spec order
+uses line
+data lines: line list
+rule initial:
+  lines -> last
+"#,
+    );
+    let response = evaluate(
+        &engine,
+        "order",
+        data(&[("lines", list(vec![map(&[("qty", lit("5"))])]))]),
+    );
+    let initial = response
+        .results
+        .get("initial")
+        .and_then(|rule| rule.result.as_ref())
+        .expect("initial");
+    let row = initial.row.as_ref().expect("row arm");
+    assert_eq!(row.instance.as_deref(), Some("lines.1"));
+}
+
+#[test]
+fn appended_row_measure_field_publishes_written_unit() {
+    let engine = load_ok(
+        r#"
+spec menu_item
+data drink: text
+data price: measure
+  -> unit eur: 1.00
+spec coffee_order
+uses menu_item
+data menu: menu_item list
+  -> key drink
+  -> with drink: "espresso", price: 2.50 eur
+rule extended:
+  menu -> with drink: "mocha", price: 4 eur
+"#,
+    );
+    let response = evaluate(&engine, "coffee_order", data(&[]));
+    let extended = response
+        .results
+        .get("extended")
+        .and_then(|rule| rule.result.as_ref())
+        .expect("extended");
+    let appended = &extended.list.as_ref().expect("list arm")[1];
+    let row = appended
+        .row
+        .as_ref()
+        .expect("appended row is a run-data row");
+    let price = &response.rows[row.index]
+        .data
+        .get("price")
+        .and_then(|slot| slot.result.as_ref())
+        .expect("price slot");
+    assert_eq!(price.unit.as_deref(), Some("eur"));
+    assert!(price.measure.is_some(), "price is a measure");
+}
+
+#[test]
+fn evaluation_data_row_measure_field_publishes_written_unit() {
+    let engine = load_ok(
+        r#"
+spec line
+data qty: number
+data price: measure
+  -> unit eur: 1.00
+spec order
+uses line
+data lines: line list
+rule initial:
+  lines -> last
+"#,
+    );
+    let response = evaluate(
+        &engine,
+        "order",
+        data(&[(
+            "lines",
+            list(vec![map(&[("qty", lit("5")), ("price", lit("4 eur"))])]),
+        )]),
+    );
+    let initial = response
+        .results
+        .get("initial")
+        .and_then(|rule| rule.result.as_ref())
+        .expect("initial");
+    let row = initial.row.as_ref().expect("row arm");
+    let price = &response.rows[row.index]
+        .data
+        .get("price")
+        .and_then(|slot| slot.result.as_ref())
+        .expect("price slot");
+    assert_eq!(price.unit.as_deref(), Some("eur"));
+    assert!(price.measure.is_some(), "price is a measure");
 }

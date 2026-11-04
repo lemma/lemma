@@ -111,12 +111,7 @@ fn response_results_follow_same_order_as_local_show_rules() {
     let engine = load(RULE_TOPO_SPEC, "topo.lemma");
     let now = DateTimeValue::now();
     let show = engine.show(None, "topo", Some(&now)).expect("show");
-    let show_keys: Vec<_> = show
-        .rules
-        .iter()
-        .filter(|(_, rule)| rule.path.is_empty())
-        .map(|(name, _)| name.clone())
-        .collect();
+    let show_keys: Vec<_> = show.rules.keys().cloned().collect();
     let response = engine
         .evaluate(
             None,
@@ -141,7 +136,8 @@ rule late: z
 rule early: late + 1
 
 spec test
-uses zz: xx list
+uses xx
+data zz: xx list
   -> key z
   -> with z: 5
   -> with z: 7, type: "hi"
@@ -157,7 +153,15 @@ fn response_row_data_and_rules_follow_plan_order() {
     let response = engine
         .evaluate(None, "test", Some(&now), IndexMap::new(), None, false)
         .expect("evaluate");
-    let row = response.rows.first().expect("one found row");
+    // The found row is written in the spec: a planned instance, published as the
+    // `spec` arm of `x`.
+    let row = response
+        .results
+        .get("x")
+        .and_then(|result| result.result.as_ref())
+        .and_then(|value| value.spec.as_deref())
+        .expect("one found row");
+    assert_eq!(row.instance, "zz.2");
     let data_keys: Vec<_> = row.data.keys().cloned().collect();
     assert_eq!(
         data_keys,
@@ -172,11 +176,11 @@ fn response_row_data_and_rules_follow_plan_order() {
     );
     let json = serde_json::to_value(lemma::api::Response::from(&response)).expect("Response JSON");
     assert_eq!(
-        json_object_keys(&json["rows"][0]["data"]),
+        json_object_keys(&json["results"]["x"]["spec"]["data"]),
         vec!["z", "type"]
     );
     assert_eq!(
-        json_object_keys(&json["rows"][0]["rules"]),
+        json_object_keys(&json["results"]["x"]["spec"]["rules"]),
         vec!["late", "early"]
     );
 }

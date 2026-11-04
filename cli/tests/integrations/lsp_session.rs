@@ -124,6 +124,17 @@ impl LspSession {
         );
     }
 
+    /// `textDocument/didSave`. Pass `text: None` to omit included text (client may ignore includeText).
+    pub fn did_save(&mut self, uri: &str, text: Option<&str>) {
+        let mut params = json!({
+            "textDocument": { "uri": uri }
+        });
+        if let Some(text) = text {
+            params["text"] = json!(text);
+        }
+        self.send_notification("textDocument/didSave", params);
+    }
+
     /// Block until `textDocument/publishDiagnostics` for `uri` arrives.
     pub fn wait_for_diagnostics(&mut self, uri: &str) -> Value {
         loop {

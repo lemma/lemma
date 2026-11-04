@@ -47,18 +47,43 @@
       "type": "object",
       "required": [
         "name",
-        "factor",
         "derived_measure_factors",
         "decomposition"
       ],
       "additionalProperties": false,
-      "description": "One declared unit of a Measure type. `factor`: 1 of this unit equals `factor` canonical units.",
+      "description": "One declared unit of a Measure type. Exactly one of `factor` (1 of this unit equals `factor` canonical units) and `reference` (a number data or rule that supplies the factor at evaluation) is present.",
+      "oneOf": [
+        {
+          "required": [
+            "factor"
+          ],
+          "not": {
+            "required": [
+              "reference"
+            ]
+          }
+        },
+        {
+          "required": [
+            "reference"
+          ],
+          "not": {
+            "required": [
+              "factor"
+            ]
+          }
+        }
+      ],
       "properties": {
         "name": {
           "type": "string"
         },
         "factor": {
           "$ref": "#/$defs/RationalFactor"
+        },
+        "reference": {
+          "type": "string",
+          "description": "Source spelling of the number data or rule that supplies this unit's scale."
         },
         "derived_measure_factors": {
           "type": "array",
@@ -262,7 +287,6 @@
             "kind",
             "minimum",
             "maximum",
-            "decimals",
             "units",
             "traits",
             "decomposition",
@@ -291,12 +315,6 @@
                 {
                   "$ref": "#/$defs/NamedBound"
                 }
-              ]
-            },
-            "decimals": {
-              "type": [
-                "integer",
-                "null"
               ]
             },
             "units": {
@@ -446,7 +464,6 @@
             "kind",
             "minimum",
             "maximum",
-            "decimals",
             "units",
             "help"
           ],
@@ -473,12 +490,6 @@
                 {
                   "$ref": "#/$defs/DecimalString"
                 }
-              ]
-            },
-            "decimals": {
-              "type": [
-                "integer",
-                "null"
               ]
             },
             "units": {
@@ -920,7 +931,6 @@
         "kind",
         "minimum",
         "maximum",
-        "decimals",
         "units",
         "traits",
         "decomposition",
@@ -950,12 +960,6 @@
             {
               "$ref": "#/$defs/NamedBound"
             }
-          ]
-        },
-        "decimals": {
-          "type": [
-            "integer",
-            "null"
           ]
         },
         "units": {
@@ -1137,7 +1141,6 @@
         "kind",
         "minimum",
         "maximum",
-        "decimals",
         "units",
         "help",
         "extends"
@@ -1165,12 +1168,6 @@
             {
               "$ref": "#/$defs/DecimalString"
             }
-          ]
-        },
-        "decimals": {
-          "type": [
-            "integer",
-            "null"
           ]
         },
         "units": {
@@ -1830,11 +1827,10 @@
       "required": [
         "spec",
         "effective",
-        "instance",
         "index"
       ],
       "additionalProperties": false,
-      "description": "A row of an instance list. Its data and rules are Response.rows[index]. instance is the row path relative to the spec holding this value (lines.2).",
+      "description": "A row of an instance list. Its data and rules are Response.rows[index]. instance is the row path relative to the spec holding this value (lines.2); omitted for a row appended with -> with, whose identity is its place in the list.",
       "properties": {
         "repository": {
           "type": "string"
@@ -1964,10 +1960,14 @@
         "spec"
       ],
       "additionalProperties": false,
-      "description": "One uses hop on a Show data or rule path. uses is the alias; repository is omitted for the unnamed workspace; spec is the resolved target name.",
+      "description": "One hop on a Show data or rule path: a uses alias, or (with row) the row written at that 1-based position in the data list named uses. repository is omitted for the unnamed workspace; spec is the resolved target name.",
       "properties": {
         "uses": {
           "type": "string"
+        },
+        "row": {
+          "type": "integer",
+          "minimum": 1
         },
         "repository": {
           "type": "string"
@@ -2292,6 +2292,10 @@
             "pattern": {
               "type": "string"
             },
+            "format": {
+              "type": "string",
+              "const": "time"
+            },
             "enum": {
               "type": "array",
               "items": {
@@ -2358,11 +2362,16 @@
           "items": {
             "type": "object"
           },
-          "description": "Alternatives: text, boolean, or a single-unit object for measure and ratio data."
+          "description": "Alternatives: text, boolean, date|date-time, or a single-unit object for measure and ratio data."
         },
         "pattern": {
           "type": "string",
-          "description": "Literal grammar of number, measure and ratio inputs (ECMA-262)."
+          "description": "Boolean text form (ECMA-262); only on the boolean string alternative."
+        },
+        "format": {
+          "type": "string",
+          "const": "time",
+          "description": "Present on time inputs. Date inputs use oneOf with format date|date-time on each arm."
         },
         "enum": {
           "type": "array",
@@ -2417,7 +2426,7 @@
           "items": {
             "type": "string"
           },
-          "description": "x-lemma-rules keys that transitively need this data after normalize. Empty = reuse catalog only (not an eval intake key for this spec)."
+          "description": "On top-level properties: x-lemma-rules keys that transitively need this data after normalize. Empty = reuse catalog only (not an eval intake key for this spec). On $defs row properties always empty — parent field consumers are x-lemma-row-field-needed-by-rules."
         },
         "x-lemma-value": {
           "$ref": "#/$defs/RuleResultValue"
@@ -2436,7 +2445,7 @@
         "properties"
       ],
       "additionalProperties": false,
-      "description": "Row object schema of an instance list, one per row spec in the Show document's $defs. Every row-spec data entry is a property, dotted uses fields included.",
+      "description": "Row object schema of an instance list, one per row spec in the Show document's $defs. Identity-keyed and identical across Show documents; parent field consumers are document-level x-lemma-row-field-needed-by-rules. Every row-spec data entry is a property, dotted uses fields included.",
       "properties": {
         "title": {
           "type": "string"
@@ -2476,16 +2485,10 @@
               "enum": [
                 "boolean",
                 "measure",
-                "measure_range",
                 "number",
-                "number_range",
                 "ratio",
-                "ratio_range",
-                "text",
                 "date",
-                "date_range",
-                "time",
-                "time_range"
+                "time"
               ]
             }
           }
@@ -2646,6 +2649,26 @@
           "type": "object",
           "required": [
             "type",
+            "operands"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "type": {
+              "const": "or"
+            },
+            "operands": {
+              "type": "array",
+              "minItems": 2,
+              "items": {
+                "$ref": "#/$defs/ShowExpression"
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "type",
             "operand"
           ],
           "additionalProperties": false,
@@ -2782,13 +2805,39 @@
                 "atan",
                 "log",
                 "exp",
-                "abs",
-                "floor",
-                "ceil",
-                "round"
+                "abs"
               ]
             },
             "operand": {
+              "$ref": "#/$defs/ShowExpression"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "type",
+            "mode",
+            "operand"
+          ],
+          "additionalProperties": false,
+          "description": "Postfix rounding: `x -> round`, or `price -> round 0.05 eur` with a step.",
+          "properties": {
+            "type": {
+              "const": "step_rounding"
+            },
+            "mode": {
+              "type": "string",
+              "enum": [
+                "round",
+                "floor",
+                "ceil"
+              ]
+            },
+            "operand": {
+              "$ref": "#/$defs/ShowExpression"
+            },
+            "step": {
               "$ref": "#/$defs/ShowExpression"
             }
           }
@@ -3038,6 +3087,13 @@
             },
             "field": {
               "type": "string"
+            },
+            "qualifier": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "List path prefix when the row field was authored with a qualifier."
             }
           }
         },
@@ -3084,7 +3140,7 @@
             "args"
           ],
           "additionalProperties": false,
-          "description": "Postfix list command (`staff -> sum bonus`). direction is present exactly on sort. A value-list condition is a comparison or range_containment whose left operand is row_value.",
+          "description": "Postfix list command (`staff -> sum bonus`). direction is present exactly on sort. A value-list condition is a comparison or range_containment whose left operand is row_value, or a logical `and`/`or` of those comparisons.",
           "properties": {
             "type": {
               "const": "list_command"
@@ -3109,7 +3165,8 @@
                 "where",
                 "sort",
                 "top",
-                "with"
+                "with",
+                "key"
               ]
             },
             "direction": {
@@ -3330,7 +3387,7 @@
       ]
     },
     "Show": {
-      "description": "Result of Engine::show: a Draft 2020-12 JSON Schema for the spec's evaluation-data inputs. properties holds inputs rules need (non-empty x-lemma-needed-by-rules), required the unbound ones, $defs instance-list row schemas. x-lemma-types is local data declarations; x-lemma-rules is this spec's rule graph (local plus reachable imports).",
+      "description": "Result of Engine::show: a Draft 2020-12 JSON Schema for the spec's evaluation-data inputs. properties holds inputs rules need (non-empty x-lemma-needed-by-rules), required the unbound ones, $defs instance-list row schemas (identity-stable across Show documents). x-lemma-row-field-needed-by-rules maps each LemmaRow_* def to the parent rules that need each row field. x-lemma-types is local data declarations; x-lemma-rules is this spec's own rules (branch Rule leaves may name imports outside that map).",
       "allOf": [
         {
           "$ref": "https://json-schema.org/draft/2020-12/schema"
@@ -3419,6 +3476,19 @@
               "additionalProperties": {
                 "$ref": "#/$defs/ShowRule"
               }
+            },
+            "x-lemma-row-field-needed-by-rules": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "object",
+                "additionalProperties": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              },
+              "description": "Per $defs LemmaRow_* name: map of row field input key to parent x-lemma-rules keys that need that field through an instance list. Omitted when no row field is needed by a parent rule. Kept off $defs so row schemas stay identical across Show documents."
             }
           }
         }
@@ -3512,6 +3582,14 @@
           "items": {
             "type": "string"
           }
+        },
+        "missing_data_options": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "array",
+            "items": {}
+          },
+          "description": "Closed values for keys in missing_data on this run. A key with no entry is not constrained by a set. An empty array means nothing is valid. Each item is evaluation data. Static options come first, then rows from the options rule."
         }
       }
     },
@@ -3701,7 +3779,6 @@
           "enum": [
             "parsing",
             "validation",
-            "inversion",
             "registry",
             "missing_repository",
             "request",
@@ -3854,6 +3931,9 @@
           "$ref": "#/$defs/ComposeNode"
         },
         {
+          "$ref": "#/$defs/ListCommandNode"
+        },
+        {
           "$ref": "#/$defs/DataNode"
         },
         {
@@ -3872,6 +3952,146 @@
           "$ref": "#/$defs/FilterNode"
         }
       ]
+    },
+    "ExplainedListOp": {
+      "description": "List command identity on a list_command explanation node.",
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "find",
+            "first",
+            "last",
+            "count",
+            "sum",
+            "avg",
+            "product",
+            "min",
+            "max",
+            "any",
+            "all",
+            "where",
+            "top",
+            "with",
+            "key"
+          ]
+        },
+        {
+          "type": "object",
+          "required": [
+            "sort"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "sort": {
+              "type": "object",
+              "required": [
+                "descending"
+              ],
+              "additionalProperties": false,
+              "properties": {
+                "descending": {
+                  "type": "boolean"
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "ListCommandNode": {
+      "type": "object",
+      "required": [
+        "type",
+        "expression",
+        "stage",
+        "op",
+        "operands"
+      ],
+      "additionalProperties": false,
+      "description": "One NormalForm list command cell (menu -> sum price). stage is the command fragment after ->. RuleResultValue fields are flattened.",
+      "properties": {
+        "result": {
+          "type": "string"
+        },
+        "measure": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/DecimalString"
+          }
+        },
+        "ratio": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/DecimalString"
+          }
+        },
+        "number": {
+          "$ref": "#/$defs/DecimalString"
+        },
+        "boolean": {
+          "type": "boolean"
+        },
+        "text": {
+          "type": "string"
+        },
+        "date": {
+          "type": "string"
+        },
+        "time": {
+          "type": "string"
+        },
+        "calendar": {
+          "$ref": "#/$defs/CalendarResult"
+        },
+        "unit": {
+          "type": "string"
+        },
+        "range": {
+          "$ref": "#/$defs/RangeResult"
+        },
+        "spec": {
+          "$ref": "#/$defs/SpecResult"
+        },
+        "row": {
+          "$ref": "#/$defs/RowReference"
+        },
+        "list": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/RuleResultValue"
+          }
+        },
+        "fields": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/RuleResultValue"
+          },
+          "description": "Show only: on a source row of an instance list value, the fields the row sets, keyed relative to the row spec. Such rows and their list carry no result; row order is array order."
+        },
+        "reference": {
+          "type": "string",
+          "description": "Show only: on a source-row field whose value is a reference; the input key of the referenced data in the spec declaring the list."
+        },
+        "type": {
+          "const": "list_command"
+        },
+        "expression": {
+          "type": "string"
+        },
+        "stage": {
+          "type": "string"
+        },
+        "op": {
+          "$ref": "#/$defs/ExplainedListOp"
+        },
+        "operands": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ExplanationNode"
+          }
+        }
+      }
     },
     "RuleNode": {
       "type": "object",
@@ -4166,7 +4386,7 @@
         "fields"
       ],
       "additionalProperties": false,
-      "description": "One instance-list row a list command read. Label in ASCII is n. when unkeyed, or [key values] when field-keyed.",
+      "description": "One instance-list row a list command read. ASCII: numbered rows use n.; keyed rows print key and data fields as comma columns (no brackets).",
       "properties": {
         "type": {
           "const": "row"
@@ -4235,7 +4455,70 @@
         "operands"
       ],
       "additionalProperties": false,
+      "description": "Composed expression (arithmetic, comparison, logical, …). RuleResultValue fields are flattened.",
       "properties": {
+        "result": {
+          "type": "string"
+        },
+        "measure": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/DecimalString"
+          }
+        },
+        "ratio": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/DecimalString"
+          }
+        },
+        "number": {
+          "$ref": "#/$defs/DecimalString"
+        },
+        "boolean": {
+          "type": "boolean"
+        },
+        "text": {
+          "type": "string"
+        },
+        "date": {
+          "type": "string"
+        },
+        "time": {
+          "type": "string"
+        },
+        "calendar": {
+          "$ref": "#/$defs/CalendarResult"
+        },
+        "unit": {
+          "type": "string"
+        },
+        "range": {
+          "$ref": "#/$defs/RangeResult"
+        },
+        "spec": {
+          "$ref": "#/$defs/SpecResult"
+        },
+        "row": {
+          "$ref": "#/$defs/RowReference"
+        },
+        "list": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/RuleResultValue"
+          }
+        },
+        "fields": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/RuleResultValue"
+          },
+          "description": "Show only: on a source row of an instance list value, the fields the row sets, keyed relative to the row spec. Such rows and their list carry no result; row order is array order."
+        },
+        "reference": {
+          "type": "string",
+          "description": "Show only: on a source-row field whose value is a reference; the input key of the referenced data in the spec declaring the list."
+        },
         "type": {
           "const": "compose"
         },
@@ -4367,7 +4650,70 @@
         "operands"
       ],
       "additionalProperties": false,
+      "description": "Unit conversion. RuleResultValue fields are flattened (outcome on the expression line).",
       "properties": {
+        "result": {
+          "type": "string"
+        },
+        "measure": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/DecimalString"
+          }
+        },
+        "ratio": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/DecimalString"
+          }
+        },
+        "number": {
+          "$ref": "#/$defs/DecimalString"
+        },
+        "boolean": {
+          "type": "boolean"
+        },
+        "text": {
+          "type": "string"
+        },
+        "date": {
+          "type": "string"
+        },
+        "time": {
+          "type": "string"
+        },
+        "calendar": {
+          "$ref": "#/$defs/CalendarResult"
+        },
+        "unit": {
+          "type": "string"
+        },
+        "range": {
+          "$ref": "#/$defs/RangeResult"
+        },
+        "spec": {
+          "$ref": "#/$defs/SpecResult"
+        },
+        "row": {
+          "$ref": "#/$defs/RowReference"
+        },
+        "list": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/RuleResultValue"
+          }
+        },
+        "fields": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/RuleResultValue"
+          },
+          "description": "Show only: on a source row of an instance list value, the fields the row sets, keyed relative to the row spec. Such rows and their list carry no result; row order is array order."
+        },
+        "reference": {
+          "type": "string",
+          "description": "Show only: on a source-row field whose value is a reference; the input key of the referenced data in the spec declaring the list."
+        },
         "type": {
           "const": "conversion"
         },
@@ -4437,7 +4783,6 @@
         "kind",
         "minimum",
         "maximum",
-        "decimals",
         "units",
         "traits",
         "decomposition"
@@ -4464,12 +4809,6 @@
             {
               "$ref": "#/$defs/NamedBound"
             }
-          ]
-        },
-        "decimals": {
-          "type": [
-            "integer",
-            "null"
           ]
         },
         "units": {
@@ -4606,7 +4945,6 @@
         "kind",
         "minimum",
         "maximum",
-        "decimals",
         "units"
       ],
       "properties": {
@@ -4631,12 +4969,6 @@
             {
               "$ref": "#/$defs/DecimalString"
             }
-          ]
-        },
-        "decimals": {
-          "type": [
-            "integer",
-            "null"
           ]
         },
         "units": {

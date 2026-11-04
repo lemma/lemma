@@ -7,8 +7,9 @@ defmodule Lemma.Show do
   fields read the document: `spec` is `title`, `commentary` is `description`, `types`
   is `x-lemma-types` (local data declarations), `data` is `properties` (inputs rules
   need, as `Lemma.ShowData`), `required` the unbound ones, `rows` the instance-list
-  row schemas in `$defs` (as `Lemma.ShowRow`), and the remaining fields the matching
-  `x-lemma-*` keywords.
+  row schemas in `$defs` (as `Lemma.ShowRow`), `row_field_needed_by_rules` per row schema
+  name the row fields parent rules need through a list (fields no rule needs are absent),
+  and the remaining fields the matching `x-lemma-*` keywords.
 
   Optional `repository` is the interned repository name (nil for the unnamed
   workspace). Rule values are `Lemma.ShowRule` structs (`type`, `path`, `branches`,
@@ -35,12 +36,26 @@ defmodule Lemma.Show do
           data: %{optional(String.t()) => ShowData.t()},
           required: [String.t()],
           rows: %{optional(String.t()) => ShowRow.t()},
+          row_field_needed_by_rules: %{
+            optional(String.t()) => %{optional(String.t()) => [String.t()]}
+          },
           rules: %{optional(String.t()) => ShowRule.t()},
           meta: %{optional(String.t()) => map()},
           schema: map()
         }
 
-  @enforce_keys [:spec, :start_line, :types, :data, :required, :rows, :rules, :meta, :schema]
+  @enforce_keys [
+    :spec,
+    :start_line,
+    :types,
+    :data,
+    :required,
+    :rows,
+    :row_field_needed_by_rules,
+    :rules,
+    :meta,
+    :schema
+  ]
   defstruct [
     :repository,
     :spec,
@@ -53,6 +68,7 @@ defmodule Lemma.Show do
     :data,
     :required,
     :rows,
+    :row_field_needed_by_rules,
     :rules,
     :meta,
     :schema
@@ -86,6 +102,7 @@ defmodule Lemma.Show do
         map
         |> Map.get("$defs", %{})
         |> Map.new(fn {name, row} -> {name, ShowRow.from_map(row)} end),
+      row_field_needed_by_rules: Map.get(map, "x-lemma-row-field-needed-by-rules", %{}),
       rules:
         map
         |> Map.fetch!("x-lemma-rules")

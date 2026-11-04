@@ -283,8 +283,8 @@ rule out: 1 unless flag and false then 2
     assert_eq!(explanation.body, "1");
     assert_eq!(
         cause_pairs(explanation),
-        vec![("false", "false")],
-        "static false conjunct decides; unused flag is not a cause child"
+        vec![("flag and false", "false")],
+        "not-taken and keeps full authored expression; flag is missing so it is not a child"
     );
     assert!(
         explanation.causes[0].children.is_empty(),
@@ -315,22 +315,19 @@ rule out: "ok"
     let explanation = out_explanation(&response);
     assert_eq!(
         cause_pairs(explanation),
-        vec![("a is false", "true")],
-        "false and states the deciding left conjunct"
+        vec![("a and b", "false")],
+        "not-taken and keeps full authored expression with value false"
     );
-    assert!(
-        explanation.causes[0].children.is_empty(),
-        "bare bool data is fully stated in the cause line, got {:?}",
+    assert_eq!(
+        explanation.causes[0].children.len(),
+        2,
+        "deciding a appears as Data, skipped b as DataUnused, got {:?}",
         explanation.causes[0].children
     );
     let formatted = lemma::format_explanation(explanation);
     assert!(
-        formatted.contains("a is false"),
-        "ASCII states the failing conjunct, got {formatted}"
-    );
-    assert!(
-        !formatted.contains("a and b"),
-        "ASCII must not keep the authored and line, got {formatted}"
+        formatted.contains("a and b"),
+        "ASCII keeps the authored and line, got {formatted}"
     );
 }
 
@@ -362,12 +359,12 @@ rule out: 0
     let explanation = out_explanation(&response);
     let formatted = lemma::format_explanation(explanation);
     assert!(
-        formatted.contains("model"),
-        "explanation names the false conjunct, got {formatted}"
+        formatted.contains("flag and model is c"),
+        "explanation keeps the full authored and expression, got {formatted}"
     );
     assert!(
-        !formatted.contains("flag"),
-        "explanation must not name the undecided missing sibling, got {formatted}"
+        !formatted.contains("flag:"),
+        "missing flag must not appear as a data child, got {formatted}"
     );
 }
 
@@ -428,15 +425,11 @@ rule out: "ok"
         Some("ok")
     );
     let explanation = out_explanation(&response);
-    assert_eq!(cause_pairs(explanation), vec![("a is false", "true")]);
+    assert_eq!(cause_pairs(explanation), vec![("a and b", "false")]);
     let formatted = lemma::format_explanation(explanation);
     assert!(
-        formatted.contains("a is false"),
-        "ASCII states the failing left, got {formatted}"
-    );
-    assert!(
-        !formatted.contains("b"),
-        "short-circuit right must not appear under the cause, got {formatted}"
+        formatted.contains("a and b"),
+        "ASCII keeps the authored and line, got {formatted}"
     );
 }
 
@@ -476,18 +469,14 @@ rule can_view: false
         .expect("explanation");
     assert_eq!(
         cause_pairs(explanation),
-        vec![("views_consumed >= max_views", "true")],
-        "right conjunct decides; flipped comparison, got {:?}",
+        vec![("active and views_consumed < max_views", "false")],
+        "not-taken and keeps full authored expression with value false, got {:?}",
         explanation.causes
     );
     let formatted = lemma::format_explanation(explanation);
     assert!(
-        !formatted.contains(" is false"),
-        "ASCII must not tag the and as is false, got {formatted}"
-    );
-    assert!(
-        !formatted.contains(" and "),
-        "ASCII must not print the authored and line, got {formatted}"
+        formatted.contains("active and views_consumed < max_views"),
+        "ASCII keeps the authored and line, got {formatted}"
     );
 }
 
@@ -512,13 +501,13 @@ rule out: "no"
     let explanation = out_explanation(&response);
     assert_eq!(
         cause_pairs(explanation),
-        vec![("code is not NL", "true")],
-        "left comparison fails first"
+        vec![("code is NL and amount > 0", "false")],
+        "not-taken and keeps full authored expression with value false"
     );
     let formatted = lemma::format_explanation(explanation);
     assert!(
-        !formatted.contains("amount"),
-        "unbound right conjunct must stay out of the cause, got {formatted}"
+        formatted.contains("code is NL and amount > 0"),
+        "ASCII keeps the authored and line, got {formatted}"
     );
 }
 

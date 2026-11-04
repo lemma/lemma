@@ -336,7 +336,8 @@ spec shift
 {hours}
 data band: hours range
 spec roster
-uses shifts: shift list
+uses shift
+data shifts: shift list
   -> with band: 8 hour...12
 "#,
         hours = hours_type_block()
@@ -351,7 +352,8 @@ spec shift
 {hours}
 data band: hours range
 spec roster
-uses shifts: shift list
+uses shift
+data shifts: shift list
   -> with band: 8 hour...12 hour
 rule n: shifts -> count
 "#,
@@ -820,7 +822,8 @@ data duration: hours
 
 spec roster
 data qty: number
-uses shifts: shift list
+uses shift
+data shifts: shift list
   -> with duration: qty
 "#,
         hours = hours_type_block()
@@ -848,7 +851,8 @@ data duration: units.hours
 spec roster
 uses units
 data pay: units.money
-uses shifts: shift list
+uses shift
+data shifts: shift list
   -> with duration: pay
 "#,
     );
@@ -875,7 +879,8 @@ data duration: units.hours
 spec roster
 uses units
 data worked: units.hours
-uses shifts: shift list
+uses shift
+data shifts: shift list
   -> with duration: worked
 rule n: shifts -> count
 "#,
@@ -892,7 +897,8 @@ data band: hours range
 
 spec roster
 data qty: number
-uses shifts: shift list
+uses shift
+data shifts: shift list
   -> with band: qty
 "#,
         hours = hours_type_block()
@@ -920,7 +926,8 @@ data band: units.hours range
 spec roster
 uses units
 data pay_band: units.money range
-uses shifts: shift list
+uses shift
+data shifts: shift list
   -> with band: pay_band
 "#,
     );
@@ -948,7 +955,8 @@ spec roster
 uses units
 data window: units.hours range
   -> with 8 hour...12 hour
-uses shifts: shift list
+uses shift
+data shifts: shift list
   -> with band: window
 rule n: shifts -> count
 "#,
@@ -964,7 +972,8 @@ data qty: number
 
 spec order
 data label: text
-uses items: item list
+uses item
+data items: item list
   -> with qty: label
 "#,
     );
@@ -983,7 +992,8 @@ data label: text
 
 spec order
 data qty: number
-uses items: item list
+uses item
+data items: item list
   -> with label: qty
 "#,
     );

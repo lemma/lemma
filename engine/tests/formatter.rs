@@ -79,19 +79,19 @@ fn not_bare_operand_followed_by_and_is_parse_error() {
 fn prefix_operator_canonical_form() {
     let spec = "spec t data x: 1.5 data y: 2 data ok: true data band: number range";
     for (input, expected) in [
-        ("floor x", "floor x"),
-        ("floor (x)", "floor x"),
-        ("floor(x) + 1", "floor(x) + 1"),
-        ("(floor x) + 1", "floor(x) + 1"),
-        ("floor (x + 1)", "floor(x + 1)"),
-        ("1 + floor x", "1 + floor(x)"),
-        ("(floor x) * (floor y)", "floor(x) * floor(y)"),
+        ("abs x", "abs x"),
+        ("abs (x)", "abs x"),
+        ("abs(x) + 1", "abs(x) + 1"),
+        ("(abs x) + 1", "abs(x) + 1"),
+        ("abs (x + 1)", "abs(x + 1)"),
+        ("1 + abs x", "1 + abs(x)"),
+        ("(abs x) * (abs y)", "abs(x) * abs(y)"),
         ("ok and not ok", "ok and not ok"),
         ("ok and not (y > 1)", "ok and not(y > 1)"),
-        ("floor abs x", "floor abs x"),
-        ("round (x as number)", "round(x as number)"),
-        ("floor(x) > 1 and ok", "floor(x) > 1 and ok"),
-        ("y > floor(x) and ok", "y > floor(x) and ok"),
+        ("abs sqrt x", "abs sqrt x"),
+        ("x -> round", "x -> round"),
+        ("(x -> floor) > 1 and ok", "x -> floor > 1 and ok"),
+        ("y > (x -> floor) and ok", "y > x -> floor and ok"),
         ("lower band", "lower band"),
         ("lower(band) + 1", "lower(band) + 1"),
         ("not ok", "not ok"),
@@ -328,6 +328,26 @@ rule r: 1
 }
 
 #[test]
+fn format_round_trips_uses_instance_list_aliases_in_order() {
+    let source = r#"spec node
+data children: node list
+
+spec tree
+uses left: node
+uses right: node
+uses root: node
+  -> with children: left, right, weight: 2
+"#;
+    let formatted = format_source(source, lemma::SourceType::Volatile).unwrap();
+    assert!(
+        formatted.contains("-> with children: left, right"),
+        "ordered aliases must stay on one binding:\n{formatted}"
+    );
+    let reformatted = format_source(&formatted, lemma::SourceType::Volatile).unwrap();
+    assert_eq!(formatted, reformatted);
+}
+
+#[test]
 fn round_trip_multiple_bare_uses_one_per_line() {
     let source = "spec consumer\nuses a\nuses b\nuses c";
     let formatted = format_source(source, lemma::SourceType::Volatile).unwrap();
@@ -478,14 +498,73 @@ data drink: text
 data price: number
 
 spec coffee_order
-uses menu: menu_item list
-  -> with drink: "espresso", price: 1
+uses menu_item
+data menu: menu_item list
   -> key drink
+  -> with drink: "espresso", price: 1
 "#;
     let formatted = format_source(source, lemma::SourceType::Volatile).expect("format");
     let key = formatted.find("-> key drink").expect("key");
     let with = formatted.find("-> with").expect("with");
     assert!(key < with, "key before with, got:\n{formatted}");
+}
+
+#[test]
+fn list_with_before_key_is_format_error() {
+    let source = r#"
+spec menu_item
+data drink: text
+data price: number
+
+spec coffee_order
+uses menu_item
+data menu: menu_item list
+  -> with drink: "espresso", price: 1
+  -> key drink
+"#;
+    let err = format_source(source, lemma::SourceType::Volatile).expect_err("with before key");
+    let message = err.to_string();
+    assert!(
+        message.contains("key") && message.contains("with"),
+        "expected key-before-with error, got: {message}"
+    );
+}
+
+/// Inline `-> with` lines that carry every named field; used to assert equal column starts.
+fn inline_with_rows<'a>(formatted: &'a str, fields: &[&str]) -> Vec<&'a str> {
+    formatted
+        .lines()
+        .filter(|line| {
+            let trimmed = line.trim_start();
+            trimmed.starts_with("-> with ")
+                && fields
+                    .iter()
+                    .all(|field| trimmed.contains(&format!("{field}:")))
+        })
+        .collect()
+}
+
+fn assert_with_columns_align(formatted: &str, fields: &[&str]) {
+    let rows = inline_with_rows(formatted, fields);
+    assert!(
+        rows.len() >= 2,
+        "need at least two inline -> with rows, got:\n{formatted}"
+    );
+    for field in fields {
+        let needle = format!("{field}:");
+        let cols: Vec<usize> = rows
+            .iter()
+            .map(|line| {
+                line.find(&needle)
+                    .unwrap_or_else(|| panic!("missing {field}: on row `{line}`\n{formatted}"))
+            })
+            .collect();
+        let first = cols[0];
+        assert!(
+            cols.iter().all(|&column| column == first),
+            "column `{field}` not aligned across rows: {cols:?}\n{formatted}"
+        );
+    }
 }
 
 #[test]
@@ -496,22 +575,20 @@ data drink: text
 data price: number
 
 spec coffee_order
-uses menu: menu_item list
-  -> with drink: "espresso", price: 2.50
-  -> with drink: "latte", price: 3.50
+uses menu_item
+data menu: menu_item list
+  -> with drink: "a", price: 2.50
+  -> with drink: "espresso", price: 3
 "#;
     let formatted = format_source(source, lemma::SourceType::Volatile).expect("format");
-    assert!(
-        formatted.contains("drink:") && formatted.contains("price:"),
-        "{formatted}"
-    );
+    assert_with_columns_align(&formatted, &["drink", "price"]);
     let espresso = formatted.find("espresso").expect("espresso");
-    let latte = formatted.find("latte").expect("latte");
-    assert!(espresso < latte, "{formatted}");
+    let short = formatted.find("\"a\"").expect("short drink");
+    assert!(short < espresso, "{formatted}");
 }
 
 #[test]
-fn long_inline_row_falls_back_to_one_field_per_line() {
+fn long_aligned_row_stays_one_line_per_with() {
     let source = r#"
 spec menu_item
 data drink: text
@@ -520,23 +597,148 @@ data origin: text
 data price: number
 
 spec coffee_order
-uses menu: menu_item list
+uses menu_item
+data menu: menu_item list
   -> with drink: "single-origin espresso from the highlands", description: "a very long tasting note that will not fit", origin: "ethiopia", price: 4.50
+  -> with drink: "house blend", description: "short", origin: "brazil", price: 3
+"#;
+    let formatted = format_source(source, lemma::SourceType::Volatile).expect("format");
+    let rows = inline_with_rows(&formatted, &["drink", "description", "origin", "price"]);
+    assert_eq!(rows.len(), 2, "aligned rows stay inline, got:\n{formatted}");
+    assert_with_columns_align(&formatted, &["drink", "description", "origin", "price"]);
+    assert!(
+        rows.iter().all(|line| line.len() > 56),
+        "fixture rows must exceed MAX_COLS so the width gate is exercised:\n{formatted}"
+    );
+}
+
+#[test]
+fn misaligned_long_row_falls_back_to_one_field_per_line() {
+    let source = r#"
+spec menu_item
+data drink: text
+data description: text
+data price: number
+
+spec coffee_order
+uses menu_item
+data menu: menu_item list
+  -> with drink: "single-origin espresso from the highlands", description: "a very long tasting note that will not fit", price: 4.50
+  -> with price: 12.50, description: "another very long tasting note that forces wrap", drink: "house blend from the valley"
 "#;
     let formatted = format_source(source, lemma::SourceType::Volatile).expect("format");
     assert!(
-        formatted.contains("drink:")
-            && formatted
-                .lines()
-                .filter(|line| line.contains("drink:"))
-                .count()
-                >= 1,
-        "{formatted}"
+        formatted.lines().any(|line| {
+            let trimmed = line.trim_start();
+            trimmed.starts_with("drink:") || trimmed.starts_with("price:")
+        }),
+        "misaligned oversize rows verticalize fields, got:\n{formatted}"
     );
     assert!(
         formatted.lines().any(|line| line.trim_end().ends_with(',')),
         "vertical field pairs end in comma, got:\n{formatted}"
     );
+}
+
+#[test]
+fn wide_aligned_data_list_pads_uneven_values() {
+    let source = r#"
+spec menu_item
+data drink: text
+data origin: text
+data price: number
+
+spec coffee_order
+uses menu_item
+data menu: menu_item list
+  -> with drink: "a", origin: "ethiopia highlands estate", price: 4.50
+  -> with drink: "single-origin espresso", origin: "br", price: 3
+"#;
+    let formatted = format_source(source, lemma::SourceType::Volatile).expect("format");
+    assert_eq!(
+        inline_with_rows(&formatted, &["drink", "origin", "price"]).len(),
+        2,
+        "{formatted}"
+    );
+    assert_with_columns_align(&formatted, &["drink", "origin", "price"]);
+}
+
+#[test]
+fn sealed_catalog_rule_formats_as_padded_table() {
+    let source = r#"
+spec jeugdrij
+data ingang: date
+data schaal: text
+data jaren: number range
+data bedrag: number
+
+spec catalog
+rule jeugd:
+  jeugdrij list
+  -> key ingang, schaal, jaren
+  -> with ingang: 2025-07-01, schaal: "C", jaren: 15...16, bedrag: 6.58
+  -> with ingang: 2025-07-01, schaal: "C", jaren: 16...17, bedrag: 8.04
+"#;
+    let formatted = format_source(source, lemma::SourceType::Volatile).expect("format");
+    assert!(
+        formatted.contains("rule jeugd:\n  jeugdrij list\n  -> key ingang, schaal, jaren\n"),
+        "catalog spine is multi-line, got:\n{formatted}"
+    );
+    assert_eq!(
+        inline_with_rows(&formatted, &["ingang", "schaal", "jaren", "bedrag"]).len(),
+        2,
+        "{formatted}"
+    );
+    assert_with_columns_align(&formatted, &["ingang", "schaal", "jaren", "bedrag"]);
+    assert!(
+        !formatted
+            .lines()
+            .any(|line| line.contains("-> key") && line.contains("-> with")),
+        "key and with must not share a line, got:\n{formatted}"
+    );
+}
+
+#[test]
+fn sealed_catalog_many_aligned_rows_formats_multiline_in_bounded_time() {
+    let mut source = String::from(
+        r#"
+spec row
+data a: number
+data b: number
+data c: number
+
+spec catalog
+rule table:
+  row list -> key a -> with a: 1, b: 2, c: 3"#,
+    );
+    for i in 2..=64 {
+        source.push_str(&format!(" -> with a: {i}, b: {}, c: {}", i + 1, i + 2));
+    }
+    source.push('\n');
+
+    let started = std::time::Instant::now();
+    let formatted = format_source(&source, lemma::SourceType::Volatile).expect("format");
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed.as_secs() < 2,
+        "catalog format must stay bounded, took {elapsed:?}"
+    );
+    let with_lines = formatted
+        .lines()
+        .filter(|line| line.trim_start().starts_with("-> with "))
+        .count();
+    assert_eq!(
+        with_lines, 64,
+        "expected one -> with line per row, got:\n{formatted}"
+    );
+    assert!(
+        !formatted.lines().any(|line| {
+            let n = line.matches("-> with").count();
+            n > 1
+        }),
+        "aligned catalog must not keep many -> with on one line, got:\n{formatted}"
+    );
+    assert_with_columns_align(&formatted, &["a", "b", "c"]);
 }
 
 #[test]
@@ -562,10 +764,12 @@ fn list_valued_unless_uses_split_then() {
 spec rate
 data band: text
 spec parcel
-uses standard_rates: rate list
+uses rate
+data standard_rates: rate list
   -> key band
   -> with band: "light"
-uses express_rates: rate list
+uses rate
+data express_rates: rate list
   -> key band
   -> with band: "light"
 data express: boolean
@@ -589,16 +793,33 @@ fn command_argument_canonical_form() {
         ("fares -> top(take + 1)", "fares -> top(take + 1)"),
         ("fares -> find (1 + 1)", "fares -> find(1 + 1)"),
         ("fares -> where (>= 1 eur)", "fares -> where >= 1 eur"),
-        ("fares -> sum * 2", "fares -> sum * 2"),
-        ("(fares -> sum) - 1 eur", "fares -> sum - 1 eur"),
+        ("(fares -> sum) * 2", "(fares -> sum) * 2"),
+        ("(fares -> sum) - 1 eur", "(fares -> sum) - 1 eur"),
         ("lines -> sum (qty * price)", "lines -> sum(qty * price)"),
-        ("lines -> sum(qty) * 2", "lines -> sum(qty) * 2"),
-        ("2 * lines -> sum(qty)", "2 * lines -> sum(qty)"),
-        ("2 * lines -> sum qty", "2 * lines -> sum(qty)"),
+        ("(lines -> sum(qty)) * 2", "(lines -> sum qty) * 2"),
+        ("2 * (lines -> sum(qty))", "2 * (lines -> sum qty)"),
+        ("2 * lines -> sum qty", "2 * lines -> sum qty"),
+        ("(2 * lines) -> sum qty", "2 * lines -> sum qty"),
         (
             "lines -> sum(qty) > 1 and ok",
             "lines -> sum(qty) > 1 and ok",
         ),
+        ("(fares -> sum) as eur", "(fares -> sum) as eur"),
+        ("fares -> sum -> round", "fares -> sum -> round"),
+        ("not (staff -> any paid)", "not(staff -> any paid)"),
+        ("a + b -> round 0.01", "a + b -> round 0.01"),
+        ("a + b -> round", "a + b -> round"),
+        ("(a / b) -> round(0.05 eur)", "a / b -> round 0.05 eur"),
+        (
+            "a -> round(0.05 eur) > 1 eur",
+            "a -> round(0.05 eur) > 1 eur",
+        ),
+        ("a -> round > 1", "a -> round > 1"),
+        ("(a -> floor 1 eur) + b", "(a -> floor 1 eur) + b"),
+        ("(a -> round 1) -> ceil 5", "a -> round 1 -> ceil 5"),
+        ("(a -> round) -> ceil", "a -> round -> ceil"),
+        ("abs a -> round 1", "abs a -> round 1"),
+        ("abs a -> round", "abs a -> round"),
         ("staff -> where (salary > 1)", "staff -> where salary > 1"),
         (
             "staff -> where (a > 1 and b < 2)",
@@ -625,7 +846,8 @@ fn short_expression_chain_stays_on_one_line() {
 spec employee
 data salary: number
 spec payroll
-uses staff: employee list
+uses employee
+data staff: employee list
   -> with salary: 1
 rule top_salary:
   staff -> sort salary desc -> first

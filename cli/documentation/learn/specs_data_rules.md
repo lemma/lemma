@@ -61,10 +61,9 @@ data status: text
 data amount: measure
   -> unit eur: 1.00
   -> unit usd: 0.91
-  -> decimals 2
 ```
 
-Constraints chain with `-> minimum`, `-> maximum`, `-> option`, `-> unit`, `-> decimals`, `-> suggest`, `-> help`, and more, depending on the primitive. To inspect the declared data catalog and rules (empty `x-lemma-needed-by-rules` = reuse-only):
+Constraints chain with `-> minimum`, `-> maximum`, `-> option`, `-> unit`, `-> decimals` (number only), `-> suggest`, `-> help`, and more, depending on the primitive. To inspect the declared data catalog and rules (empty `x-lemma-needed-by-rules` = reuse-only):
 
 ```bash
 lemma show loan_application
@@ -91,7 +90,6 @@ data rating: number
 data amount: measure
   -> unit eur: 1.00
   -> unit usd: 0.91
-  -> decimals 2
 
 rule max_amount:
   100_000 eur

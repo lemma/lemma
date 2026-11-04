@@ -116,7 +116,7 @@ fn normalize_value(value: &ValueKind, lemma_type: &LemmaType) -> Output {
         },
         ValueKind::Text(s) => Output {
             kind: "text",
-            value: s.clone(),
+            value: s.to_string(),
             unit: None,
         },
         ValueKind::Date(dt) => Output {
@@ -154,6 +154,9 @@ fn normalize_value(value: &ValueKind, lemma_type: &LemmaType) -> Output {
             .expect("BUG: Output is trivially JSON-serializable"),
             unit: None,
         },
+        ValueKind::UnscaledMeasure { .. } => {
+            unreachable!("BUG: unscaled measure outside its owning leaf")
+        }
     }
 }
 

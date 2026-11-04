@@ -50,10 +50,11 @@ fn test_literal_value_to_primitive_type() {
         TypeSpecification::Measure {
             minimum: None,
             maximum: None,
-            decimals: None,
             units: MeasureUnits::from(vec![MeasureUnit {
                 name: "second".to_string(),
-                factor: crate::computation::rational::rational_one(),
+                scale: crate::literals::UnitScale::Literal(
+                    crate::computation::rational::rational_one(),
+                ),
                 derived_measure_factors: Vec::new(),
                 decomposition: BaseMeasureVector::new(),
                 minimum: None,
@@ -101,7 +102,7 @@ fn test_comparison_operator_display() {
 #[test]
 fn test_conversion_target_display() {
     assert_eq!(
-        format!("{}", ConversionTarget::Type(PrimitiveKind::Number)),
+        format!("{}", ConversionTarget::Type(ConversionTypeKind::Number)),
         "number"
     );
 }
@@ -263,11 +264,12 @@ fn test_literal_value_display_value() {
         TypeSpecification::Measure {
             minimum: None,
             maximum: None,
-            decimals: None,
             units: MeasureUnits::from(vec![MeasureUnit {
                 name: "hour".to_string(),
-                factor: crate::computation::rational::decimal_to_rational(Decimal::from(3600))
-                    .expect("3600 must be exact decimal ratio"),
+                scale: crate::literals::UnitScale::Literal(
+                    crate::computation::rational::decimal_to_rational(Decimal::from(3600))
+                        .expect("3600 must be exact decimal ratio"),
+                ),
                 derived_measure_factors: Vec::new(),
                 decomposition: BaseMeasureVector::new(),
                 minimum: None,
@@ -352,13 +354,6 @@ fn test_timezone_value() {
 
     let tz_utc = TimezoneValue { offset_minutes: 0 };
     assert_eq!(format!("{}", tz_utc), "Z");
-}
-
-#[test]
-fn test_negation_types() {
-    let json = serde_json::to_string(&NegationType::Not).expect("serialize NegationType");
-    let decoded: NegationType = serde_json::from_str(&json).expect("deserialize NegationType");
-    assert_eq!(decoded, NegationType::Not);
 }
 
 #[test]

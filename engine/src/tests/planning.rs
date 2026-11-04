@@ -10,7 +10,7 @@ use crate::parsing::parse;
 use crate::parsing::source::Source;
 use crate::planning::execution_plan::ExecutionPlan;
 use crate::planning::plan;
-use crate::planning::semantics::{DataPath, PathSegment, TypeDefiningSpec, TypeExtends};
+use crate::planning::semantics::{DataDefinition, DataPath, TypeDefiningSpec, TypeExtends};
 use crate::Error;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -422,11 +422,11 @@ fn test_definition_empty_base_returns_lemma_error() {
             name: "x".to_string(),
         },
         DataValue::Definition {
-            base: Some(ParentType::Custom {
-                name: String::new(),
-            }),
+            base: Some(ParentType::custom(String::new())),
             constraints: None,
             value: None,
+
+            list: None,
         },
         source,
     ));
@@ -496,26 +496,27 @@ rule getx: one.x
     let execution_plan = plan_single(spec_two, &specs).expect("planning should succeed");
 
     // Verify that one.x keeps its declared custom type name while resolving in spec one.
-    let one_x_path = DataPath {
-        segments: vec![PathSegment {
-            uses: "one".to_string(),
-            repository: None,
-            spec: "one".to_string(),
-        }],
-        data: "x".to_string(),
+    let Some(DataDefinition::Import { row, .. }) =
+        execution_plan.data.get(&DataPath::local("one".into()))
+    else {
+        panic!("`one` is an import slot of the consumer plan");
     };
-
+    let template = execution_plan.row_template(&row.identity);
+    let x_path = DataPath::local("x".into());
     assert!(
-        !execution_plan.data.contains_key(&one_x_path),
-        "named-`uses` member must not be materialized into consumer data"
+        matches!(
+            row.get_binding(template, &x_path),
+            Some(crate::planning::semantics::RowBinding::Bound(_))
+        ),
+        "`-> with x: 7` binds the slot; evaluation data cannot replace it"
     );
-    let one_x_type = crate::planning::normalize::lookup_data_definition(
-        &execution_plan.data,
-        &execution_plan.row_templates,
-        &one_x_path,
-    )
-    .and_then(|d| d.schema_type())
-    .expect("one.x should have a resolved type");
+    let one_x = template
+        .data
+        .get(&x_path)
+        .expect("`x` is data of the imported template");
+    let one_x_type = one_x
+        .schema_type()
+        .expect("one.x should have a resolved type");
 
     assert_eq!(
         one_x_type.name(),
@@ -819,6 +820,7 @@ rule passthrough: imported_amount"#;
         .expect("consumer spec");
     let ordered_dependencies = crate::planning::discovery::discover_dependency_order(
         &ctx,
+        &repository,
         consumer_arc,
         &effective,
         &crate::ResourceLimits::default(),

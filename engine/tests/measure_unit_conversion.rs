@@ -1,6 +1,6 @@
 use indexmap::IndexMap;
 use lemma::DateTimeValue;
-use lemma::__test_support::{checked_div, checked_mul, decimal_to_rational, rational_new};
+use lemma::{checked_div, checked_mul, decimal_to_rational, rational_new};
 use lemma::{Engine, EvaluateDataValue, ValueKind};
 use rust_decimal::Decimal;
 use std::str::FromStr;
@@ -771,7 +771,7 @@ rule out: cost_per_unit
 }
 
 #[test]
-fn measure_below_minimum_veto_respects_type_decimals() {
+fn measure_below_minimum_veto_shows_unrounded_converted_bound() {
     let code = r#"
 spec s
 data money: measure -> unit eur: 1 -> unit usd: 0.91
@@ -780,7 +780,6 @@ data cost_per_unit: measure
   -> unit eur_per_kilo: eur/kilogram
   -> unit usd_per_tonne: usd/tonne
   -> minimum 1.20 eur_per_kilo
-  -> decimals 2
 rule out: cost_per_unit
 "#;
 
@@ -804,12 +803,8 @@ rule out: cost_per_unit
         "expected user unit in message, got: {message}"
     );
     assert!(
-        message.contains("1318.68"),
-        "expected minimum bound rounded to 2 decimals, got: {message}"
-    );
-    assert!(
-        !message.contains("1318.681"),
-        "must not show extra decimal precision beyond type decimals, got: {message}"
+        message.contains("1318.681318681318681318681318"),
+        "expected unrounded converted minimum, got: {message}"
     );
 }
 
@@ -1718,5 +1713,30 @@ rule out: amount as kg
     assert!(
         msg.contains("eur") || msg.to_lowercase().contains("unit"),
         "error must suggest expressing source unit first, got: {msg}"
+    );
+}
+
+#[test]
+fn as_text_is_rejected_at_parse() {
+    // `as text` was never documented or tested; display formatting is not a
+    // conversion. The parser rejects it at the `as` target position.
+    let code = r#"
+spec t
+data name: text
+rule out: name as text
+"#;
+    let mut engine = Engine::new();
+    let err = engine
+        .load([(lemma::SourceType::Volatile, code.to_string())])
+        .expect_err("as text must be rejected at parse");
+    let msg = err
+        .errors
+        .iter()
+        .map(|e| e.to_string())
+        .collect::<Vec<_>>()
+        .join("; ");
+    assert!(
+        msg.contains("'text' is not a valid conversion target"),
+        "error must reject `as text`, got: {msg}"
     );
 }

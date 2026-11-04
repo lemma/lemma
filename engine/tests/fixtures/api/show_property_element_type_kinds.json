@@ -6,7 +6,6 @@
     "kind": "measure",
     "minimum": null,
     "maximum": null,
-    "decimals": 2,
     "units": [
       {
         "name": "eur",
@@ -29,7 +28,6 @@
     "kind": "measure",
     "minimum": null,
     "maximum": null,
-    "decimals": null,
     "units": [
       {
         "name": "hour",
@@ -54,7 +52,6 @@
     "kind": "measure",
     "minimum": null,
     "maximum": null,
-    "decimals": null,
     "units": [
       {
         "name": "month",
@@ -92,7 +89,6 @@
     "kind": "ratio",
     "minimum": null,
     "maximum": null,
-    "decimals": null,
     "units": [
       {
         "name": "percent",

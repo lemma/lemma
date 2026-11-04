@@ -1,0 +1,36 @@
+spec item
+
+data bonus: number
+
+
+spec source
+
+rule rate:
+  7
+
+
+spec own_rule
+
+uses item
+
+data items: item list
+  -> with bonus: extra
+
+rule extra:
+  5
+
+rule first_bonus:
+  (items -> first).bonus
+
+
+spec member_rule
+
+uses item
+
+uses src: source
+
+data items: item list
+  -> with bonus: src.rate
+
+rule first_bonus:
+  (items -> first).bonus

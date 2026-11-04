@@ -1,0 +1,25 @@
+spec person
+
+data name:     text
+data age:      number
+data has_ward: boolean
+
+rule adult:
+  age >= 18
+
+rule guardian:
+  has_ward
+
+
+spec household
+
+uses person
+
+data people: person list
+  -> key name
+  -> with name: "Ada",    age: 40, has_ward: no
+  -> with name: "Grace",  age: 17, has_ward: yes
+  -> with name: "Edsger", age: 10, has_ward: no
+
+rule selected:
+  people -> where(adult or guardian) -> count

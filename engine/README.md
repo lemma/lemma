@@ -22,7 +22,7 @@ Add the crate:
 
 ```toml
 [dependencies]
-lemma-engine = "0.10.2"
+lemma-engine = "0.11.0"
 ```
 
 ### Minimal example
@@ -106,11 +106,11 @@ let response = engine.evaluate(
 
 ### Discovering required data
 
-`Engine::show` describes a spec without evaluating it. `Show.types` lists the data declarations of the spec itself. `Show.data` lists the inputs that rules read, keyed by input name (`quantity`, or `alias.field` for an import), each with its type, the `value` the spec sets, a `suggestion` from `-> suggest`, the `needed_by_rules` that read it, and `path` (the `uses` hops to the spec that declares it). `Show.rules` is the rule graph: each `ShowRule` has its result type, `path`, the default and `unless` branches, and `depends_on_rules`. The temporal window of the shown version is included.
+`Engine::show` describes a spec without evaluating it. `Show.types` lists the data declarations of the spec itself. `Show.data` lists the inputs that rules read, keyed by input name (`quantity`, or `alias.field` for an import), each with its type, the `value` the spec sets, a `suggestion` from `-> suggest`, the `needed_by_rules` that read it, and `path` (the `uses` hops to the spec that declares it). `Show.rules` is this spec's own rules: each `ShowRule` has its result type, `path`, the default and `unless` branches, and `depends_on_rules` (other local catalog keys). Branch Rule leaves may name imports outside this map. The temporal window of the shown version is included.
 
 `lemma::api::show_document(&engine, &show)` turns this into the JSON document that the CLI, HTTP server, MCP and SDKs return: a Draft 2020-12 JSON Schema for the evaluation data (`properties`, `required`, `$defs` for list rows) with the Lemma specifics under `x-lemma-*` keys. A evaluation-data payload can be validated against it as is.
 
-By default `evaluate` evaluates the rules written in the spec itself. Pass `rules` with any `Show.rules` key, such as `src.computed`, to evaluate a rule reached through `uses`. To learn what a particular evaluation still needs, call `evaluate` and read each rule's `missing_data`:
+By default `evaluate` evaluates the rules written in the spec itself. Pass `rules` with a `Show.rules` key to limit which local rules to evaluate. Imported names are a request error. To learn what a particular evaluation still needs, call `evaluate` and read each rule's `missing_data`:
 
 ```rust
 let response = engine.evaluate(
@@ -176,7 +176,6 @@ Public `load` rejects `SourceType::Dependency("lemma")`: that id is reserved for
 | `evaluate(repository, spec, effective, data, rules, explain)` | Evaluate; each `RuleResult` may include `missing_data`; `explanation` when `explain` is true ([schema](schemas/api.v1.json)) |
 | `update(repository, code, source_type)` | Replace identities present in `code` in one planning pass |
 | `remove(repository, spec, effective)` | Remove a temporal spec slice |
-| `snapshot()` / `from_snapshot(bytes)` | Persist / restore parsed specs + plans + limits (no re-plan); see [Rust tools](../cli/documentation/tools/rust.md#binary-snapshot) |
 | `limits()` | Resource limits |
 
 Free function: `lemma::resolve_effective`.
@@ -246,7 +245,7 @@ Build: `node build.js` (from `engine/packages/npm/`). See [packages/npm/README.m
 <dependency>
   <groupId>com.lemmabase</groupId>
   <artifactId>lemma-engine</artifactId>
-  <version>0.10.2</version>
+  <version>0.11.0</version>
 </dependency>
 ```
 
@@ -255,7 +254,7 @@ Build/test: `cargo build -p lemma_jni` then `./mvnw verify` under `engine/packag
 ### C# / .NET
 
 ```bash
-dotnet add package Lemmabase.Lemma.Engine --version 0.10.2
+dotnet add package Lemmabase.Lemma.Engine --version 0.11.0
 ```
 
 Build/test: `cargo run -p xtask -- nuget-natives` then `dotnet test` under `engine/packages/nuget/` (also via `cargo precommit`). See [packages/nuget/Lemmabase.Lemma.Engine/README.md](packages/nuget/Lemmabase.Lemma.Engine/README.md).

@@ -10,11 +10,16 @@
     "kind": "measure",
     "minimum": null,
     "maximum": null,
-    "decimals": 2,
     "units": [
       {
         "name": "eur",
         "factor": { "numer": "1", "denom": "1" },
+        "derived_measure_factors": [],
+        "decomposition": { "tax_bracket.money": 1 }
+      },
+      {
+        "name": "gbp",
+        "reference": "rate",
         "derived_measure_factors": [],
         "decomposition": { "tax_bracket.money": 1 }
       }
@@ -29,7 +34,6 @@
     "kind": "measure",
     "minimum": null,
     "maximum": null,
-    "decimals": null,
     "units": [
       {
         "name": "hour",
@@ -48,7 +52,6 @@
     "kind": "measure",
     "minimum": null,
     "maximum": null,
-    "decimals": null,
     "units": [
       {
         "name": "month",
@@ -86,7 +89,6 @@
     "kind": "ratio",
     "minimum": null,
     "maximum": null,
-    "decimals": null,
     "units": [{ "name": "percent", "value": { "numer": "100", "denom": "1" } }],
     "help": "",
     "extends": { "kind": "primitive" }
@@ -179,7 +181,6 @@
       "kind": "measure",
       "minimum": null,
       "maximum": null,
-      "decimals": null,
       "units": [
         {
           "name": "eur",

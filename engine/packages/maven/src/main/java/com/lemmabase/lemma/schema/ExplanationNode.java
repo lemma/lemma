@@ -1,5 +1,6 @@
 package com.lemmabase.lemma.schema;
 
+import com.lemmabase.lemma.FlattenedRuleResultValue;
 import com.lemmabase.lemma.JsonReading;
 import com.lemmabase.lemma.LemmaBugError;
 import com.lemmabase.lemma.RuleResultValue;
@@ -499,13 +500,85 @@ public sealed interface ExplanationNode {
   }
 
   /**
+   * One NormalForm list command cell ({@code menu -> sum price}).
+   *
+   * @param expression full pipeline expression
+   * @param stage command fragment after {@code ->}
+   * @param op list command identity (string unit tag, or {@code {"sort":{"descending":…}}})
+   * @param operands child nodes
+   * @param result flattened {@link RuleResultValue} outcome of the cell
+   */
+  record ListCommand(
+      String expression,
+      String stage,
+      Object op,
+      List<ExplanationNode> operands,
+      RuleResultValue result)
+      implements ExplanationNode {
+    /** {@inheritDoc} */
+    @Override
+    public String type() {
+      return "list_command";
+    }
+
+    /**
+     * Parses JSON.
+     *
+     * @param p parser at value start
+     * @return parsed value
+     * @throws IOException if JSON IO fails
+     */
+    public static ListCommand read(JsonParser p) throws IOException {
+      JsonReading.expectStartObject(p, "ExplanationNode.ListCommand");
+      String expression = null;
+      String stage = null;
+      Object op = null;
+      List<ExplanationNode> operands = null;
+      FlattenedRuleResultValue value = new FlattenedRuleResultValue();
+      while (p.nextToken() != JsonToken.END_OBJECT) {
+        String field = p.currentName();
+        p.nextToken();
+        switch (field) {
+          case "type" -> expectType(p, "list_command");
+          case "expression" -> expression = JsonReading.readString(p);
+          case "stage" -> stage = JsonReading.readString(p);
+          case "op" -> op = JsonReading.readJsonValue(p);
+          case "operands" -> operands = JsonReading.readList(p, ExplanationNode::read);
+          default -> {
+            if (!value.readField(p, field)) {
+              JsonReading.unknownField(field, "ExplanationNode.ListCommand");
+            }
+          }
+        }
+      }
+      if (expression == null) {
+        JsonReading.missingRequired("expression", "ExplanationNode.ListCommand");
+      }
+      if (stage == null) {
+        JsonReading.missingRequired("stage", "ExplanationNode.ListCommand");
+      }
+      if (op == null) {
+        JsonReading.missingRequired("op", "ExplanationNode.ListCommand");
+      }
+      if (operands == null) {
+        JsonReading.missingRequired("operands", "ExplanationNode.ListCommand");
+      }
+      return new ListCommand(expression, stage, op, operands, value.build());
+    }
+  }
+
+  /**
    * Compose.
    * @param expression expression
    * @param operator arithmetic operator when this compose is arithmetic; null otherwise
    * @param operands operands
+   * @param result flattened RuleResultValue
    */
   record Compose(
-      String expression, @Nullable String operator, List<ExplanationNode> operands)
+      String expression,
+      @Nullable String operator,
+      List<ExplanationNode> operands,
+      RuleResultValue result)
       implements ExplanationNode {
     /** {@inheritDoc} */
     @Override
@@ -525,6 +598,7 @@ public sealed interface ExplanationNode {
       String expression = null;
       String operator = null;
       List<ExplanationNode> operands = null;
+      FlattenedRuleResultValue value = new FlattenedRuleResultValue();
       while (p.nextToken() != JsonToken.END_OBJECT) {
         String field = p.currentName();
         p.nextToken();
@@ -533,7 +607,11 @@ public sealed interface ExplanationNode {
           case "expression" -> expression = JsonReading.readString(p);
           case "operator" -> operator = JsonReading.readString(p);
           case "operands" -> operands = JsonReading.readList(p, ExplanationNode::read);
-          default -> JsonReading.unknownField(field, "ExplanationNode.Compose");
+          default -> {
+            if (!value.readField(p, field)) {
+              JsonReading.unknownField(field, "ExplanationNode.Compose");
+            }
+          }
         }
       }
       if (expression == null) {
@@ -551,7 +629,7 @@ public sealed interface ExplanationNode {
               || operator.equals("power"))) {
         throw new LemmaBugError("BUG: invalid Compose operator '" + operator + "'");
       }
-      return new Compose(expression, operator, operands);
+      return new Compose(expression, operator, operands, value.build());
     }
   }
 
@@ -674,9 +752,13 @@ public sealed interface ExplanationNode {
    * @param expression expression
    * @param steps steps
    * @param operands operands
+   * @param result flattened RuleResultValue (outcome on the expression line)
    */
   record Conversion(
-      String expression, List<ConversionStep> steps, List<ExplanationNode> operands)
+      String expression,
+      List<ConversionStep> steps,
+      List<ExplanationNode> operands,
+      RuleResultValue result)
       implements ExplanationNode {
     /** {@inheritDoc} */
     @Override
@@ -696,6 +778,7 @@ public sealed interface ExplanationNode {
       String expression = null;
       List<ConversionStep> steps = null;
       List<ExplanationNode> operands = null;
+      FlattenedRuleResultValue value = new FlattenedRuleResultValue();
       while (p.nextToken() != JsonToken.END_OBJECT) {
         String field = p.currentName();
         p.nextToken();
@@ -704,7 +787,11 @@ public sealed interface ExplanationNode {
           case "expression" -> expression = JsonReading.readString(p);
           case "steps" -> steps = JsonReading.readList(p, ConversionStep::read);
           case "operands" -> operands = JsonReading.readList(p, ExplanationNode::read);
-          default -> JsonReading.unknownField(field, "ExplanationNode.Conversion");
+          default -> {
+            if (!value.readField(p, field)) {
+              JsonReading.unknownField(field, "ExplanationNode.Conversion");
+            }
+          }
         }
       }
       if (expression == null) {
@@ -716,7 +803,7 @@ public sealed interface ExplanationNode {
       if (operands == null) {
         JsonReading.missingRequired("operands", "ExplanationNode.Conversion");
       }
-      return new Conversion(expression, steps, operands);
+      return new Conversion(expression, steps, operands, value.build());
     }
   }
 
@@ -803,6 +890,7 @@ public sealed interface ExplanationNode {
     }
   }
 
+
   /**
    * Parses JSON.
    *
@@ -821,6 +909,7 @@ public sealed interface ExplanationNode {
       return switch (type) {
         case "rule_ref" -> RuleRef.read(reader);
         case "compose" -> Compose.read(reader);
+        case "list_command" -> ListCommand.read(reader);
         case "data" -> Data.read(reader);
         case "data_unused" -> DataUnused.read(reader);
         case "conversion" -> Conversion.read(reader);

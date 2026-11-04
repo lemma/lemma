@@ -132,7 +132,7 @@ $ lemma evaluate shipping is_express=false package_weight="6 kilogram"
 ┌───────────────┬───────────┐
 │ base_shipping ┆ 15.99 eur │
 ├───────────────┼───────────┤
-│ express_fee   ┆ 0.00 eur  │
+│ express_fee   ┆ 0 eur     │
 ├───────────────┼───────────┤
 │ total_cost    ┆ 15.99 eur │
 └───────────────┴───────────┘
@@ -142,7 +142,7 @@ The `is_express` data gets a default value of `true` and Lemma understands this 
 
 Each rule starts with a base case, then `unless` lines for exceptions. The last matching `unless` wins. A 2.5 kilogram package is over 1 kilogram, so `base_shipping` is 8.99 eur; at 6 kilograms the later line wins and it becomes 15.99 eur. `express_fee` is 4.99 eur when `is_express` is true, otherwise 0 eur.
 
-`total_cost` is the sum of those two rules. Units stay on the values, so `package_weight > 1 kilogram` compares weights and the totals display in eur with two decimals.
+`total_cost` is the sum of those two rules. Units stay on the values, so `package_weight > 1 kilogram` compares weights and the totals display in eur.
 
 Ask for an explanation with `-x` (or `--explain`) to see how a result was reached:
 
@@ -179,7 +179,6 @@ spec type_examples
 data money: measure
   -> unit eur: 1.00
   -> unit usd: 0.91
-  -> decimals 2
   -> minimum 0 eur
 
 data status: text
@@ -292,7 +291,6 @@ spec order_line
 
 data money: measure
   -> unit eur: 1.00
-  -> decimals 2
 
 data item:     text
 data quantity: number
@@ -304,15 +302,11 @@ rule line_total:
 
 spec order
 
-uses lines: order_line list
-  -> with
-       item: "notebook",
-       quantity: 2,
-       price: 4.50 eur
-  -> with
-       item: "pen",
-       quantity: 10,
-       price: 1.20 eur
+uses order_line
+
+data lines: order_line list
+  -> with item: "notebook", quantity: 2,  price: 4.50 eur
+  -> with item: "pen",      quantity: 10, price: 1.20 eur
 
 rule total:
   lines -> sum line_total
@@ -450,7 +444,7 @@ See [engine/packages/hex/README.md](engine/packages/hex/README.md) and [cli/docu
 <dependency>
   <groupId>com.lemmabase</groupId>
   <artifactId>lemma-engine</artifactId>
-  <version>0.10.2</version>
+  <version>0.11.0</version>
 </dependency>
 ```
 
@@ -459,7 +453,7 @@ See [engine/packages/maven/README.md](engine/packages/maven/README.md) and [cli/
 ### C# / .NET
 
 ```bash
-dotnet add package Lemmabase.Lemma.Engine --version 0.10.2
+dotnet add package Lemmabase.Lemma.Engine --version 0.11.0
 ```
 
 See [engine/packages/nuget/Lemmabase.Lemma.Engine/README.md](engine/packages/nuget/Lemmabase.Lemma.Engine/README.md) and [cli/documentation/tools/dotnet.md](cli/documentation/tools/dotnet.md).
@@ -502,7 +496,7 @@ Lemma is pre-1.0. The language and APIs are stable for most use cases, but break
 
 Contributions welcome! See [Contributing](cli/documentation/community/contributing.md) for setup and workflow.
 
-CI runs `**cargo precommit --fuzz**`. That is the PR bar: same gate as local `**cargo precommit**`, then 5 minutes of fuzz total across `[engine/fuzz](engine/fuzz)` targets. Use bare `**cargo precommit**` as a faster local shortcut (no fuzz). The gate covers `**versions-verify**`, Hex `mix precommit`, VS Code `npm precommit`, `fmt --check`, Clippy (`--all-features`), Nextest (`--all-features`), WASM npm `build.js` + `test.js`, Maven `./mvnw -B verify` (after `lemma_jni` build), NuGet `dotnet test` (after `lemma_dotnet` + UniFFI generate), cargo-deny, and `**cargo coverage all --check**`. Install `[cargo-nextest](https://nexte.st/)`, `[cargo-deny](https://github.com/EmbarkStudios/cargo-deny)`, Elixir/Mix, [Node.js](https://nodejs.org/), `[wasm-pack](https://rustwasm.github.io/wasm-pack/)`, a **JDK 21+**, and the **.NET 8 SDK** first; for `--fuzz` also install nightly (`rustup install nightly`) and `[cargo-fuzz](https://github.com/rust-fuzz/cargo-fuzz)`. Regenerate coverage with `**cargo coverage all`** when engine/cli sources change (`[cargo-llvm-cov](https://github.com/taiki-e/cargo-llvm-cov)` required). `cargo nextest` alone is Rust tests only. When bumping the workspace release version, use `**cargo bump <version>`** and `**cargo verify`** (see `[xtask/README.md](xtask/README.md)`).
+Pull requests run `cargo precommit --coverage`. Push to `main` runs `cargo precommit --coverage --fuzz`. Bare `cargo precommit` is the local shortcut: the same gate without the coverage-report check and without fuzz. The gate covers `versions-verify`, Hex `mix precommit`, VS Code `npm precommit`, `fmt --check`, Clippy (`--all-features`), Nextest (`--all-features`), WASM npm `build.js` + `test.js`, Maven `./mvnw -B verify` (after `lemma_jni` build), NuGet `dotnet test` (after `lemma_dotnet` + UniFFI generate), and cargo-deny. `--coverage` checks the committed coverage reports (`cargo coverage all --check`). `--fuzz` runs 5 minutes of fuzz total across [engine/fuzz](engine/fuzz) targets. Install [cargo-nextest](https://nexte.st/), [cargo-deny](https://github.com/EmbarkStudios/cargo-deny), Elixir/Mix, [Node.js](https://nodejs.org/), [wasm-pack](https://rustwasm.github.io/wasm-pack/), a **JDK 21+**, and the **.NET 8 SDK** first; for `--fuzz` also install nightly (`rustup install nightly`) and [cargo-fuzz](https://github.com/rust-fuzz/cargo-fuzz). Regenerate coverage with `cargo coverage all` when engine or CLI sources change ([cargo-llvm-cov](https://github.com/taiki-e/cargo-llvm-cov) required). `cargo nextest` alone is Rust tests only. When bumping the workspace release version, use `cargo bump <version>` and `cargo verify` (see [xtask/README.md](xtask/README.md)).
 
 ## License
 

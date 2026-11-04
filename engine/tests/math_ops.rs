@@ -253,9 +253,9 @@ fn test_inverse_trig_at_unit_points() -> Result<(), lemma::Errors> {
 fn test_nested_math_ops() -> Result<(), lemma::Errors> {
     let code = r#"
     spec test
-    rule a: round abs(-3.6)
-    rule b: ceil sqrt 2
-    rule c: floor (exp 1)
+    rule a: abs(-3.6) -> round
+    rule b: sqrt 2 -> ceil
+    rule c: exp 1 -> floor
     "#;
     assert_eq!(run(code, "a")?, "4");
     assert_eq!(run(code, "b")?, "2");
@@ -269,10 +269,10 @@ fn test_prefix_call_form_applies_operators_to_result() -> Result<(), lemma::Erro
     spec test
     data x: 1.2
     data express: boolean -> with false
-    rule tight: floor(x) + 0.5
-    rule wide: floor (x + 0.5)
+    rule tight: (x -> floor) + 0.5
+    rule wide: x + 0.5 -> floor
     rule scaled: sqrt(16) * 2
-    rule bare: floor x
+    rule bare: x -> floor
     rule negated: not express
     rule negated_comparison: not(x > 3)
     "#;
@@ -288,7 +288,7 @@ fn test_prefix_call_form_applies_operators_to_result() -> Result<(), lemma::Erro
 #[test]
 fn test_operator_after_bare_prefix_operand_is_parse_error() {
     for (body, suggestion) in [
-        ("floor x + 1", "`floor(a) + b`"),
+        ("abs x + 1", "`abs(a) + b`"),
         ("sqrt 16 * 2", "`sqrt(a) * b`"),
         ("not x > 3", "`not(a > b)`"),
         ("not express and express", "`not(a) and b`"),

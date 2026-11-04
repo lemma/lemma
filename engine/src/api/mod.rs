@@ -16,8 +16,8 @@ pub use evaluate_data_json::{
 };
 pub use response::{Response, RuleResult};
 pub use show::{
-    measure_pattern, number_pattern, ratio_pattern, row_def_name, show_document, PathSegment,
-    ShowBranch, ShowConversionTarget, ShowExpression, ShowListCommand, ShowRule, SortDirection,
+    row_def_name, show_document, PathSegment, ShowBranch, ShowConversionTarget, ShowExpression,
+    ShowListCommand, ShowRule, SortDirection,
 };
 pub use types::{
     LemmaType, ListKey, MeasureTrait, MeasureUnit, NamedBound, RatioUnit, RationalFactor,

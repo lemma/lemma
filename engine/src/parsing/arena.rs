@@ -6,9 +6,9 @@
 //! compared and dropped without recursion.
 
 use crate::parsing::source::Source;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize)]
 pub struct ExprId(u32);
 
 impl ExprId {
@@ -32,13 +32,13 @@ pub trait ExprKind: Clone + PartialEq {
     fn children_mut(&mut self) -> Vec<&mut ExprId>;
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct ExprNode<K> {
     pub kind: K,
     pub source_location: Option<Source>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct ExprTable<K> {
     nodes: Vec<ExprNode<K>>,
 }
@@ -147,6 +147,14 @@ impl<K: ExprKind> ExprTable<K> {
             .kind
     }
 
+    pub fn set_source(&mut self, id: ExprId, source: Source) {
+        let len = self.nodes.len();
+        self.nodes
+            .get_mut(id.index())
+            .unwrap_or_else(|| panic!("BUG: ExprId {} out of range (len {len})", id.0))
+            .source_location = Some(source);
+    }
+
     /// Structural equality of two subtrees, ignoring source locations and ids.
     #[must_use]
     pub fn structurally_equal(&self, left: ExprId, other: &Self, right: ExprId) -> bool {
@@ -177,7 +185,7 @@ fn shape<K: ExprKind>(kind: &K) -> K {
 }
 
 /// A table holding one tree, and that tree's root (its last node).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct ExprTree<K> {
     pub table: ExprTable<K>,
     pub root: ExprId,
@@ -327,6 +335,19 @@ mod tests {
         files
     }
 
+    fn parse_rule_expression(source: &str, rule_name: &str) -> crate::parsing::ast::Expression {
+        let specs = crate::parsing::parse(source, SourceType::Volatile, &ResourceLimits::default())
+            .expect("fixture must parse")
+            .into_flattened_specs();
+        specs
+            .iter()
+            .flat_map(|spec| spec.rules.iter())
+            .find(|rule| rule.name == rule_name)
+            .expect("BUG: fixture must declare the named rule")
+            .expression
+            .clone()
+    }
+
     #[test]
     fn parsed_expressions_are_trees() {
         let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -354,5 +375,71 @@ mod tests {
             }
         }
         assert!(checked > 100, "corpus too small: {checked} rules");
+    }
+
+    #[test]
+    fn identifier_list_command_is_a_tree() {
+        let expression = parse_rule_expression(
+            r#"
+spec item
+data score: number
+
+spec scores
+uses item
+rule average:
+  item list -> avg score
+"#,
+            "average",
+        );
+        expression.assert_is_tree();
+        assert_eq!(
+            expression.table.len(),
+            3,
+            "ListType, score Reference, ListCommand — no orphan Reference for item"
+        );
+    }
+
+    #[test]
+    fn identifier_range_list_is_a_tree() {
+        let expression = parse_rule_expression(
+            r#"
+spec item
+data score: number
+
+spec scores
+uses item
+rule empty:
+  item range list -> count
+"#,
+            "empty",
+        );
+        expression.assert_is_tree();
+        assert_eq!(
+            expression.table.len(),
+            2,
+            "ListType then Count command — no orphan Reference for item"
+        );
+    }
+
+    #[test]
+    fn qualified_list_type_is_a_tree() {
+        let expression = parse_rule_expression(
+            r#"
+spec row
+data score: number
+
+spec outer
+uses r: row
+rule counted:
+  r.score list -> count
+"#,
+            "counted",
+        );
+        expression.assert_is_tree();
+        assert_eq!(
+            expression.table.len(),
+            2,
+            "ListType then Count — no orphan qualified Reference"
+        );
     }
 }

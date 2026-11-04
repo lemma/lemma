@@ -17,7 +17,6 @@ spec warehouse_types
 data money: measure
   -> unit eur: 1.00
   -> unit usd: 0.91
-  -> decimals 2
   -> minimum 0 eur
 
 data mass: measure

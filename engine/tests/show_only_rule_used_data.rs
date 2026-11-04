@@ -1,5 +1,6 @@
 //! Show.types = local data decls; Show.data = inputs rules need only.
 
+use indexmap::IndexMap;
 use lemma::DateTimeValue;
 use lemma::Engine;
 use std::collections::BTreeSet;
@@ -233,11 +234,32 @@ rule r: i.slot
             .get("src.x0")
             .expect("src.x0 must appear in outer show data")
             .needed_by_rules,
-        vec!["r".to_string(), "src.computed".to_string()],
-        "outer needed_by_rules must include reachable consumers (local + imported)"
+        vec!["r".to_string()],
+        "outer needed_by_rules names local catalog rules only"
+    );
+    assert_eq!(
+        show_outer.rules.keys().cloned().collect::<Vec<_>>(),
+        vec!["r".to_string()]
+    );
+    assert!(
+        !show_outer.rules.contains_key("src.computed"),
+        "imported rules are not on the parent catalog"
     );
     assert!(
         !show_outer.types.contains_key("src.x0"),
         "imported slots are not local types"
     );
+
+    let now = DateTimeValue::now();
+    let err = engine
+        .evaluate(
+            None,
+            "outer",
+            Some(&now),
+            IndexMap::new(),
+            Some(&["src.computed".to_string()]),
+            false,
+        )
+        .expect_err("imported rule not selectable on parent");
+    assert!(err.to_string().contains("src.computed"), "error: {err}");
 }

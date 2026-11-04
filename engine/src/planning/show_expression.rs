@@ -5,17 +5,96 @@
 
 use crate::parsing::arena::{ExprId, ExprKind, ExprRef};
 use crate::parsing::ast::{
-    ArithmeticComputation, CalendarPeriodUnit, ComparisonComputation, DateCalendarKind,
-    DateRelativeKind, MathematicalComputation, PrimitiveKind, RangeBound, VetoExpression,
+    ArithmeticComputation, CalendarPeriodUnit, ComparisonComputation, ConversionTypeKind,
+    DateCalendarKind, DateRelativeKind, LogicalConnective, MathematicalComputation, RangeBound,
+    RoundingMode, VetoExpression,
 };
+use crate::planning::execution_plan::ExecutionPlan;
+use crate::planning::instance_list::{row_end_chain, RowEndView};
 use crate::planning::semantics::{
-    Expression, ExpressionKind, ListOp, SemanticConversionTarget, TypedLiteral,
+    DataDefinition, DataPath, Expression, ExpressionKind, ListOp, PathSegment, RowEnd, RulePath,
+    SemanticConversionTarget, SpecIdentity, TypedLiteral,
 };
+use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
+use std::sync::Arc;
+
+/// What projecting the rules of one plan reads: the reachable Show rules, and the
+/// plan's data and row templates, which name a member read on a `uses` import.
+pub(crate) struct ShowScope<'a> {
+    pub(crate) show_keys: &'a HashSet<RulePath>,
+    pub(crate) data: &'a IndexMap<DataPath, DataDefinition>,
+    pub(crate) templates: &'a BTreeMap<SpecIdentity, Arc<ExecutionPlan>>,
+}
+
+/// What a member read on a `uses` import names: a rule or data of the instance it
+/// lands on, by path composed from the import hops.
+enum ImportMember {
+    Rule(RulePath),
+    Data(DataPath),
+}
+
+impl ShowScope<'_> {
+    /// The member `path.name` names when `base` is a `uses` slot of the plan.
+    fn import_member(
+        &self,
+        base: &ExpressionKind,
+        path: &[String],
+        name: &str,
+    ) -> Option<ImportMember> {
+        let ExpressionKind::DataPath(slot) = base else {
+            return None;
+        };
+        let Some(DataDefinition::Import { row, .. }) = self.data.get(slot) else {
+            return None;
+        };
+        let template = self.templates.get(&row.identity).unwrap_or_else(|| {
+            panic!(
+                "BUG: `uses` slot '{slot}' has no template of '{}'",
+                row.identity
+            )
+        });
+        let parts: Vec<&str> = path
+            .iter()
+            .map(String::as_str)
+            .chain(std::iter::once(name))
+            .collect();
+        let chain = row_end_chain(
+            &row.identity,
+            RowEndView::Plan(template),
+            self.templates,
+            &parts,
+        )
+        .unwrap_or_else(|| {
+            panic!(
+                "BUG: member '{}' of `uses` slot '{slot}' planned but unresolved",
+                parts.join(".")
+            )
+        });
+        let mut segments = vec![PathSegment::import(&slot.data, &row.identity)];
+        for (hop, next) in chain.iter().zip(chain.iter().skip(1)) {
+            let RowEnd::Data(alias) = &hop.end else {
+                panic!(
+                    "BUG: a member chain hop is a `uses` slot, got {:?}",
+                    hop.end
+                );
+            };
+            segments.push(PathSegment::import(&alias.data, &next.identity));
+        }
+        let last = chain.last().expect("BUG: a member chain has a last end");
+        Some(match &last.end {
+            RowEnd::Rule(rule) => ImportMember::Rule(RulePath::new(segments, rule.rule.clone())),
+            RowEnd::Data(data) => ImportMember::Data(DataPath {
+                segments,
+                data: data.data.clone(),
+            }),
+        })
+    }
+}
 
 /// One arm of a rule's flat last-match table on Show.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ShowBranch {
     /// Absent on the default arm; present on each `unless`.
     pub condition: Option<ShowExpression>,
@@ -23,29 +102,29 @@ pub struct ShowBranch {
 }
 
 /// Local rule on Show: result type, authored branches, stored topo deps.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ShowRule {
     pub lemma_type: crate::planning::semantics::LemmaType,
-    /// Import hops to this rule (`[]` = this spec). Same shape as [`ShowData::path`].
+    /// Import hops to this rule (`[]` = this spec). Catalog entries are always empty.
     pub path: Vec<crate::planning::semantics::PathSegment>,
     pub branches: Vec<ShowBranch>,
-    /// Show.rules keys this rule depends on (planning topo). Always present.
-    pub depends_on_rules: Vec<String>,
+    /// Other Show.rules keys this rule depends on (local catalog closure). Always present.
+    /// Branch Rule leaves may name reachable imports outside this set.
+    pub depends_on_rules: Vec<RulePath>,
 }
 
 /// Conversion target on a Show `as` expression (no owning type — inspection only).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ShowConversionTarget {
-    Type(PrimitiveKind),
+    Type(ConversionTypeKind),
     Unit { unit_name: String },
 }
 
 /// Resolved expression tree for Show branches (`tag = "type"` on the API mirror).
 ///
-/// Literals stay [`TypedLiteral`] (postcard-safe ℚ). [`RuleResultValue`] is built at the
+/// Literals stay [`TypedLiteral`]. [`RuleResultValue`] is built at the
 /// JSON/`lemma::api` boundary only.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ShowExpression {
     Literal(Box<TypedLiteral>),
     Data {
@@ -56,6 +135,9 @@ pub enum ShowExpression {
     },
     /// `a and b and c`: one left fold, operands in source order.
     And {
+        operands: Vec<ShowExpression>,
+    },
+    Or {
         operands: Vec<ShowExpression>,
     },
     Not {
@@ -79,6 +161,12 @@ pub enum ShowExpression {
     Math {
         op: MathematicalComputation,
         operand: Box<ShowExpression>,
+    },
+    /// `operand -> round` or `operand -> round step`.
+    StepRounding {
+        mode: RoundingMode,
+        operand: Box<ShowExpression>,
+        step: Option<Box<ShowExpression>>,
     },
     Veto {
         message: Option<String>,
@@ -125,6 +213,8 @@ pub enum ShowExpression {
     /// Field of the current row inside an instance-list command argument.
     RowField {
         field: String,
+        /// Written list qualifier when the source used `list.field`; `None` for bare refs.
+        qualifier: Option<Vec<String>>,
     },
     /// The current row's value: the implicit left operand of a value-list condition.
     RowValue,
@@ -143,7 +233,7 @@ pub enum ShowExpression {
 }
 
 /// One operator step of a Show arithmetic chain.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ShowArithmeticStep {
     pub op: ArithmeticComputation,
     pub operand: ShowExpression,
@@ -168,6 +258,7 @@ pub enum ShowListCommand {
     Sort,
     Top,
     With,
+    Key,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -189,7 +280,7 @@ impl ShowExpression {
             | Self::SpecMember { .. }
             | Self::RowField { .. }
             | Self::RowValue => Vec::new(),
-            Self::And { operands } => operands.iter().collect(),
+            Self::And { operands } | Self::Or { operands } => operands.iter().collect(),
             Self::Not { operand }
             | Self::UnitConversion { operand, .. }
             | Self::Math { operand, .. }
@@ -212,6 +303,13 @@ impl ShowExpression {
                 value: left,
                 range: right,
             } => vec![left.as_ref(), right.as_ref()],
+            Self::StepRounding { operand, step, .. } => {
+                let mut out = vec![operand.as_ref()];
+                if let Some(step) = step {
+                    out.push(step.as_ref());
+                }
+                out
+            }
             Self::Member { base, .. } => vec![base.as_ref()],
             Self::RowFieldValue { value, .. } => vec![value.as_ref()],
             Self::ListCommand { list, args, .. } => {
@@ -256,14 +354,13 @@ pub(crate) fn take_operand<T, I: Iterator<Item = T>>(operands: &mut I) -> T {
 
 /// Project the subtree at `root` into the Show tree.
 ///
-/// `show_keys` are `RulePath::input_key` values for reachable Show rules. A
-/// `rule` leaf whose key is missing from that set is a bug.
+/// `show_keys` are reachable Show rules. A `rule` leaf whose path is missing from that set is a bug.
 ///
 /// Bottom-up projection with an explicit stack. Each node takes its operands' projections
 /// from the value stack in [`for_each_projection_operand`] order.
 fn project(
     root: ExprRef<'_, ExpressionKind>,
-    show_keys: &HashSet<String>,
+    scope: &ShowScope<'_>,
     scratch: &mut ProjectScratch,
 ) -> ShowExpression {
     let ProjectScratch { values, stack } = scratch;
@@ -273,17 +370,17 @@ fn project(
         if !expanded {
             stack.push((id, true));
             let start = stack.len();
-            for_each_projection_operand(node, |operand| stack.push((operand, false)));
+            for_each_projection_operand(node, scope, |operand| stack.push((operand, false)));
             stack[start..].reverse();
             continue;
         }
         let mut arity = 0;
-        for_each_projection_operand(node, |_| arity += 1);
+        for_each_projection_operand(node, scope, |_| arity += 1);
         let split = values
             .len()
             .checked_sub(arity)
             .expect("BUG: operand projected before its parent");
-        let shown = project_node(node, values.drain(split..), show_keys);
+        let shown = project_node(node, values.drain(split..), scope);
         values.push(shown);
     }
     let shown = values
@@ -304,12 +401,20 @@ struct ProjectScratch {
 }
 
 /// Calls `f` on the sub-expressions a Show node is built from, in [`project_node`] consumption order.
-/// An `as` run contributes only its innermost operand; a rule-path member base, none.
-fn for_each_projection_operand(node: ExprRef<'_, ExpressionKind>, mut f: impl FnMut(ExprId)) {
+/// An `as` run contributes only its innermost operand; a rule-path or `uses` member
+/// base, none.
+fn for_each_projection_operand(
+    node: ExprRef<'_, ExpressionKind>,
+    scope: &ShowScope<'_>,
+    mut f: impl FnMut(ExprId),
+) {
     match node.kind() {
         ExpressionKind::Piecewise(_) => {}
-        ExpressionKind::SpecMember { base, .. } => {
-            if !matches!(node.child(*base).kind(), ExpressionKind::RulePath(_)) {
+        ExpressionKind::SpecMember { base, path, name } => {
+            let base_kind = node.child(*base).kind();
+            if !matches!(base_kind, ExpressionKind::RulePath(_))
+                && scope.import_member(base_kind, path, name).is_none()
+            {
                 f(*base);
             }
         }
@@ -343,22 +448,32 @@ fn conversion_run(node: ExprRef<'_, ExpressionKind>) -> (ExprId, Vec<ShowConvers
 fn project_node(
     node: ExprRef<'_, ExpressionKind>,
     mut operands: std::vec::Drain<'_, ShowExpression>,
-    show_keys: &HashSet<String>,
+    scope: &ShowScope<'_>,
 ) -> ShowExpression {
+    let show_keys = scope.show_keys;
     match node.kind() {
         ExpressionKind::Literal(typed) => ShowExpression::Literal(Box::new(typed.as_ref().clone())),
         ExpressionKind::DataPath(path) => ShowExpression::Data {
             name: path.input_key(),
         },
         ExpressionKind::RulePath(path) => {
-            let key = path.input_key();
-            if !show_keys.contains(&key) {
-                panic!("BUG: rule leaf '{key}' not in Show.rules keys");
+            if !show_keys.contains(path) {
+                panic!(
+                    "BUG: rule leaf '{}' not in Show.rules keys",
+                    path.input_key()
+                );
             }
-            ShowExpression::Rule { name: key }
+            ShowExpression::Rule {
+                name: path.input_key(),
+            }
         }
-        ExpressionKind::LogicalAnd { .. } => ShowExpression::And {
-            operands: operands.collect(),
+        ExpressionKind::Logical { connective, .. } => match connective {
+            LogicalConnective::And => ShowExpression::And {
+                operands: operands.collect(),
+            },
+            LogicalConnective::Or => ShowExpression::Or {
+                operands: operands.collect(),
+            },
         },
         ExpressionKind::LogicalNegation(_, _) => ShowExpression::Not {
             operand: Box::new(take_operand(&mut operands)),
@@ -394,6 +509,14 @@ fn project_node(
             op: op.clone(),
             operand: Box::new(take_operand(&mut operands)),
         },
+        ExpressionKind::StepRounding { mode, step, .. } => {
+            let operand = Box::new(take_operand(&mut operands));
+            ShowExpression::StepRounding {
+                mode: *mode,
+                operand,
+                step: step.map(|_| Box::new(take_operand(&mut operands))),
+            }
+        }
         ExpressionKind::Veto(VetoExpression { message }) => ShowExpression::Veto {
             message: message.clone(),
         },
@@ -431,9 +554,26 @@ fn project_node(
         ExpressionKind::Piecewise(_) => {
             panic!("BUG: piecewise inside a rule branch")
         }
-        ExpressionKind::SpecMember {
-            base, path, name, ..
-        } => {
+        ExpressionKind::SpecMember { base, path, name } => {
+            match scope.import_member(node.child(*base).kind(), path, name) {
+                Some(ImportMember::Rule(rule)) => {
+                    if !show_keys.contains(&rule) {
+                        panic!(
+                            "BUG: `uses` member rule '{}' not in Show.rules keys",
+                            rule.input_key()
+                        );
+                    }
+                    return ShowExpression::Rule {
+                        name: rule.input_key(),
+                    };
+                }
+                Some(ImportMember::Data(data)) => {
+                    return ShowExpression::Data {
+                        name: data.input_key(),
+                    };
+                }
+                None => {}
+            }
             let mut member = String::new();
             for segment in path {
                 member.push_str(segment);
@@ -442,11 +582,16 @@ fn project_node(
             member.push_str(name);
             match node.child(*base).kind() {
                 ExpressionKind::RulePath(rule) => {
-                    let key = rule.input_key();
-                    if !show_keys.contains(&key) {
-                        panic!("BUG: spec member base '{key}' not in Show.rules keys");
+                    if !show_keys.contains(rule) {
+                        panic!(
+                            "BUG: spec member base '{}' not in Show.rules keys",
+                            rule.input_key()
+                        );
                     }
-                    ShowExpression::SpecMember { base: key, member }
+                    ShowExpression::SpecMember {
+                        base: rule.input_key(),
+                        member,
+                    }
                 }
                 _ => ShowExpression::Member {
                     base: Box::new(take_operand(&mut operands)),
@@ -454,9 +599,11 @@ fn project_node(
                 },
             }
         }
-        ExpressionKind::RowField { end, .. } => ShowExpression::RowField {
+        ExpressionKind::RowField { end, qualifier, .. } => ShowExpression::RowField {
             field: end.to_string(),
+            qualifier: qualifier.clone(),
         },
+        ExpressionKind::RowValue { .. } => ShowExpression::RowValue,
         ExpressionKind::ListCommand { op, .. } => {
             let list = Box::new(take_operand(&mut operands));
             let (command, direction, args) = show_list_op(op, &mut operands);
@@ -475,7 +622,6 @@ fn show_list_op(
     op: &ListOp,
     operands: &mut std::vec::Drain<'_, ShowExpression>,
 ) -> (ShowListCommand, Option<SortDirection>, Vec<ShowExpression>) {
-    use crate::parsing::ast::RowCondition;
     use crate::planning::semantics::{ListPredKind, ListReduce};
     let predicate = |kind: &ListPredKind| match kind {
         ListPredKind::Any => ShowListCommand::Any,
@@ -506,24 +652,7 @@ fn show_list_op(
             };
             (command, None, args)
         }
-        ListOp::Predicate { kind, op, .. } => {
-            let right = Box::new(take_operand(operands));
-            let condition = match op {
-                RowCondition::Compare(comparison) => ShowExpression::Comparison {
-                    op: comparison.clone(),
-                    left: Box::new(ShowExpression::RowValue),
-                    right,
-                },
-                RowCondition::In => ShowExpression::RangeContainment {
-                    value: Box::new(ShowExpression::RowValue),
-                    range: right,
-                },
-            };
-            (predicate(kind), None, vec![condition])
-        }
-        ListOp::InstancePredicate { kind, .. } => {
-            (predicate(kind), None, vec![take_operand(operands)])
-        }
+        ListOp::Predicate { kind, .. } => (predicate(kind), None, vec![take_operand(operands)]),
         ListOp::Sort {
             descending,
             argument,
@@ -546,7 +675,7 @@ fn show_list_op(
             None,
             operands.by_ref().take(rows.len()).collect(),
         ),
-        ListOp::WithRow { fields } => (
+        ListOp::WithRow { fields, .. } => (
             ShowListCommand::With,
             None,
             fields
@@ -557,158 +686,56 @@ fn show_list_op(
                 })
                 .collect(),
         ),
+        ListOp::Key { fields } => (
+            ShowListCommand::Key,
+            None,
+            fields
+                .iter()
+                .map(|path| ShowExpression::Data {
+                    name: path.input_key(),
+                })
+                .collect(),
+        ),
     }
 }
 
 /// Project `RuleNode.branches` into Show arms (default first, no synthetic true).
-pub fn show_branches_from(
+pub(crate) fn show_branches_from(
     expression: &Expression,
     branches: &[(Option<ExprId>, ExprId)],
-    show_keys: &HashSet<String>,
+    scope: &ShowScope<'_>,
 ) -> Vec<ShowBranch> {
     let mut scratch = ProjectScratch::default();
     branches
         .iter()
         .map(|(condition, result)| ShowBranch {
             condition: condition
-                .map(|condition| project(expression.at(condition), show_keys, &mut scratch)),
-            result: project(expression.at(*result), show_keys, &mut scratch),
+                .map(|condition| project(expression.at(condition), scope, &mut scratch)),
+            result: project(expression.at(*result), scope, &mut scratch),
         })
         .collect()
 }
 
-/// Project `RuleNode.depends_on_rules` to Show.rules keys (BTreeSet order).
+/// Project planning edges onto the public Show.rules catalog (BTreeSet order).
+///
+/// Local deps must be catalog keys. Import deps (non-empty segments) are planning-internal
+/// and omitted from the public vector.
 pub fn project_depends_on_rules(
-    deps: &std::collections::BTreeSet<crate::planning::semantics::RulePath>,
-    show_keys: &HashSet<String>,
-) -> Vec<String> {
+    deps: &std::collections::BTreeSet<RulePath>,
+    catalog_keys: &HashSet<RulePath>,
+) -> Vec<RulePath> {
     let mut out = Vec::new();
     for path in deps {
-        let key = path.input_key();
-        if !show_keys.contains(&key) {
-            panic!("BUG: depends_on_rules entry '{key}' missing from Show.rules keys");
+        if catalog_keys.contains(path) {
+            out.push(path.clone());
+        } else if path.segments.is_empty() {
+            panic!(
+                "BUG: local depends_on_rules entry '{}' missing from Show.rules keys",
+                path.input_key()
+            );
         }
-        out.push(key);
     }
     out
-}
-
-/// Prefix Data/Rule/SpecMember names when lifting a template Show tree under a `uses` alias path.
-pub(crate) fn prefix_show_expression(prefix: &str, expression: &ShowExpression) -> ShowExpression {
-    expression.fold(|node, operands| prefix_show_node(prefix, node, operands))
-}
-
-fn prefix_show_node(
-    prefix: &str,
-    node: &ShowExpression,
-    operands: Vec<ShowExpression>,
-) -> ShowExpression {
-    let qualify = |name: &str| format!("{prefix}.{name}");
-    let mut operands = operands.into_iter();
-    match node {
-        ShowExpression::Literal(literal) => ShowExpression::Literal(literal.clone()),
-        ShowExpression::Data { name } => ShowExpression::Data {
-            name: qualify(name),
-        },
-        ShowExpression::Rule { name } => ShowExpression::Rule {
-            name: qualify(name),
-        },
-        ShowExpression::And { .. } => ShowExpression::And {
-            operands: operands.collect(),
-        },
-        ShowExpression::Not { .. } => ShowExpression::Not {
-            operand: Box::new(take_operand(&mut operands)),
-        },
-        ShowExpression::Arithmetic { steps, .. } => {
-            let first = Box::new(take_operand(&mut operands));
-            let steps = steps
-                .iter()
-                .map(|step| ShowArithmeticStep {
-                    op: step.op.clone(),
-                    operand: take_operand(&mut operands),
-                })
-                .collect();
-            ShowExpression::Arithmetic { first, steps }
-        }
-        ShowExpression::Comparison { op, .. } => {
-            let left = Box::new(take_operand(&mut operands));
-            let right = Box::new(take_operand(&mut operands));
-            ShowExpression::Comparison {
-                op: op.clone(),
-                left,
-                right,
-            }
-        }
-        ShowExpression::UnitConversion { targets, .. } => ShowExpression::UnitConversion {
-            operand: Box::new(take_operand(&mut operands)),
-            targets: targets.clone(),
-        },
-        ShowExpression::Math { op, .. } => ShowExpression::Math {
-            op: op.clone(),
-            operand: Box::new(take_operand(&mut operands)),
-        },
-        ShowExpression::Veto { message } => ShowExpression::Veto {
-            message: message.clone(),
-        },
-        ShowExpression::Now => ShowExpression::Now,
-        ShowExpression::DateRelative { kind, .. } => ShowExpression::DateRelative {
-            kind: *kind,
-            operand: Box::new(take_operand(&mut operands)),
-        },
-        ShowExpression::DateCalendar { kind, unit, .. } => ShowExpression::DateCalendar {
-            kind: *kind,
-            unit: *unit,
-            operand: Box::new(take_operand(&mut operands)),
-        },
-        ShowExpression::RangeLiteral { .. } => {
-            let from = Box::new(take_operand(&mut operands));
-            let to = Box::new(take_operand(&mut operands));
-            ShowExpression::RangeLiteral { from, to }
-        }
-        ShowExpression::PastFutureRange { kind, .. } => ShowExpression::PastFutureRange {
-            kind: *kind,
-            operand: Box::new(take_operand(&mut operands)),
-        },
-        ShowExpression::RangeContainment { .. } => {
-            let value = Box::new(take_operand(&mut operands));
-            let range = Box::new(take_operand(&mut operands));
-            ShowExpression::RangeContainment { value, range }
-        }
-        ShowExpression::RangeBound { bound, .. } => ShowExpression::RangeBound {
-            bound: *bound,
-            operand: Box::new(take_operand(&mut operands)),
-        },
-        ShowExpression::IsVeto { .. } => ShowExpression::IsVeto {
-            operand: Box::new(take_operand(&mut operands)),
-        },
-        ShowExpression::SpecMember { base, member } => ShowExpression::SpecMember {
-            base: qualify(base),
-            member: member.clone(),
-        },
-        ShowExpression::Member { member, .. } => ShowExpression::Member {
-            base: Box::new(take_operand(&mut operands)),
-            member: member.clone(),
-        },
-        ShowExpression::RowField { field } => ShowExpression::RowField {
-            field: field.clone(),
-        },
-        ShowExpression::RowValue => ShowExpression::RowValue,
-        ShowExpression::RowFieldValue { field, .. } => ShowExpression::RowFieldValue {
-            field: field.clone(),
-            value: Box::new(take_operand(&mut operands)),
-        },
-        ShowExpression::ListCommand {
-            command, direction, ..
-        } => {
-            let list = Box::new(take_operand(&mut operands));
-            ShowExpression::ListCommand {
-                list,
-                command: *command,
-                direction: *direction,
-                args: operands.collect(),
-            }
-        }
-    }
 }
 
 fn conversion_target_from(target: &SemanticConversionTarget) -> ShowConversionTarget {

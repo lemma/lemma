@@ -51,22 +51,6 @@ defmodule Lemma do
   end
 
   @doc """
-  Persist parsed specs + plans + limits as opaque bytes. Restore with `from_snapshot/1`.
-  """
-  @spec snapshot(engine()) :: {:ok, binary()} | {:error, map()}
-  def snapshot(engine) do
-    Lemma.Native.lemma_snapshot(engine)
-  end
-
-  @doc """
-  Restore an engine from `snapshot/1` bytes.
-  """
-  @spec from_snapshot(binary()) :: {:ok, engine()} | {:error, map()}
-  def from_snapshot(bytes) when is_binary(bytes) do
-    Lemma.Native.lemma_from_snapshot(bytes)
-  end
-
-  @doc """
   Structural quality recommendations across loaded specs. Advisory only.
   """
   @spec quality(engine()) :: {:ok, [map()]} | {:error, term()}

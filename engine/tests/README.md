@@ -150,7 +150,7 @@ cargo nextest run -p lemma-engine --tests
 |------|--------|
 | `lists/list_syntax.rs` | Commas, digit comma removal, options, field-pair lookahead, `(expr).field`, reserved keywords |
 | `lists/scalar_with_command.rs` | Scalar `-> with` (replaces `fill`); standalone `with` rejected |
-| `lists/list_declarations.rs` | Value/`uses` lists, empty default, type positions, query commands rejected on data |
+| `lists/list_declarations.rs` | Value and instance lists, empty default, type positions, query commands rejected on data |
 | `lists/list_rows_with.rs` | Inline/dotted/named rows, append, key collision |
 | `lists/list_keys.rs` | Field/range/composite/numbered keys, coverage, temporal interface |
 | `lists/list_access.rs` | `find`/`first`/`last`, row dot, unless branch typing |
@@ -180,7 +180,6 @@ cargo nextest run -p lemma-engine --tests
 
 | File | Focus |
 |------|--------|
-| `engine_snapshot.rs` | Binary snapshot round-trip, determinism, corrupt/stale bytes, wide N=5000 |
 | `load_batch_wasm_planning_parity.rs` | npm (WASM binding) vs native planning parity for batch loads |
 | `repro_finance_dual_slice_registry_uses.rs` | Registry + dual slice |
 | `resource_limits_test.rs` | Resource limits |

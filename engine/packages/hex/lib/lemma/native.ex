@@ -39,10 +39,6 @@ defmodule Lemma.Native do
 
   def lemma_limits(_resource), do: :erlang.nif_error(:nif_not_loaded)
 
-  def lemma_snapshot(_resource), do: :erlang.nif_error(:nif_not_loaded)
-
-  def lemma_from_snapshot(_bytes), do: :erlang.nif_error(:nif_not_loaded)
-
   def lemma_quality(_resource), do: :erlang.nif_error(:nif_not_loaded)
 
   def lemma_format(_code), do: :erlang.nif_error(:nif_not_loaded)

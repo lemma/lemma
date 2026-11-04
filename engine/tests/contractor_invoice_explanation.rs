@@ -7,7 +7,6 @@ const CALC_SPEC: &str = r#"
 spec calc
 
 data money: measure
-  -> decimals 2
   -> unit eur: 1
 
 data hourly_rate: 85.00 eur
@@ -44,53 +43,53 @@ fn evaluate_calc(data: IndexMap<String, EvaluateDataValue>) -> lemma::Explanatio
 }
 
 const NEITHER_UNLESS_MATCHES: &str = "\
-total: 3856.88 eur
+total: 3856.875 eur
 └─ subtotal + vat
-   ├─ subtotal: 3187.50 eur
+   ├─ subtotal: 3187.5 eur
    │  └─ labor + rush_surcharge
-   │     ├─ labor: 3187.50 eur
+   │     ├─ labor: 3187.5 eur
    │     │  └─ hourly_rate * hours_worked
-   │     │     ├─ hourly_rate: 85.00 eur
+   │     │     ├─ hourly_rate: 85 eur
    │     │     └─ hours_worked: 37.5
-   │     └─ rush_surcharge: 0.00 eur
+   │     └─ rush_surcharge: 0 eur
    │        ├─ is_rush is false
    │        └─ is_super_rush is false
-   └─ vat: 669.38 eur
+   └─ vat: 669.375 eur
       └─ subtotal * 21%
-         └─ subtotal: 3187.50 eur (see above)";
+         └─ subtotal: 3187.5 eur (see above)";
 
 const IS_RUSH_ONLY: &str = "\
-total: 4821.09 eur
+total: 4821.09375 eur
 └─ subtotal + vat
-   ├─ subtotal: 3984.38 eur
+   ├─ subtotal: 3984.375 eur
    │  └─ labor + rush_surcharge
-   │     ├─ labor: 3187.50 eur
+   │     ├─ labor: 3187.5 eur
    │     │  └─ hourly_rate * hours_worked
-   │     │     ├─ hourly_rate: 85.00 eur
+   │     │     ├─ hourly_rate: 85 eur
    │     │     └─ hours_worked: 37.5
-   │     └─ rush_surcharge: 796.88 eur
+   │     └─ rush_surcharge: 796.875 eur
    │        ├─ is_super_rush is false
    │        ├─ is_rush
    │        └─ labor * 25%
-   │           └─ labor: 3187.50 eur (see above)
-   └─ vat: 836.72 eur
+   │           └─ labor: 3187.5 eur (see above)
+   └─ vat: 836.71875 eur
       └─ subtotal * 21%
-         └─ subtotal: 3984.38 eur (see above)";
+         └─ subtotal: 3984.375 eur (see above)";
 
 const IS_SUPER_RUSH: &str = "\
-total: 5785.31 eur
+total: 5785.3125 eur
 └─ subtotal + vat
    ├─ subtotal: 4781.25 eur
    │  └─ labor + rush_surcharge
-   │     ├─ labor: 3187.50 eur
+   │     ├─ labor: 3187.5 eur
    │     │  └─ hourly_rate * hours_worked
-   │     │     ├─ hourly_rate: 85.00 eur
+   │     │     ├─ hourly_rate: 85 eur
    │     │     └─ hours_worked: 37.5
    │     └─ rush_surcharge: 1593.75 eur
    │        ├─ is_super_rush
    │        └─ labor * 50%
-   │           └─ labor: 3187.50 eur (see above)
-   └─ vat: 1004.06 eur
+   │           └─ labor: 3187.5 eur (see above)
+   └─ vat: 1004.0625 eur
       └─ subtotal * 21%
          └─ subtotal: 4781.25 eur (see above)";
 

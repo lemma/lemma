@@ -245,12 +245,12 @@ fn explanation_explicit_alias_data_leaf_is_input_key() {
         .load([(
             lemma::SourceType::Volatile,
             r#"
-spec nut_bag
+spec item_bag
 data weight: measure
   -> unit kg: 1
 
 spec calc
-uses bag: nut_bag
+uses bag: item_bag
 rule total: bag.weight
 "#
             .to_string(),
@@ -274,7 +274,7 @@ rule total: bag.weight
         "data leaf must be alias key:\n{ascii}"
     );
     assert!(
-        !ascii.contains("nut_bag") && !ascii.contains('→'),
+        !ascii.contains("item_bag") && !ascii.contains('→'),
         "must not print resolved spec or hop:\n{ascii}"
     );
 }
@@ -323,12 +323,12 @@ fn explanation_missing_nested_data_matches_missing_data_key() {
         .load([(
             lemma::SourceType::Volatile,
             r#"
-spec nut_bag
+spec item_bag
 data weight: measure
   -> unit kg: 1
 
 spec calc
-uses bag: nut_bag
+uses bag: item_bag
 rule total: bag.weight
 "#
             .to_string(),
@@ -365,13 +365,13 @@ fn explanation_conversion_operand_uses_input_key() {
         .load([(
             lemma::SourceType::Volatile,
             r#"
-spec nut_bag
+spec item_bag
 data weight: measure
   -> unit kg: 1
   -> unit gram: 0.001
 
 spec calc
-uses bag: nut_bag
+uses bag: item_bag
 rule in_grams: bag.weight as gram
 "#
             .to_string(),
@@ -408,7 +408,7 @@ rule in_grams: bag.weight as gram
     );
     let ascii = format_explanation(explanation);
     assert!(
-        !ascii.contains('→') && !ascii.contains("nut_bag"),
+        !ascii.contains('→') && !ascii.contains("item_bag"),
         "conversion tree must not print hop/spec, got:\n{ascii}"
     );
 }

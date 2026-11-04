@@ -13,7 +13,8 @@ data name: text
 data salary: measure
   -> unit eur: 1.00
 spec payroll
-uses staff: employee list
+uses employee
+data staff: employee list
   -> with name: "Ada", salary: 9000 eur
 rule n:
   staff -> count
@@ -48,14 +49,34 @@ fn empty_list_replace() {
 }
 
 #[test]
-fn per_row_input_key_is_request_error() {
-    let engine = load_ok(payroll());
-    let err = evaluate_err(
+fn per_row_input_key_fills_unbound_field() {
+    let engine = load_ok(
+        r#"
+spec employee
+data name: text
+data salary: measure
+  -> unit eur: 1.00
+spec payroll
+uses employee
+data staff: employee list
+  -> with name: "Ada"
+  -> with name: "Grace"
+rule first_salary:
+  (staff -> first).salary
+rule second_salary:
+  (staff -> find 2).salary
+"#,
+    );
+    let response = evaluate(
         &engine,
         "payroll",
         data(&[("staff.2.salary", lit("8000 eur"))]),
     );
-    assert_contains(&err.to_string(), "staff");
+    assert_eq!(value(&response, "second_salary"), "8000 eur");
+    assert_eq!(
+        missing_data(&response, "first_salary"),
+        vec!["staff.1.salary".to_string()]
+    );
 }
 
 #[test]
@@ -75,7 +96,8 @@ fn sibling_list_name_prefix_is_not_row_key_error() {
 spec item
 data n: number
 spec s
-uses line: item list
+uses item
+data line: item list
 rule r: 1
 "#,
     );
@@ -214,7 +236,8 @@ spec line
 uses item: product_info
 data qty: number
 spec order
-uses lines: line list
+uses line
+data lines: line list
 rule first_price:
   (lines -> first).item.price
 "#,
@@ -251,6 +274,36 @@ fn row_parse_failure_vetoes_whole_list() {
 }
 
 #[test]
+fn a_row_with_two_bad_fields_vetoes_on_the_first_supplied() {
+    let engine = load_ok(
+        r#"
+spec item
+data weight: number
+data price: number
+spec order
+uses item
+data items: item list
+rule n:
+  items -> count
+"#,
+    );
+    let response = evaluate(
+        &engine,
+        "order",
+        data(&[(
+            "items",
+            list(vec![map(&[
+                ("price", lit("cheap")),
+                ("weight", lit("heavy")),
+            ])]),
+        )]),
+    );
+    let reason = veto_reason(&response, "n");
+    assert_contains(&reason, "price");
+    assert!(!reason.contains("weight"), "veto names one field: {reason}");
+}
+
+#[test]
 fn duplicate_evaluate_data_keys_veto_whole_list() {
     let engine = load_ok(
         r#"
@@ -258,7 +311,8 @@ spec menu_item
 data drink: text
 data price: number
 spec coffee_order
-uses menu: menu_item list
+uses menu_item
+data menu: menu_item list
   -> key drink
 rule n:
   menu -> count
@@ -287,7 +341,8 @@ data drink: text
   -> options "espresso", "latte"
 data price: number
 spec coffee_order
-uses menu: menu_item list
+uses menu_item
+data menu: menu_item list
   -> key drink
 rule n:
   menu -> count
@@ -314,7 +369,8 @@ data weight: measure
 data band: weight range
 data price: number
 spec parcel
-uses rates: rate list
+uses rate
+data rates: rate list
   -> key band
 rule n:
   rates -> count
@@ -381,7 +437,7 @@ fn missing_nested_components_is_empty_list() {
 spec part
 data money: measure
   -> unit eur: 1.00
-uses components: part list
+data components: part list
 data quantity: number
 data own_cost: money
 rule unit_cost:
@@ -451,7 +507,7 @@ fn max_list_depth_is_request_error() {
 spec part
 data own_cost: number
   -> with 1
-uses components: part list
+data components: part list
 rule unit_cost:
   own_cost + (components -> sum components.unit_cost)
 "#,
@@ -469,13 +525,103 @@ rule unit_cost:
 }
 
 #[test]
+fn max_list_depth_counts_a_nested_list_under_a_mixed_case_key() {
+    let engine = load_ok_with_limits(
+        r#"
+spec part
+data own_cost: number
+  -> with 1
+data components: part list
+rule unit_cost:
+  own_cost + (components -> sum components.unit_cost)
+"#,
+        tight_limits(),
+    );
+    let too_deep = list(vec![map(&[(
+        "Components",
+        list(vec![map(&[(
+            "COMPONENTS",
+            list(vec![map(&[("own_cost", lit("1"))])]),
+        )])]),
+    )])]);
+    let err = evaluate_err(&engine, "part", data(&[("components", too_deep)]));
+    assert_contains(&err.to_string(), "max_list_depth");
+}
+
+fn keyed_menu() -> &'static str {
+    r#"
+spec menu_item
+data drink: text
+data size: text
+data price: number
+spec coffee_order
+uses menu_item
+data menu: menu_item list
+  -> key drink, size
+rule n:
+  menu -> count
+"#
+}
+
+#[test]
+fn a_later_row_without_its_key_field_is_a_request_error_naming_the_row() {
+    let engine = load_ok(keyed_menu());
+    let err = evaluate_err(
+        &engine,
+        "coffee_order",
+        data(&[(
+            "menu",
+            list(vec![
+                map(&[
+                    ("drink", lit("espresso")),
+                    ("size", lit("small")),
+                    ("price", lit("1")),
+                ]),
+                map(&[("drink", lit("latte")), ("price", lit("2"))]),
+            ]),
+        )]),
+    );
+    assert_contains(&err.to_string(), "row 2 has no value for key field 'size'");
+}
+
+#[test]
+fn a_two_field_key_finds_duplicates_whatever_the_field_order() {
+    let engine = load_ok(keyed_menu());
+    let response = evaluate(
+        &engine,
+        "coffee_order",
+        data(&[(
+            "menu",
+            list(vec![
+                map(&[
+                    ("drink", lit("latte")),
+                    ("size", lit("large")),
+                    ("price", lit("1")),
+                ]),
+                map(&[
+                    ("price", lit("2")),
+                    ("SIZE", lit("large")),
+                    ("Drink", lit("latte")),
+                ]),
+                map(&[
+                    ("drink", lit("latte")),
+                    ("size", lit("small")),
+                    ("price", lit("3")),
+                ]),
+            ]),
+        )]),
+    );
+    assert_contains(&veto_reason(&response, "n"), "latte");
+}
+
+#[test]
 fn max_list_nodes_is_request_error() {
     let engine = load_ok_with_limits(
         r#"
 spec part
 data own_cost: number
   -> with 1
-uses components: part list
+data components: part list
 rule unit_cost:
   own_cost + (components -> sum components.unit_cost)
 "#,
@@ -529,7 +675,8 @@ fn empty_evaluate_data_row_reports_missing_field() {
 spec employee
 data name: text
 spec payroll
-uses staff: employee list
+uses employee
+data staff: employee list
 rule first_name:
   (staff -> first).name
 "#,
@@ -547,11 +694,13 @@ fn nested_evaluate_data_row_reports_full_path() {
 spec extra
 data x: number
 spec item
-uses extras: extra list
+uses extra
+data extras: extra list
 rule first_x:
   (extras -> first).x
 spec order
-uses items: item list
+uses item
+data items: item list
 rule out:
   (items -> first).first_x
 "#,
@@ -577,7 +726,8 @@ spec cell
 data id: text
 data qty: number
 spec catalog
-uses items: cell list
+uses cell
+data items: cell list
   -> key id
 rule first_qty: (items -> find "a").qty
 spec wrapper

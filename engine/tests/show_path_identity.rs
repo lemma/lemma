@@ -87,9 +87,10 @@ rule total: calc.price
     assert_eq!(
         entry.path,
         vec![PathSegment {
-            uses: "calc".to_string(),
+            uses: Arc::from("calc"),
+            row: None,
             repository: None,
-            spec: "pricing".to_string(),
+            spec: Arc::from("pricing"),
         }]
     );
 }
@@ -120,14 +121,16 @@ rule r: a.b.x
         entry.path,
         vec![
             PathSegment {
-                uses: "a".to_string(),
+                uses: Arc::from("a"),
+                row: None,
                 repository: None,
-                spec: "mid".to_string(),
+                spec: Arc::from("mid"),
             },
             PathSegment {
-                uses: "b".to_string(),
+                uses: Arc::from("b"),
+                row: None,
                 repository: None,
-                spec: "leaf".to_string(),
+                spec: Arc::from("leaf"),
             },
         ]
     );
@@ -175,17 +178,19 @@ rule right: b.n
     assert_eq!(
         a.path,
         vec![PathSegment {
-            uses: "a".to_string(),
-            repository: Some("alpha".to_string()),
-            spec: "duped".to_string(),
+            uses: Arc::from("a"),
+            row: None,
+            repository: Some(Arc::from("alpha")),
+            spec: Arc::from("duped"),
         }]
     );
     assert_eq!(
         b.path,
         vec![PathSegment {
-            uses: "b".to_string(),
-            repository: Some("beta".to_string()),
-            spec: "duped".to_string(),
+            uses: Arc::from("b"),
+            row: None,
+            repository: Some(Arc::from("beta")),
+            spec: Arc::from("duped"),
         }]
     );
 }

@@ -1,0 +1,12 @@
+selected: 2
+└─ people -> where(adult or guardian) -> count
+   ├─ name: Ada, age: 40, has_ward: false
+   │  └─ adult: true
+   │     └─ people.1.age >= 18
+   │        └─ people.1.age: 40
+   └─ name: Grace, age: 17, has_ward: true
+      ├─ adult: false
+      │  └─ people.2.age >= 18
+      │     └─ people.2.age: 17
+      └─ guardian: true
+         └─ people.2.has_ward: true

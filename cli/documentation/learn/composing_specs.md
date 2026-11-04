@@ -133,8 +133,49 @@ Which row applies at evaluation time is determined by the `--effective` instant 
 |------|--------|
 | `uses dep` | Unpinned. Every temporal version of `dep` whose range intersects this Spec's range can matter. Planning may split this Spec into temporal slices at dependency `effective_from` boundaries. Values resolved through the import can change when `dep` gains a new row. |
 | `uses dep 2025-06-01` | Pinned to an instant. One body of `dep` active at that datetime, including its transitive imports. Later rows of `dep` do not affect this edge. |
+| `uses dep` with `-> effective <date>` | Dynamic pin. One local date or datetime data or rule chooses the body at evaluation. Dependency version dates do not split the consumer. Option sets may differ across versions; other interface drift is still a planning error. |
 
-An unpinned import (`uses pricing`) follows the dependency's timeline; a pinned import (`uses p: pricing 2025-06-01`) freezes the dependency at that instant.
+An unpinned import (`uses pricing`) follows the dependency's timeline; a pinned import (`uses p: pricing 2025-06-01`) freezes the dependency at that instant. A dynamic pin keeps one consumer plan and selects the body from a date-typed local value:
+
+```lemma
+spec alpha2 2020-01-01
+
+data code: text
+  -> option "NL"
+  -> option "CS"
+
+rule name:
+  veto "unknown"
+  unless code is "NL" then "Netherlands"
+  unless code is "CS" then "Serbia and Montenegro"
+
+
+spec alpha2 2023-01-01
+
+data code: text
+  -> option "NL"
+  -> option "RS"
+
+rule name:
+  veto "unknown"
+  unless code is "NL" then "Netherlands"
+  unless code is "RS" then "Serbia"
+
+
+spec intake
+
+uses iso: alpha2
+  -> effective birth_date
+  -> with code: birth_country
+
+data birth_date:    date
+data birth_country: text
+
+rule birth_country_name:
+  iso.name
+```
+
+Do not combine a trailing literal pin with `-> effective` on the same `uses`. If no version of the dependency is active at the pin instant, evaluation vetoes.
 
 #### Unpinned: values follow the timeline
 

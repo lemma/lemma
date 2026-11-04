@@ -1,9 +1,15 @@
-//! Show.rules is the reachable rule graph (local + depends_on_rules closure).
+//! Show.rules is this spec's local catalog. Reachable imports are not catalog keys;
+//! branch Rule leaves may still name them.
 
 use indexmap::IndexMap;
+use lemma::RulePath;
 use lemma::{DateTimeValue, Engine, ShowExpression, SourceType};
 use std::path::PathBuf;
 use std::sync::Arc;
+
+fn dep_input_keys(deps: &[RulePath]) -> Vec<String> {
+    deps.iter().map(RulePath::input_key).collect()
+}
 
 fn engine(code: &str) -> Engine {
     let mut engine = Engine::new();
@@ -65,7 +71,7 @@ fn show_rule_unless_order_and_rule_leaf_in_depends_on_rules() {
         ShowExpression::Rule { ref name } if name == "bulk_rate"
     ));
     assert_eq!(
-        discount.depends_on_rules,
+        dep_input_keys(&discount.depends_on_rules),
         vec!["bulk_rate".to_string(), "vip_rate".to_string()]
     );
     assert!(show.rules.contains_key("vip_rate"));
@@ -88,7 +94,10 @@ fn show_local_rule_target_via_with_binding_in_depends_on_rules() {
     );
     let show = engine.show(None, "outer", None).expect("show");
     let r = show.rules.get("r").expect("r");
-    assert_eq!(r.depends_on_rules, vec!["computed".to_string()]);
+    assert_eq!(
+        dep_input_keys(&r.depends_on_rules),
+        vec!["computed".to_string()]
+    );
     assert_eq!(r.lemma_type.name(), "slot");
     assert!(matches!(
         &r.branches[0].result,
@@ -120,7 +129,7 @@ fn identity_elim_plus_zero_then_bare_rule_passthrough_plans() {
 }
 
 #[test]
-fn show_includes_used_imported_rule_omits_unused_sibling() {
+fn show_catalog_omits_imported_rules_keeps_branch_leaf() {
     let engine = engine(
         r#"
         spec inner
@@ -133,22 +142,15 @@ fn show_includes_used_imported_rule_omits_unused_sibling() {
         "#,
     );
     let show = engine.show(None, "outer", None).expect("show");
-    let helper = show.rules.get("i.helper").expect("i.helper present");
-    assert_eq!(helper.path.len(), 1);
-    assert_eq!(helper.path[0].uses, "i");
-    assert_eq!(helper.path[0].spec, "inner");
-    assert!(helper.path[0].repository.is_none());
-    assert!(matches!(
-        &helper.branches[0].result,
-        ShowExpression::Literal(_)
-    ));
-    assert!(
-        !show.rules.contains_key("i.other"),
-        "unused import sibling must be absent"
+    assert_eq!(
+        show.rules.keys().cloned().collect::<Vec<_>>(),
+        vec!["r".to_string()]
     );
+    assert!(!show.rules.contains_key("i.helper"));
+    assert!(!show.rules.contains_key("i.other"));
     assert!(!show.rules.contains_key("helper"));
     let r = show.rules.get("r").expect("r");
-    assert_eq!(r.depends_on_rules, vec!["i.helper".to_string()]);
+    assert!(r.depends_on_rules.is_empty());
     assert!(matches!(
         &r.branches[0].result,
         ShowExpression::Rule { name } if name == "i.helper"
@@ -156,7 +158,7 @@ fn show_includes_used_imported_rule_omits_unused_sibling() {
 }
 
 #[test]
-fn show_two_level_reachable_import_rule() {
+fn show_two_level_import_not_in_parent_catalog() {
     let engine = engine(
         r#"
         spec leaf
@@ -173,20 +175,23 @@ fn show_two_level_reachable_import_rule() {
         "#,
     );
     let show = engine.show(None, "outer", None).expect("show");
-    assert!(show.rules.contains_key("a.pass"));
-    assert!(show.rules.contains_key("a.b.target"));
-    assert!(
-        !show.rules.contains_key("a.b.other"),
-        "unused two-level sibling must be absent"
+    assert_eq!(
+        show.rules.keys().cloned().collect::<Vec<_>>(),
+        vec!["r".to_string()]
     );
+    assert!(!show.rules.contains_key("a.pass"));
+    assert!(!show.rules.contains_key("a.b.target"));
+    assert!(!show.rules.contains_key("a.b.other"));
     let r = show.rules.get("r").expect("r");
-    assert_eq!(r.depends_on_rules, vec!["a.pass".to_string()]);
-    let pass = show.rules.get("a.pass").expect("a.pass");
-    assert_eq!(pass.depends_on_rules, vec!["a.b.target".to_string()]);
+    assert!(r.depends_on_rules.is_empty());
+    assert!(matches!(
+        &r.branches[0].result,
+        ShowExpression::Rule { name } if name == "a.pass"
+    ));
 }
 
 #[test]
-fn show_two_aliases_of_same_spec_are_distinct_keys() {
+fn show_two_aliases_not_catalog_keys() {
     let engine = engine(
         r#"
         spec shared
@@ -200,20 +205,27 @@ fn show_two_aliases_of_same_spec_are_distinct_keys() {
         "#,
     );
     let show = engine.show(None, "outer", None).expect("show");
-    assert!(show.rules.contains_key("a.x"));
-    assert!(show.rules.contains_key("b.x"));
-    assert_eq!(
-        show.rules.get("left").expect("left").depends_on_rules,
-        vec!["a.x".to_string()]
-    );
-    assert_eq!(
-        show.rules.get("right").expect("right").depends_on_rules,
-        vec!["b.x".to_string()]
-    );
+    let mut keys: Vec<_> = show.rules.keys().cloned().collect();
+    keys.sort();
+    assert_eq!(keys, vec!["left".to_string(), "right".to_string()]);
+    assert!(!show.rules.contains_key("a.x"));
+    assert!(!show.rules.contains_key("b.x"));
+    assert!(show
+        .rules
+        .get("left")
+        .expect("left")
+        .depends_on_rules
+        .is_empty());
+    assert!(show
+        .rules
+        .get("right")
+        .expect("right")
+        .depends_on_rules
+        .is_empty());
 }
 
 #[test]
-fn show_with_binding_to_imported_rule_in_depends_on_rules() {
+fn show_with_binding_to_imported_rule_omits_import_from_catalog() {
     let engine = engine(
         r#"
         spec inner
@@ -234,19 +246,16 @@ fn show_with_binding_to_imported_rule_in_depends_on_rules() {
     let show = engine.show(None, "outer", None).expect("show");
     let r = show.rules.get("r").expect("r");
     assert!(
-        r.depends_on_rules.contains(&"src.computed".to_string()),
+        r.depends_on_rules.is_empty(),
         "deps: {:?}",
-        r.depends_on_rules
+        dep_input_keys(&r.depends_on_rules)
     );
-    assert!(show.rules.contains_key("src.computed"));
-    assert!(
-        !show.rules.contains_key("src.unused"),
-        "unused import helper must be absent"
-    );
+    assert!(!show.rules.contains_key("src.computed"));
+    assert!(!show.rules.contains_key("src.unused"));
 }
 
 #[test]
-fn every_depends_on_rules_and_rule_leaf_is_a_show_key() {
+fn public_depends_on_rules_are_show_keys_rule_leaves_may_name_imports() {
     let engine = engine(
         r#"
         spec inner
@@ -260,81 +269,27 @@ fn every_depends_on_rules_and_rule_leaf_is_a_show_key() {
         "#,
     );
     let show = engine.show(None, "outer", None).expect("show");
-    fn walk(expression: &ShowExpression, keys: &std::collections::HashSet<&str>) {
-        match expression {
-            ShowExpression::Rule { name } => {
-                assert!(
-                    keys.contains(name.as_str()),
-                    "Rule leaf '{name}' missing from Show.rules"
-                );
-            }
-            ShowExpression::And { operands } => {
-                for operand in operands {
-                    walk(operand, keys);
-                }
-            }
-            ShowExpression::Arithmetic { first, steps } => {
-                walk(first, keys);
-                for step in steps {
-                    walk(&step.operand, keys);
-                }
-            }
-            ShowExpression::Comparison { left, right, .. }
-            | ShowExpression::RangeLiteral {
-                from: left,
-                to: right,
-            }
-            | ShowExpression::RangeContainment {
-                value: left,
-                range: right,
-            } => {
-                walk(left, keys);
-                walk(right, keys);
-            }
-            ShowExpression::Not { operand }
-            | ShowExpression::UnitConversion { operand, .. }
-            | ShowExpression::Math { operand, .. }
-            | ShowExpression::DateRelative { operand, .. }
-            | ShowExpression::DateCalendar { operand, .. }
-            | ShowExpression::PastFutureRange { operand, .. }
-            | ShowExpression::RangeBound { operand, .. }
-            | ShowExpression::IsVeto { operand }
-            | ShowExpression::Member { base: operand, .. }
-            | ShowExpression::RowFieldValue { value: operand, .. } => walk(operand, keys),
-            ShowExpression::ListCommand { list, args, .. } => {
-                walk(list, keys);
-                for arg in args {
-                    walk(arg, keys);
-                }
-            }
-            ShowExpression::Literal(_)
-            | ShowExpression::Data { .. }
-            | ShowExpression::Veto { .. }
-            | ShowExpression::Now
-            | ShowExpression::SpecMember { .. }
-            | ShowExpression::RowField { .. }
-            | ShowExpression::RowValue => {}
-        }
-    }
     let keys: std::collections::HashSet<&str> = show.rules.keys().map(String::as_str).collect();
     for (name, rule) in &show.rules {
         for dep in &rule.depends_on_rules {
             assert!(
-                keys.contains(dep.as_str()),
-                "depends_on_rules entry '{dep}' of '{name}' missing from Show.rules"
+                keys.contains(dep.input_key().as_str()),
+                "depends_on_rules entry '{}' of '{name}' missing from Show.rules",
+                dep.input_key()
             );
         }
-        for branch in &rule.branches {
-            if let Some(condition) = &branch.condition {
-                walk(condition, &keys);
-            }
-            walk(&branch.result, &keys);
-        }
     }
+    let r = show.rules.get("r").expect("r");
+    assert_eq!(dep_input_keys(&r.depends_on_rules), vec!["vip".to_string()]);
+    assert!(matches!(
+        &r.branches[1].result,
+        ShowExpression::Rule { name } if name == "i.helper"
+    ));
+    assert!(!keys.contains("i.helper"));
 }
 
 #[test]
-fn evaluate_rules_accepts_reachable_imported_key() {
+fn evaluate_rejects_imported_rule_key() {
     let engine = engine(
         r#"
         spec inner
@@ -347,7 +302,7 @@ fn evaluate_rules_accepts_reachable_imported_key() {
         "#,
     );
     let now = DateTimeValue::now();
-    let response = engine
+    let err = engine
         .evaluate(
             None,
             "outer",
@@ -356,9 +311,8 @@ fn evaluate_rules_accepts_reachable_imported_key() {
             Some(&["i.helper".to_string()]),
             false,
         )
-        .expect("evaluate i.helper");
-    assert!(response.results.contains_key("i.helper"));
-    assert!(!response.results.contains_key("r"));
+        .expect_err("imported rule must not be selectable on parent");
+    assert!(err.to_string().contains("i.helper"), "error: {err}");
 
     let err = engine
         .evaluate(
@@ -390,15 +344,63 @@ fn default_run_returns_only_local_outputs() {
     let response = engine
         .evaluate(None, "outer", Some(&now), IndexMap::new(), None, false)
         .expect("evaluate");
-    let local_keys: Vec<_> = show
-        .rules
-        .iter()
-        .filter(|(_, rule)| rule.path.is_empty())
-        .map(|(name, _)| name.clone())
-        .collect();
+    let catalog_keys: Vec<_> = show.rules.keys().cloned().collect();
     let result_keys: Vec<_> = response.results.keys().cloned().collect();
-    assert_eq!(result_keys, local_keys);
+    assert_eq!(result_keys, catalog_keys);
     assert!(!response.results.contains_key("i.helper"));
+}
+
+#[test]
+fn parent_pass_through_catalog_and_selection_contract() {
+    let engine = engine(
+        r#"
+        spec child
+        rule y: 1
+        rule hidden: 2
+
+        spec parent
+        uses child
+        rule x: child.y
+        "#,
+    );
+    let now = DateTimeValue::now();
+    let show = engine.show(None, "parent", Some(&now)).expect("show");
+    assert_eq!(
+        show.rules.keys().cloned().collect::<Vec<_>>(),
+        vec!["x".to_string()]
+    );
+    let x = show.rules.get("x").expect("x");
+    assert!(x.depends_on_rules.is_empty());
+    assert!(matches!(
+        &x.branches[0].result,
+        ShowExpression::Rule { name } if name == "child.y"
+    ));
+    assert!(!show.rules.contains_key("child.y"));
+    assert!(!show.rules.contains_key("child.hidden"));
+
+    let err = engine
+        .evaluate(
+            None,
+            "parent",
+            Some(&now),
+            IndexMap::new(),
+            Some(&["child.y".to_string()]),
+            false,
+        )
+        .expect_err("child.y not selectable on parent");
+    assert!(err.to_string().contains("child.y"), "error: {err}");
+
+    let response = engine
+        .evaluate(
+            None,
+            "parent",
+            Some(&now),
+            IndexMap::new(),
+            Some(&["x".to_string()]),
+            false,
+        )
+        .expect("evaluate x");
+    assert_eq!(response.results.get("x").expect("x").result(), Some("1"));
 }
 
 #[test]

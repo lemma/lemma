@@ -268,19 +268,16 @@ rule doubled: p * 2
 spec child 2025-01-01
 data money: measure
  -> unit eur: 1.00
- -> decimals 2
 
 spec child 2025-06-01
 data money: measure
  -> unit eur: 1.00
- -> unit usd: 0.91
- -> decimals 2
-"#.to_string())])
+ -> unit usd: 0.91"#.to_string())])
         .expect("qualified parent `c.money` under `uses c: child …` must resolve child at qualifier instant so `usd` exists");
 
     assert_rule_value(
         &eval(&engine, "consumer", &date(2025, 3, 1)),
         "out",
-        "10.00 usd",
+        "10 usd",
     );
 }

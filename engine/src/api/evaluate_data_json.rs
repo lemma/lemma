@@ -129,17 +129,17 @@ impl JsonFrame {
 /// Optional `data` object from MCP / HTTP JSON → overlay tree for [`crate::Engine::evaluate`].
 /// `null` / omitted → empty map. Non-object → error. JSON `null` values are omitted.
 pub fn parse_evaluate_data_object(
-    data: &Option<Value>,
+    data: Option<Value>,
 ) -> Result<IndexMap<String, EvaluateDataValue>, Error> {
     match data {
         None | Some(Value::Null) => Ok(IndexMap::new()),
         Some(Value::Object(map)) => {
             let mut entries = Vec::with_capacity(map.len());
             for (key, value) in map {
-                let parsed = evaluate_data_value_from_json_value(value.clone())
-                    .map_err(|e| attribute_evaluate_data_error(e, key))?;
+                let parsed = evaluate_data_value_from_json_value(value)
+                    .map_err(|e| attribute_evaluate_data_error(e, &key))?;
                 if let Some(parsed) = parsed {
-                    entries.push((key.clone(), parsed));
+                    entries.push((key, parsed));
                 }
             }
             evaluate_data_from_entries(entries)
@@ -219,7 +219,7 @@ mod tests {
 
     #[test]
     fn json_number_error_names_top_level_key() {
-        let err = parse_evaluate_data_object(&Some(serde_json::json!({
+        let err = parse_evaluate_data_object(Some(serde_json::json!({
             "price": { "eur": 84 }
         })))
         .expect_err("nested number");
@@ -230,11 +230,11 @@ mod tests {
     #[test]
     fn parse_evaluate_data_object_null_field_is_omitted() {
         let only_null = Some(serde_json::json!({ "x": null }));
-        let empty = parse_evaluate_data_object(&only_null).expect("null field omits");
+        let empty = parse_evaluate_data_object(only_null).expect("null field omits");
         assert!(empty.is_empty(), "got: {empty:?}");
 
         let mixed = Some(serde_json::json!({ "x": null, "y": "1" }));
-        let map = parse_evaluate_data_object(&mixed).expect("null field omits");
+        let map = parse_evaluate_data_object(mixed).expect("null field omits");
         assert_eq!(map.len(), 1);
         assert_eq!(
             map.get("y"),
@@ -245,7 +245,7 @@ mod tests {
 
     #[test]
     fn null_list_item_is_request_error_naming_position_and_key() {
-        let err = parse_evaluate_data_object(&Some(serde_json::json!({
+        let err = parse_evaluate_data_object(Some(serde_json::json!({
             "fares": ["89 eur", null, "120 eur"]
         })))
         .expect_err("null list item");
@@ -255,7 +255,7 @@ mod tests {
 
     #[test]
     fn null_nested_list_item_is_request_error() {
-        let err = parse_evaluate_data_object(&Some(serde_json::json!({
+        let err = parse_evaluate_data_object(Some(serde_json::json!({
             "components": [{ "own_cost": "5 eur", "components": [null] }]
         })))
         .expect_err("nested null list item");
@@ -265,7 +265,7 @@ mod tests {
 
     #[test]
     fn null_field_inside_list_row_is_omitted() {
-        let parsed = parse_evaluate_data_object(&Some(serde_json::json!({
+        let parsed = parse_evaluate_data_object(Some(serde_json::json!({
             "staff": [{ "name": "Ada", "salary": null }]
         })))
         .expect("null row field omits");
@@ -285,7 +285,7 @@ mod tests {
 
     #[test]
     fn parse_evaluate_data_object_unit_map_and_array() {
-        let parsed = parse_evaluate_data_object(&Some(serde_json::json!({
+        let parsed = parse_evaluate_data_object(Some(serde_json::json!({
             "price": { "eur": "84" },
             "flags": [true, "x"]
         })))
@@ -309,8 +309,31 @@ mod tests {
     }
 
     #[test]
+    fn parse_evaluate_data_object_keeps_caller_order() {
+        let parsed = parse_evaluate_data_object(Some(serde_json::json!({
+            "weight": "3",
+            "rows": [{ "price": "2", "drink": "tea" }],
+            "destination": "domestic"
+        })))
+        .expect("object");
+        assert_eq!(
+            parsed.keys().collect::<Vec<_>>(),
+            ["weight", "rows", "destination"]
+        );
+        match parsed.get("rows") {
+            Some(EvaluateDataValue::List(rows)) => match &rows[0] {
+                EvaluateDataValue::Map(row) => {
+                    assert_eq!(row.keys().collect::<Vec<_>>(), ["price", "drink"]);
+                }
+                other => panic!("expected row map, got {other:?}"),
+            },
+            other => panic!("expected list, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn duplicate_case_keys_error() {
-        let err = parse_evaluate_data_object(&Some(serde_json::json!({
+        let err = parse_evaluate_data_object(Some(serde_json::json!({
             "Qty": "1",
             "qty": "2"
         })))
@@ -320,7 +343,7 @@ mod tests {
 
     #[test]
     fn duplicate_case_keys_in_nested_object_error() {
-        let err = parse_evaluate_data_object(&Some(serde_json::json!({
+        let err = parse_evaluate_data_object(Some(serde_json::json!({
             "price": { "EUR": "1", "eur": "2" }
         })))
         .expect_err("dup");

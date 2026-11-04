@@ -6,6 +6,7 @@ mod explanation_support;
 #[path = "../support/lists.rs"]
 mod lists;
 
+mod import_list_lookup;
 mod import_row_missing_data;
 mod list_access;
 mod list_commands;
@@ -18,4 +19,9 @@ mod list_rows_with;
 mod list_syntax;
 mod list_temporal;
 mod list_worked_examples;
+mod nested_row_references;
+mod qualified_dependencies;
+mod row_bound_instances;
+mod row_copies;
 mod scalar_with_command;
+mod uses_data_rule_lists;

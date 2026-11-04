@@ -165,7 +165,7 @@ rule r: y
 }
 
 #[test]
-fn all_seven_error_kind_snake_case_spellings_appear() {
+fn all_six_error_kind_snake_case_spellings_appear() {
     let mut kinds = std::collections::BTreeSet::new();
 
     let mut engine = Engine::new();
@@ -187,14 +187,6 @@ fn all_seven_error_kind_snake_case_spellings_appear() {
         .expect_err("validation");
     kinds.insert(
         current_binding_error_json(&val_err.errors[0])["kind"]
-            .as_str()
-            .unwrap()
-            .to_string(),
-    );
-
-    let inv = Error::inversion("unsupported", Some(source("i.lemma")), None::<String>);
-    kinds.insert(
-        current_binding_error_json(&inv)["kind"]
             .as_str()
             .unwrap()
             .to_string(),
@@ -255,7 +247,6 @@ fn all_seven_error_kind_snake_case_spellings_appear() {
     let expected = [
         "parsing",
         "validation",
-        "inversion",
         "registry",
         "missing_repository",
         "request",
@@ -267,7 +258,7 @@ fn all_seven_error_kind_snake_case_spellings_appear() {
             "missing ErrorKind API spelling {kind:?} in {kinds:?}"
         );
     }
-    assert_eq!(kinds.len(), 7);
+    assert_eq!(kinds.len(), 6);
 }
 
 #[test]

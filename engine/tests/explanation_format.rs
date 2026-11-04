@@ -395,7 +395,7 @@ fn explanation_compose_with_data_operands() {
             SourceType::Volatile,
             r#"
 spec t
-data money: measure -> unit eur: 1 -> decimals 2
+data money: measure -> unit eur: 1
 data price: 100 eur
 data quantity: number
 data q: 3
@@ -421,7 +421,7 @@ rule total: price * q
     assert_eq!(children.len(), 1);
     let operands = assert_operation_compose(&children[0], "multiply", "price * q");
     assert_eq!(operands.len(), 2);
-    assert_data_operand(&operands[0], "price", "100.00 eur");
+    assert_data_operand(&operands[0], "price", "100 eur");
     assert_data_operand(&operands[1], "q", "3");
 }
 
@@ -671,7 +671,6 @@ spec sales
 data money: measure
   -> unit eur: 1
   -> unit cny: 0.13
-  -> decimals 2
 data cost_delivered: money
 data total_markup_pct: 15%
 rule final_sales_price: cost_delivered * (100% + total_markup_pct)
@@ -697,8 +696,8 @@ rule cost_in_cny: cost_delivered as cny
         .results
         .get("final_sales_price")
         .expect("final_sales_price");
-    // 553.21 cny * 1.15 markup → 636.19 cny (caller unit, not first-declared eur)
-    assert_eq!(price.result(), Some("636.19 cny"));
+    // 553.21 cny * 1.15 markup → 636.1915 cny (caller unit, not first-declared eur)
+    assert_eq!(price.result(), Some("636.1915 cny"));
     let price_measure = price
         .result
         .as_ref()
@@ -710,9 +709,9 @@ rule cost_in_cny: cost_delivered as cny
     assert!(price_measure.contains_key("cny"));
 
     let explanation = explanation_json(&response, "final_sales_price");
-    assert_eq!(explanation["result"], "636.19 cny");
+    assert_eq!(explanation["result"], "636.1915 cny");
 
-    assert_eq!(explanation["measure"]["cny"], "636.19");
+    assert_eq!(explanation["measure"]["cny"], "636.1915");
     assert!(explanation["measure"].get("eur").is_some());
 
     let children = explanation["children"].as_array().expect("children");
@@ -737,7 +736,7 @@ rule cost_in_cny: cost_delivered as cny
 
     let formatted = format_explanation(price.explanation.as_ref().expect("explanation"));
     assert!(
-        formatted.starts_with("final_sales_price: 636.19 cny"),
+        formatted.starts_with("final_sales_price: 636.1915 cny"),
         "ASCII must use caller unit, got:\n{formatted}"
     );
     assert!(
@@ -762,7 +761,6 @@ spec sales
 data money: measure
   -> unit eur: 1
   -> unit cny: 0.13
-  -> decimals 2
 data cost_delivered: money
 data total_markup_pct: 15%
 rule final_sales_price: cost_delivered * (100% + total_markup_pct)
@@ -787,9 +785,9 @@ rule final_sales_price: cost_delivered * (100% + total_markup_pct)
         .results
         .get("final_sales_price")
         .expect("final_sales_price");
-    assert_eq!(price.result(), Some("82.71 eur"));
+    assert_eq!(price.result(), Some("82.708 eur"));
     let explanation = explanation_json(&response, "final_sales_price");
-    assert_eq!(explanation["result"], "82.71 eur");
+    assert_eq!(explanation["result"], "82.708 eur");
     let children = explanation["children"].as_array().expect("children");
     let product = children[0]["operands"]
         .as_array()
@@ -1259,8 +1257,7 @@ rule out: 1 + (2 + (3 - 5))
         formatted,
         "\
 out: 1
-└─ 3 - 5 + 1 + 2
-   └─ 3 - 5"
+└─ 3 - 5 + 1 + 2"
     );
 }
 
@@ -1293,8 +1290,7 @@ rule out: 2 * (3 * (4 / 5))
         formatted,
         "\
 out: 4.8
-└─ 2 * 3 * (4 / 5)
-   └─ 4 / 5"
+└─ 2 * 3 * (4 / 5)"
     );
 }
 
@@ -1328,8 +1324,7 @@ rule out: 2 + (3 - 5)
         formatted,
         "\
 out: 0
-└─ 3 - 5 + 2
-   └─ 3 - 5"
+└─ 3 - 5 + 2"
     );
 }
 
@@ -1386,7 +1381,6 @@ spec pricing
 data money: measure
   -> unit eur: 1
   -> unit inr: 0.0092
-  -> decimals 2
   -> suggest 100 inr
 rule out: money
 "#
@@ -1424,7 +1418,6 @@ spec pricing
 data money: measure
   -> unit eur: 1
   -> unit inr: 0.0092
-  -> decimals 2
   -> with 100 inr
 rule out: money
 "#
@@ -1443,9 +1436,9 @@ rule out: money
         .unwrap();
     let out = response.results.get("out").expect("out");
     assert!(!out.vetoed, "got {:?}", out.veto_reason);
-    assert_eq!(out.result(), Some("100.00 inr"));
+    assert_eq!(out.result(), Some("100 inr"));
     let explanation = explanation_json(&response, "out");
-    assert_eq!(explanation["result"], "100.00 inr");
+    assert_eq!(explanation["result"], "100 inr");
 }
 
 #[test]
@@ -1459,7 +1452,6 @@ spec pricing
 data money: measure
   -> unit eur: 1
   -> unit inr: 0.0092
-  -> decimals 2
   -> with 100 inr
 rule out: money
 "#
@@ -1473,9 +1465,9 @@ rule out: money
         .unwrap();
     let out = response.results.get("out").expect("out");
     assert!(!out.vetoed, "got {:?}", out.veto_reason);
-    assert_eq!(out.result(), Some("200.00 eur"));
+    assert_eq!(out.result(), Some("200 eur"));
     let explanation = explanation_json(&response, "out");
-    assert_eq!(explanation["result"], "200.00 eur");
+    assert_eq!(explanation["result"], "200 eur");
 }
 
 #[test]
@@ -1489,7 +1481,6 @@ spec pricing
 data money: measure
   -> unit eur: 1
   -> unit inr: 0.0092
-  -> decimals 2
   -> suggest 100 inr
 rule out: money as eur
 "#
@@ -1517,7 +1508,6 @@ spec wallets
 data money: measure
   -> unit eur: 1
   -> unit cny: 0.13
-  -> decimals 2
 data price1: money
 data price2: money
 rule total: price1 + price2
@@ -1533,7 +1523,7 @@ rule total: price1 + price2
         .unwrap();
     let total = response.results.get("total").expect("total");
     assert!(!total.vetoed, "got {:?}", total.veto_reason);
-    assert_eq!(total.result(), Some("12.60 eur"));
+    assert_eq!(total.result(), Some("12.6 eur"));
     let measure = total
         .result
         .as_ref()
@@ -1544,7 +1534,7 @@ rule total: price1 + price2
     assert!(measure.contains_key("eur"));
     assert!(measure.contains_key("cny"));
     let explanation = explanation_json(&response, "total");
-    assert_eq!(explanation["result"], "12.60 eur");
+    assert_eq!(explanation["result"], "12.6 eur");
 }
 
 #[test]
@@ -1558,7 +1548,6 @@ spec wallets
 data money: measure
   -> unit eur: 1
   -> unit cny: 0.13
-  -> decimals 2
 data price1: money
 data price2: money
 rule total: price2 + price1
@@ -1574,7 +1563,7 @@ rule total: price2 + price1
         .unwrap();
     let total = response.results.get("total").expect("total");
     assert!(!total.vetoed, "got {:?}", total.veto_reason);
-    assert_eq!(total.result(), Some("96.92 cny"));
+    assert_eq!(total.result(), Some("96.92307692307692307692307692 cny"));
     let measure = total
         .result
         .as_ref()
@@ -1585,7 +1574,7 @@ rule total: price2 + price1
     assert!(measure.contains_key("eur"));
     assert!(measure.contains_key("cny"));
     let explanation = explanation_json(&response, "total");
-    assert_eq!(explanation["result"], "96.92 cny");
+    assert_eq!(explanation["result"], "96.92307692307692307692307692 cny");
 }
 
 #[test]

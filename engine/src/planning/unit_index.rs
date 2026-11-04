@@ -2,10 +2,11 @@
 //! Qualify with `Type.unit`, `alias.Type.unit`, nested import paths, or `alias.unit`
 //! when that import scope identifies the owner.
 
-use crate::planning::semantics::{primitive_ratio_arc, LemmaType, SpecIdentity, TypeSpecification};
+use crate::planning::semantics::{
+    primitive_ratio_arc, LemmaType, SpecVersionKey, TypeFamily, TypeSpecification,
+};
 use indexmap::IndexMap;
-use serde::{Deserialize, Serialize};
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 
 /// Owner recorded while types are still being resolved. Local types are names only;
@@ -69,13 +70,12 @@ impl PlanningOwner {
 }
 
 /// Bound owner after magnitudes: eval and Show read Arcs from here.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub enum UnitOwner {
     PrimitiveRatio,
     Named {
         import_path: Vec<String>,
         type_name: String,
-        #[serde(with = "crate::snapshot::shared::arc")]
         lemma_type: Arc<LemmaType>,
     },
 }
@@ -210,7 +210,7 @@ impl PlanningUnitIndex {
                         .find(|existing_unit| existing_unit.name == unit)
                         .zip(new_units.iter().find(|new_unit| new_unit.name == unit))
                         .is_some_and(|(existing_unit, new_unit)| {
-                            existing_unit.factor == new_unit.factor
+                            existing_unit.same_consumer_scale(new_unit, existing_path, import_path)
                         });
                     if same_factor {
                         // Same import path family: keep one local declarer (extension chain).
@@ -349,10 +349,10 @@ impl PlanningUnitIndex {
 
     /// Attach local Arcs from final `resolved` and add missing family-root units.
     #[must_use]
-    pub fn bind(
+    pub(crate) fn bind(
         self,
         resolved: &IndexMap<String, Arc<LemmaType>>,
-        this_spec: &SpecIdentity,
+        this_spec: &SpecVersionKey,
     ) -> UnitIndex {
         let mut bound = UnitIndex::new();
         for (unit_name, owner) in self.into_iter_owners() {
@@ -433,9 +433,13 @@ impl PlanningUnitIndex {
 }
 
 /// Expression-scope units after bind: every declarer per bare unit name.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default)]
 pub struct UnitIndex {
     by_bare: IndexMap<String, Vec<UnitOwner>>,
+    /// First-seen owning type per `(import_path, type_name)` slot.
+    distinct_types: IndexMap<(Vec<String>, String), Arc<LemmaType>>,
+    /// Family root Arc: type whose `.name == family.name`, keyed by full [`TypeFamily`].
+    family_roots: BTreeMap<TypeFamily, Arc<LemmaType>>,
 }
 
 impl UnitIndex {
@@ -473,22 +477,13 @@ impl UnitIndex {
     }
 
     pub fn values(&self) -> impl Iterator<Item = &Arc<LemmaType>> {
-        let mut seen = BTreeSet::new();
-        self.by_bare
-            .values()
-            .flat_map(|owners| owners.iter())
-            .filter_map(move |owner| {
-                let key = (
-                    owner.import_path().to_vec(),
-                    owner.type_name().to_string(),
-                    owner.lemma_type().name(),
-                );
-                if seen.insert(key) {
-                    Some(owner.lemma_type())
-                } else {
-                    None
-                }
-            })
+        self.distinct_types.values()
+    }
+
+    /// Family-root type for `family`, keyed by full [`TypeFamily`] identity.
+    #[must_use]
+    pub fn family_root(&self, family: &TypeFamily) -> Option<&Arc<LemmaType>> {
+        self.family_roots.get(family)
     }
 
     pub fn keys(&self) -> impl Iterator<Item = &String> {
@@ -496,15 +491,39 @@ impl UnitIndex {
     }
 
     pub fn insert_owner(&mut self, bare: String, owner: UnitOwner) {
+        let slot = owner_slot(&owner);
+        let lemma_type = Arc::clone(owner.lemma_type());
         let owners = self.by_bare.entry(bare).or_default();
         if let Some(existing) = owners
             .iter_mut()
             .find(|existing| bound_owners_same_slot(existing, &owner))
         {
             *existing = owner;
+            self.refresh_distinct_slot(slot, lemma_type);
             return;
         }
         owners.push(owner);
+        if let indexmap::map::Entry::Vacant(entry) = self.distinct_types.entry(slot) {
+            let stored = entry.insert(lemma_type);
+            record_family_root(&mut self.family_roots, stored);
+        }
+    }
+
+    fn refresh_distinct_slot(&mut self, slot: (Vec<String>, String), lemma_type: Arc<LemmaType>) {
+        let previous = self
+            .distinct_types
+            .insert(slot, Arc::clone(&lemma_type))
+            .expect("BUG: same-slot replace requires an existing distinct owner");
+        if let Some(previous_family) = previous.family() {
+            if previous.name.as_deref() == Some(previous_family.name.as_str()) {
+                if let Some(root) = self.family_roots.get_mut(previous_family) {
+                    if Arc::ptr_eq(root, &previous) {
+                        *root = Arc::clone(&lemma_type);
+                    }
+                }
+            }
+        }
+        record_family_root(&mut self.family_roots, &lemma_type);
     }
 
     pub fn resolve(&self, unit_ref: &str) -> Result<(String, Arc<LemmaType>), String> {
@@ -682,6 +701,25 @@ fn bound_owners_same_slot(left: &UnitOwner, right: &UnitOwner) -> bool {
     }
 }
 
+fn owner_slot(owner: &UnitOwner) -> (Vec<String>, String) {
+    (owner.import_path().to_vec(), owner.type_name().to_string())
+}
+
+fn record_family_root(
+    family_roots: &mut BTreeMap<TypeFamily, Arc<LemmaType>>,
+    lemma_type: &Arc<LemmaType>,
+) {
+    let Some(family) = lemma_type.family() else {
+        return;
+    };
+    if lemma_type.name.as_deref() != Some(family.name.as_str()) {
+        return;
+    }
+    family_roots
+        .entry(family.clone())
+        .or_insert_with(|| Arc::clone(lemma_type));
+}
+
 fn unit_ref_bare(unit_ref: &str) -> String {
     unit_ref
         .split('.')
@@ -695,7 +733,7 @@ fn unit_scalar_for_bare(lemma_type: &LemmaType, bare: &str) -> Option<UnitScalar
         TypeSpecification::Measure { units, .. } => units
             .get(bare)
             .ok()
-            .map(|unit| UnitScalar::Measure(unit.factor.clone())),
+            .and_then(|unit| unit.literal_factor().cloned().map(UnitScalar::Measure)),
         TypeSpecification::Ratio { units, .. } => units
             .get(bare)
             .ok()
@@ -935,15 +973,18 @@ fn format_qualifier_list<O>(
 mod tests {
     use super::*;
     use crate::computation::rational::rational_one;
-    use crate::literals::{MeasureUnit, MeasureUnits};
+    use crate::literals::{MeasureUnit, MeasureUnits, UnitScale};
     use crate::parsing::ast::EffectiveDate;
-    use crate::planning::semantics::{LemmaType, SpecIdentity, TypeExtends, TypeSpecification};
+    use crate::planning::semantics::{
+        LemmaType, SpecVersionKey, TypeExtends, TypeFamily, TypeSpecification,
+    };
     use indexmap::IndexMap;
     use std::collections::HashMap;
+    use std::str::FromStr;
     use std::sync::Arc;
 
-    fn test_spec() -> SpecIdentity {
-        SpecIdentity {
+    fn test_spec() -> SpecVersionKey {
+        SpecVersionKey {
             repository: None,
             spec: "test".into(),
             effective: EffectiveDate::Origin,
@@ -969,7 +1010,7 @@ mod tests {
         let mut units = MeasureUnits::new();
         units.push(MeasureUnit {
             name: unit.to_string(),
-            factor: rational_one(),
+            scale: crate::literals::UnitScale::Literal(rational_one()),
             derived_measure_factors: Vec::new(),
             decomposition: Default::default(),
             minimum: None,
@@ -980,7 +1021,6 @@ mod tests {
             name.to_string(),
             TypeSpecification::Measure {
                 units,
-                decimals: None,
                 traits: vec![],
                 decomposition: None,
                 minimum: None,
@@ -990,6 +1030,171 @@ mod tests {
             },
             TypeExtends::Primitive,
         ))
+    }
+
+    fn family_measure_type(family: TypeFamily, units: &[&str]) -> Arc<LemmaType> {
+        let mut measure_units = MeasureUnits::new();
+        for unit in units {
+            measure_units.push(MeasureUnit {
+                name: (*unit).to_string(),
+                scale: crate::literals::UnitScale::Literal(rational_one()),
+                derived_measure_factors: Vec::new(),
+                decomposition: Default::default(),
+                minimum: None,
+                maximum: None,
+                suggestion_magnitude: None,
+            });
+        }
+        Arc::new(LemmaType::new(
+            family.name.clone(),
+            TypeSpecification::Measure {
+                units: measure_units,
+                traits: vec![],
+                decomposition: None,
+                minimum: None,
+                maximum: None,
+                unit: None,
+                help: String::new(),
+            },
+            TypeExtends::custom_local("measure".to_string(), family),
+        ))
+    }
+
+    #[test]
+    fn values_dedupes_multiple_bare_units_of_one_owner() {
+        let money = family_measure_type(
+            crate::planning::semantics::tests::test_type_family("money"),
+            &["eur", "cent"],
+        );
+        let mut index = UnitIndex::new();
+        index.insert_owner(
+            "eur".into(),
+            UnitOwner::Named {
+                import_path: Vec::new(),
+                type_name: "money".into(),
+                lemma_type: Arc::clone(&money),
+            },
+        );
+        index.insert_owner(
+            "cent".into(),
+            UnitOwner::Named {
+                import_path: Vec::new(),
+                type_name: "money".into(),
+                lemma_type: Arc::clone(&money),
+            },
+        );
+        let values: Vec<_> = index.values().collect();
+        assert_eq!(values.len(), 1);
+        assert!(Arc::ptr_eq(values[0], &money));
+    }
+
+    #[test]
+    fn insert_owner_same_slot_replace_updates_distinct_arc() {
+        let family = crate::planning::semantics::tests::test_type_family("money");
+        let first = family_measure_type(family.clone(), &["eur"]);
+        let second = family_measure_type(family.clone(), &["eur"]);
+        assert!(!Arc::ptr_eq(&first, &second));
+        let mut index = UnitIndex::new();
+        index.insert_owner(
+            "eur".into(),
+            UnitOwner::Named {
+                import_path: Vec::new(),
+                type_name: "money".into(),
+                lemma_type: Arc::clone(&first),
+            },
+        );
+        index.insert_owner(
+            "eur".into(),
+            UnitOwner::Named {
+                import_path: Vec::new(),
+                type_name: "money".into(),
+                lemma_type: Arc::clone(&second),
+            },
+        );
+        let values: Vec<_> = index.values().collect();
+        assert_eq!(values.len(), 1);
+        assert!(Arc::ptr_eq(values[0], &second));
+        assert!(Arc::ptr_eq(
+            index.family_root(&family).expect("family root"),
+            &second
+        ));
+    }
+
+    #[test]
+    fn family_root_collapses_same_typefamily_across_import_paths() {
+        let family = crate::planning::semantics::tests::test_type_family("money");
+        let money = family_measure_type(family.clone(), &["eur"]);
+        let mut index = UnitIndex::new();
+        index.insert_owner(
+            "eur".into(),
+            UnitOwner::Named {
+                import_path: vec!["pricing".into()],
+                type_name: "money".into(),
+                lemma_type: Arc::clone(&money),
+            },
+        );
+        index.insert_owner(
+            "eur".into(),
+            UnitOwner::Named {
+                import_path: vec!["billing".into()],
+                type_name: "money".into(),
+                lemma_type: Arc::clone(&money),
+            },
+        );
+        assert_eq!(index.values().count(), 2);
+        assert!(Arc::ptr_eq(
+            index.family_root(&family).expect("one family root"),
+            &money
+        ));
+    }
+
+    #[test]
+    fn family_roots_keep_same_name_families_with_different_identity_distinct() {
+        let local_family = TypeFamily {
+            repository: None,
+            spec: "shop".into(),
+            effective: EffectiveDate::Origin,
+            name: "money".into(),
+        };
+        let imported_family = TypeFamily {
+            repository: Some("catalog".into()),
+            spec: "pricing".into(),
+            effective: EffectiveDate::DateTimeValue(
+                crate::DateTimeValue::from_str("2024-01-01T00:00:00Z").expect("date"),
+            ),
+            name: "money".into(),
+        };
+        let local_money = family_measure_type(local_family.clone(), &["eur"]);
+        let imported_money = family_measure_type(imported_family.clone(), &["eur"]);
+        let mut index = UnitIndex::new();
+        index.insert_owner(
+            "eur".into(),
+            UnitOwner::Named {
+                import_path: Vec::new(),
+                type_name: "money".into(),
+                lemma_type: Arc::clone(&local_money),
+            },
+        );
+        index.insert_owner(
+            "eur".into(),
+            UnitOwner::Named {
+                import_path: vec!["pricing".into()],
+                type_name: "money".into(),
+                lemma_type: Arc::clone(&imported_money),
+            },
+        );
+        assert!(Arc::ptr_eq(
+            index.family_root(&local_family).expect("local root"),
+            &local_money
+        ));
+        assert!(Arc::ptr_eq(
+            index.family_root(&imported_family).expect("imported root"),
+            &imported_money
+        ));
+        assert!(!Arc::ptr_eq(
+            index.family_root(&local_family).expect("local root"),
+            index.family_root(&imported_family).expect("imported root")
+        ));
     }
 
     #[test]
@@ -1157,7 +1362,6 @@ mod tests {
                 TypeSpecification::Ratio {
                     minimum: None,
                     maximum: None,
-                    decimals: None,
                     units,
                     unit: None,
                     help: String::new(),
@@ -1224,7 +1428,6 @@ mod tests {
                 TypeSpecification::Ratio {
                     minimum: None,
                     maximum: None,
-                    decimals: None,
                     units,
                     unit: None,
                     help: String::new(),
@@ -1248,5 +1451,162 @@ mod tests {
         assert!(Arc::ptr_eq(&owner, primitive_ratio_arc()));
         let (_, qualified) = bound.resolve("margin.percent").expect("Type.unit");
         assert!(Arc::ptr_eq(&qualified, &ratio));
+    }
+
+    fn measure_type_scale(name: &str, unit: &str, scale: UnitScale) -> Arc<LemmaType> {
+        let mut units = MeasureUnits::new();
+        units.push(MeasureUnit {
+            name: unit.to_string(),
+            scale,
+            derived_measure_factors: Vec::new(),
+            decomposition: Default::default(),
+            minimum: None,
+            maximum: None,
+            suggestion_magnitude: None,
+        });
+        Arc::new(LemmaType::new(
+            name.to_string(),
+            TypeSpecification::Measure {
+                units,
+                traits: vec![],
+                decomposition: None,
+                minimum: None,
+                maximum: None,
+                unit: None,
+                help: String::new(),
+            },
+            TypeExtends::custom_local(
+                "money".to_string(),
+                crate::planning::semantics::tests::test_type_family("money"),
+            ),
+        ))
+    }
+
+    fn reference_scale(name: &str) -> UnitScale {
+        UnitScale::Unresolved {
+            written: name.to_string(),
+            segments: Vec::new(),
+            name: name.to_string(),
+        }
+    }
+
+    #[test]
+    fn merge_same_literal_scale_agrees() {
+        let mut index = PlanningUnitIndex::new();
+        let money = measure_type("money", "eur");
+        index
+            .merge_measure_unit(
+                "eur".into(),
+                &money,
+                "money",
+                &[],
+                "money",
+                &locals(&[("money", &money)]),
+            )
+            .expect("first");
+        index
+            .merge_measure_unit(
+                "eur".into(),
+                &money,
+                "money",
+                &[],
+                "money",
+                &locals(&[("money", &money)]),
+            )
+            .expect("same literal scale");
+    }
+
+    #[test]
+    fn merge_same_consumer_reference_scale_agrees() {
+        let mut index = PlanningUnitIndex::new();
+        let left = measure_type_scale("left", "gbp", reference_scale("rate"));
+        let right = measure_type_scale("right", "gbp", reference_scale("rate"));
+        index
+            .merge_measure_unit(
+                "gbp".into(),
+                &left,
+                "left",
+                &[],
+                "money",
+                &locals(&[("left", &left)]),
+            )
+            .expect("first");
+        index
+            .merge_measure_unit(
+                "gbp".into(),
+                &right,
+                "right",
+                &[],
+                "money",
+                &locals(&[("left", &left), ("right", &right)]),
+            )
+            .expect("same consumer-coordinate reference");
+    }
+
+    #[test]
+    fn merge_literal_and_reference_conflict() {
+        let mut index = PlanningUnitIndex::new();
+        let literal = measure_type_scale("money", "gbp", UnitScale::Literal(rational_one()));
+        let reference = measure_type_scale("money", "gbp", reference_scale("rate"));
+        index
+            .merge_measure_unit(
+                "gbp".into(),
+                &literal,
+                "money",
+                &["a".into()],
+                "money",
+                &locals(&[("money", &literal)]),
+            )
+            .expect("literal");
+        let err = index
+            .merge_measure_unit(
+                "gbp".into(),
+                &reference,
+                "money",
+                &["b".into()],
+                "money",
+                &locals(&[("money", &reference)]),
+            )
+            .expect_err("literal vs reference");
+        assert_eq!(
+            err,
+            UnitMergeConflict::ConflictingFactors {
+                unit: "gbp".into(),
+                family: "money".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn merge_different_reference_paths_conflict() {
+        let mut index = PlanningUnitIndex::new();
+        let money = measure_type_scale("money", "gbp", reference_scale("rate"));
+        index
+            .merge_measure_unit(
+                "gbp".into(),
+                &money,
+                "money",
+                &["a".into()],
+                "money",
+                &locals(&[("money", &money)]),
+            )
+            .expect("alias a");
+        let err = index
+            .merge_measure_unit(
+                "gbp".into(),
+                &money,
+                "money",
+                &["b".into()],
+                "money",
+                &locals(&[("money", &money)]),
+            )
+            .expect_err("alias b different consumer path");
+        assert_eq!(
+            err,
+            UnitMergeConflict::ConflictingFactors {
+                unit: "gbp".into(),
+                family: "money".into(),
+            }
+        );
     }
 }

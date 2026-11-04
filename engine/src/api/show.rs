@@ -3,10 +3,9 @@
 
 use crate::api::types::LemmaType;
 use crate::api::value::RuleResultValue;
-use crate::literals::{MeasureUnits, RatioUnits};
 use crate::parsing::ast::{
-    ArithmeticComputation, CalendarPeriodUnit, ComparisonComputation, DateCalendarKind,
-    DateRelativeKind, MathematicalComputation, PrimitiveKind, RangeBound,
+    ArithmeticComputation, CalendarPeriodUnit, ComparisonComputation, ConversionTypeKind,
+    DateCalendarKind, DateRelativeKind, MathematicalComputation, RangeBound, RoundingMode,
 };
 use crate::planning::execution_plan::{
     ExecutionPlan, Show as DomainShow, ShowBranch as DomainShowBranch,
@@ -29,10 +28,14 @@ use serde_json::{json, Map, Value as JsonValue};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
-/// One `uses` hop on a Show data or rule path.
+/// One hop on a Show data or rule path: a `uses` alias, or (with `row`) a row written
+/// in the data list named `uses`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PathSegment {
     pub uses: String,
+    /// Row number (1-based) when this hop is a spec-written row of list `uses`.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub row: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub repository: Option<String>,
     pub spec: String,
@@ -41,9 +44,10 @@ pub struct PathSegment {
 impl From<&DomainPathSegment> for PathSegment {
     fn from(segment: &DomainPathSegment) -> Self {
         Self {
-            uses: segment.uses.clone(),
-            repository: segment.repository.clone(),
-            spec: segment.spec.clone(),
+            uses: segment.uses.to_string(),
+            row: segment.row,
+            repository: segment.repository.as_ref().map(|arc| arc.to_string()),
+            spec: segment.spec.to_string(),
         }
     }
 }
@@ -51,7 +55,7 @@ impl From<&DomainPathSegment> for PathSegment {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ShowConversionTarget {
-    Type(PrimitiveKind),
+    Type(ConversionTypeKind),
     Unit { unit_name: String },
 }
 
@@ -83,6 +87,9 @@ pub enum ShowExpression {
     And {
         operands: Vec<ShowExpression>,
     },
+    Or {
+        operands: Vec<ShowExpression>,
+    },
     Not {
         operand: Box<ShowExpression>,
     },
@@ -102,6 +109,12 @@ pub enum ShowExpression {
     Math {
         op: MathematicalComputation,
         operand: Box<ShowExpression>,
+    },
+    StepRounding {
+        mode: RoundingMode,
+        operand: Box<ShowExpression>,
+        #[serde(skip_serializing_if = "Option::is_none", default)]
+        step: Option<Box<ShowExpression>>,
     },
     Veto {
         #[serde(skip_serializing_if = "Option::is_none", default)]
@@ -146,6 +159,8 @@ pub enum ShowExpression {
     },
     RowField {
         field: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        qualifier: Option<Vec<String>>,
     },
     RowValue,
     RowFieldValue {
@@ -199,6 +214,9 @@ fn convert_show_node(node: &DomainShowExpression, operands: Vec<ShowExpression>)
         DomainShowExpression::And { .. } => ShowExpression::And {
             operands: operands.collect(),
         },
+        DomainShowExpression::Or { .. } => ShowExpression::Or {
+            operands: operands.collect(),
+        },
         DomainShowExpression::Not { .. } => ShowExpression::Not {
             operand: Box::new(take_operand(&mut operands)),
         },
@@ -230,6 +248,14 @@ fn convert_show_node(node: &DomainShowExpression, operands: Vec<ShowExpression>)
             op: op.clone(),
             operand: Box::new(take_operand(&mut operands)),
         },
+        DomainShowExpression::StepRounding { mode, step, .. } => {
+            let operand = Box::new(take_operand(&mut operands));
+            ShowExpression::StepRounding {
+                mode: *mode,
+                operand,
+                step: step.as_ref().map(|_| Box::new(take_operand(&mut operands))),
+            }
+        }
         DomainShowExpression::Veto { message } => ShowExpression::Veto {
             message: message.clone(),
         },
@@ -272,8 +298,9 @@ fn convert_show_node(node: &DomainShowExpression, operands: Vec<ShowExpression>)
             base: Box::new(take_operand(&mut operands)),
             member: member.clone(),
         },
-        DomainShowExpression::RowField { field } => ShowExpression::RowField {
+        DomainShowExpression::RowField { field, qualifier } => ShowExpression::RowField {
             field: field.clone(),
+            qualifier: qualifier.clone(),
         },
         DomainShowExpression::RowValue => ShowExpression::RowValue,
         DomainShowExpression::RowFieldValue { field, .. } => ShowExpression::RowFieldValue {
@@ -325,7 +352,11 @@ impl From<&DomainShowRule> for ShowRule {
             lemma_type: LemmaType::from(&rule.lemma_type),
             path: rule.path.iter().map(PathSegment::from).collect(),
             branches: rule.branches.iter().map(ShowBranch::from).collect(),
-            depends_on_rules: rule.depends_on_rules.clone(),
+            depends_on_rules: rule
+                .depends_on_rules
+                .iter()
+                .map(|path| path.input_key())
+                .collect(),
         }
     }
 }
@@ -338,10 +369,13 @@ const BOOLEAN_TEXT_PATTERN: &str =
 
 /// The Show document: a Draft 2020-12 JSON Schema for the spec's evaluation-data inputs.
 ///
-/// Standard keywords carry what JSON Schema expresses (`type`, `pattern`, `enum`,
-/// `default`, `examples`, `items`, ...); `x-lemma-*` keywords carry the rest, including
-/// the rule graph under `x-lemma-rules`. `$defs` holds one row object schema per
-/// instance-list row spec.
+/// Standard keywords carry what JSON Schema expresses (`type`, `enum`, `minLength` /
+/// `maxLength`, `format`, `default`, `examples`, `items`, ...; `pattern` only on the
+/// boolean string alternative). Date inputs are `oneOf` `date` | `date-time`; time
+/// uses `format: time`. Number, measure, ratio and ranges are plain strings; the
+/// engine validates literals on evaluate. `x-lemma-*` keywords carry the rest,
+/// including this spec's own rules under `x-lemma-rules`. `$defs` holds one row object
+/// schema per instance-list row spec.
 pub fn show_document(engine: &Engine, show: &DomainShow) -> JsonValue {
     let consumer = match engine.plan_matching_show(show) {
         Some(plan) => Some(plan),
@@ -359,9 +393,18 @@ pub fn show_document(engine: &Engine, show: &DomainShow) -> JsonValue {
         document.insert("description".to_string(), json!(commentary));
     }
     document.extend(input_object_schema(show, &mut rows));
-    let defs = rows.into_defs();
+    let (defs, row_field_needed_by_rules) = rows.into_defs();
     if !defs.is_empty() {
         document.insert("$defs".to_string(), JsonValue::Object(defs));
+    }
+    if !row_field_needed_by_rules.is_empty() {
+        // Parent-specific: which of this Show's rules need each `$defs` row field.
+        // Kept off `$defs` so `LemmaRow_*` schemas are identical across Show documents
+        // (OpenAPI shares them by row identity).
+        document.insert(
+            "x-lemma-row-field-needed-by-rules".to_string(),
+            JsonValue::Object(row_field_needed_by_rules),
+        );
     }
     if let Some(repository) = &show.repository {
         document.insert("x-lemma-repository".to_string(), json!(repository));
@@ -437,13 +480,13 @@ fn input_object_schema(show: &DomainShow, rows: &mut RowSchemas) -> Map<String, 
 }
 
 /// Row `$defs` object: local types, plus any other `show.data` slots on the row
-/// (imported fields, local instance lists). `needed_by_rules` come from the
-/// consumer plan's instance-list [`NeededByRules::fields`], not the row Show.
-fn row_object_schema(
-    show: &DomainShow,
-    identity: &SpecIdentity,
-    rows: &mut RowSchemas,
-) -> Map<String, JsonValue> {
+/// (imported fields, local instance lists).
+///
+/// `x-lemma-needed-by-rules` on these properties is always empty: parent consumers
+/// differ per Show document, and `$defs` are keyed by row identity so every Show
+/// must render the same `LemmaRow_*` schema. Parent field consumers live on the
+/// document as `x-lemma-row-field-needed-by-rules`.
+fn row_object_schema(show: &DomainShow, rows: &mut RowSchemas) -> Map<String, JsonValue> {
     let mut properties = Map::new();
     let mut required = Vec::new();
     for (name, lemma_type) in &show.types {
@@ -468,8 +511,7 @@ fn row_object_schema(
         if entry.value.is_none() && !is_list {
             required.push(name.clone());
         }
-        let needed = rows.row_field_needed_by_rules(identity, name);
-        properties.insert(name.clone(), property_schema(entry, rows, &needed));
+        properties.insert(name.clone(), property_schema(entry, rows, &[]));
     }
     for (name, data) in &show.data {
         if properties.contains_key(name) {
@@ -482,8 +524,7 @@ fn row_object_schema(
         if data.value.is_none() && !is_list {
             required.push(name.clone());
         }
-        let needed = rows.row_field_needed_by_rules(identity, name);
-        properties.insert(name.clone(), property_schema(data, rows, &needed));
+        properties.insert(name.clone(), property_schema(data, rows, &[]));
     }
     required.sort();
     let mut schema = Map::new();
@@ -496,12 +537,19 @@ fn row_object_schema(
     schema
 }
 
+/// Property names of a row `$defs` schema: local types, then any other `show.data` keys.
+fn row_property_names(show: &DomainShow) -> BTreeSet<String> {
+    let mut names: BTreeSet<String> = show.types.keys().cloned().collect();
+    names.extend(show.data.keys().cloned());
+    names
+}
+
 fn property_schema(
     data: &DomainShowData,
     rows: &mut RowSchemas,
     needed_by_rules: &[String],
 ) -> JsonValue {
-    let mut schema = type_schema(&data.lemma_type.specifications, rows);
+    let mut schema = type_schema(&data.lemma_type, rows);
     let help = specification_help(&data.lemma_type.specifications);
     if !help.is_empty() {
         schema.insert("description".to_string(), json!(help));
@@ -549,12 +597,9 @@ fn property_schema(
 
 /// Standard keywords for one type. Lists are a JSON array: rows of an instance list are
 /// objects (`$defs` row schema), items of a value list are the element's literal.
-fn type_schema(
-    specification: &DomainTypeSpecification,
-    rows: &mut RowSchemas,
-) -> Map<String, JsonValue> {
-    let DomainTypeSpecification::List { element, .. } = specification else {
-        return scalar_data_schema(specification);
+fn type_schema(lemma_type: &DomainLemmaType, rows: &mut RowSchemas) -> Map<String, JsonValue> {
+    let DomainTypeSpecification::List { element, .. } = &lemma_type.specifications else {
+        return scalar_data_schema(lemma_type);
     };
     let mut schema = Map::new();
     let items = match &element.specifications {
@@ -562,7 +607,7 @@ fn type_schema(
         DomainTypeSpecification::List { .. } => {
             unreachable!("BUG: lists do not nest; planning rejects a list element list")
         }
-        element => JsonValue::Object(scalar_data_schema(element)),
+        _ => JsonValue::Object(scalar_data_schema(element)),
     };
     schema.insert("type".to_string(), json!("array"));
     schema.insert("items".to_string(), items);
@@ -574,7 +619,8 @@ fn type_schema(
 }
 
 /// A scalar data slot. Measure and ratio data also accept a single-unit object (`{"eur": "84"}`).
-fn scalar_data_schema(specification: &DomainTypeSpecification) -> Map<String, JsonValue> {
+fn scalar_data_schema(lemma_type: &DomainLemmaType) -> Map<String, JsonValue> {
+    let specification = &lemma_type.specifications;
     let names: Vec<&str> = match specification {
         DomainTypeSpecification::Measure { units, .. } => {
             units.iter().map(|unit| unit.name.as_str()).collect()
@@ -582,27 +628,26 @@ fn scalar_data_schema(specification: &DomainTypeSpecification) -> Map<String, Js
         DomainTypeSpecification::Ratio { units, .. } => {
             units.iter().map(|unit| unit.name.as_str()).collect()
         }
-        _ => return scalar_type_schema(specification),
+        _ => return scalar_type_schema(lemma_type),
     };
     let unit_map = json!({
         "type": "object",
         "minProperties": 1,
         "maxProperties": 1,
         "propertyNames": {"enum": names},
-        "additionalProperties": {"type": "string", "pattern": number_pattern()}
+        "additionalProperties": {"type": "string"}
     });
     let mut schema = Map::new();
     schema.insert(
         "oneOf".to_string(),
-        json!([
-            JsonValue::Object(scalar_type_schema(specification)),
-            unit_map
-        ]),
+        json!([JsonValue::Object(scalar_type_schema(lemma_type)), unit_map]),
     );
+    publish_option_enum(&mut schema, lemma_type);
     schema
 }
 
-fn scalar_type_schema(specification: &DomainTypeSpecification) -> Map<String, JsonValue> {
+fn scalar_type_schema(lemma_type: &DomainLemmaType) -> Map<String, JsonValue> {
+    let specification = &lemma_type.specifications;
     let mut schema = Map::new();
     match specification {
         DomainTypeSpecification::Boolean { .. } => {
@@ -614,53 +659,35 @@ fn scalar_type_schema(specification: &DomainTypeSpecification) -> Map<String, Js
                 ]),
             );
         }
-        DomainTypeSpecification::Text {
-            length, options, ..
-        } => {
+        DomainTypeSpecification::Text { length, .. } => {
             schema.insert("type".to_string(), json!("string"));
-            if !options.is_empty() {
-                schema.insert("enum".to_string(), json!(options));
-            }
             if let Some(length) = length {
                 schema.insert("minLength".to_string(), json!(length));
                 schema.insert("maxLength".to_string(), json!(length));
             }
         }
-        DomainTypeSpecification::Number { .. } => {
-            schema.insert("type".to_string(), json!("string"));
-            schema.insert("pattern".to_string(), json!(number_pattern()));
-        }
-        DomainTypeSpecification::Measure { units, .. } => {
-            schema.insert("type".to_string(), json!("string"));
-            schema.insert("pattern".to_string(), json!(measure_pattern(units)));
-        }
-        DomainTypeSpecification::Ratio { units, .. } => {
-            schema.insert("type".to_string(), json!("string"));
-            schema.insert("pattern".to_string(), json!(ratio_pattern(units)));
-        }
-        DomainTypeSpecification::NumberRange { .. } => {
-            schema.insert("type".to_string(), json!("string"));
-            schema.insert("pattern".to_string(), json!(range_pattern(&number_body())));
-        }
-        DomainTypeSpecification::MeasureRange { units, .. } => {
-            schema.insert("type".to_string(), json!("string"));
-            schema.insert(
-                "pattern".to_string(),
-                json!(range_pattern(&measure_body(units))),
-            );
-        }
-        DomainTypeSpecification::RatioRange { units, .. } => {
-            schema.insert("type".to_string(), json!("string"));
-            schema.insert(
-                "pattern".to_string(),
-                json!(range_pattern(&ratio_body(units))),
-            );
-        }
-        DomainTypeSpecification::Date { .. }
-        | DomainTypeSpecification::Time { .. }
+        DomainTypeSpecification::Number { .. }
+        | DomainTypeSpecification::Measure { .. }
+        | DomainTypeSpecification::Ratio { .. }
+        | DomainTypeSpecification::NumberRange { .. }
+        | DomainTypeSpecification::MeasureRange { .. }
+        | DomainTypeSpecification::RatioRange { .. }
         | DomainTypeSpecification::DateRange { .. }
         | DomainTypeSpecification::TimeRange { .. } => {
             schema.insert("type".to_string(), json!("string"));
+        }
+        DomainTypeSpecification::Date { .. } => {
+            schema.insert(
+                "oneOf".to_string(),
+                json!([
+                    {"type": "string", "format": "date"},
+                    {"type": "string", "format": "date-time"}
+                ]),
+            );
+        }
+        DomainTypeSpecification::Time { .. } => {
+            schema.insert("type".to_string(), json!("string"));
+            schema.insert("format".to_string(), json!("time"));
         }
         DomainTypeSpecification::List { .. } => {
             unreachable!("BUG: list schemas are built by type_schema")
@@ -675,7 +702,23 @@ fn scalar_type_schema(specification: &DomainTypeSpecification) -> Map<String, Js
             unreachable!("BUG: undetermined sentinel type on a Show data entry")
         }
     }
+    publish_option_enum(&mut schema, lemma_type);
     schema
+}
+
+fn publish_option_enum(schema: &mut Map<String, JsonValue>, lemma_type: &DomainLemmaType) {
+    if lemma_type.options.values.is_empty() {
+        return;
+    }
+    schema.insert(
+        "enum".to_string(),
+        json!(lemma_type
+            .options
+            .values
+            .iter()
+            .map(|option| lemma_type.display_bound(&option.value))
+            .collect::<Vec<_>>()),
+    );
 }
 
 fn specification_help(specification: &DomainTypeSpecification) -> String {
@@ -704,78 +747,6 @@ fn specification_help(specification: &DomainTypeSpecification) -> String {
             unreachable!("BUG: sentinel type on a Show data entry")
         }
     }
-}
-
-/// Run-data number text: an optional sign, digits with single underscores between them (1 to
-/// 28 digits per run), an optional fraction (a leading `.` needs at least one digit), and an
-/// optional exponent of one or two digits. Surrounding whitespace is added by the callers.
-/// Stricter than `NumberLiteral`, which also accepts underscores at the edges and doubled ones.
-fn number_body() -> String {
-    let digits = "[0-9](?:_?[0-9]){0,27}";
-    format!(r"[+-]?(?:{digits}(?:\.(?:{digits})?)?|\.{digits})(?:[eE][+-]?[0-9]{{1,2}})?")
-}
-
-/// A measure value body: a number, whitespace, one of the declared unit names.
-fn measure_body(units: &MeasureUnits) -> String {
-    let names: Vec<&str> = units.iter().map(|unit| unit.name.as_str()).collect();
-    assert!(!names.is_empty(), "BUG: planned measure type has no units");
-    format!(r"{}\s+({})", number_body(), alternation(&names))
-}
-
-/// A ratio value body: a number glued to `%` (only when `percent` is declared) or `%%`
-/// (only when `permille` is declared), or a number, whitespace, and a declared unit name.
-/// A bare number is not a ratio value.
-fn ratio_body(units: &RatioUnits) -> String {
-    let names: Vec<&str> = units.iter().map(|unit| unit.name.as_str()).collect();
-    assert!(!names.is_empty(), "BUG: planned ratio type has no units");
-    let mut alternatives = Vec::new();
-    if names.contains(&"permille") {
-        alternatives.push(format!("{}%%", number_body()));
-    }
-    if names.contains(&"percent") {
-        alternatives.push(format!("{}%", number_body()));
-    }
-    alternatives.push(format!(r"{}\s+({})", number_body(), alternation(&names)));
-    format!("(?:{})", alternatives.join("|"))
-}
-
-/// `pattern` for a number value.
-pub fn number_pattern() -> String {
-    format!(r"^\s*{}\s*$", number_body())
-}
-
-/// `pattern` for a measure value.
-pub fn measure_pattern(units: &MeasureUnits) -> String {
-    format!(r"^\s*{}\s*$", measure_body(units))
-}
-
-/// `pattern` for a ratio value.
-pub fn ratio_pattern(units: &RatioUnits) -> String {
-    format!(r"^\s*{}\s*$", ratio_body(units))
-}
-
-/// `pattern` for a range: two endpoints around `...`, each endpoint a value body.
-fn range_pattern(endpoint: &str) -> String {
-    format!(r"^\s*{endpoint}\s*\.\.\.\s*{endpoint}\s*$")
-}
-
-fn alternation(names: &[&str]) -> String {
-    names
-        .iter()
-        .map(|name| regex_escape(name))
-        .collect::<Vec<_>>()
-        .join("|")
-}
-
-fn regex_escape(text: &str) -> String {
-    let mut escaped = String::with_capacity(text.len());
-    for c in text.chars() {
-        if "\\^$.|?*+()[]{}/-".contains(c) {
-            escaped.push('\\');
-        }
-        escaped.push(c);
-    }
-    escaped
 }
 
 /// Run-data JSON for a committed value or suggestion: a boolean is a JSON boolean, a value
@@ -931,7 +902,7 @@ fn strip_standard_keywords(value: &mut JsonValue) {
 struct RowSchemas<'a> {
     engine: &'a Engine,
     /// Consumer plan whose instance-list [`crate::planning::execution_plan::NeededByRules::fields`]
-    /// annotate `$defs`.
+    /// feed `x-lemma-row-field-needed-by-rules` (not `$defs`).
     consumer: Option<&'a ExecutionPlan>,
     started: BTreeSet<SpecIdentity>,
     pending: Vec<SpecIdentity>,
@@ -949,18 +920,30 @@ impl<'a> RowSchemas<'a> {
         }
     }
 
-    /// Builds every row schema reached from the document. Row schemas that reference
-    /// further row specs queue them on `pending`, so the walk never nests.
-    fn into_defs(mut self) -> Map<String, JsonValue> {
+    /// Builds every row schema reached from the document, plus the parent-rule map
+    /// for each def. Row schemas that reference further row specs queue them on
+    /// `pending`, so the walk never nests.
+    fn into_defs(mut self) -> (Map<String, JsonValue>, Map<String, JsonValue>) {
+        let mut row_field_needed_by_rules = Map::new();
         while let Some(identity) = self.pending.pop() {
             let show = self.engine.show_spec(&identity);
             let mut schema = Map::new();
             schema.insert("title".to_string(), json!(format!("{identity} row")));
-            schema.extend(row_object_schema(&show, &identity, &mut self));
-            self.defs
-                .insert(row_def_name(&identity), JsonValue::Object(schema));
+            schema.extend(row_object_schema(&show, &mut self));
+            let def_name = row_def_name(&identity);
+            let mut field_map = Map::new();
+            for field in row_property_names(&show) {
+                let needed = self.row_field_needed_by_rules(&identity, &field);
+                if !needed.is_empty() {
+                    field_map.insert(field, json!(needed));
+                }
+            }
+            if !field_map.is_empty() {
+                row_field_needed_by_rules.insert(def_name.clone(), JsonValue::Object(field_map));
+            }
+            self.defs.insert(def_name, JsonValue::Object(schema));
         }
-        self.defs.into_iter().collect()
+        (self.defs.into_iter().collect(), row_field_needed_by_rules)
     }
 
     /// Parent Show.rules keys that need `field` on rows of `identity`.
@@ -972,14 +955,15 @@ impl<'a> RowSchemas<'a> {
             .row_field_needed_by_rules(identity, field)
             .into_iter()
             .map(|rule_position| {
-                consumer
+                &consumer
                     .rules
                     .get_index(rule_position as usize)
                     .expect("BUG: needed_by_rules field consumer out of consumer.rules range")
                     .1
                     .path
-                    .input_key()
             })
+            .filter(|rule_path| consumer.show_rules.contains_key(*rule_path))
+            .map(|rule_path| rule_path.input_key())
             .collect()
     }
 
@@ -1031,6 +1015,7 @@ data express: boolean -> suggest true
 data code: text -> option "A" -> option "B" -> suggest "B"
 data label: text -> length 3
 data start: date -> suggest 2026-01-01
+data at: time -> suggest 09:30:00
 data window: number range -> suggest 1...5
 data tags: number list
   -> with 5, 10
@@ -1043,6 +1028,7 @@ rule r_express: express
 rule r_code: code
 rule r_label: label
 rule r_start: start
+rule r_at: at
 rule r_window: window
 rule r_tags: tags -> sum
 "#;
@@ -1072,17 +1058,6 @@ rule r_tags: tags -> sum
                 col: 1,
             },
         )
-    }
-
-    fn pattern_accepts(pattern: &str, literal: &str) -> bool {
-        jsonschema::is_valid(
-            &json!({ "type": "string", "pattern": pattern }),
-            &json!(literal),
-        )
-    }
-
-    fn parses(literal: &str, specification: &DomainTypeSpecification) -> bool {
-        parse_value_from_string(literal, specification, &source()).is_ok()
     }
 
     fn decimal(text: &JsonValue) -> rust_decimal::Decimal {
@@ -1152,7 +1127,8 @@ rule r_tags: tags -> sum
         assert_eq!(
             document["required"],
             json!([
-                "bps", "code", "express", "label", "price", "quantity", "rate", "start", "window"
+                "at", "bps", "code", "express", "label", "price", "quantity", "rate", "start",
+                "window"
             ])
         );
     }
@@ -1167,11 +1143,17 @@ rule r_tags: tags -> sum
         assert_eq!(properties["code"]["enum"], json!(["A", "B"]));
         assert_eq!(properties["label"]["minLength"], 3);
         assert_eq!(properties["label"]["maxLength"], 3);
-        assert_eq!(properties["quantity"]["pattern"], number_pattern());
+        assert_eq!(properties["quantity"]["type"], "string");
+        assert!(properties["quantity"].get("pattern").is_none());
         assert_eq!(
             properties["price"]["oneOf"][1]["propertyNames"]["enum"],
             json!(["eur", "cent"])
         );
+        assert_eq!(
+            properties["price"]["oneOf"][1]["additionalProperties"],
+            json!({ "type": "string" })
+        );
+        assert!(properties["price"]["oneOf"][0].get("pattern").is_none());
         assert_eq!(
             properties["rate"]["oneOf"][1]["propertyNames"]["enum"],
             json!(["percent", "permille"])
@@ -1180,17 +1162,21 @@ rule r_tags: tags -> sum
             properties["bps"]["oneOf"][1]["propertyNames"]["enum"],
             json!(["percent", "permille", "basis_points"])
         );
-        assert_eq!(properties["start"]["type"], "string");
-        assert!(properties["start"].get("pattern").is_none());
-        assert!(properties["start"].get("format").is_none());
+        assert_eq!(
+            properties["start"]["oneOf"],
+            json!([
+                {"type": "string", "format": "date"},
+                {"type": "string", "format": "date-time"}
+            ])
+        );
+        assert_eq!(properties["at"]["type"], "string");
+        assert_eq!(properties["at"]["format"], "time");
         assert_eq!(properties["window"]["type"], "string");
-        assert!(properties["window"]["pattern"].is_string());
+        assert!(properties["window"].get("pattern").is_none());
+        assert!(properties["window"].get("format").is_none());
         let tags = &properties["tags"];
         assert_eq!(tags["type"], "array");
-        assert_eq!(
-            tags["items"],
-            json!({ "type": "string", "pattern": number_pattern() })
-        );
+        assert_eq!(tags["items"], json!({ "type": "string" }));
         assert_eq!(
             tags["maxItems"],
             crate::ResourceLimits::default().max_list_rows
@@ -1281,9 +1267,10 @@ data weight: number
 data enabled: boolean
 spec line_item
 data weight: number
-data roast: boolean
-uses processing list
-  -> with weight: weight, type: "roast", enabled: roast
+data finish_a: boolean
+uses step: processing
+data processing: step list
+  -> with weight: weight, type: "finish_a", enabled: finish_a
 rule cost: processing -> where enabled -> count
 "#
                 .to_string(),
@@ -1341,39 +1328,41 @@ rule cost: processing -> where enabled -> count
                 ),
             }
         }
-        assert_eq!(checked, 12);
+        assert_eq!(checked, 13);
+    }
+
+    fn is_numeric_literal_specification(specification: &DomainTypeSpecification) -> bool {
+        matches!(
+            specification,
+            DomainTypeSpecification::Number { .. }
+                | DomainTypeSpecification::Measure { .. }
+                | DomainTypeSpecification::Ratio { .. }
+                | DomainTypeSpecification::NumberRange { .. }
+                | DomainTypeSpecification::MeasureRange { .. }
+                | DomainTypeSpecification::RatioRange { .. }
+        )
     }
 
     #[test]
-    fn emitted_literals_match_pattern_and_denote_their_value() {
+    fn emitted_string_literals_denote_their_value() {
         let (_, show, document) = document();
         let mut checked = 0;
         for (name, property) in document["properties"].as_object().expect("properties") {
-            let Some(pattern) = property["pattern"]
-                .as_str()
-                .or_else(|| property["oneOf"][0]["pattern"].as_str())
-            else {
-                continue;
-            };
             let specification = &show.data[name].lemma_type.specifications;
-            let mut literals: Vec<(&str, &JsonValue)> = Vec::new();
-            if let Some(default) = property.get("default") {
-                literals.push((
-                    default.as_str().expect("scalar default"),
-                    &property["x-lemma-value"],
-                ));
+            if !is_numeric_literal_specification(specification) {
+                continue;
             }
-            if let Some(examples) = property.get("examples") {
-                literals.push((
-                    examples[0].as_str().expect("scalar example"),
-                    &property["x-lemma-suggestion"],
-                ));
+            let mut literals: Vec<(&str, &JsonValue)> = Vec::new();
+            if let Some(literal) = property.get("default").and_then(|value| value.as_str()) {
+                literals.push((literal, &property["x-lemma-value"]));
+            }
+            if let Some(literal) = property
+                .get("examples")
+                .and_then(|examples| examples[0].as_str())
+            {
+                literals.push((literal, &property["x-lemma-suggestion"]));
             }
             for (literal, value) in literals {
-                assert!(
-                    pattern_accepts(pattern, literal),
-                    "{name}: '{literal}' vs {pattern}"
-                );
                 assert_literal_denotes(name, literal, value, specification);
                 checked += 1;
             }
@@ -1381,66 +1370,12 @@ rule cost: processing -> where enabled -> count
         assert_eq!(checked, 8);
     }
 
-    #[test]
-    fn pattern_and_parser_agree_on_samples() {
-        let (_, show, document) = document();
-        let cases: [(&str, &[&str], &[&str]); 4] = [
-            (
-                "quantity",
-                &["0", "12.5", "-3", "1_000", "1_000.25"],
-                &["1,000", "12 eur", "abc", ""],
-            ),
-            (
-                "price",
-                &["10 eur", "2.5 cent", "-1 eur", "1_000 eur"],
-                &["84eur", "10 usd", "10", "eur 10", "10 eur extra"],
-            ),
-            (
-                "rate",
-                &["21%", "5%%", "0.5 percent", "2 permille"],
-                &["21", "21 %", "21 basis_points", "%"],
-            ),
-            (
-                "bps",
-                &["500 basis_points", "5%", "5%%", "5 percent"],
-                &["500 bps", "5", "5 basis_point"],
-            ),
-        ];
-        for (name, accepted, rejected) in cases {
-            let property = &document["properties"][name];
-            let pattern = property["pattern"]
-                .as_str()
-                .or_else(|| property["oneOf"][0]["pattern"].as_str())
-                .expect("pattern");
-            let specification = &show.data[name].lemma_type.specifications;
-            for literal in accepted {
-                assert!(
-                    pattern_accepts(pattern, literal),
-                    "{name}: pattern must accept '{literal}'"
-                );
-                assert!(
-                    parses(literal, specification),
-                    "{name}: parser must accept '{literal}'"
-                );
-            }
-            for literal in rejected {
-                assert!(
-                    !pattern_accepts(pattern, literal),
-                    "{name}: pattern must reject '{literal}'"
-                );
-                assert!(
-                    !parses(literal, specification),
-                    "{name}: parser must reject '{literal}'"
-                );
-            }
-        }
-    }
-
     fn identity(repository: Option<&str>, spec: &str) -> SpecIdentity {
         SpecIdentity {
             repository: repository.map(str::to_string),
             spec: spec.to_string(),
             effective: crate::parsing::ast::EffectiveDate::Origin,
+            slice: crate::parsing::ast::EffectiveDate::Origin,
         }
     }
 

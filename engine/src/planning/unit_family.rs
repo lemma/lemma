@@ -6,12 +6,11 @@
 use crate::literals::{MeasureUnits, RatioUnits};
 use crate::planning::semantics::{LemmaType, TypeFamily, TypeSpecification};
 use crate::planning::unit_index::UnitIndex;
-use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 /// Precomputed units for one measure or ratio family in expression scope.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub(crate) struct FamilyUnitEntry {
     pub family_bare_names: Arc<[String]>,
     pub merged_measure_units: Option<MeasureUnits>,
@@ -19,7 +18,7 @@ pub(crate) struct FamilyUnitEntry {
 }
 
 /// Family-keyed unit expansion data for a plan slice.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default)]
 pub(crate) struct FamilyUnitCatalog {
     by_family: BTreeMap<TypeFamily, FamilyUnitEntry>,
 }
@@ -230,7 +229,7 @@ mod tests {
         let mut money_units = MeasureUnits::new();
         money_units.push(MeasureUnit {
             name: "eur".into(),
-            factor: rational_one(),
+            scale: crate::literals::UnitScale::Literal(rational_one()),
             derived_measure_factors: Vec::new(),
             decomposition: Default::default(),
             minimum: None,
@@ -239,7 +238,7 @@ mod tests {
         });
         money_units.push(MeasureUnit {
             name: "usd".into(),
-            factor: rational_one(),
+            scale: crate::literals::UnitScale::Literal(rational_one()),
             derived_measure_factors: Vec::new(),
             decomposition: Default::default(),
             minimum: None,
@@ -251,7 +250,6 @@ mod tests {
             "money".into(),
             TypeSpecification::Measure {
                 units: money_units,
-                decimals: None,
                 traits: vec![],
                 decomposition: None,
                 minimum: None,
@@ -268,7 +266,7 @@ mod tests {
                     let mut units = MeasureUnits::new();
                     units.push(MeasureUnit {
                         name: "gbp".into(),
-                        factor: rational_one(),
+                        scale: crate::literals::UnitScale::Literal(rational_one()),
                         derived_measure_factors: Vec::new(),
                         decomposition: Default::default(),
                         minimum: None,
@@ -277,7 +275,6 @@ mod tests {
                     });
                     units
                 },
-                decimals: None,
                 traits: vec![],
                 decomposition: None,
                 minimum: None,
@@ -347,7 +344,6 @@ mod tests {
                 TypeSpecification::Ratio {
                     minimum: None,
                     maximum: None,
-                    decimals: None,
                     units,
                     unit: None,
                     help: String::new(),

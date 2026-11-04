@@ -325,7 +325,11 @@ public sealed interface RuleResult {
    * @param index position in {@link Response#rows()}
    */
   record RowReference(
-      @Nullable String repository, String spec, String effective, String instance, int index) {
+      @Nullable String repository,
+      String spec,
+      String effective,
+      @Nullable String instance,
+      int index) {
     /**
      * Parses JSON.
      *
@@ -357,9 +361,6 @@ public sealed interface RuleResult {
       }
       if (effective == null) {
         JsonReading.missingRequired("effective", "RowReference");
-      }
-      if (instance == null) {
-        JsonReading.missingRequired("instance", "RowReference");
       }
       if (index == null) {
         JsonReading.missingRequired("index", "RowReference");

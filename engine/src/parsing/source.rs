@@ -4,7 +4,7 @@ use std::fmt;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SourceType {
     Path(Arc<PathBuf>),
@@ -38,7 +38,7 @@ impl SourceType {
 /// Positional source location: source id and span.
 ///
 /// Text is resolved via `text_from(sources)` when needed. No embedded source text.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize)]
 pub struct Source {
     /// Source identifier (e.g. filesystem path label)
     pub source_type: SourceType,

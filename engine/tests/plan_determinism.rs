@@ -96,21 +96,3 @@ fn repeated_show_is_identical() {
         );
     }
 }
-
-#[test]
-fn repeated_load_produces_identical_snapshot_bytes() {
-    let mut snapshots = Vec::new();
-    for _ in 0..5 {
-        let mut engine = Engine::new();
-        engine
-            .load([(lemma::SourceType::Volatile, SPEC.to_string())])
-            .unwrap();
-        snapshots.push(engine.snapshot().expect("snapshot"));
-    }
-    for (i, bytes) in snapshots.iter().enumerate().skip(1) {
-        assert_eq!(
-            &snapshots[0], bytes,
-            "snapshot run 0 vs run {i} produced different bytes"
-        );
-    }
-}

@@ -1,55 +1,82 @@
-//! Named-`uses` template sharing: one Arc body per SpecIdentity per planning pass.
+//! Row-template sharing: one Arc body per row SpecIdentity per planning pass. A plan
+//! holds a template for every spec it imports with `uses` and every spec whose rows it
+//! holds, and every plan reaching a spec shares that spec's one template.
 
-use crate::fixture::{self, LogisticsFixture, LADDER};
+use crate::fixture::LogisticsFixture;
+use crate::sharing::{self, SharingLayout};
 use lemma::{Engine, SourceType};
-use std::collections::HashSet;
+use std::collections::{BTreeMap, BTreeSet, HashSet};
+
+/// Arc of the row template `identity` in the plan of `spec`.
+fn template_ptr(engine: &Engine, spec: &str, identity: &str) -> usize {
+    let ptrs = engine.debug_row_template_arc_ptrs(None, spec);
+    ptrs.iter()
+        .find(|(holder, found, _)| holder.is_empty() && found == identity)
+        .map(|(_, _, ptr)| *ptr)
+        .unwrap_or_else(|| panic!("{spec}.row_templates[{identity}] missing in {ptrs:?}"))
+}
+
+/// Row-template identities a plan holds, under no holder.
+fn template_identities(engine: &Engine, spec: &str) -> BTreeSet<String> {
+    engine
+        .debug_row_template_arc_ptrs(None, spec)
+        .into_iter()
+        .filter(|(holder, _, _)| holder.is_empty())
+        .map(|(_, identity, _)| identity)
+        .collect()
+}
 
 #[test]
-fn two_consumers_share_one_import_template_arc() {
+fn two_consumers_share_one_row_template_arc() {
     let source = r#"
 spec body
 data n: number
 rule doubled: n * 2
 
 spec left
-uses b: body
-  -> with n: n
-data n: number
-rule out: b.doubled
+uses body
+data items: body list
+  -> with n: 1
+rule out: items -> sum doubled
 
 spec right
-uses b: body
-  -> with n: n
-data n: number
-rule out: b.doubled
+uses body
+data items: body list
+  -> with n: 2
+rule out: items -> sum doubled
 
 spec root
 uses l: left
-  -> with n: n
 uses r: right
-  -> with n: n
-data n: number
 rule total: l.out + r.out
 "#;
     let mut engine = Engine::new();
     engine
         .load([(SourceType::Volatile, source.to_string())])
-        .expect("shared import templates must plan");
+        .expect("shared row templates must plan");
 
-    let ptrs = engine.debug_row_template_arc_ptrs(None, "root");
-    let left_body = ptrs
-        .iter()
-        .find(|(holder, identity, _)| holder == "left" && identity == "body")
-        .map(|(_, _, ptr)| *ptr)
-        .expect("left.row_templates[body]");
-    let right_body = ptrs
-        .iter()
-        .find(|(holder, identity, _)| holder == "right" && identity == "body")
-        .map(|(_, _, ptr)| *ptr)
-        .expect("right.row_templates[body]");
+    let left_body = template_ptr(&engine, "left", "body");
+    let right_body = template_ptr(&engine, "right", "body");
+    let root_body = template_ptr(&engine, "root", "body");
     assert_eq!(
         left_body, right_body,
         "left and right must share one body template Arc"
+    );
+    assert_eq!(
+        root_body, left_body,
+        "root reaches body rows through its imports and shares their template Arc"
+    );
+    for spec in ["left", "right"] {
+        assert_eq!(
+            template_identities(&engine, spec),
+            BTreeSet::from(["body".to_string()]),
+            "{spec} holds a template for its row spec only"
+        );
+    }
+    assert_eq!(
+        template_identities(&engine, "root"),
+        BTreeSet::from(["body".to_string(), "left".to_string(), "right".to_string()]),
+        "root holds a template for each import and for the row spec they reach"
     );
 
     let response = engine
@@ -57,11 +84,11 @@ rule total: l.out + r.out
             None,
             "root",
             None,
-            lemma::IndexMap::from([("n".into(), "3".into())]),
+            lemma::IndexMap::new(),
             Some(&["total".to_string()]),
             false,
         )
-        .expect("shared import templates must evaluate");
+        .expect("shared row templates must evaluate");
     assert_eq!(
         response
             .results
@@ -70,77 +97,98 @@ rule total: l.out + r.out
             .result()
             .expect("value")
             .to_string(),
-        "12"
+        "6"
     );
 }
 
 #[test]
-fn rate_shop_quotes_share_accessorials_and_zone_templates() {
-    let enterprise = &LADDER[3];
-    let embedded = fixture::logistics(enterprise.rate_cells);
-    assert_eq!(embedded.profile, "enterprise");
-    assert_eq!(embedded.rate_cells, enterprise.rate_cells);
-    assert!(
-        embedded.catalog_json.is_none(),
-        "embedded enterprise keeps catalog in source"
-    );
-    let external_ground = fixture::logistics_external_catalog(LADDER[0].rate_cells);
-    assert!(external_ground.catalog_json.is_some());
-    assert!(external_ground.source.len() < embedded.source.len());
+fn uses_import_registers_its_template() {
+    let source = r#"
+spec knoop
+data n: number
+rule doubled: n * 2
 
-    let mut engine = Engine::with_limits(embedded.limits.clone());
+spec consumer
+uses k: knoop
+  -> with n: 4
+rule out: k.doubled
+"#;
+    let mut engine = Engine::new();
     engine
-        .load([(SourceType::Volatile, embedded.source.clone())])
-        .expect("hypothesis fixture must load");
-
-    let ptrs = engine.debug_row_template_arc_ptrs(None, LogisticsFixture::SPEC_NAME);
-
-    let accessorials: HashSet<usize> = ptrs
-        .iter()
-        .filter(|(holder, identity, _)| holder.starts_with("quote_") && identity == "accessorials")
-        .map(|(_, _, ptr)| *ptr)
-        .collect();
+        .load([(SourceType::Volatile, source.to_string())])
+        .expect("consumer must plan");
     assert_eq!(
-        accessorials.len(),
-        1,
-        "all quote pipelines must share one accessorials template Arc, got {accessorials:?}"
+        template_identities(&engine, "consumer"),
+        BTreeSet::from(["knoop".to_string()]),
+        "a `uses` import is an instance of the imported spec's template"
     );
-
-    let mut zones_by_carrier: std::collections::BTreeMap<String, HashSet<usize>> =
-        std::collections::BTreeMap::new();
-    for (holder, identity, ptr) in &ptrs {
-        if !holder.starts_with("quote_") || !identity.starts_with("zones_") {
-            continue;
-        }
-        zones_by_carrier
-            .entry(identity.clone())
-            .or_default()
-            .insert(*ptr);
-    }
-    assert!(
-        !zones_by_carrier.is_empty(),
-        "expected nested zones_* templates under quotes"
-    );
-    for (zones_id, arcs) in &zones_by_carrier {
-        assert_eq!(
-            arcs.len(),
-            1,
-            "quotes of one carrier must share zones template {zones_id}, got {arcs:?}"
-        );
-    }
-
-    let quote_templates: HashSet<usize> = ptrs
-        .iter()
-        .filter(|(holder, identity, _)| holder.is_empty() && identity.starts_with("quote_"))
-        .map(|(_, _, ptr)| *ptr)
-        .collect();
+    let response = engine
+        .evaluate(
+            None,
+            "consumer",
+            None,
+            lemma::IndexMap::new(),
+            Some(&["out".to_string()]),
+            false,
+        )
+        .expect("consumer must evaluate");
     assert_eq!(
-        quote_templates.len(),
-        120,
-        "rate_shop holds one Arc per quote spec (120 carrier×service pipelines)"
+        response
+            .results
+            .get("out")
+            .expect("out")
+            .result()
+            .expect("value")
+            .to_string(),
+        "8"
     );
+}
 
+#[test]
+fn rule_built_rows_register_their_template() {
+    let source = r#"
+spec knoop
+data n: number
+rule doubled: n * 2
+
+spec consumer
+uses knoop
+rule rows: knoop list -> with n: 4 -> with n: 5
+rule out: rows -> sum doubled
+"#;
+    let mut engine = Engine::new();
     engine
+        .load([(SourceType::Volatile, source.to_string())])
+        .expect("consumer must plan");
+    assert_eq!(
+        template_identities(&engine, "consumer"),
+        BTreeSet::from(["knoop".to_string()]),
+        "rows a rule builds run in a row context of the row spec's template"
+    );
+    let response = engine
+        .evaluate(
+            None,
+            "consumer",
+            None,
+            lemma::IndexMap::new(),
+            Some(&["out".to_string()]),
+            false,
+        )
+        .expect("consumer must evaluate");
+    assert_eq!(
+        response
+            .results
+            .get("out")
+            .expect("out")
+            .result()
+            .expect("value")
+            .to_string(),
+        "18"
+    );
+}
+
+fn cheapest(engine: &Engine) -> String {
+    let response = engine
         .evaluate(
             None,
             LogisticsFixture::SPEC_NAME,
@@ -150,4 +198,69 @@ fn rate_shop_quotes_share_accessorials_and_zone_templates() {
             false,
         )
         .expect("rate_shop.cheapest must evaluate");
+    response
+        .results
+        .get(LogisticsFixture::TERMINAL_RULE)
+        .expect("cheapest result")
+        .result()
+        .expect("cheapest must produce a value")
+        .to_string()
+}
+
+/// Row specs whose rows the pipelines hold: rate cells, ZIP zones and fuel brackets.
+const ROW_SPECS: [&str; 3] = ["rate_cell", "zip_zone", "fuel_bracket"];
+
+fn assert_templates(engine: &Engine, layout: &SharingLayout) {
+    let mut quotes = Vec::new();
+    for carrier in &layout.carriers {
+        for service in &layout.services {
+            quotes.push(layout.quote_spec(carrier, service));
+        }
+    }
+    let rate_shop = template_identities(engine, LogisticsFixture::SPEC_NAME);
+    for quote in &quotes {
+        assert!(
+            rate_shop.contains(quote),
+            "rate_shop imports {quote}, so it holds its template: {rate_shop:?}"
+        );
+    }
+    let mut arcs_by_identity: BTreeMap<String, HashSet<usize>> = BTreeMap::new();
+    for plan in std::iter::once(LogisticsFixture::SPEC_NAME.to_string()).chain(quotes) {
+        let identities = template_identities(engine, &plan);
+        for identity in ROW_SPECS {
+            assert!(
+                identities.contains(identity),
+                "{plan} holds a template for row spec {identity}: {identities:?}"
+            );
+        }
+        for identity in identities {
+            let ptr = template_ptr(engine, &plan, &identity);
+            arcs_by_identity.entry(identity).or_default().insert(ptr);
+        }
+    }
+    for (identity, arcs) in &arcs_by_identity {
+        assert_eq!(
+            arcs.len(),
+            1,
+            "rate_shop and its {} quote pipelines must share one {identity} template Arc, got {arcs:?}",
+            layout.pipelines()
+        );
+    }
+}
+
+#[test]
+fn rate_shop_quotes_share_row_templates() {
+    let (embedded, layout) = sharing::logistics_sharing();
+    assert!(
+        embedded.catalog_json.is_none(),
+        "sharing catalog keeps rows in source"
+    );
+
+    let mut engine = Engine::with_limits(embedded.limits.clone());
+    engine
+        .load([(SourceType::Volatile, embedded.source.clone())])
+        .expect("sharing catalog must load");
+
+    assert_templates(&engine, &layout);
+    cheapest(&engine);
 }

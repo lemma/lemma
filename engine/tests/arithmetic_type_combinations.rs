@@ -203,51 +203,206 @@ rule result: price / n"#;
 }
 
 #[test]
-fn measure_modulo_number() {
-    let code = r#"spec t
+fn measure_modulo_number_rejected() {
+    expect_plan_error(
+        r#"spec t
 uses lemma units
 data money: measure -> unit eur: 1.00
 data price: 10 eur
 data n: 3
-rule result: price mod n"#;
-    let val = eval_rule(code, "t", "result", IndexMap::new());
-    assert!(val.contains("1"), "Expected 1 eur, got: {}", val);
+rule result: price mod n"#,
+        "modulo",
+    );
 }
 
 #[test]
-fn measure_power_number() {
-    // Exponent must be an integer literal for dimensional types; using a literal 3 directly.
-    let code = r#"spec t
+fn eur_cubed_without_declared_unit_is_rejected() {
+    expect_plan_error(
+        r#"spec t
 uses lemma units
 data money: measure -> unit eur: 1.00
 data price: 2 eur
-rule result: price ^ 3"#;
-    let val = eval_rule(code, "t", "result", IndexMap::new());
-    assert!(val.contains("8"), "Expected 8 eur, got: {}", val);
+rule cubed: price ^ 3"#,
+        "anonymous intermediate",
+    );
 }
 
 #[test]
 fn measure_power_variable_exponent_rejected() {
-    // Variable exponent for Measure ^ Number must be rejected at plan time.
     expect_plan_error(
         r#"spec t
 data money: measure -> unit eur: 1.00
 data price: 2 eur
 data n: 3
 rule result: price ^ n"#,
-        "variable exponent",
+        "integer literal",
     );
 }
 
 #[test]
 fn measure_power_fractional_exponent_rejected() {
-    // Fractional literal exponents for Measure ^ Number must also be rejected.
     expect_plan_error(
         r#"spec t
 data money: measure -> unit eur: 1.00
 data price: 4 eur
 rule result: price ^ 0.5"#,
-        "fractional",
+        "integer literal",
+    );
+}
+
+#[test]
+fn meter_squared_is_square_meter() {
+    let code = r#"spec tile
+
+uses lemma units
+
+data side: 2 meter
+
+rule area:
+  side ^ 2
+
+rule volume:
+  side ^ 3"#;
+    assert_eq!(
+        eval_rule(code, "tile", "area", IndexMap::new()),
+        "4 square_meter"
+    );
+}
+
+#[test]
+fn meter_cubed_is_cubic_meter() {
+    let code = r#"spec tile
+
+uses lemma units
+
+data side: 2 meter
+
+rule area:
+  side ^ 2
+
+rule volume:
+  side ^ 3"#;
+    assert_eq!(
+        eval_rule(code, "tile", "volume", IndexMap::new()),
+        "8 cubic_meter"
+    );
+}
+
+#[test]
+fn meter_to_the_first_stays_meter() {
+    let code = r#"spec tile
+
+uses lemma units
+
+data side: 2 meter
+
+rule length:
+  side ^ 1"#;
+    assert_eq!(
+        eval_rule(code, "tile", "length", IndexMap::new()),
+        "2 meter"
+    );
+}
+
+#[test]
+fn meter_to_the_zero_is_one() {
+    let code = r#"spec tile
+
+uses lemma units
+
+data side: 5 meter
+
+rule one:
+  side ^ 0"#;
+    assert_eq!(eval_rule(code, "tile", "one", IndexMap::new()), "1");
+}
+
+#[test]
+fn hour_squared_uses_the_declared_unit() {
+    let code = r#"spec shift
+
+uses lemma units
+
+data span: measure
+  -> unit hour_squared: hour^2
+
+data shift: 2 hour
+
+rule squared:
+  shift ^ 2"#;
+    assert_eq!(
+        eval_rule(code, "shift", "squared", IndexMap::new()),
+        "4 hour_squared"
+    );
+}
+
+#[test]
+fn per_meter_uses_the_declared_unit() {
+    let code = r#"spec tile
+
+uses lemma units
+
+data rate: measure
+  -> unit per_meter: meter^-1
+
+data length: 2 meter
+
+rule inverse:
+  length ^ -1"#;
+    let map = eval_measure_map(code, "tile", "inverse");
+    assert_eq!(map["per_meter"], Decimal::new(5, 1));
+    let text = eval_rule(code, "tile", "inverse", IndexMap::new());
+    assert!(
+        text.contains("per_meter"),
+        "display must name per_meter, got: {text}"
+    );
+}
+
+#[test]
+fn negative_power_without_declared_unit_is_rejected() {
+    expect_plan_error(
+        r#"spec tile
+
+uses lemma units
+
+data length: 2 meter
+
+rule inverse:
+  length ^ -1"#,
+        "anonymous intermediate",
+    );
+}
+
+#[test]
+fn ambiguous_square_is_rejected() {
+    let code = r#"spec tile
+
+uses lemma units
+
+data plot: measure
+  -> unit garden: meter^2
+
+data side: 2 meter
+
+rule area:
+  side ^ 2"#;
+    expect_plan_error(code, "anonymous intermediate");
+    expect_plan_error(code, "area");
+    expect_plan_error(code, "plot");
+}
+
+#[test]
+fn meter_power_past_exponent_cap_is_rejected() {
+    expect_plan_error(
+        r#"spec tile
+
+uses lemma units
+
+data side: 2 meter
+
+rule result:
+  side ^ 65"#,
+        "maximum of 64",
     );
 }
 
@@ -429,37 +584,41 @@ rule result: d / n"#;
 }
 
 #[test]
-fn duration_modulo_number() {
-    let code = r#"spec t
+fn duration_modulo_number_rejected() {
+    expect_plan_error(
+        r#"spec t
 uses lemma units
 data d: 10 hour
 data n: 3
-rule result: d mod n"#;
-    let map = eval_measure_map(code, "t", "result");
-    assert_eq!(map["hour"], Decimal::from(1), "10 hour mod 3 = 1 hour");
+rule result: d mod n"#,
+        "modulo",
+    );
 }
 
 #[test]
-fn duration_power_number() {
-    // Exponent must be an integer literal for dimensional types; using a literal 3 directly.
-    let code = r#"spec t
+fn hour_cubed_without_declared_unit_is_rejected() {
+    expect_plan_error(
+        r#"spec shift
+
 uses lemma units
-data d: 2 hour
-rule result: d ^ 3"#;
-    let val = eval_rule(code, "t", "result", IndexMap::new());
-    assert!(val.contains("8"), "Expected 8 hour, got: {}", val);
+
+data shift: 2 hour
+
+rule cubed:
+  shift ^ 3"#,
+        "anonymous intermediate",
+    );
 }
 
 #[test]
 fn duration_power_variable_exponent_rejected() {
-    // Variable exponent for Duration ^ Number must be rejected at plan time.
     expect_plan_error(
         r#"spec t
 uses lemma units
 data d: 2 hour
 data n: 3
 rule result: d ^ n"#,
-        "variable exponent",
+        "integer literal",
     );
 }
 
@@ -943,22 +1102,29 @@ rule doubled: margin_factor * 10"#;
 // ═══════════════════════════════════════════════════════════════════
 
 #[test]
-fn number_divide_measure_returns_number() {
-    let code = r#"spec t
-uses lemma units
+fn number_divide_measure_rejected_when_inverse_unresolved() {
+    expect_plan_error(
+        r#"spec t
 data money: measure -> unit eur: 1.00
 data item_count: 20
 data price: 10 eur
-rule units_per_eur: item_count / price"#;
+rule units_per_eur: item_count / price"#,
+        "anonymous intermediate",
+    );
+}
+
+#[test]
+fn number_divide_measure_cancels_when_multiplied_back() {
+    let code = r#"spec t
+data money: measure -> unit eur: 1.00
+data item_count: 20
+data price: 10 eur
+data other: 10 eur
+rule units_per_eur: (item_count / price) * other"#;
     let val = eval_rule(code, "t", "units_per_eur", IndexMap::new());
     assert_eq!(
-        val, "2",
-        "20 / 10 eur should be dimensionless 2, got: {val}"
-    );
-    assert!(
-        !val.to_lowercase().contains("eur"),
-        "number / measure should NOT contain unit, got: {}",
-        val
+        val, "20",
+        "(20 / 10 eur) * 10 eur should cancel to 20, got: {val}"
     );
 }
 

@@ -130,7 +130,6 @@ public sealed interface ShowPropertyType
    * @param name name
    * @param minimum minimum
    * @param maximum maximum
-   * @param decimals decimals
    * @param units units
    * @param traits traits
    * @param decomposition decomposition
@@ -141,7 +140,6 @@ public sealed interface ShowPropertyType
       @Nullable String name,
       LemmaType.@Nullable NamedBound minimum,
       LemmaType.@Nullable NamedBound maximum,
-      @Nullable Integer decimals,
       List<LemmaType.MeasureUnit> units,
       List<String> traits,
       @Nullable Map<String, Integer> decomposition,
@@ -168,8 +166,6 @@ public sealed interface ShowPropertyType
       boolean minimumSeen = false;
       LemmaType.NamedBound maximum = null;
       boolean maximumSeen = false;
-      Integer decimals = null;
-      boolean decimalsSeen = false;
       List<LemmaType.MeasureUnit> units = null;
       List<String> traits = null;
       Map<String, Integer> decomposition = null;
@@ -193,10 +189,6 @@ public sealed interface ShowPropertyType
             maximumSeen = true;
             maximum = LemmaType.NamedBound.readNullable(p);
           }
-          case "decimals" -> {
-            decimalsSeen = true;
-            decimals = JsonReading.readInt(p);
-          }
           case "units" -> units = JsonReading.readList(p, LemmaType.MeasureUnit::read);
           case "traits" -> traits = JsonReading.readList(p, JsonReading::readString);
           case "decomposition" -> {
@@ -218,9 +210,6 @@ public sealed interface ShowPropertyType
       if (!maximumSeen) {
         JsonReading.missingRequired("maximum", "ShowPropertyType.Measure");
       }
-      if (!decimalsSeen) {
-        JsonReading.missingRequired("decimals", "ShowPropertyType.Measure");
-      }
       if (units == null) {
         JsonReading.missingRequired("units", "ShowPropertyType.Measure");
       }
@@ -231,8 +220,7 @@ public sealed interface ShowPropertyType
         JsonReading.missingRequired("decomposition", "ShowPropertyType.Measure");
       }
       extendsType = readRequiredExtends(extendsType, "ShowPropertyType.Measure");
-      return new Measure(
-          name, minimum, maximum, decimals, units, traits, decomposition, unit, extendsType);
+      return new Measure(name, minimum, maximum, units, traits, decomposition, unit, extendsType);
     }
   }
 
@@ -411,7 +399,6 @@ public sealed interface ShowPropertyType
    * @param name name
    * @param minimum minimum
    * @param maximum maximum
-   * @param decimals decimals
    * @param units units
    * @param unit written unit when describing a value, or null
    * @param extendsType extendsType
@@ -420,7 +407,6 @@ public sealed interface ShowPropertyType
       @Nullable String name,
       @Nullable BigDecimal minimum,
       @Nullable BigDecimal maximum,
-      @Nullable Integer decimals,
       List<LemmaType.RatioUnit> units,
       @Nullable String unit,
       TypeExtends extendsType)
@@ -445,8 +431,6 @@ public sealed interface ShowPropertyType
       boolean minimumSeen = false;
       BigDecimal maximum = null;
       boolean maximumSeen = false;
-      Integer decimals = null;
-      boolean decimalsSeen = false;
       List<LemmaType.RatioUnit> units = null;
       String unit = null;
       TypeExtends extendsType = null;
@@ -467,10 +451,6 @@ public sealed interface ShowPropertyType
             maximumSeen = true;
             maximum = readNullableDecimal(p);
           }
-          case "decimals" -> {
-            decimalsSeen = true;
-            decimals = JsonReading.readInt(p);
-          }
           case "units" -> units = JsonReading.readList(p, LemmaType.RatioUnit::read);
           case "unit" -> unit = JsonReading.readString(p);
           case "extends" -> extendsType = TypeExtends.read(p);
@@ -484,14 +464,11 @@ public sealed interface ShowPropertyType
       if (!maximumSeen) {
         JsonReading.missingRequired("maximum", "ShowPropertyType.Ratio");
       }
-      if (!decimalsSeen) {
-        JsonReading.missingRequired("decimals", "ShowPropertyType.Ratio");
-      }
       if (units == null) {
         JsonReading.missingRequired("units", "ShowPropertyType.Ratio");
       }
       extendsType = readRequiredExtends(extendsType, "ShowPropertyType.Ratio");
-      return new Ratio(name, minimum, maximum, decimals, units, unit, extendsType);
+      return new Ratio(name, minimum, maximum, units, unit, extendsType);
     }
   }
 

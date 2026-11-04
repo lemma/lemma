@@ -154,9 +154,18 @@ pub fn generate_openapi_effective(
 
     paths.insert("/".to_string(), index_path_item(engine));
 
+    let mut tag_descriptions: std::collections::BTreeMap<String, String> =
+        std::collections::BTreeMap::new();
+
     for version in &active_specs {
         let spec_name = &version.name;
         if let Ok(show) = engine.show(None, spec_name, Some(effective)) {
+            let tag_description = show
+                .commentary
+                .clone()
+                .unwrap_or_else(|| format!("Show and evaluate `{spec_name}`"));
+            tag_descriptions.insert(spec_name.clone(), tag_description);
+
             let artifacts = build_spec_openapi_artifacts(
                 spec_name,
                 &show,
@@ -192,10 +201,14 @@ pub fn generate_openapi_effective(
     })];
     for spec_name in &unique_spec_names {
         let safe_tag = spec_name.replace('.', "_");
+        let description = tag_descriptions
+            .get(spec_name)
+            .cloned()
+            .unwrap_or_else(|| format!("Show and evaluate `{spec_name}`"));
         tags.push(json!({
             "name": safe_tag,
             "x-displayName": spec_name,
-            "description": format!("Show and evaluate `{spec_name}`")
+            "description": description
         }));
     }
 
@@ -544,12 +557,7 @@ fn build_spec_openapi_artifacts(
     effective_range: (Option<&DateTimeValue>, Option<&DateTimeValue>),
     explain: bool,
 ) -> SpecOpenApiArtifacts {
-    let rule_names: Vec<String> = show
-        .rules
-        .iter()
-        .filter(|(_, rule)| rule.path.is_empty())
-        .map(|(name, _)| name.clone())
-        .collect();
+    let rule_names: Vec<String> = show.rules.keys().cloned().collect();
     let (
         get_show_component_name,
         evaluate_response_schema_name,
@@ -615,9 +623,9 @@ fn accept_datetime_header_parameter() -> Value {
         "name": "Accept-Datetime",
         "in": "header",
         "required": false,
-        "description": "Evaluate at this datetime. Omit for now.",
-        "schema": { "type": "string", "format": "date-time" },
-        "example": "Sat, 01 Jan 2025 00:00:00 GMT"
+        "description": "Evaluate at this datetime (Lemma forms: year, year-month, date, or datetime). Omit the header to evaluate at the current time.",
+        "schema": { "type": "string" },
+        "example": "2025-01-01"
     })
 }
 
@@ -783,7 +791,9 @@ fn rewrite_defs_refs(value: &mut Value) {
 }
 
 /// Form keywords copied from a Show property: a form field is one literal string.
-const FORM_KEYWORDS: [&str; 5] = ["pattern", "enum", "minLength", "maxLength", "description"];
+/// `pattern` is not copied: Show only uses it for the boolean text alternative, and form
+/// already forces booleans to `enum: ["true","false"]`.
+const FORM_KEYWORDS: [&str; 5] = ["enum", "minLength", "maxLength", "description", "format"];
 
 /// Lists are JSON-only: a form field is one literal, and a boolean is the string
 /// `true`/`false`.
@@ -918,6 +928,44 @@ mod tests {
         assert_eq!(groups[0]["tags"], json!(["Specs"]));
         assert_eq!(groups[1]["name"], "Specs");
         assert_eq!(groups[1]["tags"], json!(["pricing"]));
+    }
+
+    #[test]
+    fn test_tag_description_uses_spec_commentary_when_present() {
+        let engine = create_engine_with_code(
+            r#"spec artikel
+"""
+Artikel pricing for Dutch VAT bands.
+"""
+data price: 10
+rule total: price"#,
+        );
+        let spec = generate_openapi(&engine, false);
+        let tags = spec["tags"].as_array().expect("tags array");
+        let artikel = tags
+            .iter()
+            .find(|t| t["name"] == "artikel")
+            .expect("artikel tag");
+        assert_eq!(
+            artikel["description"],
+            "Artikel pricing for Dutch VAT bands."
+        );
+    }
+
+    #[test]
+    fn test_tag_description_falls_back_without_commentary() {
+        let engine = create_engine_with_code(
+            "spec pricing
+            data quantity: 10
+            rule total: quantity * 2",
+        );
+        let spec = generate_openapi(&engine, false);
+        let tags = spec["tags"].as_array().expect("tags array");
+        let pricing = tags
+            .iter()
+            .find(|t| t["name"] == "pricing")
+            .expect("pricing tag");
+        assert_eq!(pricing["description"], "Show and evaluate `pricing`");
     }
 
     #[test]
@@ -1468,6 +1516,32 @@ rule discount: 20
 
         let schema = &spec["components"]["schemas"]["test_request"];
         assert_eq!(schema["properties"]["quantity"]["type"], "string");
+        assert!(schema["properties"]["quantity"].get("pattern").is_none());
+    }
+
+    #[test]
+    fn test_post_schema_date_and_time_use_standard_formats() {
+        let engine = create_engine_with_code(
+            "spec test
+            data start: date
+            data at: time
+            rule result: start
+            rule when: at",
+        );
+        let spec = generate_openapi(&engine, false);
+
+        let schema = &spec["components"]["schemas"]["test_request"];
+        assert_eq!(
+            schema["properties"]["start"]["oneOf"],
+            json!([
+                {"type": "string", "format": "date"},
+                {"type": "string", "format": "date-time"}
+            ])
+        );
+        assert_eq!(schema["properties"]["at"]["format"], "time");
+        let form = &spec["components"]["schemas"]["test_form_request"];
+        assert_eq!(form["properties"]["start"]["format"], "date");
+        assert_eq!(form["properties"]["at"]["format"], "time");
     }
 
     #[test]
@@ -1540,7 +1614,8 @@ data qty: number -> suggest 1
 rule cost: price * qty
 
 spec order
-uses lines: line list
+uses line
+data lines: line list
 data discounts: number list
   -> with 5, 10
 rule total: lines -> sum cost
@@ -1549,7 +1624,7 @@ rule discount_total: discounts -> sum
 
 spec part
 data own_cost: number
-uses components: part list
+data components: part list
 rule unit_cost:
   own_cost + (components -> sum components.unit_cost)
   unless components -> count is 0 then own_cost
@@ -1591,10 +1666,7 @@ rule unit_cost:
         let discounts =
             &document["components"]["schemas"]["order_request"]["properties"]["discounts"];
         assert_eq!(discounts["type"], "array");
-        assert_eq!(
-            discounts["items"],
-            json!({ "type": "string", "pattern": lemma::api::number_pattern() })
-        );
+        assert_eq!(discounts["items"], json!({ "type": "string" }));
         assert_eq!(discounts["default"], json!(["5", "10"]));
     }
 
@@ -1607,7 +1679,8 @@ uses article: article
 rule cost: qty * article.price
 
 spec order
-uses lines: line list
+uses line
+data lines: line list
   -> with qty: 2, article.price: 5
   -> with qty: 1
 rule total: lines -> sum cost
@@ -1619,7 +1692,8 @@ rule applies: income > threshold
 
 spec tax
 data income: number
-uses brackets: bracket list
+uses bracket
+data brackets: bracket list
   -> with threshold: 0, income: income
 rule applicable: brackets -> where applies -> count
 "#;
@@ -1720,6 +1794,39 @@ rule applicable: brackets -> where applies -> count
             schemas["RuleResultValue"]["properties"]["list"]["items"]["$ref"],
             "#/components/schemas/RuleResultValue"
         );
+    }
+
+    #[test]
+    fn shared_row_schema_across_parents_does_not_panic() {
+        let code = r#"
+spec article
+data price: number
+
+spec line
+uses article: article
+data qty: number
+rule cost: qty * article.price
+
+spec order
+uses line
+data lines: line list
+rule total: lines -> sum cost
+
+spec cart
+uses line
+data lines: line list
+rule subtotal: lines -> sum qty
+"#;
+        let engine = create_engine_with_code(code);
+        let document = generate_openapi(&engine, false);
+        let row = &document["components"]["schemas"]["LemmaRow_line"];
+        assert_eq!(row["type"], "object");
+        assert_eq!(
+            row["properties"]["qty"]["x-lemma-needed-by-rules"],
+            json!([])
+        );
+        assert!(document["paths"].get("/order").is_some());
+        assert!(document["paths"].get("/cart").is_some());
     }
 
     #[test]

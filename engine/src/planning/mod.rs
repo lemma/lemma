@@ -28,41 +28,10 @@ use crate::parsing::ast::{DateTimeValue, EffectiveDate, LemmaRepository, LemmaSp
 use crate::Error;
 pub use execution_plan::ExecutionPlan;
 use indexmap::IndexMap;
-use semantics::SpecIdentity;
-use serde::{Deserialize, Serialize};
 pub use spec_set::LemmaSpecSet;
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 use std::unreachable;
-
-/// Canonical identity of one temporal spec set: `(repository, spec name)`.
-///
-/// `repository` is `None` for the default unnamed repository. Both components are canonicalized
-/// exactly as [`PlanStore`] canonicalizes its own keys, so a key built here always
-/// addresses the same entry the plans were stored under.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub(crate) struct SpecSetKey {
-    repository: Option<String>,
-    spec: String,
-}
-
-impl SpecSetKey {
-    pub(crate) fn new(repository: Option<&str>, spec: &str) -> Self {
-        Self {
-            repository: PlanStore::repo_key(repository),
-            spec: PlanStore::spec_key(spec),
-        }
-    }
-}
-
-impl std::fmt::Display for SpecSetKey {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match &self.repository {
-            Some(repository) => write!(formatter, "{repository} {}", self.spec),
-            None => write!(formatter, "{}", self.spec),
-        }
-    }
-}
 
 /// Temporal slices of one spec, keyed by [`ExecutionPlan::effective`].
 pub(crate) type PlanSlices = BTreeMap<EffectiveDate, Arc<ExecutionPlan>>;
@@ -72,82 +41,9 @@ pub(crate) type PlanSlices = BTreeMap<EffectiveDate, Arc<ExecutionPlan>>;
 /// Temporal slices per spec are a [`BTreeMap`] keyed by [`ExecutionPlan::effective`].
 /// Values are [`Arc`] so a planning pass can intern the same plan as a named-`uses`
 /// / row template without a second deep clone.
-#[derive(Debug, Default, Serialize, Deserialize)]
+#[derive(Debug, Default)]
 pub(crate) struct PlanStore {
-    #[serde(with = "plan_store_plans")]
     plans: IndexMap<Option<String>, IndexMap<String, PlanSlices>>,
-}
-
-/// Snapshot form of [`PlanStore::plans`]: every plan slice keeps its `Arc` identity.
-mod plan_store_plans {
-    use super::PlanSlices;
-    use crate::snapshot::shared::arc_map;
-    use indexmap::IndexMap;
-    use serde::{Deserialize, Deserializer, Serializer};
-
-    type Plans = IndexMap<Option<String>, IndexMap<String, PlanSlices>>;
-
-    struct SlicesRef<'a>(&'a PlanSlices);
-
-    impl serde::Serialize for SlicesRef<'_> {
-        fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-            arc_map::serialize(self.0, serializer)
-        }
-    }
-
-    struct SlicesOwned(PlanSlices);
-
-    impl<'de> Deserialize<'de> for SlicesOwned {
-        fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-            arc_map::deserialize(deserializer).map(SlicesOwned)
-        }
-    }
-
-    struct SpecsRef<'a>(&'a IndexMap<String, PlanSlices>);
-
-    impl serde::Serialize for SpecsRef<'_> {
-        fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-            serializer.collect_seq(
-                self.0
-                    .iter()
-                    .map(|(spec, slices)| (spec, SlicesRef(slices))),
-            )
-        }
-    }
-
-    pub(super) fn serialize<S: Serializer>(
-        plans: &Plans,
-        serializer: S,
-    ) -> Result<S::Ok, S::Error> {
-        serializer.collect_seq(
-            plans
-                .iter()
-                .map(|(repository, specs)| (repository, SpecsRef(specs))),
-        )
-    }
-
-    pub(super) fn deserialize<'de, D: Deserializer<'de>>(
-        deserializer: D,
-    ) -> Result<Plans, D::Error> {
-        let raw = Vec::<(Option<String>, Vec<(String, SlicesOwned)>)>::deserialize(deserializer)?;
-        let mut plans = IndexMap::with_capacity(raw.len());
-        for (repository, specs) in raw {
-            let mut by_spec = IndexMap::with_capacity(specs.len());
-            for (spec, slices) in specs {
-                if by_spec.insert(spec, slices.0).is_some() {
-                    return Err(serde::de::Error::custom(
-                        "engine snapshot repeats a spec name",
-                    ));
-                }
-            }
-            if plans.insert(repository, by_spec).is_some() {
-                return Err(serde::de::Error::custom(
-                    "engine snapshot repeats a repository",
-                ));
-            }
-        }
-        Ok(plans)
-    }
 }
 
 impl PlanStore {
@@ -239,7 +135,8 @@ pub(crate) struct PlanningResult {
     pub errors: Vec<Error>,
 }
 
-/// Every spec set of `context` with its identity, ordered by [`SpecSetKey`], so a pass
+/// Every spec set of `context` with its identity, ordered by repository name then spec
+/// name, so a pass
 /// visits sets in an order fixed by their identities and not by load order.
 pub(crate) fn spec_sets_in_order(
     context: &Context,
@@ -253,102 +150,218 @@ pub(crate) fn spec_sets_in_order(
                 .map(move |(name, spec_set)| (repository, name, spec_set))
         })
         .collect();
-    sets.sort_by_key(|(repository, name, _)| SpecSetKey::new(repository.name.as_deref(), name));
+    sets.sort_by(|(repo_a, name_a, _), (repo_b, name_b, _)| {
+        repo_a
+            .name
+            .as_deref()
+            .cmp(&repo_b.name.as_deref())
+            .then_with(|| name_a.as_str().cmp(name_b.as_str()))
+    });
     sets
 }
 
-/// Canonical bytes of everything the plans of one temporal version are built from: the
-/// version with its effective boundaries, and every spec set reachable from it through
-/// dependency edges, each with all of its versions and boundaries.
-///
-/// Equal bytes mean equal plans, so a committed slice with equal bytes is reused as is.
-/// Bytes are compared directly and never hashed. `start_line` and spans are part of the
-/// bytes, so moving a version in its source rebuilds its slice.
-pub(crate) fn planning_input(
-    context: &Context,
-    repository: &Arc<LemmaRepository>,
-    spec: &LemmaSpec,
-) -> Result<Arc<Vec<u8>>, Vec<Error>> {
-    #[derive(Serialize)]
-    struct VersionInput<'a> {
-        spec: &'a LemmaSpec,
-        boundaries: (Option<DateTimeValue>, Option<DateTimeValue>),
-    }
-
-    #[derive(Serialize)]
-    struct DependencySetInput<'a> {
-        repository: &'a LemmaRepository,
-        name: &'a str,
-        versions: Option<Vec<VersionInput<'a>>>,
-    }
-
-    #[derive(Serialize)]
-    struct PlanningInput<'a> {
-        repository: &'a LemmaRepository,
-        version: VersionInput<'a>,
-        dependencies: Vec<DependencySetInput<'a>>,
-    }
-
-    let lemma_spec_set = context
-        .spec_set(repository, &spec.name)
-        .expect("BUG: planning input requested for a spec missing from context");
-
-    let mut reached: BTreeMap<SpecSetKey, (Arc<LemmaRepository>, String, Option<&LemmaSpecSet>)> =
-        BTreeMap::new();
-    let mut frontier: Vec<(Arc<LemmaRepository>, &LemmaSpec)> =
-        vec![(Arc::clone(repository), spec)];
-    while let Some((owner, version)) = frontier.pop() {
-        for edge in discovery::dependency_edges(version, &owner, context)? {
-            let key = SpecSetKey::new(edge.dep_repository.name.as_deref(), &edge.dep_name);
-            if reached.contains_key(&key) {
-                continue;
-            }
-            let dep_set = context.spec_set(&edge.dep_repository, &edge.dep_name);
-            if let Some(dep_set) = dep_set {
-                for dep_version in dep_set.iter_specs() {
-                    frontier.push((Arc::clone(&edge.dep_repository), dep_version));
-                }
-            }
-            reached.insert(
-                key,
-                (Arc::clone(&edge.dep_repository), edge.dep_name, dep_set),
-            );
-        }
-    }
-
-    let dependencies = reached
-        .values()
-        .map(|(dep_repository, name, dep_set)| DependencySetInput {
-            repository: dep_repository.as_ref(),
-            name,
-            versions: dep_set.map(|dep_set| {
-                dep_set
-                    .iter_with_ranges()
-                    .map(|(spec, from, to)| VersionInput {
-                        spec,
-                        boundaries: (from, to),
-                    })
-                    .collect()
-            }),
-        })
-        .collect();
-    let input = PlanningInput {
-        repository: repository.as_ref(),
-        version: VersionInput {
-            spec,
-            boundaries: lemma_spec_set.effective_range(spec),
-        },
-        dependencies,
-    };
-    Ok(Arc::new(
-        postcard::to_allocvec(&input).expect("BUG: planning input serializes"),
-    ))
+/// One dependency edge of a slice plan: the spec version it reaches and that version's
+/// slice.
+#[derive(Clone)]
+struct SliceEdge<'a> {
+    repository: Arc<LemmaRepository>,
+    spec: &'a LemmaSpec,
+    identity: semantics::SpecIdentity,
 }
 
-/// The template plan of `spec` at instant `at`, built at most once per pass.
+/// The slices the dependency edges of the `slice` plan of `spec` resolve to, in edge
+/// order, self-edges left out.
+fn slice_edges<'a>(
+    context: &'a Context,
+    repository: &Arc<LemmaRepository>,
+    spec: &LemmaSpec,
+    slice: &EffectiveDate,
+    slices: &mut instance_list::SpecSlices,
+    limits: &crate::limits::ResourceLimits,
+) -> Result<Vec<SliceEdge<'a>>, Vec<Error>> {
+    let mut edges = Vec::new();
+    let mut errors = Vec::new();
+    for edge in discovery::dependency_edges(spec, repository, context)? {
+        match discovery::resolve_dependency_targets(
+            context, &edge, repository, spec, slice, slices, limits,
+        ) {
+            Ok(targets) => {
+                for dependency in targets {
+                    match slices.identity_at(
+                        context,
+                        &dependency.repository,
+                        dependency.spec,
+                        &dependency.at,
+                        limits,
+                    ) {
+                        Ok(identity) => edges.push(SliceEdge {
+                            repository: dependency.repository,
+                            spec: dependency.spec,
+                            identity,
+                        }),
+                        Err(slice_errors) => errors.extend(slice_errors),
+                    }
+                }
+            }
+            Err(resolve_errors) => errors.extend(resolve_errors),
+        }
+    }
+    if errors.is_empty() {
+        Ok(edges)
+    } else {
+        Err(errors)
+    }
+}
+
+/// The committed plan of slice `identity` of `spec` with the slice's edges, when this pass
+/// would build it from the same own bytes `Arc`, boundaries and edge slices. Whether the edge
+/// slices are themselves reused is left to [`seed_reusable_plans`].
+fn reuse_candidate<'a>(
+    context: &'a Context,
+    committed: &PlanStore,
+    repository: &Arc<LemmaRepository>,
+    spec: &LemmaSpec,
+    identity: &semantics::SpecIdentity,
+    slices: &mut instance_list::SpecSlices,
+    limits: &crate::limits::ResourceLimits,
+) -> Option<(Arc<ExecutionPlan>, Vec<SliceEdge<'a>>)> {
+    let candidate = committed
+        .get_plans(repository.name.as_deref(), &spec.name)?
+        .get(&identity.slice)?;
+    if candidate.identity != *identity {
+        return None;
+    }
+    let spec_set = context
+        .spec_set(repository, &spec.name)
+        .expect("BUG: reuse checked for a spec missing from context");
+    if !Arc::ptr_eq(spec_set.spec_arc(spec), &candidate.own_spec) {
+        return None;
+    }
+    let (effective_from, effective_to) = spec_set.effective_range(spec);
+    if candidate.effective_from != effective_from || candidate.effective_to != effective_to {
+        return None;
+    }
+    // Edges that fail to resolve are reported when the slice is built.
+    let edges = slice_edges(context, repository, spec, &identity.slice, slices, limits).ok()?;
+    if !edges
+        .iter()
+        .map(|edge| &edge.identity)
+        .eq(candidate.edges.iter())
+    {
+        return None;
+    }
+    Some((Arc::clone(candidate), edges))
+}
+
+/// A slice whose committed plan passed [`reuse_candidate`], waiting on its edge slices.
+struct ReuseFrame<'a> {
+    identity: semantics::SpecIdentity,
+    candidate: Arc<ExecutionPlan>,
+    edges: Vec<SliceEdge<'a>>,
+    next_edge: usize,
+}
+
+/// Put every committed slice plan this pass would build identically into
+/// `interners.spec_templates`, so [`get_or_build_template`] returns it as is.
 ///
-/// Nested row templates and root temporal slices both come through here, so one
-/// `(identity, instant)` has exactly one plan in a pass.
+/// A slice is reused when [`reuse_candidate`] accepts it and every slice its edges reach
+/// is reused. Decisions are made once per slice, depth first on an explicit stack; an
+/// edge back to a slice still on the stack is not reused.
+fn seed_reusable_plans(
+    context: &Context,
+    committed: &PlanStore,
+    limits: &crate::limits::ResourceLimits,
+    interners: &mut instance_list::PassInterners,
+) {
+    let mut decisions: HashMap<semantics::SpecIdentity, bool> = HashMap::new();
+    for (repository, _, lemma_spec_set) in spec_sets_in_order(context) {
+        for spec in lemma_spec_set.iter_specs() {
+            // Slice errors are reported when `plan` asks for the same slices.
+            let Ok(version_slices) = interners.slices.of(context, repository, spec, limits) else {
+                continue;
+            };
+            for start in version_slices.starts() {
+                let identity = semantics::SpecIdentity::of(repository, spec, start.clone());
+                if decisions.contains_key(&identity) {
+                    continue;
+                }
+                let Some((candidate, edges)) = reuse_candidate(
+                    context,
+                    committed,
+                    repository,
+                    spec,
+                    &identity,
+                    &mut interners.slices,
+                    limits,
+                ) else {
+                    decisions.insert(identity, false);
+                    continue;
+                };
+                let mut stack = vec![ReuseFrame {
+                    identity,
+                    candidate,
+                    edges,
+                    next_edge: 0,
+                }];
+                while let Some(top) = stack.last() {
+                    let Some(edge) = top.edges.get(top.next_edge).cloned() else {
+                        let reused = stack.pop().expect("BUG: stack top was just read");
+                        decisions.insert(reused.identity.clone(), true);
+                        interners
+                            .spec_templates
+                            .insert(reused.identity, reused.candidate);
+                        continue;
+                    };
+                    match decisions.get(&edge.identity) {
+                        Some(true) => {
+                            stack
+                                .last_mut()
+                                .expect("BUG: stack top was just read")
+                                .next_edge += 1;
+                            continue;
+                        }
+                        Some(false) => {
+                            let rejected = stack.pop().expect("BUG: stack top was just read");
+                            decisions.insert(rejected.identity, false);
+                            continue;
+                        }
+                        None => {}
+                    }
+                    if stack.iter().any(|frame| frame.identity == edge.identity) {
+                        let rejected = stack.pop().expect("BUG: stack top was just read");
+                        decisions.insert(rejected.identity, false);
+                        continue;
+                    }
+                    match reuse_candidate(
+                        context,
+                        committed,
+                        &edge.repository,
+                        edge.spec,
+                        &edge.identity,
+                        &mut interners.slices,
+                        limits,
+                    ) {
+                        Some((candidate, edges)) => stack.push(ReuseFrame {
+                            identity: edge.identity,
+                            candidate,
+                            edges,
+                            next_edge: 0,
+                        }),
+                        None => {
+                            decisions.insert(edge.identity, false);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// The plan of the slice of `spec` that holds instant `at`, built at most once per pass.
+///
+/// Nested row templates and root temporal slices both come through here, so one slice
+/// ([`SpecIdentity`]) has exactly one plan in a pass. The plan is built at the slice's
+/// start: inside a slice every unpinned import resolves to the same version.
 pub(crate) fn get_or_build_template(
     context: &Context,
     repository: &Arc<LemmaRepository>,
@@ -356,78 +369,67 @@ pub(crate) fn get_or_build_template(
     at: &EffectiveDate,
     limits: &crate::limits::ResourceLimits,
     interners: &mut instance_list::PassInterners,
-    planning_input: &Arc<Vec<u8>>,
 ) -> Result<Arc<ExecutionPlan>, Vec<Error>> {
-    let identity = SpecIdentity::of(repository, spec);
-    if let Some(template) = interners.spec_templates.get(&identity, at) {
+    let identity = interners
+        .slices
+        .identity_at(context, repository, spec, at, limits)?;
+    if let Some(template) = interners.spec_templates.get(&identity) {
         return Ok(template);
     }
+    let slice = identity.slice.clone();
     let lemma_spec_set = context
         .spec_set(repository, &spec.name)
         .expect("BUG: template spec missing from context");
-    let dependencies = discovery::discover_dependency_order(context, spec, at, limits).map_err(
-        |error| match error {
-            discovery::DependencyDiscoveryError::Cycle(errors)
-            | discovery::DependencyDiscoveryError::Other(errors) => errors,
-        },
-    )?;
+    let dependencies = discovery::discover_dependency_order(
+        context, repository, spec, &slice, limits,
+    )
+    .map_err(|error| match error {
+        discovery::DependencyDiscoveryError::Cycle(errors)
+        | discovery::DependencyDiscoveryError::Other(errors) => errors,
+    })?;
     let (graph, resolved_types) = graph::Graph::build(
         context,
         repository,
         spec,
         &dependencies,
-        at,
+        &slice,
         limits,
         interners,
     )?;
+    let edges = slice_edges(
+        context,
+        repository,
+        spec,
+        &slice,
+        &mut interners.slices,
+        limits,
+    )
+    .expect("BUG: edges of a slice whose dependencies were discovered and built resolve")
+    .into_iter()
+    .map(|edge| edge.identity)
+    .collect();
     let mut plan = execution_plan::build_execution_plan(
         &graph,
         resolved_types,
-        at,
+        &slice,
         limits,
         &mut normalize::NormalFormInterner::new(),
-        Arc::clone(planning_input),
+        Arc::clone(lemma_spec_set.spec_arc(spec)),
+        edges,
     )?;
     execution_plan::attach_show_cache(&mut plan, lemma_spec_set, spec);
     let template = Arc::new(plan);
     interners
         .spec_templates
-        .insert(identity, at, Arc::clone(&template));
+        .insert(identity, Arc::clone(&template));
     Ok(template)
-}
-
-/// Committed plans of the temporal version `spec` of `repository`, when every one of them
-/// was built from `planning_input`. Empty when the version must be planned again.
-fn reusable_version_plans(
-    committed: &PlanStore,
-    repository: &Arc<LemmaRepository>,
-    spec: &LemmaSpec,
-    planning_input: &Arc<Vec<u8>>,
-) -> Vec<Arc<ExecutionPlan>> {
-    let Some(slices) = committed.get_plans(repository.name.as_deref(), &spec.name) else {
-        return Vec::new();
-    };
-    let version_plans: Vec<Arc<ExecutionPlan>> = slices
-        .values()
-        .filter(|plan| plan.identity.effective == spec.effective_from)
-        .cloned()
-        .collect();
-    let unchanged = !version_plans.is_empty()
-        && version_plans
-            .iter()
-            .all(|plan| plan.planning_input == *planning_input);
-    if unchanged {
-        version_plans
-    } else {
-        Vec::new()
-    }
 }
 
 /// Build the execution plans of every spec set of `context`.
 ///
-/// `committed` is read only to reuse plans: a temporal version whose planning input
-/// bytes equal the committed ones keeps its committed `Arc`s. Every other version is
-/// built. Neither the context nor `committed` is mutated.
+/// `committed` is read only to reuse plans: a slice [`seed_reusable_plans`] accepts keeps
+/// its committed `Arc`. Every other slice is built. Neither the context nor `committed`
+/// is mutated.
 pub(crate) fn plan(
     context: &Context,
     limits: &crate::limits::ResourceLimits,
@@ -442,44 +444,19 @@ pub(crate) fn plan(
         EffectiveDate,
     )> = HashSet::new();
     let mut interners = instance_list::PassInterners::default();
+    seed_reusable_plans(context, committed, limits, &mut interners);
 
     for (repository, spec_name, lemma_spec_set) in spec_sets_in_order(context) {
         for spec in lemma_spec_set.iter_specs() {
-            let input = match planning_input(context, repository, spec) {
-                Ok(input) => input,
-                Err(input_errors) => {
-                    errors.extend(
-                        input_errors
-                            .into_iter()
-                            .map(|err| err.with_spec_context(spec)),
-                    );
-                    failed_specs.insert((
-                        Arc::clone(repository),
-                        spec_name.clone(),
-                        spec.effective_from.clone(),
-                    ));
-                    continue;
-                }
-            };
-
-            let reused = reusable_version_plans(committed, repository, spec, &input);
-            if !reused.is_empty() {
-                for plan in reused {
-                    plans.insert_plan(repository.name.as_deref(), spec_name, plan);
-                }
-                continue;
-            }
-
             let mut slice_errors = Vec::new();
             let mut slice_plans = Vec::new();
-            let breakpoints =
-                match discovery::plan_breakpoints(context, lemma_spec_set, spec, limits) {
-                    Ok(dates) => dates,
-                    Err(plan_errors) => {
-                        slice_errors.extend(plan_errors);
-                        Vec::new()
-                    }
-                };
+            let breakpoints = match interners.slices.of(context, repository, spec, limits) {
+                Ok(slices) => slices.starts().to_vec(),
+                Err(plan_errors) => {
+                    slice_errors.extend(plan_errors);
+                    Vec::new()
+                }
+            };
             for effective in breakpoints {
                 match get_or_build_template(
                     context,
@@ -488,7 +465,6 @@ pub(crate) fn plan(
                     &effective,
                     limits,
                     &mut interners,
-                    &input,
                 ) {
                     Ok(plan) => slice_plans.push(plan),
                     Err(build_errors) => slice_errors.extend(build_errors),
@@ -1041,6 +1017,8 @@ data x: 1
     // --- Incremental replanning: reuse, transactionality ---
 
     use crate::planning::normalize::NormalForm;
+    use crate::planning::ExecutionPlan;
+    use std::collections::BTreeMap;
     use std::path::PathBuf;
 
     fn path_source(name: &str) -> SourceType {
@@ -1340,6 +1318,533 @@ rule current: code
             run_display(&engine, "consumer", &date(2025, 3, 1), "out"),
             "42",
             "a pinned consumer must observe the new source of the pinned slice"
+        );
+    }
+
+    /// Committed slice plans of a spec set, by slice start, as `Arc` addresses.
+    fn slice_arcs(
+        engine: &crate::Engine,
+        spec_name: &str,
+    ) -> BTreeMap<EffectiveDate, *const ExecutionPlan> {
+        engine
+            .plans
+            .get_plans(None, spec_name)
+            .unwrap_or_else(|| panic!("plans for spec '{spec_name}'"))
+            .iter()
+            .map(|(slice, plan)| (slice.clone(), Arc::as_ptr(plan)))
+            .collect()
+    }
+
+    fn slice_start(year: i32, month: u32, day: u32) -> EffectiveDate {
+        EffectiveDate::DateTimeValue(date(year, month, day))
+    }
+
+    /// A second load that leaves a spec set and its closure unchanged keeps every committed
+    /// plan, and every template a consumer holds is the dependency's committed slice.
+    #[test]
+    fn a_second_load_reuses_every_unchanged_plan() {
+        let mut engine = crate::Engine::new();
+        engine
+            .load([
+                (
+                    path_source("leaf.lemma"),
+                    "spec leaf\ndata v: 1\nrule r: v\n\nspec leaf 2025-01-01\ndata v: 2\nrule r: v\n",
+                ),
+                (
+                    path_source("mid.lemma"),
+                    "spec mid\nuses l: leaf\nrule r: l.r\n",
+                ),
+                (
+                    path_source("root.lemma"),
+                    "spec root\nuses m: mid\nrule out: m.r\n",
+                ),
+            ])
+            .expect("initial load");
+        let before: Vec<_> = ["leaf", "mid", "root"]
+            .iter()
+            .map(|name| slice_arcs(&engine, name))
+            .collect();
+
+        engine
+            .load([(
+                path_source("other.lemma"),
+                "spec other\ndata v: 3\nrule r: v\n",
+            )])
+            .expect("second load");
+
+        let after: Vec<_> = ["leaf", "mid", "root"]
+            .iter()
+            .map(|name| slice_arcs(&engine, name))
+            .collect();
+        assert_eq!(
+            after, before,
+            "unchanged spec sets keep their committed Arcs"
+        );
+
+        for plan in engine
+            .plans
+            .get_plans(None, "root")
+            .expect("root plans")
+            .values()
+        {
+            for (identity, template) in &plan.row_templates {
+                let committed = engine
+                    .plans
+                    .get_plans(identity.repository.as_deref(), &identity.spec)
+                    .and_then(|slices| slices.get(&identity.slice))
+                    .unwrap_or_else(|| panic!("committed slice for template {identity}"));
+                assert!(
+                    Arc::ptr_eq(committed, template),
+                    "template {identity} is the committed slice plan"
+                );
+            }
+        }
+    }
+
+    /// Adding a dependency version ends the previous version earlier, so the consumer slice
+    /// over that version is replanned; the slice over an older, untouched version is reused.
+    #[test]
+    fn a_new_dependency_version_keeps_consumer_slices_over_untouched_versions() {
+        let mut engine = crate::Engine::new();
+        engine
+            .load([
+                (
+                    path_source("dep.lemma"),
+                    "spec dep 2024-01-01\ndata v: 1\nrule r: v\n\nspec dep 2025-01-01\ndata v: 2\nrule r: v\n",
+                ),
+                (
+                    path_source("consumer.lemma"),
+                    "spec consumer 2024-01-01\nuses d: dep\nrule out: d.r\n",
+                ),
+            ])
+            .expect("initial load");
+        let before = slice_arcs(&engine, "consumer");
+        assert_eq!(before.len(), 2, "one consumer slice per dependency version");
+
+        engine
+            .load([(
+                path_source("dep_2026.lemma"),
+                "spec dep 2026-01-01\ndata v: 3\nrule r: v\n",
+            )])
+            .expect("new dependency version loads");
+
+        let after = slice_arcs(&engine, "consumer");
+        assert_eq!(after.len(), 3, "the new version adds a consumer slice");
+        assert_eq!(
+            after[&slice_start(2024, 1, 1)],
+            before[&slice_start(2024, 1, 1)],
+            "the slice over `dep` 2024, whose window did not change, is reused"
+        );
+        assert_ne!(
+            after[&slice_start(2025, 1, 1)],
+            before[&slice_start(2025, 1, 1)],
+            "the slice over `dep` 2025, which now ends at 2026, is replanned"
+        );
+        assert_eq!(
+            run_display(&engine, "consumer", &date(2024, 6, 1), "out"),
+            "1"
+        );
+        assert_eq!(
+            run_display(&engine, "consumer", &date(2025, 6, 1), "out"),
+            "2"
+        );
+        assert_eq!(
+            run_display(&engine, "consumer", &date(2026, 6, 1), "out"),
+            "3"
+        );
+    }
+
+    /// A pinned import reads one dependency version; a new version after it changes nothing
+    /// the consumer reads, so the consumer is reused.
+    #[test]
+    fn a_pinned_import_keeps_its_plan_when_a_later_dependency_version_arrives() {
+        let mut engine = crate::Engine::new();
+        engine
+            .load([
+                (
+                    path_source("dep.lemma"),
+                    "spec dep 2024-01-01\ndata v: 1\nrule r: v\n\nspec dep 2025-01-01\ndata v: 2\nrule r: v\n",
+                ),
+                (
+                    path_source("consumer.lemma"),
+                    "spec consumer\nuses d: dep 2024-06-01\nrule out: d.r\n",
+                ),
+            ])
+            .expect("initial load");
+        let before = slice_arcs(&engine, "consumer");
+
+        engine
+            .load([(
+                path_source("dep_2026.lemma"),
+                "spec dep 2026-01-01\ndata v: 3\nrule r: v\n",
+            )])
+            .expect("new dependency version loads");
+
+        assert_eq!(
+            slice_arcs(&engine, "consumer"),
+            before,
+            "the pinned consumer reads `dep` 2024 only and is reused"
+        );
+        assert_eq!(
+            run_display(&engine, "consumer", &date(2026, 6, 1), "out"),
+            "1"
+        );
+    }
+
+    /// A version inserted at an old slice start of its own spec takes that slice: the
+    /// committed plan there belongs to the earlier version and must not be reused.
+    #[test]
+    fn a_version_inserted_at_an_old_slice_start_is_planned_fresh() {
+        let mut engine = crate::Engine::new();
+        engine
+            .load([
+                (
+                    path_source("dep.lemma"),
+                    "spec dep\ndata v: 1\nrule r: v\n\nspec dep 2025-01-01\ndata v: 2\nrule r: v\n",
+                ),
+                (
+                    path_source("consumer.lemma"),
+                    "spec consumer\nuses d: dep\nrule out: d.r\n",
+                ),
+            ])
+            .expect("initial load");
+        assert_eq!(slice_count(&engine, "consumer"), 2);
+
+        engine
+            .load([(
+                path_source("consumer_2025.lemma"),
+                "spec consumer 2025-01-01\nuses d: dep\nrule out: d.r * 10\n",
+            )])
+            .expect("new consumer version loads");
+
+        let slices = engine
+            .plans
+            .get_plans(None, "consumer")
+            .expect("consumer plans");
+        let at_2025 = &slices[&slice_start(2025, 1, 1)];
+        assert_eq!(
+            at_2025.identity.effective,
+            slice_start(2025, 1, 1),
+            "the 2025 slice is the new version's"
+        );
+        assert_eq!(
+            run_display(&engine, "consumer", &date(2025, 6, 1), "out"),
+            "20"
+        );
+        assert_eq!(
+            run_display(&engine, "consumer", &date(2024, 6, 1), "out"),
+            "1"
+        );
+    }
+
+    /// Moving a spec in its source moves its spans, which are part of its own bytes.
+    #[test]
+    fn moving_a_spec_in_its_source_replans_it() {
+        let mut engine = crate::Engine::new();
+        engine
+            .load([(
+                path_source("solo.lemma"),
+                "spec solo\ndata v: 1\nrule r: v\n",
+            )])
+            .expect("initial load");
+        let before = slice_arcs(&engine, "solo");
+
+        engine
+            .update(
+                None,
+                "\n\nspec solo\ndata v: 1\nrule r: v\n".to_string(),
+                path_source("solo.lemma"),
+            )
+            .expect("moved spec applies");
+
+        assert_ne!(slice_arcs(&engine, "solo"), before);
+        assert_eq!(
+            engine
+                .plans
+                .get_plans(None, "solo")
+                .expect("solo plans")
+                .values()
+                .next()
+                .expect("one slice")
+                .start_line,
+            3
+        );
+    }
+
+    /// Every plan the engine keeps alive: the committed slices and every template they
+    /// carry, transitively, each once.
+    fn held_plans(engine: &crate::Engine) -> Vec<Arc<ExecutionPlan>> {
+        let mut stack: Vec<Arc<ExecutionPlan>> = engine
+            .plans
+            .plans
+            .values()
+            .flat_map(|by_spec| by_spec.values())
+            .flat_map(|slices| slices.values())
+            .cloned()
+            .collect();
+        let mut held: Vec<Arc<ExecutionPlan>> = Vec::new();
+        while let Some(plan) = stack.pop() {
+            if held.iter().any(|kept| Arc::ptr_eq(kept, &plan)) {
+                continue;
+            }
+            stack.extend(plan.row_templates.values().cloned());
+            held.push(plan);
+        }
+        held
+    }
+
+    fn committed_plan_of(
+        engine: &crate::Engine,
+        identity: &super::semantics::SpecIdentity,
+    ) -> Option<Arc<ExecutionPlan>> {
+        engine
+            .plans
+            .get_plans(identity.repository.as_deref(), &identity.spec)
+            .and_then(|slices| slices.get(&identity.slice))
+            .cloned()
+    }
+
+    /// No plan outlives the pass that replaced it: every template a committed plan holds
+    /// is the committed plan of its slice.
+    fn assert_every_template_is_committed(engine: &crate::Engine, step: &str) {
+        for plan in held_plans(engine) {
+            let committed = committed_plan_of(engine, &plan.identity).unwrap_or_else(|| {
+                panic!(
+                    "{step}: plan of {} is held but no longer committed",
+                    plan.identity
+                )
+            });
+            assert!(
+                Arc::ptr_eq(&committed, &plan),
+                "{step}: a stale plan of {} is held beside the committed one",
+                plan.identity
+            );
+        }
+    }
+
+    /// Weak handles to every plan the engine holds now.
+    fn weak_plans(engine: &crate::Engine) -> Vec<(String, std::sync::Weak<ExecutionPlan>)> {
+        held_plans(engine)
+            .iter()
+            .map(|plan| (plan.identity.to_string(), Arc::downgrade(plan)))
+            .collect()
+    }
+
+    /// Every plan held before a step is either still committed or freed.
+    fn assert_replaced_plans_freed(
+        engine: &crate::Engine,
+        before: &[(String, std::sync::Weak<ExecutionPlan>)],
+        step: &str,
+    ) {
+        let held = held_plans(engine);
+        for (identity, weak) in before {
+            if let Some(plan) = weak.upgrade() {
+                assert!(
+                    held.iter().any(|kept| Arc::ptr_eq(kept, &plan)),
+                    "{step}: replaced plan of {identity} is still alive outside the engine's plans"
+                );
+            }
+        }
+    }
+
+    const RETENTION_LEAF: &str =
+        "spec leaf\ndata v: 1\nrule r: v\n\nspec leaf 2025-01-01\ndata v: 2\nrule r: v\n";
+    const RETENTION_ITEM: &str =
+        "spec item\nuses l: leaf\ndata amount: number\nrule total: amount * l.r\n";
+    const RETENTION_BOX: &str =
+        "spec box\nuses item\ndata items: item list\nrule item_count: items -> count\n";
+    const RETENTION_ROOT: &str = "spec root\nuses b: box\nuses i: item\n  -> with amount: 3\nrule out: i.total\nrule boxed: b.item_count\n";
+    const RETENTION_PINNED: &str = "spec pinned\nuses l: leaf 2024-06-01\nrule out: l.r\n";
+
+    fn retention_engine() -> crate::Engine {
+        let mut engine = crate::Engine::new();
+        engine
+            .load([
+                (path_source("leaf.lemma"), RETENTION_LEAF),
+                (path_source("item.lemma"), RETENTION_ITEM),
+                (path_source("box.lemma"), RETENTION_BOX),
+                (path_source("root.lemma"), RETENTION_ROOT),
+                (path_source("pinned.lemma"), RETENTION_PINNED),
+            ])
+            .expect("retention workspace loads");
+        assert_every_template_is_committed(&engine, "initial load");
+        engine
+    }
+
+    /// Apply `step` and check that nothing the engine held before outlives it unless it
+    /// is still committed, and that every held template is the committed slice.
+    fn replan_step(engine: &mut crate::Engine, step: &str, apply: impl FnOnce(&mut crate::Engine)) {
+        let before = weak_plans(engine);
+        apply(engine);
+        assert_replaced_plans_freed(engine, &before, step);
+        assert_every_template_is_committed(engine, step);
+    }
+
+    /// A sequence of edits, additions, removals and a failed batch over a workspace
+    /// with nested templates (`root` holds `box`, `box` holds `item`,
+    /// `item` holds `leaf`) and a pinned import. After every step, no replaced plan may
+    /// survive and no held template may differ from its committed slice.
+    #[test]
+    fn replanning_frees_every_replaced_plan() {
+        let mut engine = retention_engine();
+
+        replan_step(&mut engine, "edit leaf", |engine| {
+            engine
+                .update(
+                    None,
+                    RETENTION_LEAF.replace("data v: 2", "data v: 5"),
+                    path_source("leaf.lemma"),
+                )
+                .expect("leaf edit applies");
+        });
+        assert_eq!(run_display(&engine, "root", &date(2025, 6, 1), "out"), "15");
+
+        replan_step(&mut engine, "edit leaf back", |engine| {
+            engine
+                .update(None, RETENTION_LEAF.to_string(), path_source("leaf.lemma"))
+                .expect("leaf revert applies");
+        });
+
+        replan_step(&mut engine, "re-parse unchanged item", |engine| {
+            engine
+                .update(None, RETENTION_ITEM.to_string(), path_source("item.lemma"))
+                .expect("unchanged item applies");
+        });
+
+        replan_step(&mut engine, "add leaf version", |engine| {
+            engine
+                .load([(
+                    path_source("leaf_2027.lemma"),
+                    "spec leaf 2027-01-01\ndata v: 7\nrule r: v\n",
+                )])
+                .expect("leaf version loads");
+        });
+        assert_eq!(run_display(&engine, "root", &date(2027, 6, 1), "out"), "21");
+
+        replan_step(&mut engine, "remove leaf version", |engine| {
+            engine
+                .remove(None, "leaf", Some(&date(2027, 6, 1)))
+                .expect("leaf version removes");
+        });
+
+        replan_step(&mut engine, "failed batch", |engine| {
+            engine
+                .update(
+                    None,
+                    "spec item\nuses l: leaf\ndata amount: number\nrule total: amount * l.missing\n"
+                        .to_string(),
+                    path_source("item.lemma"),
+                )
+                .expect_err("an item reading a missing rule fails to plan");
+        });
+
+        replan_step(&mut engine, "remove root", |engine| {
+            engine.remove(None, "root", None).expect("root removes");
+        });
+        assert!(engine.plans.get_plans(None, "root").is_none());
+
+        replan_step(&mut engine, "edit leaf after removals", |engine| {
+            engine
+                .update(
+                    None,
+                    RETENTION_LEAF.replace("data v: 1", "data v: 4"),
+                    path_source("leaf.lemma"),
+                )
+                .expect("leaf edit applies");
+        });
+        replan_step(&mut engine, "re-parse unchanged box again", |engine| {
+            engine
+                .update(None, RETENTION_BOX.to_string(), path_source("box.lemma"))
+                .expect("unchanged box applies");
+        });
+    }
+
+    /// Every spec version in the context with its spec `Arc`.
+    fn live_spec_arcs(engine: &crate::Engine) -> Vec<(String, Arc<LemmaSpec>)> {
+        let mut live = Vec::new();
+        for (repository, by_name) in engine.context.repositories() {
+            for spec_set in by_name.values() {
+                for spec in spec_set.iter_specs() {
+                    live.push((
+                        format!(
+                            "{:?} {} {:?}",
+                            repository.name, spec.name, spec.effective_from
+                        ),
+                        Arc::clone(spec_set.spec_arc(spec)),
+                    ));
+                }
+            }
+        }
+        live
+    }
+
+    /// Replanning the same specs a few times must not keep the old specs alive: once a
+    /// step replaces a spec version, the version it replaced is freed.
+    #[test]
+    fn replanning_drops_the_specs_it_replaces() {
+        const BROKEN_ITEM: &str =
+            "spec item\nuses l: leaf\ndata amount: number\nrule total: amount * l.missing\n";
+        let mut engine = retention_engine();
+        type ReplanStep = (&'static str, fn(&mut crate::Engine));
+        let steps: [ReplanStep; 5] = [
+            ("re-parse unchanged item", |engine| {
+                engine
+                    .update(None, RETENTION_ITEM.to_string(), path_source("item.lemma"))
+                    .expect("unchanged item applies");
+            }),
+            ("edit leaf", |engine| {
+                engine
+                    .update(
+                        None,
+                        RETENTION_LEAF.replace("data v: 2", "data v: 5"),
+                        path_source("leaf.lemma"),
+                    )
+                    .expect("leaf edit applies");
+            }),
+            ("revert leaf", |engine| {
+                engine
+                    .update(None, RETENTION_LEAF.to_string(), path_source("leaf.lemma"))
+                    .expect("leaf revert applies");
+            }),
+            ("failed item batch", |engine| {
+                engine
+                    .update(None, BROKEN_ITEM.to_string(), path_source("item.lemma"))
+                    .expect_err("an item reading a missing rule fails to plan");
+            }),
+            ("re-parse unchanged item again", |engine| {
+                engine
+                    .update(None, RETENTION_ITEM.to_string(), path_source("item.lemma"))
+                    .expect("unchanged item applies");
+            }),
+        ];
+
+        let mut seen: Vec<(String, std::sync::Weak<LemmaSpec>)> = Vec::new();
+        let mut failures = Vec::new();
+        for (step, apply) in steps {
+            for (version, spec_arc) in live_spec_arcs(&engine) {
+                let weak = Arc::downgrade(&spec_arc);
+                if !seen.iter().any(|(_, known)| known.ptr_eq(&weak)) {
+                    seen.push((version, weak));
+                }
+            }
+            apply(&mut engine);
+            let live = live_spec_arcs(&engine);
+            for (version, weak) in &seen {
+                let Some(spec_arc) = weak.upgrade() else {
+                    continue;
+                };
+                if !live
+                    .iter()
+                    .any(|(_, current)| Arc::ptr_eq(current, &spec_arc))
+                {
+                    failures.push(format!("after {step}: old {version}"));
+                }
+            }
+        }
+        assert!(
+            failures.is_empty(),
+            "replanning kept replaced specs alive:\n{}",
+            failures.join("\n")
         );
     }
 

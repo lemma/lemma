@@ -2010,6 +2010,55 @@ rule total: c.fee
 }
 
 #[test]
+fn nested_member_rule_read_across_unpinned_dependency_versions_is_checked() {
+    let mut engine = Engine::new();
+    let err = engine
+        .load([
+            (
+                lemma::SourceType::Path(std::sync::Arc::new(std::path::PathBuf::from("sub.lemma"))),
+                r#"
+spec sub
+rule fee: 1
+
+spec sub 2025-06-01
+rule fee: "later"
+"#
+                .to_string(),
+            ),
+            (
+                lemma::SourceType::Path(std::sync::Arc::new(std::path::PathBuf::from("mid.lemma"))),
+                r#"
+spec mid
+uses s: sub 2025-01-01
+
+spec mid 2025-06-01
+uses s: sub 2025-06-01
+"#
+                .to_string(),
+            ),
+            (
+                lemma::SourceType::Path(std::sync::Arc::new(std::path::PathBuf::from(
+                    "invoice.lemma",
+                ))),
+                r#"
+spec invoice 2025-01-01
+uses m: mid
+rule total: m.s.fee
+"#
+                .to_string(),
+            ),
+        ])
+        .expect_err("nested rule m.s.fee changes from number to text across mid versions");
+    let messages: Vec<String> = err.iter().map(|e| e.message().to_string()).collect();
+    assert!(
+        messages
+            .iter()
+            .any(|msg| msg.contains("without pinning an effective date") && msg.contains("s.fee")),
+        "{messages:?}"
+    );
+}
+
+#[test]
 fn spec_valued_rule_reads_the_whole_unpinned_interface() {
     let mut engine = Engine::new();
     engine

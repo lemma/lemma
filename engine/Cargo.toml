@@ -11,7 +11,7 @@ documentation = "https://docs.rs/lemma-engine"
 readme = "README.md"
 keywords = ["logic", "rules", "declarative", "dsl", "rust"]
 categories = ["parser-implementations", "development-tools"]
-include = ["/src/**", "/documentation/**", "/tests/**", "/schemas/**", "/README.md", "/LICENSE"]
+include = ["/src/**", "/documentation/**", "/tests/**", "/benches/**", "/schemas/**", "/README.md", "/LICENSE"]
 
 [lib]
 name = "lemma"
@@ -23,8 +23,6 @@ serde.workspace = true
 serde_json.workspace = true
 rust_decimal.workspace = true
 indexmap = { version = "2.0", features = ["serde"] }
-postcard = { version = "1.1", default-features = false, features = ["alloc", "use-std"] }
-crc32c = "0.6"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 wasm-bindgen = "=0.2.126"

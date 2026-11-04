@@ -124,19 +124,21 @@ public sealed interface LemmaType {
     }
   }
 
-  /**
-   * MeasureUnit.
-   * @param name name
-   * @param factor factor
-   * @param derivedMeasureFactors derivedMeasureFactors
-   * @param decomposition decomposition
-   * @param minimum minimum
-   * @param maximum maximum
-   * @param suggestion suggestion
-   */
+    /**
+     * MeasureUnit.
+     * @param name name
+     * @param factor factor; null when {@code reference} is set
+     * @param reference reference; null when {@code factor} is set
+     * @param derivedMeasureFactors derivedMeasureFactors
+     * @param decomposition decomposition
+     * @param minimum minimum
+     * @param maximum maximum
+     * @param suggestion suggestion
+     */
   record MeasureUnit(
       String name,
-      RationalFactor factor,
+      @Nullable RationalFactor factor,
+      @Nullable String reference,
       List<DerivedMeasureFactor> derivedMeasureFactors,
       Map<String, Integer> decomposition,
       @Nullable BigDecimal minimum,
@@ -160,6 +162,7 @@ public sealed interface LemmaType {
       JsonReading.expectStartObject(p, "MeasureUnit");
       String name = null;
       RationalFactor factor = null;
+      String reference = null;
       List<DerivedMeasureFactor> derived = null;
       Map<String, Integer> decomposition = null;
       BigDecimal minimum = null;
@@ -171,6 +174,7 @@ public sealed interface LemmaType {
         switch (field) {
           case "name" -> name = JsonReading.readString(p);
           case "factor" -> factor = RationalFactor.read(p);
+          case "reference" -> reference = JsonReading.readString(p);
           case "derived_measure_factors" ->
               derived =
                   JsonReading.readList(
@@ -189,8 +193,9 @@ public sealed interface LemmaType {
       if (name == null) {
         JsonReading.missingRequired("name", "MeasureUnit");
       }
-      if (factor == null) {
-        JsonReading.missingRequired("factor", "MeasureUnit");
+      if ((factor == null) == (reference == null)) {
+        throw new LemmaBugError(
+            "BUG: MeasureUnit requires exactly one of 'factor' and 'reference'");
       }
       if (derived == null) {
         JsonReading.missingRequired("derived_measure_factors", "MeasureUnit");
@@ -198,7 +203,8 @@ public sealed interface LemmaType {
       if (decomposition == null) {
         JsonReading.missingRequired("decomposition", "MeasureUnit");
       }
-      return new MeasureUnit(name, factor, derived, decomposition, minimum, maximum, suggestion);
+      return new MeasureUnit(
+          name, factor, reference, derived, decomposition, minimum, maximum, suggestion);
     }
   }
 
@@ -377,7 +383,6 @@ public sealed interface LemmaType {
    * @param name name
    * @param minimum minimum
    * @param maximum maximum
-   * @param decimals decimals
    * @param units units
    * @param traits traits
    * @param decomposition decomposition
@@ -389,7 +394,6 @@ public sealed interface LemmaType {
       @Nullable String name,
       @Nullable NamedBound minimum,
       @Nullable NamedBound maximum,
-      @Nullable Integer decimals,
       List<MeasureUnit> units,
       List<String> traits,
       @Nullable Map<String, Integer> decomposition,
@@ -422,8 +426,6 @@ public sealed interface LemmaType {
       boolean minimumSeen = false;
       NamedBound maximum = null;
       boolean maximumSeen = false;
-      Integer decimals = null;
-      boolean decimalsSeen = false;
       List<MeasureUnit> units = null;
       List<String> traits = null;
       Map<String, Integer> decomposition = null;
@@ -448,10 +450,6 @@ public sealed interface LemmaType {
             maximumSeen = true;
             maximum = NamedBound.readNullable(p);
           }
-          case "decimals" -> {
-            decimalsSeen = true;
-            decimals = JsonReading.readInt(p);
-          }
           case "units" -> units = JsonReading.readList(p, MeasureUnit::read);
           case "traits" -> traits = JsonReading.readList(p, JsonReading::readString);
           case "decomposition" -> {
@@ -474,9 +472,6 @@ public sealed interface LemmaType {
       if (!maximumSeen) {
         JsonReading.missingRequired("maximum", "LemmaType.Measure");
       }
-      if (!decimalsSeen) {
-        JsonReading.missingRequired("decimals", "LemmaType.Measure");
-      }
       if (units == null) {
         JsonReading.missingRequired("units", "LemmaType.Measure");
       }
@@ -491,7 +486,7 @@ public sealed interface LemmaType {
       }
       extendsType = identityExtends(extendsType, identity, "LemmaType.Measure");
       return new Measure(
-          name, minimum, maximum, decimals, units, traits, decomposition, unit, help, extendsType);
+          name, minimum, maximum, units, traits, decomposition, unit, help, extendsType);
     }
   }
 
@@ -691,7 +686,6 @@ public sealed interface LemmaType {
    * @param name name
    * @param minimum minimum
    * @param maximum maximum
-   * @param decimals decimals
    * @param units units
    * @param unit written unit when describing a value, or null
    * @param help help
@@ -701,7 +695,6 @@ public sealed interface LemmaType {
       @Nullable String name,
       @Nullable BigDecimal minimum,
       @Nullable BigDecimal maximum,
-      @Nullable Integer decimals,
       List<RatioUnit> units,
       @Nullable String unit,
       String help,
@@ -732,8 +725,6 @@ public sealed interface LemmaType {
       boolean minimumSeen = false;
       BigDecimal maximum = null;
       boolean maximumSeen = false;
-      Integer decimals = null;
-      boolean decimalsSeen = false;
       List<RatioUnit> units = null;
       String unit = null;
       String help = null;
@@ -755,10 +746,6 @@ public sealed interface LemmaType {
             maximumSeen = true;
             maximum = readNullableDecimal(p);
           }
-          case "decimals" -> {
-            decimalsSeen = true;
-            decimals = JsonReading.readInt(p);
-          }
           case "units" -> units = JsonReading.readList(p, RatioUnit::read);
           case "unit" -> unit = JsonReading.readString(p);
           case "help" -> help = JsonReading.readString(p);
@@ -773,9 +760,6 @@ public sealed interface LemmaType {
       if (!maximumSeen) {
         JsonReading.missingRequired("maximum", "LemmaType.Ratio");
       }
-      if (!decimalsSeen) {
-        JsonReading.missingRequired("decimals", "LemmaType.Ratio");
-      }
       if (units == null) {
         JsonReading.missingRequired("units", "LemmaType.Ratio");
       }
@@ -783,7 +767,7 @@ public sealed interface LemmaType {
         JsonReading.missingRequired("help", "LemmaType.Ratio");
       }
       extendsType = identityExtends(extendsType, identity, "LemmaType.Ratio");
-      return new Ratio(name, minimum, maximum, decimals, units, unit, help, extendsType);
+      return new Ratio(name, minimum, maximum, units, unit, help, extendsType);
     }
   }
 

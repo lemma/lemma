@@ -72,7 +72,6 @@ pub fn format_error(error: &Error, sources: &HashMap<lemma::SourceType, String>)
     };
     match error {
         Error::Parsing(details) => fmt("Parse error", details, ""),
-        Error::Inversion(details) => fmt("Inversion error", details, ""),
         Error::Validation(details) => fmt("Validation error", details, ""),
         Error::Registry {
             details,

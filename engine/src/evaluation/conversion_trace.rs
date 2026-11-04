@@ -20,14 +20,15 @@ pub(crate) fn build_conversion_steps(
     target: &SemanticConversionTarget,
     result: &LiteralValue,
     result_type: &Arc<LemmaType>,
+    runtime_scales: Option<&std::collections::HashMap<String, RationalInteger>>,
 ) -> Vec<SerializedConversionTraceStep> {
     let mut steps = Vec::new();
     steps.push(SerializedConversionTraceStep {
         role: ConversionTraceRole::Outcome,
-        text: result.display_value_with_type(result_type.as_ref()),
+        text: result.display_value_with_scales(result_type.as_ref(), runtime_scales),
     });
 
-    for rule_text in conversion_rule_step_texts(value, value_type, target, result) {
+    for rule_text in conversion_rule_step_texts(value, value_type, target, result, runtime_scales) {
         steps.push(SerializedConversionTraceStep {
             role: ConversionTraceRole::Rule,
             text: rule_text,
@@ -42,6 +43,7 @@ fn conversion_rule_step_texts(
     value_type: &LemmaType,
     target: &SemanticConversionTarget,
     result: &LiteralValue,
+    runtime_scales: Option<&std::collections::HashMap<String, RationalInteger>>,
 ) -> Vec<String> {
     match &value.value {
         ValueKind::Range(left, right) => range_span_rule_step_text(left, right, result)
@@ -53,7 +55,12 @@ fn conversion_rule_step_texts(
                 owning_type,
             } => {
                 let from_signature = value_type.measure_runtime_signature();
-                measure_unit_declared_factor_steps(&from_signature, unit_name, owning_type)
+                measure_unit_declared_factor_steps(
+                    &from_signature,
+                    unit_name,
+                    owning_type,
+                    runtime_scales,
+                )
             }
             _ => Vec::new(),
         },
@@ -167,6 +174,7 @@ fn measure_unit_declared_factor_steps(
     from_signature: &[(String, i32)],
     to_unit: &str,
     owning_type: &LemmaType,
+    runtime_scales: Option<&std::collections::HashMap<String, RationalInteger>>,
 ) -> Vec<String> {
     let from_unit = from_signature
         .first()
@@ -188,8 +196,9 @@ fn measure_unit_declared_factor_steps(
         return Vec::new();
     }
 
+    // Declared-factor narration is relative to the type's factor-1 unit only.
+    // All-dynamic families have no canonical unit; do not invent one.
     let Some(reference) = units.iter().find(|unit| unit.is_canonical_factor()) else {
-        // Valid measures may omit a factor-1 unit; no declared-factor narration then.
         return Vec::new();
     };
 
@@ -205,11 +214,24 @@ fn measure_unit_declared_factor_steps(
         if unit.is_canonical_factor() {
             continue;
         }
-        let multiplier_display = format_explanation_multiplier(&unit.factor);
-        steps.push(format!(
-            "1 {unit_name} is {multiplier_display} {}",
-            reference.name
-        ));
+        let Some(factor) = unit
+            .literal_factor()
+            .cloned()
+            .or_else(|| runtime_scales.and_then(|scales| scales.get(unit_name).cloned()))
+        else {
+            continue;
+        };
+        let multiplier_display = format_explanation_multiplier(&factor);
+        let text = match unit.scale_written() {
+            Some(written) => {
+                format!(
+                    "1 {unit_name} is {multiplier_display} {} ({written})",
+                    reference.name
+                )
+            }
+            None => format!("1 {unit_name} is {multiplier_display} {}", reference.name),
+        };
+        steps.push(text);
         emitted.push(unit_name);
     }
     steps
@@ -230,8 +252,10 @@ mod tests {
                 .iter()
                 .map(|(unit_name, factor)| MeasureUnit {
                     name: (*unit_name).to_string(),
-                    factor: decimal_to_rational(Decimal::from_str(factor).expect("factor decimal"))
-                        .expect("BUG: test factor must be rational"),
+                    scale: crate::literals::UnitScale::Literal(
+                        decimal_to_rational(Decimal::from_str(factor).expect("factor decimal"))
+                            .expect("BUG: test factor must be rational"),
+                    ),
                     derived_measure_factors: Vec::new(),
                     decomposition: Default::default(),
                     minimum: None,
@@ -245,7 +269,6 @@ mod tests {
             TypeSpecification::Measure {
                 minimum: None,
                 maximum: None,
-                decimals: None,
                 units,
                 traits: Vec::new(),
                 decomposition: None,
@@ -268,7 +291,7 @@ mod tests {
             unit_name: to_unit.to_string(),
             owning_type: Arc::clone(ty),
         };
-        build_conversion_steps(&value, &value_type, &target, &result, &result_type)
+        build_conversion_steps(&value, &value_type, &target, &result, &result_type, None)
             .into_iter()
             .filter(|step| matches!(step.role, ConversionTraceRole::Rule))
             .map(|step| step.text)
@@ -322,7 +345,7 @@ mod tests {
             unit_name: "eur".to_string(),
             owning_type: Arc::clone(&money),
         };
-        let steps = build_conversion_steps(&value, &value_type, &target, &value, &value_type);
+        let steps = build_conversion_steps(&value, &value_type, &target, &value, &value_type, None);
         assert_eq!(steps.len(), 1);
         assert!(matches!(steps[0].role, ConversionTraceRole::Outcome));
         assert!(rule_texts("eur", "eur", &money).is_empty());

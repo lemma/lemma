@@ -19,8 +19,12 @@ const SHIPPING: &str = include_str!("../benches/specs/shipping.lemma");
 /// after warmup, on this machine's allocator accounting. Update deliberately
 /// when the eval path's allocation shape changes.
 ///
-/// Measured 50 on the current tree (HEAD measures 53).
-const SHIPPING_EVAL_ALLOCATIONS: usize = 50;
+/// `bench_shipping` is number and ratio rules only: no `^`, no `uses`, no list.
+/// Text and list values share their storage, so cell reads clone no payload; the
+/// request caches (row contexts and run-data row overrides) are one `Rc` per evaluate.
+/// Run-data bindings are keyed by data slot, so binding an input clones no path; the
+/// active-rule set of the frame stack is one allocation.
+const SHIPPING_EVAL_ALLOCATIONS: usize = 45;
 
 fn shipping_effective() -> DateTimeValue {
     DateTimeValue {

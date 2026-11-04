@@ -7,15 +7,15 @@
 pub(crate) mod expression;
 
 use crate::parsing::ast::{
-    AsLemmaSource, Constraint, ContinuationShape, DataValue, Expression, LemmaData, LemmaRule,
-    LemmaSpec, TypeConstraintCommand,
+    AsLemmaSource, Constraint, ContinuationShape, DataValue, Expression, ExpressionKind, LemmaData,
+    LemmaRule, LemmaSpec, ListCommand, ListWithRows, TypeConstraintCommand,
 };
 use crate::parsing::{parse, ParseResult};
 use crate::{Error, ResourceLimits};
 use expression::{display_broken, Syntax};
 
-/// Soft line length limit. Longer lines may be wrapped (unless clauses, expressions).
-/// Data and other constructs are not broken if they exceed this.
+/// Soft line length limit for prose (`unless`, expression soft-breaks, comma-value lists).
+/// Aligned instance-row tables may exceed this so each `-> with` stays on one padded line.
 /// 56 has been chosen to fit on an average mobile screen with an 11pt font.
 pub const MAX_COLS: usize = 56;
 
@@ -151,6 +151,16 @@ fn data_constraints_nonempty(constraints: &Option<Vec<Constraint>>) -> bool {
 
 fn data_value_has_arrow_constraints(value: &DataValue) -> bool {
     match value {
+        DataValue::Definition {
+            constraints,
+            list: Some(list),
+            ..
+        } => {
+            data_constraints_nonempty(constraints)
+                || list.key.is_some()
+                || !list.rows.is_empty()
+                || !list.option_rows.is_empty()
+        }
         DataValue::Definition { constraints, .. } => data_constraints_nonempty(constraints),
         DataValue::Import { .. } | DataValue::ImportList { .. } => false,
     }
@@ -160,6 +170,19 @@ fn format_with_rhs(rhs: &crate::parsing::ast::WithRhs) -> String {
     match rhs {
         crate::parsing::ast::WithRhs::Literal(v) => format!("{}", AsLemmaSource(v)),
         crate::parsing::ast::WithRhs::Reference { target } => target.to_string(),
+    }
+}
+
+fn format_uses_binding_rhs(rhs: &crate::parsing::ast::UsesBindingRhs) -> String {
+    match rhs {
+        crate::parsing::ast::UsesBindingRhs::Literal(value) => {
+            format!("{}", AsLemmaSource(value))
+        }
+        crate::parsing::ast::UsesBindingRhs::References { targets } => targets
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(", "),
     }
 }
 
@@ -173,6 +196,42 @@ fn data_value_rhs_for_spec_body(
             base,
             constraints,
             value,
+            list: Some(list),
+        } => {
+            let head: String = match base.as_ref() {
+                Some(b) => format!("{}", b),
+                None => match value {
+                    Some(v) => format!("{}", AsLemmaSource(v)),
+                    None => String::new(),
+                },
+            };
+            let mut out = head;
+            if data_constraints_nonempty(constraints) {
+                let cs = constraints
+                    .as_ref()
+                    .expect("BUG: constraints checked above");
+                for row in cs {
+                    out.push('\n');
+                    out.push_str(&format_constraint_block(
+                        &row.command,
+                        &row.args,
+                        continuation_prefix,
+                        max_cols,
+                    ));
+                }
+            }
+            out.push_str(&format_uses_list_commands(
+                list,
+                continuation_prefix,
+                max_cols,
+            ));
+            out
+        }
+        DataValue::Definition {
+            base,
+            constraints,
+            value,
+            list: None,
         } if data_constraints_nonempty(constraints) => {
             let cs = constraints
                 .as_ref()
@@ -299,38 +358,105 @@ fn emit_data_row_group(rows: &[&LemmaData], line_prefix: &str, max_cols: usize, 
 
 fn format_import_header(data: &LemmaData) -> String {
     let alias = &data.reference.name;
-    let (spec_ref, suffix) = match &data.value {
-        DataValue::Import { spec_ref, .. } => (spec_ref, ""),
-        DataValue::ImportList { spec_ref, .. } => (spec_ref, " list"),
-        DataValue::Definition { .. } => {
-            unreachable!("BUG: format_import_header called on non-Import data")
-        }
+    let DataValue::Import { spec_ref, .. } = &data.value else {
+        unreachable!("BUG: format_import_header called on non-Import data")
     };
     let spec_name = &spec_ref.name;
     if alias == spec_name {
-        format!("uses {spec_ref}{suffix}")
+        format!("uses {spec_ref}")
     } else {
-        format!("uses {alias}: {spec_ref}{suffix}")
+        format!("uses {alias}: {spec_ref}")
     }
 }
 
 /// `name: value` strings of one inline row, before alignment.
-fn uses_row_fields(bindings: &[crate::parsing::ast::UsesBinding]) -> Vec<(String, String)> {
+fn uses_row_fields(bindings: &[crate::parsing::ast::RowBinding]) -> Vec<(String, String)> {
     bindings
         .iter()
         .map(|binding| (binding.path.to_string(), format_with_rhs(&binding.rhs)))
         .collect()
 }
 
-/// `-> key` first, then rows in source order. Inline rows with the same field order align
-/// their columns; a row too long for one line puts one field per line.
-fn format_uses_list_block(data: &LemmaData, line_prefix: &str, max_cols: usize) -> String {
-    use crate::parsing::ast::UsesListRow;
-    let mut out = format_import_header(data);
-    let DataValue::ImportList { list, .. } = &data.value else {
-        unreachable!("BUG: format_uses_list_block called on non-list import");
+/// Per-column width when every row names the same fields in the same order; otherwise empty.
+fn aligned_column_widths(field_rows: &[Vec<(String, String)>]) -> Vec<usize> {
+    let Some(first) = field_rows.first() else {
+        return Vec::new();
     };
-    let command_prefix = format!("{line_prefix}{DATA_CONSTRAINT_INDENT}-> ");
+    let names: Vec<&str> = first.iter().map(|(name, _)| name.as_str()).collect();
+    let aligned = field_rows.iter().all(|row| {
+        row.len() == names.len()
+            && row
+                .iter()
+                .zip(names.iter())
+                .all(|((name, _), shared)| name == shared)
+    });
+    if !aligned {
+        return Vec::new();
+    }
+    (0..names.len())
+        .map(|column| {
+            field_rows
+                .iter()
+                .map(|row| row[column].0.len() + 2 + row[column].1.len() + 1)
+                .max()
+                .expect("BUG: aligned rows are non-empty")
+        })
+        .collect()
+}
+
+/// One `-> with` / `-> option` Fields line. When `column_widths` is non-empty, pad to those
+/// widths and never verticalize. When empty, keep one line if it fits `max_cols`, else one
+/// field per line.
+fn format_fields_row_line(
+    command: &str,
+    fields: &[(String, String)],
+    command_prefix: &str,
+    vertical_indent: &str,
+    column_widths: &[usize],
+    max_cols: usize,
+) -> String {
+    let mut inline = String::new();
+    for (index, (name, value)) in fields.iter().enumerate() {
+        let last = index + 1 == fields.len();
+        let cell = if last {
+            format!("{name}: {value}")
+        } else {
+            format!("{name}: {value},")
+        };
+        inline.push_str(&cell);
+        if !last {
+            let width = column_widths.get(index).copied().unwrap_or(cell.len());
+            inline.push_str(&" ".repeat(width.saturating_sub(cell.len()) + 1));
+        }
+    }
+    let line = format!("{command_prefix}{command} {inline}");
+    if !column_widths.is_empty() || line.len() <= max_cols {
+        return line;
+    }
+    let mut out = String::new();
+    out.push_str(command_prefix);
+    out.push_str(command);
+    for (index, (name, value)) in fields.iter().enumerate() {
+        out.push('\n');
+        out.push_str(vertical_indent);
+        out.push_str(&format!("{name}: {value}"));
+        if index + 1 < fields.len() {
+            out.push(',');
+        }
+    }
+    out
+}
+
+/// `-> key` first, then rows in source order. Rows with the same field order pad to equal
+/// column widths on one line each; misaligned rows that exceed `max_cols` go vertical.
+fn format_uses_list_commands(
+    list: &crate::parsing::ast::InstanceListBody,
+    continuation_prefix: &str,
+    max_cols: usize,
+) -> String {
+    use crate::parsing::ast::InstanceListRow;
+    let mut out = String::new();
+    let command_prefix = format!("{continuation_prefix}-> ");
     if let Some(key) = &list.key {
         let fields: Vec<String> = key.fields.iter().map(ToString::to_string).collect();
         out.push('\n');
@@ -343,92 +469,85 @@ fn format_uses_list_block(data: &LemmaData, line_prefix: &str, max_cols: usize) 
         .rows
         .iter()
         .filter_map(|row| match row {
-            UsesListRow::Fields { bindings, .. } => Some(uses_row_fields(bindings)),
-            UsesListRow::Values { .. } => None,
+            InstanceListRow::Fields { bindings, .. } => Some(uses_row_fields(bindings)),
+            InstanceListRow::Values { .. } => None,
         })
         .collect();
-    let shared_names: Option<Vec<&str>> = field_rows
-        .first()
-        .map(|first| first.iter().map(|(name, _)| name.as_str()).collect());
-    let aligned = shared_names.as_ref().is_some_and(|names| {
-        field_rows.iter().all(|row| {
-            row.len() == names.len()
-                && row
-                    .iter()
-                    .zip(names.iter())
-                    .all(|((name, _), shared)| name == shared)
-        })
-    });
-    let column_widths: Vec<usize> = if aligned {
-        let columns = shared_names.as_ref().map_or(0, Vec::len);
-        (0..columns)
-            .map(|column| {
-                field_rows
-                    .iter()
-                    .map(|row| row[column].0.len() + 2 + row[column].1.len() + 1)
-                    .max()
-                    .expect("BUG: aligned rows are non-empty")
-            })
-            .collect()
-    } else {
-        Vec::new()
-    };
+    let column_widths = aligned_column_widths(&field_rows);
 
-    let vertical_indent = format!("{line_prefix}{DATA_CONSTRAINT_INDENT}     ");
+    let vertical_indent = format!("{continuation_prefix}     ");
+    for row in &list.option_rows {
+        out.push('\n');
+        out.push_str(&format_instance_row_line(
+            "option",
+            row,
+            &command_prefix,
+            &vertical_indent,
+            &column_widths,
+            max_cols,
+        ));
+    }
     for row in &list.rows {
         out.push('\n');
-        match row {
-            UsesListRow::Fields { bindings, .. } => {
-                let fields = uses_row_fields(bindings);
-                let mut inline = String::new();
-                for (index, (name, value)) in fields.iter().enumerate() {
-                    let last = index + 1 == fields.len();
-                    let cell = if last {
-                        format!("{name}: {value}")
-                    } else {
-                        format!("{name}: {value},")
-                    };
-                    inline.push_str(&cell);
-                    if !last {
-                        let width = column_widths.get(index).copied().unwrap_or(cell.len());
-                        inline.push_str(&" ".repeat(width.saturating_sub(cell.len()) + 1));
-                    }
-                }
-                let line = format!("{command_prefix}with {inline}");
-                if line.len() <= max_cols {
-                    out.push_str(&line);
-                } else {
-                    out.push_str(&command_prefix);
-                    out.push_str("with");
-                    for (index, (name, value)) in fields.iter().enumerate() {
-                        out.push('\n');
-                        out.push_str(&vertical_indent);
-                        out.push_str(&format!("{name}: {value}"));
-                        if index + 1 < fields.len() {
-                            out.push(',');
-                        }
-                    }
-                }
-            }
-            UsesListRow::Values { values, .. } => {
-                let items: Vec<String> = values.iter().map(format_with_rhs).collect();
-                out.push_str(&command_prefix);
-                out.push_str("with ");
-                out.push_str(&items.join(", "));
-            }
-        }
+        out.push_str(&format_instance_row_line(
+            "with",
+            row,
+            &command_prefix,
+            &vertical_indent,
+            &column_widths,
+            max_cols,
+        ));
     }
     out
 }
 
-fn format_uses_block(data: &LemmaData, line_prefix: &str, max_cols: usize) -> String {
-    if matches!(&data.value, DataValue::ImportList { .. }) {
-        return format_uses_list_block(data, line_prefix, max_cols);
+fn format_instance_row_line(
+    command: &str,
+    row: &crate::parsing::ast::InstanceListRow,
+    command_prefix: &str,
+    vertical_indent: &str,
+    column_widths: &[usize],
+    max_cols: usize,
+) -> String {
+    use crate::parsing::ast::InstanceListRow;
+    match row {
+        InstanceListRow::Fields { bindings, .. } => format_fields_row_line(
+            command,
+            &uses_row_fields(bindings),
+            command_prefix,
+            vertical_indent,
+            column_widths,
+            max_cols,
+        ),
+        InstanceListRow::Values { values, .. } => {
+            let items: Vec<String> = values.iter().map(format_with_rhs).collect();
+            let mut out = String::new();
+            out.push_str(command_prefix);
+            out.push_str(command);
+            out.push(' ');
+            out.push_str(&items.join(", "));
+            out
+        }
     }
+}
+
+fn format_uses_block(data: &LemmaData, line_prefix: &str) -> String {
     let mut out = format_import_header(data);
-    let DataValue::Import { bindings, .. } = &data.value else {
+    let DataValue::Import {
+        bindings,
+        effective_ref,
+        ..
+    } = &data.value
+    else {
         unreachable!("BUG: format_uses_block called on non-Import data");
     };
+    if let Some(reference) = effective_ref {
+        out.push('\n');
+        out.push_str(line_prefix);
+        out.push_str(DATA_CONSTRAINT_INDENT);
+        out.push_str("-> effective ");
+        out.push_str(&reference.to_string());
+    }
     for binding in bindings {
         out.push('\n');
         out.push_str(line_prefix);
@@ -437,7 +556,7 @@ fn format_uses_block(data: &LemmaData, line_prefix: &str, max_cols: usize) -> St
         out.push_str(&crate::parsing::ast::format_assignment_continuation(
             "with",
             &format!("{}", binding.path),
-            &format_with_rhs(&binding.rhs),
+            &format_uses_binding_rhs(&binding.rhs),
         ));
     }
     out
@@ -471,7 +590,7 @@ fn format_sorted_data(data: &[LemmaData], out: &mut String, line_prefix: &str, m
                 out.push('\n');
             }
             out.push_str(line_prefix);
-            out.push_str(&format_uses_block(row, line_prefix, max_cols));
+            out.push_str(&format_uses_block(row, line_prefix));
             out.push('\n');
         }
     }
@@ -574,13 +693,91 @@ fn format_rule(rule: &LemmaRule, max_cols: usize) -> String {
 
 /// The expression on one line when it fits `max_cols`; otherwise every top-level `and` /
 /// arithmetic operator starts a new line at `indent`. Operands always print on one line.
+/// A sealed-catalog spine (`base`, optional `-> key`, then aligned `-> with` field rows)
+/// prints as a multi-line padded table instead.
 fn format_expr_wrapped(expr: &Expression, max_cols: usize, indent: &str) -> String {
+    if let Some(catalog) = format_list_catalog_table(expr, indent) {
+        return catalog;
+    }
     let flat = Syntax(expr.root()).to_string();
     if flat.len() <= max_cols {
         flat
     } else {
         display_broken(expr.root(), indent)
     }
+}
+
+/// `base -> key? -> with field: … -> with …` when every `-> with` shares field order:
+/// one padded row per line. First line is the base (caller supplies indent for that line);
+/// continuation `->` lines use `indent`.
+fn format_list_catalog_table(expr: &Expression, indent: &str) -> Option<String> {
+    let mut commands = Vec::new();
+    let mut cur = expr.root;
+    while let ExpressionKind::ListCommand { list, command } = expr.table.kind(cur) {
+        commands.push(command.clone());
+        cur = *list;
+    }
+    if commands.is_empty() {
+        return None;
+    }
+    commands.reverse();
+
+    let mut with_start = 0;
+    let key_fields = match commands.first() {
+        Some(ListCommand::Key { fields }) => {
+            with_start = 1;
+            Some(fields)
+        }
+        _ => None,
+    };
+    let with_commands = &commands[with_start..];
+    if with_commands.is_empty() {
+        return None;
+    }
+
+    let mut field_rows: Vec<Vec<(String, String)>> = Vec::with_capacity(with_commands.len());
+    for command in with_commands {
+        let ListCommand::With {
+            rows: ListWithRows::FieldPairs(pairs),
+        } = command
+        else {
+            return None;
+        };
+        field_rows.push(
+            pairs
+                .iter()
+                .map(|(name, value)| (name.to_string(), Syntax(expr.at(*value)).to_string()))
+                .collect(),
+        );
+    }
+
+    let column_widths = aligned_column_widths(&field_rows);
+    if column_widths.is_empty() {
+        return None;
+    }
+
+    let command_prefix = format!("{indent}-> ");
+    let vertical_indent = format!("{indent}     ");
+    let mut out = Syntax(expr.at(cur)).to_string();
+    if let Some(fields) = key_fields {
+        let names: Vec<String> = fields.iter().map(ToString::to_string).collect();
+        out.push('\n');
+        out.push_str(&command_prefix);
+        out.push_str("key ");
+        out.push_str(&names.join(", "));
+    }
+    for fields in &field_rows {
+        out.push('\n');
+        out.push_str(&format_fields_row_line(
+            "with",
+            fields,
+            &command_prefix,
+            &vertical_indent,
+            &column_widths,
+            MAX_COLS,
+        ));
+    }
+    Some(out)
 }
 
 // =============================================================================
@@ -767,6 +964,33 @@ mod tests {
         assert!(
             !formatted.contains("2026-01-01"),
             "uses effective pin must not expand year-only date, got: {formatted}"
+        );
+    }
+
+    #[test]
+    fn format_uses_dynamic_effective_command() {
+        let source = r#"
+spec alpha2 2020-01-01
+data code: text
+
+spec intake
+data birth_date: date
+uses iso: alpha2
+  -> effective birth_date
+  -> with code: "NL"
+"#;
+        let formatted = format_source(source, crate::parsing::source::SourceType::Volatile)
+            .expect("dynamic effective uses should format");
+        assert!(
+            formatted.contains("-> effective birth_date"),
+            "formatter must emit -> effective, got: {formatted}"
+        );
+        assert!(
+            formatted
+                .find("-> effective birth_date")
+                .expect("effective")
+                < formatted.find("-> with code").expect("with"),
+            "-> effective must precede -> with, got: {formatted}"
         );
     }
 
@@ -991,7 +1215,6 @@ rule total: quantity
 data money: measure
   -> unit eur: 1.00
   -> unit usd: 0.91
-  -> decimals 2
   -> minimum 0
 
 data price: money

@@ -19,6 +19,30 @@ use crate::planning::semantics::{DataPath, RulePath};
 use crate::result_value::RuleResultValue;
 use serde::{Serialize, Serializer};
 
+/// List command identity on a narrated [`ExplanationNode::ListCommand`].
+///
+/// Unit variants serialize as a bare string (`"sum"`). `Sort` carries direction.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExplainedListOp {
+    Find,
+    First,
+    Last,
+    Count,
+    Sum,
+    Avg,
+    Product,
+    Min,
+    Max,
+    Any,
+    All,
+    Where,
+    Sort { descending: bool },
+    Top,
+    With,
+    Key,
+}
+
 pub(crate) fn serialize_rule_path_as_name<S>(
     path: &RulePath,
     serializer: S,
@@ -76,6 +100,18 @@ pub enum ExplanationNode {
         #[serde(skip_serializing_if = "Option::is_none")]
         operator: Option<ArithmeticComputation>,
         operands: Vec<ExplanationNode>,
+        #[serde(flatten)]
+        result: RuleResultValue,
+    },
+    /// One NormalForm list command cell (`menu -> sum price`).
+    ListCommand {
+        expression: String,
+        /// Command fragment after `->`, from Syntax (not a string split of `expression`).
+        stage: String,
+        op: ExplainedListOp,
+        operands: Vec<ExplanationNode>,
+        #[serde(flatten)]
+        result: RuleResultValue,
     },
     /// Evaluated / bound data narration. Result fields flatten like [`crate::evaluation::response::RuleResult`].
     Data {
@@ -94,6 +130,8 @@ pub enum ExplanationNode {
         expression: String,
         steps: Vec<SerializedConversionTraceStep>,
         operands: Vec<ExplanationNode>,
+        #[serde(flatten)]
+        result: RuleResultValue,
     },
     Veto {
         #[serde(skip_serializing_if = "Option::is_none")]

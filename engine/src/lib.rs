@@ -21,7 +21,6 @@ pub(crate) mod planning;
 pub mod quality;
 pub(crate) mod registry;
 pub mod result_value;
-pub(crate) mod snapshot;
 pub(crate) mod spec_set_id;
 pub(crate) mod stdlib;
 pub(crate) mod string_distance;
@@ -39,6 +38,15 @@ pub use api::{
     evaluate_data_value_from_json_value, parse_evaluate_data_object, resolve_evaluate_rules,
     show_document,
 };
+pub use computation::arithmetic::{
+    arithmetic_operation, number_arithmetic, NumberArithmeticFailure, SignatureFactor,
+    SignatureIndex,
+};
+pub use computation::comparison::comparison_operation;
+pub use computation::rational::{
+    checked_div, checked_mul, decimal_to_rational, rational_new, NumericFailure, RationalInteger,
+};
+pub use computation::units::convert_unit_operand;
 pub use computation::{OperationResult, VetoType};
 pub use engine::{
     format_repositories, resolve_effective, Engine, Errors, Repository, SpecDependency,
@@ -48,12 +56,16 @@ pub use error::{
     EngineError, EngineErrorSource, Error, ErrorDetails, ErrorKind, RegistryErrorKind,
     RequestErrorKind,
 };
+pub use evaluation::branch_semantics::{
+    condition_outcome, piecewise_decision, BranchOutcome, PiecewiseDecision,
+};
 pub use evaluation::evaluate_data::{
     attribute_evaluate_data_error, evaluate_data_from_entries, evaluate_data_map_from_entries,
-    evaluate_data_null_list_item, EvaluateDataValue,
+    evaluate_data_null_list_item, parse_data_value, EvaluateData, EvaluateDataValue,
 };
 pub use evaluation::explanations::{format_explanation, Cause, Explanation, ExplanationNode};
 pub use evaluation::response::{Response, RuleResult};
+pub use planning::explanation::ExplainedListOp;
 
 #[deprecated(note = "use EvaluateDataValue")]
 pub type RunDataValue = EvaluateDataValue;
@@ -76,19 +88,35 @@ pub use indexmap::IndexMap;
 pub use limits::{
     ResourceLimits, MAX_DATA_NAME_LENGTH, MAX_RULE_NAME_LENGTH, MAX_SPEC_NAME_LENGTH,
 };
-pub use literals::{DateGranularity, MeasureUnit, MeasureUnits, RatioUnit, RatioUnits};
+pub use literals::{DateGranularity, MeasureUnit, MeasureUnits, RatioUnit, RatioUnits, UnitScale};
+pub use parsing::ast::{
+    ArithmeticComputation, CalendarPeriodUnit, ComparisonComputation, ConversionTypeKind,
+    DateCalendarKind, DateRelativeKind, ListPredicateForm, LogicalConnective,
+    MathematicalComputation, RangeBound, RoundingMode, VetoExpression,
+};
 pub use parsing::ast::{DateTimeValue, EffectiveDate};
 pub use parsing::source::SourceType;
 pub use planning::execution_plan::type_detail_lines;
 pub use planning::execution_plan::{
-    Show, ShowBranch, ShowConversionTarget, ShowData, ShowExpression, ShowRule,
+    ExecutableRule, ExecutionPlan, Show, ShowBranch, ShowConversionTarget, ShowData,
+    ShowExpression, ShowRule,
 };
 pub use planning::explanation::{ConversionTraceRole, SerializedConversionTraceStep};
 pub use planning::explanation::{ExplainedRule, ExplainedRuleId};
-pub use planning::semantics::{
-    numbered_row_origin, row_field_input_key, DataPath, LemmaType, ListKey, LiteralValue,
-    PathSegment, SpecIdentity, TypeSpecification, ValueKind,
+pub use planning::graph::ResolvedSpecTypes;
+pub use planning::normalize::{
+    ArithmeticTerm, DispatchRegion, LeafKind, NormalForm, NormalFormId, NormalFormKind,
+    NormalFormListOp, RowRead,
 };
+pub use planning::ordered_dispatch::{region_count, region_of_scrutinee, DispatchKey};
+pub use planning::semantics::{
+    negated_comparison, numbered_row_origin, primitive_number_arc, row_field_input_key,
+    BoundValueKind, DataDefinition, DataOrigin, DataPath, KeyField, LemmaType, ListKey,
+    ListPredKind, LiteralValue, PathSegment, ReferenceTarget, RowBinding, RowEnd, RowInstance,
+    RowOrigin, RulePath, SpecIdentity, SpecInstance, TypeFamily, TypeSpecification, TypedLiteral,
+    ValueKind,
+};
+pub use planning::unit_index::UnitIndex;
 pub use result_value::{
     CalendarResult, RangeResult, RowReference, RowResult, RuleResultValue, RuleResultValueFailure,
     SpecResult, SpecRuleResult,
@@ -103,13 +131,11 @@ pub const API_V1_SCHEMA_JSON: &str = include_str!("../schemas/api.v1.json");
 /// Exact rational helpers for in-tree integration tests. Not a supported consumer API.
 #[doc(hidden)]
 pub mod __test_support {
-    pub use crate::computation::rational::{
-        checked_div, checked_mul, decimal_to_rational, rational_new,
-    };
     pub use crate::literals::TimeValue;
     pub use crate::planning::semantics::{
         SemanticDateTime, SemanticTime, SemanticTimezone, TypedLiteral,
     };
+    pub use crate::{checked_div, checked_mul, decimal_to_rational, rational_new};
 
     /// Serializes an [`Error`](crate::Error) as [`EngineError`](crate::EngineError).
     pub fn current_binding_error_json(error: &crate::Error) -> serde_json::Value {

@@ -1,0 +1,5 @@
+first_bonus: 7
+└─ (items -> first).bonus
+   ├─ items -> first
+   │  └─ items: items.1
+   └─ 1. src.rate: 7

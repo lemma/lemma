@@ -64,7 +64,6 @@ fn attribution_fields(spec: Option<&LemmaSpec>) -> (Option<String>, Option<Effec
 pub enum ErrorKind {
     Parsing,
     Validation,
-    Inversion,
     Registry,
     MissingRepository,
     Request,
@@ -76,9 +75,6 @@ pub enum ErrorKind {
 pub enum Error {
     /// Parse error with source location
     Parsing(Box<ErrorDetails>),
-
-    /// Inversion error (valid Lemma, but unsupported by inversion) with source location
-    Inversion(Box<ErrorDetails>),
 
     /// Validation error (semantic/planning, including circular dependency) with source location
     Validation(Box<ErrorDetails>),
@@ -173,54 +169,6 @@ impl Error {
         suggestion: impl Into<String>,
     ) -> Self {
         Self::parsing_with_context(message, source, Some(suggestion), None, None)
-    }
-
-    /// Create an inversion error with source information.
-    pub fn inversion(
-        message: impl Into<String>,
-        source: Option<Source>,
-        suggestion: Option<impl Into<String>>,
-    ) -> Self {
-        Self::inversion_with_context(message, source, suggestion, None, None)
-    }
-
-    /// Inversion error with optional spec context (for display).
-    pub fn inversion_with_context(
-        message: impl Into<String>,
-        source: Option<Source>,
-        suggestion: Option<impl Into<String>>,
-        spec_context: Option<&LemmaSpec>,
-        related_spec: Option<&LemmaSpec>,
-    ) -> Self {
-        let (spec_context_name, spec_context_effective_from) = attribution_fields(spec_context);
-        let (related_spec_name, related_spec_effective_from) = attribution_fields(related_spec);
-        Self::Inversion(Box::new(ErrorDetails {
-            message: message.into(),
-            source,
-            suggestion: suggestion.map(Into::into),
-            spec_context_name,
-            spec_context_effective_from,
-            related_spec_name,
-            related_spec_effective_from,
-            related_data: None,
-        }))
-    }
-
-    /// Create an inversion error with suggestion
-    pub fn inversion_with_suggestion(
-        message: impl Into<String>,
-        source: Option<Source>,
-        suggestion: impl Into<String>,
-        spec_context: Option<&LemmaSpec>,
-        related_spec: Option<&LemmaSpec>,
-    ) -> Self {
-        Self::inversion_with_context(
-            message,
-            source,
-            Some(suggestion),
-            spec_context,
-            related_spec,
-        )
     }
 
     /// Create a validation error with source information (semantic/planning, including circular dependency).
@@ -415,11 +363,6 @@ impl Error {
                 f(&mut d);
                 Error::Parsing(Box::new(d))
             }
-            Error::Inversion(details) => {
-                let mut d = *details;
-                f(&mut d);
-                Error::Inversion(Box::new(d))
-            }
             Error::Validation(details) => {
                 let mut d = *details;
                 f(&mut d);
@@ -528,17 +471,6 @@ impl fmt::Display for Error {
                 write_related_spec(f, details)?;
                 write_source_location(f, &details.source)
             }
-            Error::Inversion(details) => {
-                if let Some(ref name) = details.spec_context_name {
-                    write_spec_context(f, name)?;
-                }
-                write!(f, "Inversion error: {}", details.message)?;
-                if let Some(suggestion) = &details.suggestion {
-                    write!(f, " (suggestion: {suggestion})")?;
-                }
-                write_related_spec(f, details)?;
-                write_source_location(f, &details.source)
-            }
             Error::Validation(details) => {
                 if let Some(ref name) = details.spec_context_name {
                     write_spec_context(f, name)?;
@@ -635,7 +567,6 @@ impl Error {
         match self {
             Error::Parsing(_) => ErrorKind::Parsing,
             Error::Validation(_) => ErrorKind::Validation,
-            Error::Inversion(_) => ErrorKind::Inversion,
             Error::Registry { .. } => ErrorKind::Registry,
             Error::MissingRepository { .. } => ErrorKind::MissingRepository,
             Error::Request { .. } => ErrorKind::Request,
@@ -646,7 +577,7 @@ impl Error {
     /// Shared access to the inner [`ErrorDetails`] regardless of variant.
     pub(crate) fn details(&self) -> &ErrorDetails {
         match self {
-            Error::Parsing(d) | Error::Inversion(d) | Error::Validation(d) => d,
+            Error::Parsing(d) | Error::Validation(d) => d,
             Error::Registry { details, .. }
             | Error::MissingRepository { details, .. }
             | Error::ResourceLimitExceeded { details, .. }

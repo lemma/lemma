@@ -564,7 +564,7 @@ fn evaluate_data_inputs(
             anyhow::bail!("stdin must contain a JSON object");
         }
         let parsed =
-            lemma::parse_evaluate_data_object(&Some(value)).map_err(|e| anyhow::anyhow!("{e}"))?;
+            lemma::parse_evaluate_data_object(Some(value)).map_err(|e| anyhow::anyhow!("{e}"))?;
         entries.extend(parsed);
     }
     entries.extend(pairs.iter().map(|pair| {

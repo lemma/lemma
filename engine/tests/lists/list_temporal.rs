@@ -29,7 +29,8 @@ rule bonus:
             "payroll.lemma",
             r#"
 spec payroll
-uses staff: employee 2024 list
+uses employee 2024
+data staff: employee list
   -> with name: "Ada", salary: 100
 rule source_bonus:
   (staff -> first).bonus
@@ -79,7 +80,8 @@ rule bonus:
             "payroll.lemma",
             r#"
 spec payroll 2024-01-01
-uses staff: employee list
+uses employee
+data staff: employee list
   -> with name: "Ada", salary: 100
 rule source_bonus:
   (staff -> first).bonus
@@ -106,13 +108,15 @@ spec employee
 data name: text
 
 spec payroll 2024-01-01
-uses staff: employee list
+uses employee
+data staff: employee list
   -> with name: "Ada"
 rule first_name:
   (staff -> first).name
 
 spec payroll 2025-01-01
-uses staff: employee list
+uses employee
+data staff: employee list
   -> with name: "Grace"
 rule first_name:
   (staff -> first).name
@@ -157,7 +161,8 @@ data pay: number
             "payroll.lemma",
             r#"
 spec payroll
-uses staff: employee list
+uses employee
+data staff: employee list
   -> with name: "Ada", salary: 1
 "#,
         ),

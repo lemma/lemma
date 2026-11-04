@@ -5,8 +5,7 @@
 use std::sync::Arc;
 
 use crate::computation::measure_math::{
-    apply_rational_magnitude_op, mathematical_computation_preserves_measure_magnitude,
-    measure_magnitude_math,
+    apply_rational_number_op, magnitude_abs, mathematical_computation_applies_to_magnitude,
 };
 use crate::computation::{OperationResult, VetoType};
 use crate::planning::semantics::{
@@ -21,17 +20,19 @@ pub(crate) fn evaluate_mathematical_operator(
     use crate::computation::decimal_math::{decimal_acos, decimal_asin, decimal_atan, decimal_tan};
     use rust_decimal::MathematicalOps;
 
-    if matches!(&value.value, ValueKind::Measure(_))
-        && mathematical_computation_preserves_measure_magnitude(op)
-    {
-        return measure_magnitude_math(op, value, lemma_type);
-    }
-
     match &value.value {
+        ValueKind::Measure(_) | ValueKind::Ratio(_) => {
+            assert!(
+                mathematical_computation_applies_to_magnitude(op),
+                "BUG: planning rejects '{op}' on {}",
+                lemma_type.name()
+            );
+            magnitude_abs(value)
+        }
         ValueKind::Number(stored_rational) => {
             use crate::computation::rational::decimal_to_rational;
-            if mathematical_computation_preserves_measure_magnitude(op) {
-                return match apply_rational_magnitude_op(op, stored_rational) {
+            if let Some(exact) = apply_rational_number_op(op, stored_rational) {
+                return match exact {
                     Ok(rounded) => OperationResult::from_literal(LiteralValue::number(rounded)),
                     Err(failure) => OperationResult::Veto(VetoType::computation(failure.to_string())),
                 };
@@ -48,10 +49,7 @@ pub(crate) fn evaluate_mathematical_operator(
                 }
             };
             let decimal_result: Option<rust_decimal::Decimal> = match op {
-                MathematicalComputation::Abs
-                | MathematicalComputation::Floor
-                | MathematicalComputation::Ceil
-                | MathematicalComputation::Round => {
+                MathematicalComputation::Abs => {
                     unreachable!("BUG: exact rational operators return before the Decimal path")
                 }
                 MathematicalComputation::Sqrt => stored_decimal.sqrt(),
@@ -97,10 +95,7 @@ pub(crate) fn resolve_data_path_value(
     if let Some(crate::planning::semantics::ReferenceEnd::Rule(rule_path)) =
         plan.reference_ends.get(data_path)
     {
-        panic!(
-            "BUG: rule-target data path '{}' (→ rule '{}') reached evaluation; planning must inline these",
-            data_path, rule_path.rule
-        );
+        return rule_bound_slot_value(data_path, context.rule_value(plan, rule_path).clone(), plan);
     }
     let target = plan.promptable_data_path(data_path).expect(
         "BUG: missing-data veto on non-promptable path; planning must not leave this unbound",
@@ -109,4 +104,31 @@ pub(crate) fn resolve_data_path_value(
         target.clone(),
         context.missing_data_suggestion(target),
     ))
+}
+
+/// Value of data slot `path` whose reference ends at a rule: the rule's value when it
+/// satisfies the slot's declared type, else a veto naming the slot.
+fn rule_bound_slot_value(
+    path: &crate::planning::semantics::DataPath,
+    value: OperationResult,
+    plan: &crate::planning::execution_plan::ExecutionPlan,
+) -> OperationResult {
+    let OperationResult::Value(bound) = &value else {
+        return value;
+    };
+    let Some(crate::planning::semantics::DataDefinition::Reference { resolved_type, .. }) =
+        plan.data.get(path)
+    else {
+        panic!("BUG: rule-bound data path '{path}' is not a reference");
+    };
+    match crate::planning::execution_plan::validate_value_against_type(
+        resolved_type.as_ref(),
+        &bound.to_literal(),
+        &plan.resolved_types.unit_index,
+    ) {
+        Ok(()) => value,
+        Err(message) => OperationResult::Veto(VetoType::computation(format!(
+            "Reference '{path}' violates its declared constraint: {message}"
+        ))),
+    }
 }

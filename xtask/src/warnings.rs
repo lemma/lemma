@@ -4,6 +4,8 @@ pub fn line_is_warning(line: &str) -> bool {
     let trimmed = line.trim_start();
     trimmed.starts_with("[WARNING]")
         || trimmed.starts_with("WARNING")
+        || trimmed.starts_with("Warning:")
+        || trimmed.starts_with("warning:")
         || trimmed.starts_with("npm warn")
         || trimmed.starts_with("npm WARN")
 }
@@ -32,6 +34,12 @@ mod tests {
             "npm WARN deprecated prebuild-install@7.1.3"
         ));
         assert!(line_is_warning("WARNING Something went wrong"));
+        assert!(line_is_warning(
+            "Warning: Unable to auto-format lemma_dotnet.cs"
+        ));
+        assert!(line_is_warning(
+            "warning: ignoring benchmark `apply` as `benches/apply.rs` is not included in the published package"
+        ));
         assert!(line_is_warning("  npm warn indented"));
         assert!(!line_is_warning(
             " DONE  Packaged: /tmp/lemma-language-0.9.4.vsix"

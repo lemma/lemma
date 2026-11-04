@@ -16,7 +16,7 @@ rule cost: qty * article.price
 
 spec part
 data own_cost: number
-uses components: part list
+data components: part list
 rule unit_cost:
   own_cost + (components -> sum components.unit_cost)
   unless components -> count is 0 then own_cost
@@ -26,7 +26,8 @@ data name: text
 data price: number
 
 spec catalog
-uses items: item list
+uses item
+data items: item list
   -> key name
   -> with name: "a", price: 1
 rule total: items -> sum price
@@ -37,9 +38,11 @@ data shipping: money
 data express: boolean
 data discounts: number list
   -> with 5, 10
-uses lines: line list
+uses line
+data lines: line list
   -> with qty: 2, article.price: 5
-uses parts: part list
+uses part
+data parts: part list
 uses supplier: article
 rule total: lines -> sum cost
 rule fee: shipping
@@ -109,7 +112,7 @@ fn real_payload_validates_and_run_accepts_it() {
     let errors = schema_errors(&document, &payload);
     assert!(errors.is_empty(), "{}", errors.join("\n"));
 
-    let data = lemma::api::parse_evaluate_data_object(&Some(payload)).expect("evaluation data");
+    let data = lemma::api::parse_evaluate_data_object(Some(payload)).expect("evaluation data");
     let response = engine
         .evaluate(None, "order", None, data, None, false)
         .expect("evaluate accepts the payload");
@@ -163,10 +166,7 @@ fn value_list_is_array_of_element_literals() {
     let engine = engine();
     let discounts = &document(&engine, "order")["properties"]["discounts"];
     assert_eq!(discounts["type"], "array");
-    assert_eq!(
-        discounts["items"],
-        json!({ "type": "string", "pattern": lemma::api::number_pattern() })
-    );
+    assert_eq!(discounts["items"], json!({ "type": "string" }));
     assert_eq!(discounts["default"], json!(["5", "10"]));
 }
 
@@ -308,7 +308,8 @@ rule cost: price * weight
 
 spec order
 uses lemma units
-uses items: line list
+uses line
+data items: line list
   -> with weight: 2 kilogram, price: 3 eur_per_kg
 rule total: items -> sum cost
 "#
@@ -405,7 +406,8 @@ data price: money
             SourceType::Path(Arc::new(PathBuf::from("basket.lemma"))),
             r#"
 spec basket
-uses items: @acme/catalog item list
+uses @acme/catalog item
+data items: item list
 rule total: items -> sum price
 "#
             .to_string(),

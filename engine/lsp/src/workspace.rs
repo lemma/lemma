@@ -245,14 +245,13 @@ impl WorkspaceModel {
     /// Record the current buffer text as the disk baseline for close/restore.
     ///
     /// Called on `textDocument/didSave` so close restores the saved content even when
-    /// the filesystem watch does not cover that path.
+    /// the filesystem watch does not cover that path. Untracked URIs (save without
+    /// open/change, or save after close with no included text) are ignored: clients
+    /// may send late or out-of-order saves, and there is no buffer to snapshot.
     pub fn record_saved_baseline(&mut self, url: &Uri) {
         let attribute = Self::attribute_for_url(url);
         let Some(tracked) = self.files.get(&attribute) else {
-            panic!(
-                "BUG: didSave for untracked URI {}; open/change must precede save",
-                url.as_str()
-            );
+            return;
         };
         let text = tracked.text.clone();
         self.disk_texts.insert(attribute.clone(), text);
@@ -1029,6 +1028,47 @@ uses fin: finance 2027
         assert!(
             joined.contains("active at that instant") || joined.contains("cannot reference itself"),
             "expected planning import error, got: {joined}"
+        );
+    }
+
+    const CART_ITEM_SOURCE: &str = r#"spec item
+data score: number
+
+spec cart
+uses item
+data items: item list
+  -> with score: 3
+rule average:
+  items -> avg score
+"#;
+
+    #[test]
+    fn instance_list_with_field_pairs_has_no_diagnostics() {
+        let mut workspace = WorkspaceModel::new();
+        let url = url_from_path("/tmp/cart_item.lemma");
+        workspace.update_file(url.clone(), CART_ITEM_SOURCE.to_string());
+
+        let results = workspace.validate_workspace();
+        assert_eq!(results.len(), 1);
+        assert!(
+            results[0].errors.is_empty(),
+            "item/cart with `-> with score: 3` must be clean, got: {:?}",
+            results[0].errors
+        );
+        workspace
+            .engine()
+            .show(None, "cart", None)
+            .expect("cart must show");
+    }
+
+    #[test]
+    fn record_saved_baseline_ignores_untracked_uri() {
+        let mut workspace = WorkspaceModel::new();
+        let url = url_from_path("/tmp/never_opened.lemma");
+        workspace.record_saved_baseline(&url);
+        assert!(
+            !workspace.is_disk_backed(&url),
+            "untracked didSave must not invent disk membership"
         );
     }
 }

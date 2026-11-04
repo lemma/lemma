@@ -6,12 +6,8 @@ use crate::planning::semantics::{
     BoundValueKind, DataPath, LemmaType, LiteralValue, SemanticDateTime, SemanticTime,
     TypeSpecification,
 };
-use serde::Serialize;
 
 /// Why an operation yielded no value (domain veto).
-///
-/// JSON serialization is a single string (see [`fmt::Display`]). There is intentionally no
-/// `Deserialize` implementation: veto payloads are engine output only.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum VetoType {
     /// Evaluation needed a data that was not provided
@@ -83,18 +79,8 @@ impl VetoType {
     }
 }
 
-impl Serialize for VetoType {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        serializer.serialize_str(&self.to_string())
-    }
-}
-
 /// Result of evaluating a rule, expression, or data leaf.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum OperationResult {
     /// Operation produced a value (canonical magnitude + optional written unit)
     Value(BoundValueKind),
@@ -158,7 +144,7 @@ impl OperationResult {
         let factor = if let TypeSpecification::Measure { units, .. } = &lemma_type.specifications {
             units
                 .get(&unit_name)
-                .map(|u| u.factor.clone())
+                .map(|u| u.require_literal_factor().clone())
                 .unwrap_or_else(|_| {
                     panic!(
                         "BUG: OperationResult::measure unit '{}' not declared on type",
@@ -206,14 +192,6 @@ impl OperationResult {
 #[cfg(test)]
 mod tests {
     use super::VetoType;
-    use crate::planning::semantics::DataPath;
-
-    #[test]
-    fn veto_type_serializes_as_display_string() {
-        let v = VetoType::missing_data(DataPath::new(vec![], "product".to_string()), None);
-        let json = serde_json::to_string(&v).expect("serialize");
-        assert_eq!(json, "\"Required data 'product' was not provided.\"");
-    }
 
     #[test]
     fn missing_row_data_display_names_list_row_and_field() {

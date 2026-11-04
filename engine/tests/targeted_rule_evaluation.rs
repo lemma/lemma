@@ -159,6 +159,97 @@ fn all_local_rules_explain_false() {
     assert!(response.results.contains_key("is_high_value"));
 }
 
+const SHOW_ORDER_SOURCE: &str = r#"
+spec tariff
+data weight: number
+rule surcharge: weight * 2
+rule handling: surcharge + 3
+
+spec invoice
+uses parcel: tariff
+data base: number
+rule net: base + parcel.handling
+rule vat: net * 21 percent
+rule gross: net + vat
+"#;
+
+fn show_order_engine() -> Engine {
+    let mut engine = Engine::new();
+    engine
+        .load([(lemma::SourceType::Volatile, SHOW_ORDER_SOURCE.to_string())])
+        .expect("load");
+    engine
+}
+
+fn show_order_inputs() -> IndexMap<String, EvaluateDataValue> {
+    IndexMap::from([
+        ("base".into(), "100".into()),
+        ("parcel.weight".into(), "4".into()),
+    ])
+}
+
+fn shown_rules_among(engine: &Engine, requested: &[&str]) -> Vec<String> {
+    engine
+        .show(None, "invoice", None)
+        .expect("show")
+        .rules
+        .keys()
+        .filter(|name| requested.contains(&name.as_str()))
+        .cloned()
+        .collect()
+}
+
+#[test]
+fn requested_rules_come_back_in_show_order() {
+    let engine = show_order_engine();
+    let requested = ["gross", "net"];
+    let response = engine
+        .evaluate(
+            None,
+            "invoice",
+            None,
+            show_order_inputs(),
+            Some(&requested.map(String::from)),
+            false,
+        )
+        .expect("evaluate");
+    let returned: Vec<String> = response.results.keys().cloned().collect();
+    assert_eq!(returned, shown_rules_among(&engine, &requested));
+    assert_eq!(returned.len(), requested.len());
+}
+
+#[test]
+fn a_rule_requested_twice_comes_back_once() {
+    let engine = show_order_engine();
+    let requested = ["vat", "net", "vat"];
+    let response = engine
+        .evaluate(
+            None,
+            "invoice",
+            None,
+            show_order_inputs(),
+            Some(&requested.map(String::from)),
+            false,
+        )
+        .expect("evaluate");
+    let returned: Vec<String> = response.results.keys().cloned().collect();
+    assert_eq!(returned, shown_rules_among(&engine, &requested));
+    assert_eq!(returned.len(), 2);
+}
+
+#[test]
+fn every_local_rule_comes_back_in_show_order() {
+    let engine = show_order_engine();
+    let response = engine
+        .evaluate(None, "invoice", None, show_order_inputs(), None, false)
+        .expect("evaluate");
+    let returned: Vec<String> = response.results.keys().cloned().collect();
+    assert_eq!(
+        returned,
+        shown_rules_among(&engine, &["net", "vat", "gross"])
+    );
+}
+
 #[test]
 fn ratio_canonical_matches_rule_result_value() {
     let mut engine = Engine::new();

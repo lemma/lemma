@@ -103,7 +103,7 @@ A list is one key holding a `List`: `Literal` items for a value list, `Map` item
 
 ## Show vs evaluate discovery
 
-`Engine::show` returns the static planning catalog: `Show.types` (local data declarations), `Show.data` (inputs rules need: non-empty `needed_by_rules`, with `path` for import identity), plus this spec's rule graph as `ShowRule` (`type`, `path`, `branches`, `depends_on_rules` as `input_key`; local plus reachable imports). `lemma::api::show_document(&engine, &show)` turns it into the JSON document every surface returns: a Draft 2020-12 JSON Schema for the evaluation data (`properties`, `required`, `$defs` row schemas) with Lemma metadata under `x-lemma-*` (`x-lemma-type`, `x-lemma-path`, `x-lemma-needed-by-rules`, `x-lemma-value`, `x-lemma-suggestion`, `x-lemma-types`, `x-lemma-rules`, ...). On `$defs` row properties, `x-lemma-needed-by-rules` are parent Show.rules keys that need that field through the list. Default `evaluate` evaluates empty-path rules; pass any Show key (e.g. `src.computed`) to target a reachable import.
+`Engine::show` returns the static planning catalog: `Show.types` (local data declarations), `Show.data` (inputs rules need: non-empty `needed_by_rules`, with `path` for import identity), plus this spec's own rules as `ShowRule` (`type`, `path`, `branches`, `depends_on_rules` as `input_key`). Branch Rule leaves may name reachable imports that are not `Show.rules` keys; follow those via `show` on the imported spec. `lemma::api::show_document(&engine, &show)` turns it into the JSON document every surface returns: a Draft 2020-12 JSON Schema for the evaluation data (`properties`, `required`, `$defs` row schemas) with Lemma metadata under `x-lemma-*` (`x-lemma-type`, `x-lemma-path`, `x-lemma-needed-by-rules`, `x-lemma-value`, `x-lemma-suggestion`, `x-lemma-types`, `x-lemma-rules`, ...). Parent Show.rules keys that need a `$defs` row field through a list are under document-level `x-lemma-row-field-needed-by-rules`; `$defs` row properties keep empty `x-lemma-needed-by-rules` so `LemmaRow_*` schemas are identical across Show documents. Default `evaluate` evaluates this spec's rules; pass Show.rules keys only (imported names are a request error).
 
 For requirements on a partial evaluation, call `evaluate` and inspect each rule's `missing_data` (`string[]` input keys in evaluation / decision-tree order; first key is the next fact the live tree needs). Local type catalog, filled literals, and `-> suggest` hints are on `Engine::show` (`Show.types` / `Show.data` values are `ShowData`) only. Bound inputs (caller evaluation bindings or spec-filled values) are omitted from `missing_data`; suggestions do not bind until supplied in `evaluate`'s data. Non-veto rule results flatten `RuleResultValue` onto each result (`result()` / typed fields). Pass `explain: true` as the last `evaluate` argument to attach per-rule explanation trees ([api.v1.json](../../../engine/schemas/api.v1.json)).
 
@@ -126,61 +126,7 @@ for key in &response.results["rate"].missing_data {
 
 `Engine::new()` loads `repo lemma` / `spec units` at compile time (import with `uses lemma units`). It always appears in `Engine::specs`. Formatted source: `engine.source(Some("lemma"), None, None)?`.
 
-## Binary snapshot
-
-After `load` / `update`, the engine holds parsed specs and compiled execution plans. `snapshot` writes that state to bytes so a later process can `from_snapshot` and call `evaluate` / `show` / `specs` without re-parsing or re-planning. The restored engine also accepts further `update` / `remove`.
-
-Bytes carry a version header (`CARGO_PKG_VERSION`) and a CRC32. A snapshot from another engine version, or corrupt bytes, returns `Error`. Same sources loaded into two engines produce identical snapshot bytes.
-
-### Write to disk and restore
-
-```rust
-use lemma::{DateTimeValue, Engine, IndexMap, SourceType};
-use std::fs;
-use std::path::Path;
-
-fn build_and_save(path: &Path) -> Result<(), Box<dyn std::error::Error>> {
-    let mut engine = Engine::new();
-    engine.load([(
-        SourceType::Volatile,
-        r#"
-        spec shipping
-        uses lemma units
-        data weight: number
-        rule rate: 10
-          unless weight > 10 then 15
-        "#
-        .to_string(),
-    )])?;
-
-    fs::write(path, engine.snapshot()?)?;
-    Ok(())
-}
-
-fn load_and_evaluate(path: &Path) -> Result<(), Box<dyn std::error::Error>> {
-    let bytes = fs::read(path)?;
-    let engine = Engine::from_snapshot(&bytes)?;
-
-    let mut values = IndexMap::new();
-    values.insert("weight".to_string(), "12".into());
-    let now = DateTimeValue::now();
-    let response = engine.evaluate(None, "shipping", Some(&now), values, None, false)?;
-
-    println!("{}", response.results["rate"].result().unwrap_or(""));
-    Ok(())
-}
-```
-
-In-process only (no filesystem):
-
-```rust
-let bytes = engine.snapshot()?;
-let restored = Engine::from_snapshot(&bytes)?;
-```
-
-JSON documents for `show` / `evaluate` / bindings use `lemma::api` (`api::show_document`, `api::Response`, ...). Domain types keep exact serde for the snapshot path.
-
-Same opaque bytes on the language SDKs: [JavaScript](javascript.md), [Java](java.md), [Elixir](elixir.md).
+JSON documents for `show` / `evaluate` / bindings use `lemma::api` (`api::show_document`, `api::Response`, ...).
 
 ## API docs
 

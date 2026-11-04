@@ -9,7 +9,6 @@ fn error_kind_string(kind: ErrorKind) -> &'static str {
     match kind {
         ErrorKind::Parsing => "parsing",
         ErrorKind::Validation => "validation",
-        ErrorKind::Inversion => "inversion",
         ErrorKind::Registry => "registry",
         ErrorKind::MissingRepository => "missing_repository",
         ErrorKind::Request => "request",

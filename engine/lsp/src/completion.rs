@@ -14,6 +14,8 @@ use tower_lsp_server::ls_types::{
 pub enum ArrowKind {
     Data,
     RuleExpr,
+    /// `->` on `data name: Spec list`: `key` and `with` only.
+    InstanceList,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -21,11 +23,25 @@ pub enum CompletionContext {
     FileTop,
     SpecBody,
     TypeAnnotation,
-    ArrowCommand { kind: ArrowKind },
+    ArrowCommand {
+        kind: ArrowKind,
+    },
     Expression,
     UsesTarget,
-    UnitLiteral { data_name: Option<String> },
-    SpecMember { alias: String },
+    UnitLiteral {
+        data_name: Option<String>,
+    },
+    SpecMember {
+        alias: String,
+    },
+    /// `alias.|` in a data type (`menu_item.drink`, `menu.drink`). Data names only.
+    TypeMember {
+        alias: String,
+    },
+    /// Field-name hole in `-> key` or `-> with` on an instance list.
+    InstanceListField {
+        element: String,
+    },
 }
 
 struct PrefixTokens {
@@ -72,7 +88,7 @@ fn classify_full(text: &str, position: Position, parse: Option<&ParseResult>) ->
     let statement = enclosing.and_then(|(_, spec)| enclosing_statement(spec, text, position));
     let prefix_context = context_from_prefix(&tokens, statement.as_ref());
 
-    let context = if let Some(ctx) = prefix_context {
+    let mut context = if let Some(ctx) = prefix_context {
         ctx
     } else if let Some(stmt) = statement {
         match stmt {
@@ -90,6 +106,15 @@ fn classify_full(text: &str, position: Position, parse: Option<&ParseResult>) ->
     } else {
         CompletionContext::FileTop
     };
+    if let Some(spot) = list_cursor(text, offset) {
+        context = match spot {
+            ListCursor::InstanceCommand => CompletionContext::ArrowCommand {
+                kind: ArrowKind::InstanceList,
+            },
+            ListCursor::Field { element } => CompletionContext::InstanceListField { element },
+            ListCursor::TypeDot { alias } => CompletionContext::TypeMember { alias },
+        };
+    }
 
     let spec = enclosing.map(|(repo, spec)| {
         (
@@ -194,19 +219,23 @@ fn collect(
                     &mut items,
                     &[
                         "find", "first", "last", "sum", "avg", "product", "count", "min", "max",
-                        "any", "all", "where", "sort", "top", "with",
+                        "any", "all", "where", "sort", "top", "with", "key", "round", "floor",
+                        "ceil",
                     ],
                     Group::Command,
                 );
+            }
+            ArrowKind::InstanceList => {
+                push_keywords(&mut items, &["key", "with"], Group::Command);
             }
         },
         CompletionContext::Expression => {
             push_keywords(
                 &mut items,
                 &[
-                    "unless", "then", "not", "and", "in", "as", "veto", "now", "past", "future",
-                    "true", "false", "yes", "no", "sqrt", "sin", "cos", "tan", "asin", "acos",
-                    "atan", "log", "exp", "abs", "floor", "ceil", "round",
+                    "unless", "then", "not", "and", "or", "in", "as", "veto", "now", "past",
+                    "future", "true", "false", "yes", "no", "sqrt", "sin", "cos", "tan", "asin",
+                    "acos", "atan", "log", "exp", "abs",
                 ],
                 Group::Keyword,
             );
@@ -251,6 +280,12 @@ fn collect(
         }
         CompletionContext::SpecMember { alias } => {
             push_spec_members(&mut items, classified, parse, engine, alias);
+        }
+        CompletionContext::TypeMember { alias } => {
+            push_type_members(&mut items, classified, parse, engine, alias);
+        }
+        CompletionContext::InstanceListField { element } => {
+            push_type_members(&mut items, classified, parse, engine, element);
         }
     }
 
@@ -316,10 +351,10 @@ fn lex_prefix(prefix: &str) -> PrefixTokens {
             break;
         }
         last_end_at_cursor = tok.span.end == prefix.len();
-        last_text = tok.text.clone();
+        last_text = tok.text.of(prefix).to_string();
         last_span_in_prefix = Some((tok.span.start, tok.span.end));
         kinds.push(tok.kind);
-        texts.push(tok.text.clone());
+        texts.push(tok.text.of(prefix).to_string());
     }
     PrefixTokens {
         kinds,
@@ -400,6 +435,353 @@ fn context_from_prefix(
         return Some(CompletionContext::FileTop);
     }
     None
+}
+
+struct Lexed {
+    kind: TokenKind,
+    text: String,
+    end: usize,
+}
+
+enum ListCursor {
+    InstanceCommand,
+    Field { element: String },
+    TypeDot { alias: String },
+}
+
+enum BodyMode {
+    Top,
+    Command,
+    KeyStart,
+    KeyName,
+    WithHole,
+    WithPath,
+    WithValue,
+    WithNames,
+}
+
+/// Where the cursor sits in a `data` list, from the token prefix. Works when the
+/// trailing `->` or field has not parsed yet.
+fn list_cursor(text: &str, offset: usize) -> Option<ListCursor> {
+    let tokens = structural_tokens(text, offset);
+    let mut spec_name: Option<String> = None;
+    let mut uses_aliases: Vec<String> = Vec::new();
+    let mut result = None;
+    let mut i = 0;
+    while i < tokens.len() {
+        match tokens[i].kind {
+            TokenKind::Spec => {
+                uses_aliases.clear();
+                result = None;
+                if let Some(name) = label_at(&tokens, i + 1) {
+                    spec_name = Some(name);
+                    i += 2;
+                } else {
+                    i += 1;
+                }
+            }
+            TokenKind::Uses => {
+                result = None;
+                i = consume_uses(&tokens, i, &mut uses_aliases);
+            }
+            TokenKind::Rule | TokenKind::Meta | TokenKind::Repo => {
+                result = None;
+                i += 1;
+            }
+            TokenKind::Data => {
+                i = consume_data(&tokens, i, &spec_name, &uses_aliases, &mut result);
+            }
+            _ => i += 1,
+        }
+    }
+    result
+}
+
+fn structural_tokens(text: &str, offset: usize) -> Vec<Lexed> {
+    let prefix = &text[..offset.min(text.len())];
+    let mut lexer = Lexer::new(prefix, &SourceType::Volatile);
+    let mut tokens = Vec::new();
+    while let Ok(tok) = lexer.next_token() {
+        if tok.kind == TokenKind::Eof {
+            break;
+        }
+        tokens.push(Lexed {
+            kind: tok.kind,
+            text: tok.text.of(prefix).to_string(),
+            end: tok.span.end,
+        });
+    }
+    if let Some(last) = tokens.last() {
+        if last.end == prefix.len() && is_word(&last.kind) {
+            tokens.pop();
+        }
+    }
+    tokens
+}
+
+fn is_word(kind: &TokenKind) -> bool {
+    can_be_label(kind)
+        || !matches!(
+            kind,
+            TokenKind::Colon
+                | TokenKind::Dot
+                | TokenKind::Arrow
+                | TokenKind::Comma
+                | TokenKind::LParen
+                | TokenKind::RParen
+                | TokenKind::Plus
+                | TokenKind::Minus
+                | TokenKind::Star
+                | TokenKind::Slash
+                | TokenKind::Percent
+                | TokenKind::PercentPercent
+                | TokenKind::Caret
+                | TokenKind::Gt
+                | TokenKind::Lt
+                | TokenKind::Gte
+                | TokenKind::Lte
+                | TokenKind::Ellipsis
+                | TokenKind::NumberLit
+                | TokenKind::StringLit
+                | TokenKind::Commentary
+                | TokenKind::Eof
+                | TokenKind::LogicalName
+        )
+}
+
+fn is_decl(kind: &TokenKind) -> bool {
+    matches!(
+        kind,
+        TokenKind::Spec
+            | TokenKind::Data
+            | TokenKind::Rule
+            | TokenKind::Uses
+            | TokenKind::Meta
+            | TokenKind::Repo
+    )
+}
+
+fn label_at(tokens: &[Lexed], index: usize) -> Option<String> {
+    let tok = tokens.get(index)?;
+    if can_be_label(&tok.kind) || tok.kind == TokenKind::LogicalName {
+        Some(tok.text.to_ascii_lowercase())
+    } else {
+        None
+    }
+}
+
+fn consume_uses(tokens: &[Lexed], uses_at: usize, aliases: &mut Vec<String>) -> usize {
+    let mut j = uses_at + 1;
+    let Some(first) = tokens.get(j) else {
+        return j;
+    };
+    if first.kind == TokenKind::LogicalName && first.text.starts_with('@') {
+        j += 1;
+        if let Some(name) = label_at(tokens, j) {
+            aliases.push(name);
+            j += 1;
+        }
+        return j;
+    }
+    if let Some(first_name) = label_at(tokens, j) {
+        j += 1;
+        if tokens
+            .get(j)
+            .is_some_and(|tok| tok.kind == TokenKind::Colon)
+        {
+            j += 1;
+            if label_at(tokens, j).is_some() {
+                aliases.push(first_name);
+                j += 1;
+            }
+        } else {
+            aliases.push(first_name);
+        }
+    }
+    j
+}
+
+fn consume_data(
+    tokens: &[Lexed],
+    data_at: usize,
+    spec_name: &Option<String>,
+    uses_aliases: &[String],
+    result: &mut Option<ListCursor>,
+) -> usize {
+    let mut j = data_at + 1;
+    if label_at(tokens, j).is_none() {
+        *result = None;
+        return j;
+    }
+    j += 1;
+    while tokens.get(j).is_some_and(|tok| tok.kind == TokenKind::Dot)
+        && label_at(tokens, j + 1).is_some()
+    {
+        j += 2;
+    }
+    if !tokens
+        .get(j)
+        .is_some_and(|tok| tok.kind == TokenKind::Colon)
+    {
+        *result = None;
+        return j;
+    }
+    j += 1;
+    let type_start = j;
+    while j < tokens.len() && !is_decl(&tokens[j].kind) && tokens[j].kind != TokenKind::Arrow {
+        j += 1;
+    }
+    let type_tokens = &tokens[type_start..j];
+    if j == tokens.len() {
+        if let Some(alias) = alias_before_trailing_dot(type_tokens) {
+            *result = Some(ListCursor::TypeDot { alias });
+            return j;
+        }
+    }
+    let element = instance_element(type_tokens, spec_name, uses_aliases);
+    if element.is_none() {
+        while j < tokens.len() && !is_decl(&tokens[j].kind) {
+            j += 1;
+        }
+        *result = None;
+        return j;
+    }
+    let mut mode = BodyMode::Top;
+    while j < tokens.len() && !is_decl(&tokens[j].kind) {
+        let kind = tokens[j].kind;
+        if kind == TokenKind::Arrow {
+            mode = BodyMode::Command;
+            j += 1;
+            continue;
+        }
+        match mode {
+            BodyMode::Command => {
+                mode = if kind == TokenKind::Key {
+                    BodyMode::KeyStart
+                } else if kind == TokenKind::With {
+                    BodyMode::WithHole
+                } else {
+                    BodyMode::Top
+                };
+                j += 1;
+            }
+            BodyMode::KeyStart => {
+                if can_be_label(&kind) || kind == TokenKind::Dot {
+                    mode = BodyMode::KeyName;
+                }
+                j += 1;
+            }
+            BodyMode::KeyName => {
+                if kind == TokenKind::Comma {
+                    mode = BodyMode::KeyStart;
+                }
+                j += 1;
+            }
+            BodyMode::WithHole => {
+                if can_be_label(&kind) {
+                    mode = if opens_field_path(tokens, j) {
+                        BodyMode::WithPath
+                    } else {
+                        BodyMode::WithNames
+                    };
+                } else if is_value_token(&kind) {
+                    mode = BodyMode::WithValue;
+                }
+                j += 1;
+            }
+            BodyMode::WithPath => {
+                if kind == TokenKind::Colon {
+                    mode = BodyMode::WithValue;
+                }
+                j += 1;
+            }
+            BodyMode::WithValue => {
+                if kind == TokenKind::Comma {
+                    mode = BodyMode::WithHole;
+                }
+                j += 1;
+            }
+            BodyMode::WithNames => {
+                j += 1;
+            }
+            BodyMode::Top => j += 1,
+        }
+    }
+    *result = match mode {
+        BodyMode::Command => element.map(|_| ListCursor::InstanceCommand),
+        BodyMode::KeyStart | BodyMode::WithHole | BodyMode::WithPath => {
+            element.map(|element| ListCursor::Field { element })
+        }
+        _ => None,
+    };
+    j
+}
+
+fn alias_before_trailing_dot(type_tokens: &[Lexed]) -> Option<String> {
+    let last = type_tokens.last()?;
+    if last.kind != TokenKind::Dot {
+        return None;
+    }
+    let prev = type_tokens.get(type_tokens.len().checked_sub(2)?)?;
+    if can_be_label(&prev.kind) || prev.kind == TokenKind::LogicalName {
+        Some(prev.text.to_ascii_lowercase())
+    } else {
+        None
+    }
+}
+
+fn instance_element(
+    type_tokens: &[Lexed],
+    spec_name: &Option<String>,
+    uses_aliases: &[String],
+) -> Option<String> {
+    if type_tokens.len() != 2 || type_tokens[1].kind != TokenKind::List {
+        return None;
+    }
+    let name = type_tokens[0].text.to_ascii_lowercase();
+    if !can_be_label(&type_tokens[0].kind) {
+        return None;
+    }
+    let is_spec = uses_aliases.iter().any(|alias| alias == &name)
+        || spec_name.as_ref().is_some_and(|spec| spec == &name);
+    is_spec.then_some(name)
+}
+
+fn opens_field_path(tokens: &[Lexed], label_at_index: usize) -> bool {
+    let mut k = label_at_index + 1;
+    loop {
+        let Some(tok) = tokens.get(k) else {
+            return false;
+        };
+        match tok.kind {
+            TokenKind::Colon => return true,
+            TokenKind::Dot => {
+                k += 1;
+                let Some(next) = tokens.get(k) else {
+                    return true;
+                };
+                if !can_be_label(&next.kind) {
+                    return false;
+                }
+                k += 1;
+            }
+            _ => return false,
+        }
+    }
+}
+
+fn is_value_token(kind: &TokenKind) -> bool {
+    matches!(
+        kind,
+        TokenKind::StringLit
+            | TokenKind::NumberLit
+            | TokenKind::Minus
+            | TokenKind::Plus
+            | TokenKind::True
+            | TokenKind::False
+            | TokenKind::Yes
+            | TokenKind::No
+    )
 }
 
 fn member_access_alias(tokens: &PrefixTokens) -> Option<String> {
@@ -532,7 +914,7 @@ fn collect_parent_type_names(ty: &ParentType, names: &mut Vec<String>) {
     let mut current = ty;
     loop {
         match current {
-            ParentType::Custom { name } => {
+            ParentType::Custom { name, .. } => {
                 names.push(name.clone());
                 return;
             }
@@ -682,6 +1064,149 @@ fn push_spec_members(
             None,
         );
     }
+}
+
+fn push_type_members(
+    items: &mut BTreeMap<String, RankedItem>,
+    classified: &Classified,
+    parse: Option<&ParseResult>,
+    engine: Option<&Engine>,
+    alias: &str,
+) {
+    let Some(parse) = parse else {
+        return;
+    };
+    let Some((_, spec_name, _)) = classified.spec.as_ref() else {
+        return;
+    };
+    let Some((_, spec)) = enclosing_spec_named(parse, spec_name) else {
+        return;
+    };
+    let mut seen = Vec::new();
+    for name in resolve_type_fields(spec, alias, parse, engine, &mut seen) {
+        push_item(
+            items,
+            name,
+            CompletionItemKind::FIELD,
+            Group::Local,
+            None,
+            None,
+        );
+    }
+}
+
+fn resolve_type_fields(
+    spec: &LemmaSpec,
+    element: &str,
+    parse: &ParseResult,
+    engine: Option<&Engine>,
+    seen: &mut Vec<String>,
+) -> Vec<String> {
+    let mut element = element.to_ascii_lowercase();
+    loop {
+        if seen.iter().any(|name| name == &element) {
+            return Vec::new();
+        }
+        seen.push(element.clone());
+        if let Some(next) = different_list_element(spec, &element) {
+            element = next;
+            continue;
+        }
+        if let Some(data) = spec.data.iter().find(|data| data.reference.name == element) {
+            match &data.value {
+                DataValue::Import { spec_ref, .. } => {
+                    return fields_of_spec_ref(spec_ref, spec, parse, engine);
+                }
+                DataValue::Definition {
+                    base: Some(ParentType::List { inner }),
+                    ..
+                } if custom_list_element(inner).is_some_and(|name| name == element) => {
+                    return definition_names(spec);
+                }
+                _ => {}
+            }
+        }
+        if spec.name == element {
+            return definition_names(spec);
+        }
+        return find_parsed_spec(parse, &element)
+            .map(definition_names)
+            .unwrap_or_default();
+    }
+}
+
+/// Lowercased element name when `element` is a list of a different custom type.
+fn different_list_element(spec: &LemmaSpec, element: &str) -> Option<String> {
+    let data = spec
+        .data
+        .iter()
+        .find(|data| data.reference.name == element)?;
+    let DataValue::Definition {
+        base: Some(ParentType::List { inner }),
+        ..
+    } = &data.value
+    else {
+        return None;
+    };
+    let inner_name = custom_list_element(inner)?;
+    if inner_name == element {
+        return None;
+    }
+    Some(inner_name.to_ascii_lowercase())
+}
+
+fn custom_list_element(ty: &ParentType) -> Option<String> {
+    let mut current = ty;
+    loop {
+        match current {
+            ParentType::Custom { name } => return Some(name.clone()),
+            ParentType::List { inner } => current = inner,
+            ParentType::Ranged { .. }
+            | ParentType::Qualified { .. }
+            | ParentType::Primitive { .. } => return None,
+        }
+    }
+}
+
+fn fields_of_spec_ref(
+    spec_ref: &lemma::SpecRef,
+    consumer: &LemmaSpec,
+    parse: &ParseResult,
+    engine: Option<&Engine>,
+) -> Vec<String> {
+    if let Some(spec) = find_parsed_spec(parse, &spec_ref.name) {
+        return definition_names(spec);
+    }
+    let Some(engine) = engine else {
+        return Vec::new();
+    };
+    let repository = spec_ref
+        .repository
+        .as_ref()
+        .map(|qualifier| qualifier.name.as_str());
+    let effective = spec_ref.effective.as_ref().or(consumer.effective_from());
+    engine
+        .spec_declaration(repository, &spec_ref.name, effective)
+        .map(definition_names)
+        .unwrap_or_default()
+}
+
+fn find_parsed_spec<'a>(parse: &'a ParseResult, name: &str) -> Option<&'a LemmaSpec> {
+    let canonical = name.to_ascii_lowercase();
+    parse
+        .repositories
+        .iter()
+        .find_map(|(_, specs)| specs.iter().find(|spec| spec.name == canonical))
+}
+
+fn definition_names(spec: &LemmaSpec) -> Vec<String> {
+    spec.data
+        .iter()
+        .filter_map(|data| match &data.value {
+            DataValue::Definition { .. } => Some(data.reference.name.clone()),
+            DataValue::Import { .. } | DataValue::ImportList { .. } => None,
+        })
+        .collect()
 }
 
 fn push_units(
@@ -894,6 +1419,10 @@ mod tests {
         );
         assert!(labels.contains(&"sum".to_string()));
         assert!(labels.contains(&"where".to_string()));
+        assert!(labels.contains(&"key".to_string()));
+        assert!(labels.contains(&"round".to_string()));
+        assert!(labels.contains(&"floor".to_string()));
+        assert!(labels.contains(&"ceil".to_string()));
         assert!(!labels.contains(&"minimum".to_string()));
     }
 
@@ -990,9 +1519,142 @@ rule out: units_src.|mass
     }
 
     #[test]
-    fn qualified_type_after_dot_in_data_stays_type_annotation() {
+    fn qualified_type_after_dot_in_data_is_type_member() {
         let src = "spec consumer\ndata x: units_src.|";
-        assert_eq!(context_at(src, "|"), CompletionContext::TypeAnnotation);
+        assert_eq!(
+            context_at(src, "|"),
+            CompletionContext::TypeMember {
+                alias: "units_src".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn instance_list_arrow_offers_key_and_with_only() {
+        let src = "spec payroll\nuses employee\ndata staff: employee list\n  -> |";
+        assert_eq!(
+            context_at(src, "|"),
+            CompletionContext::ArrowCommand {
+                kind: ArrowKind::InstanceList
+            }
+        );
+        let labels = labels_at(src, "|");
+        assert!(labels.contains(&"key".to_string()), "{labels:?}");
+        assert!(labels.contains(&"with".to_string()), "{labels:?}");
+        assert!(!labels.contains(&"minimum".to_string()), "{labels:?}");
+        assert!(!labels.contains(&"where".to_string()), "{labels:?}");
+
+        let self_list = "spec part\ndata components: part list\n  -> |";
+        assert_eq!(
+            context_at(self_list, "|"),
+            CompletionContext::ArrowCommand {
+                kind: ArrowKind::InstanceList
+            }
+        );
+    }
+
+    #[test]
+    fn value_list_arrow_keeps_constraints_and_hides_key() {
+        let src = "spec pricing\ndata money: measure\ndata fares: money list\n  -> |";
+        assert!(
+            matches!(
+                context_at(src, "|"),
+                CompletionContext::ArrowCommand {
+                    kind: ArrowKind::Data
+                }
+            ),
+            "got {:?}",
+            context_at(src, "|")
+        );
+        let labels = labels_at(src, "|");
+        assert!(labels.contains(&"with".to_string()), "{labels:?}");
+        assert!(labels.contains(&"minimum".to_string()), "{labels:?}");
+        assert!(!labels.contains(&"key".to_string()), "{labels:?}");
+    }
+
+    #[test]
+    fn instance_list_field_hole_offers_row_data_names() {
+        let src = "\
+spec employee
+data name: text
+data salary: number
+rule bonus: salary
+
+spec payroll
+uses employee
+data staff: employee list
+  -> with
+    name: \"Ada\",
+    |salary: 1
+";
+        assert_eq!(
+            context_at(src, "|"),
+            CompletionContext::InstanceListField {
+                element: "employee".to_string()
+            }
+        );
+        let labels = labels_at(src, "|");
+        assert!(labels.contains(&"name".to_string()), "{labels:?}");
+        assert!(labels.contains(&"salary".to_string()), "{labels:?}");
+        assert!(!labels.contains(&"bonus".to_string()), "{labels:?}");
+
+        let hole = "\
+spec payroll
+uses employee
+data staff: employee list
+  -> with
+    |
+";
+        assert_eq!(
+            context_at(hole, "|"),
+            CompletionContext::InstanceListField {
+                element: "employee".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn data_type_path_offers_uses_alias_and_list_fields_not_rules() {
+        let via_uses = "\
+spec menu_item
+data drink: text
+data price: number
+rule total: 1
+
+spec order
+uses menu_item
+data ordered: menu_item.|drink
+";
+        assert_eq!(
+            context_at(via_uses, "|"),
+            CompletionContext::TypeMember {
+                alias: "menu_item".to_string()
+            }
+        );
+        let labels = labels_at(via_uses, "|");
+        assert!(labels.contains(&"drink".to_string()), "{labels:?}");
+        assert!(labels.contains(&"price".to_string()), "{labels:?}");
+        assert!(!labels.contains(&"total".to_string()), "{labels:?}");
+
+        let via_list = "\
+spec menu_item
+data drink: text
+rule total: 1
+
+spec order
+uses menu_item
+data menu: menu_item list
+data ordered: menu.|drink
+";
+        assert_eq!(
+            context_at(via_list, "|"),
+            CompletionContext::TypeMember {
+                alias: "menu".to_string()
+            }
+        );
+        let labels = labels_at(via_list, "|");
+        assert!(labels.contains(&"drink".to_string()), "{labels:?}");
+        assert!(!labels.contains(&"total".to_string()), "{labels:?}");
     }
 
     #[test]

@@ -30,21 +30,6 @@
     "actual_value": null
   },
   {
-    "kind": "inversion",
-    "message": "cannot invert a piecewise rule with an unbounded arm",
-    "related_data": null,
-    "spec": "sample",
-    "related_spec": null,
-    "source": { "attribute": "sample.lemma", "line": 6, "column": 1, "length": 12 },
-    "suggestion": null,
-    "repository": null,
-    "registry_kind": null,
-    "request_kind": null,
-    "limit_name": null,
-    "limit_value": null,
-    "actual_value": null
-  },
-  {
     "kind": "registry",
     "message": "spec not found in registry",
     "related_data": null,

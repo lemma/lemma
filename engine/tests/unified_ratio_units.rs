@@ -277,8 +277,8 @@ fn cross_type_add_result_carries_left_operand_type() {
     let rr = response.results.get("total_rate").expect("total_rate");
     assert_eq!(
         rr.rule_type.as_str(),
-        "margin_pct",
-        "ratio + ratio must keep left named type"
+        "ratio",
+        "ratio + ratio must generalize to primitive ratio"
     );
     rule_value(&response, "total_rate");
 }
@@ -313,7 +313,7 @@ fn cross_type_unless_branches() {
 
     let response = evaluate_spec(&engine, "finance", finance_suggested_inputs());
     match &rule_value(&response, "tier").value {
-        ValueKind::Text(s) => assert_eq!(s, "mid", "15% > 10% but not > 20%"),
+        ValueKind::Text(s) => assert_eq!(s.as_ref(), "mid", "15% > 10% but not > 20%"),
         other => panic!("tier must be Text, got {other:?}"),
     }
 }

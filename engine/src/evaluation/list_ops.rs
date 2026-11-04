@@ -1,31 +1,21 @@
 //! List command results over evaluated operands. The frame machine in
 //! [`super::tree`] evaluates operands and row reads; the functions here combine them.
 
-use crate::computation::range::check_containment;
 use crate::computation::rational::{rational_new, rational_zero, RationalInteger};
 use crate::computation::{arithmetic_operation, comparison_operation, OperationResult, VetoType};
 use crate::evaluation::rows::checked_row_field;
-use crate::parsing::ast::RowCondition;
 use crate::planning::execution_plan::ExecutionPlan;
-use crate::planning::instance_list::{
-    describe_key, key_conflict, row_end_type, typed_from_bound, KeyedRow,
-};
+use crate::planning::instance_list::{describe_key, row_end_type, typed_from_bound};
 use crate::planning::normalize::{NormalFormId, NormalFormListOp};
 use crate::planning::semantics::{
-    row_literal, ArithmeticComputation, BoundValueKind, ComparisonComputation, DataPath, LemmaType,
-    ListKey, LiteralValue, RowInstance, RowOrigin, SpecValue, TypeSpecification, TypedLiteral,
-    ValueKind,
+    primitive_number_arc, row_literal, ArithmeticComputation, BoundValueKind,
+    ComparisonComputation, DataPath, KeyField, LemmaType, ListKey, ListPredKind, ListValue,
+    LiteralValue, RowBinding, RowEnd, RowInstance, RowOrigin, SpecIdentity, TypeSpecification,
+    TypedLiteral, ValueKind,
 };
-use indexmap::IndexMap;
+use std::borrow::Cow;
 use std::cmp::Ordering;
 use std::sync::Arc;
-
-pub(crate) fn row_instance(row: &TypedLiteral) -> &Arc<RowInstance> {
-    match &row.value {
-        ValueKind::Spec(SpecValue::Row(instance)) => instance,
-        other => panic!("BUG: instance list row is {other:?}, not a row"),
-    }
-}
 
 pub(crate) fn list_key(list_type: &LemmaType) -> &ListKey {
     match &list_type.specifications {
@@ -34,21 +24,21 @@ pub(crate) fn list_key(list_type: &LemmaType) -> &ListKey {
     }
 }
 
-pub(crate) fn list_result(rows: Vec<TypedLiteral>, unit: Option<Arc<str>>) -> OperationResult {
+pub(crate) fn list_result(rows: impl Into<ListValue>, unit: Option<Arc<str>>) -> OperationResult {
     OperationResult::from_bound(BoundValueKind {
-        value: ValueKind::List(rows),
+        value: ValueKind::List(rows.into()),
         unit,
     })
 }
 
-pub(crate) fn count_rows(rows: &[TypedLiteral]) -> OperationResult {
+pub(crate) fn count_rows(rows: &ListValue) -> OperationResult {
     OperationResult::from_literal(LiteralValue::number(rational_new(
         i64::try_from(rows.len()).expect("BUG: list len fits i64"),
         1,
     )))
 }
 
-pub(crate) fn first_or_last(rows: &[TypedLiteral], first: bool) -> OperationResult {
+pub(crate) fn first_or_last(rows: &ListValue, first: bool) -> OperationResult {
     let row = if first { rows.first() } else { rows.last() };
     match row {
         Some(row) => OperationResult::from_literal(row.to_literal()),
@@ -124,7 +114,7 @@ pub(crate) fn reduce(
             result_type,
             &ArithmeticComputation::Divide,
             &count,
-            crate::planning::semantics::primitive_number_arc(),
+            primitive_number_arc(),
             &plan.signature_index,
         );
     }
@@ -205,7 +195,7 @@ pub(crate) fn sort_rows(
 }
 
 pub(crate) fn top_rows(
-    rows: &[TypedLiteral],
+    rows: &ListValue,
     n_result: OperationResult,
     unit: Option<Arc<str>>,
 ) -> OperationResult {
@@ -221,10 +211,16 @@ pub(crate) fn top_rows(
             n.display_str()
         )));
     };
-    list_result(rows.iter().take(count).cloned().collect(), unit)
+    list_result(
+        rows.iter()
+            .take(count)
+            .map(Cow::into_owned)
+            .collect::<Arc<[_]>>(),
+        unit,
+    )
 }
 
-pub(crate) fn find_numbered(rows: &[TypedLiteral], key_result: OperationResult) -> OperationResult {
+pub(crate) fn find_numbered(rows: &ListValue, key_result: OperationResult) -> OperationResult {
     let OperationResult::Value(key_bound) = &key_result else {
         return key_result;
     };
@@ -248,69 +244,8 @@ pub(crate) fn find_numbered(rows: &[TypedLiteral], key_result: OperationResult) 
     }
 }
 
-/// Per-row truth of a value-list condition against the right operand `right`; the first
-/// vetoed row (or a vetoed right operand) is the `Err`.
-pub(crate) fn condition_flags(
-    rows: &[TypedLiteral],
-    condition: &RowCondition,
-    right: &OperationResult,
-    right_type: &Arc<LemmaType>,
-) -> Result<Vec<bool>, OperationResult> {
-    let OperationResult::Value(right_bound) = right else {
-        return Err(right.clone());
-    };
-    let mut flags = Vec::with_capacity(rows.len());
-    for row in rows {
-        let result = match condition {
-            RowCondition::Compare(op) => comparison_operation(
-                &row.value,
-                &row.lemma_type,
-                op,
-                &right_bound.value,
-                right_type,
-            ),
-            RowCondition::In => {
-                let ValueKind::Range(lower, upper) = &right_bound.value else {
-                    panic!("BUG: `in` operand of a list condition is not a range after planning");
-                };
-                let endpoint_type = right_type
-                    .specifications
-                    .element_from_range()
-                    .map(|element| Arc::new(LemmaType::primitive(element)))
-                    .expect("BUG: `in` operand of a list condition has a range type");
-                check_containment(
-                    &row.value,
-                    &row.lemma_type,
-                    &lower.value,
-                    &upper.value,
-                    &endpoint_type,
-                )
-            }
-        };
-        match result {
-            OperationResult::Value(flag) => {
-                let ValueKind::Boolean(b) = flag.value else {
-                    panic!("BUG: list condition must evaluate to boolean");
-                };
-                flags.push(b);
-            }
-            veto @ OperationResult::Veto(_) => return Err(veto),
-        }
-    }
-    Ok(flags)
-}
-
-pub(crate) fn predicate_result(flags: &[bool], any: bool) -> OperationResult {
-    let holds = if any {
-        flags.iter().any(|b| *b)
-    } else {
-        flags.iter().all(|b| *b)
-    };
-    OperationResult::from_literal(LiteralValue::from_bool(holds))
-}
-
 pub(crate) fn filter_rows(
-    rows: &[TypedLiteral],
+    rows: &ListValue,
     flags: Vec<bool>,
     unit: Option<Arc<str>>,
 ) -> OperationResult {
@@ -318,8 +253,8 @@ pub(crate) fn filter_rows(
         .iter()
         .zip(flags)
         .filter(|(_, keep)| *keep)
-        .map(|(row, _)| row.clone())
-        .collect();
+        .map(|(row, _)| row.into_owned())
+        .collect::<Arc<[_]>>();
     list_result(kept, unit)
 }
 
@@ -344,11 +279,12 @@ pub(crate) fn append_values(
     list_result(kept, unit)
 }
 
-/// Result of an instance-list command whose per-row operand values are `values`
-/// (one per row of `rows`, in row order).
+/// Result of a list command whose per-row operand values are `values`
+/// (one per row of `rows`, in row order). Used for value-list and instance-list
+/// predicates, reductions, and sorts.
 pub(crate) fn per_row_result(
     op: &NormalFormListOp,
-    rows: &[TypedLiteral],
+    rows: &ListValue,
     values: &[TypedLiteral],
     unit: Option<Arc<str>>,
     result_type: &Arc<LemmaType>,
@@ -360,22 +296,22 @@ pub(crate) fn per_row_result(
         NormalFormListOp::Avg => reduce(values, ListFold::Avg, result_type, plan),
         NormalFormListOp::Min => extrema(values, Ordering::Less),
         NormalFormListOp::Max => extrema(values, Ordering::Greater),
-        NormalFormListOp::AnyRow | NormalFormListOp::AllRow | NormalFormListOp::WhereRow => {
+        NormalFormListOp::Predicate { kind, .. } => {
             let flags: Vec<bool> = values
                 .iter()
                 .map(|value| match value.value {
                     ValueKind::Boolean(flag) => flag,
-                    ref other => panic!("BUG: row condition evaluated to {other:?}"),
+                    ref other => panic!("BUG: predicate evaluated to {other:?}"),
                 })
                 .collect();
-            match op {
-                NormalFormListOp::AnyRow => {
+            match kind {
+                ListPredKind::Any => {
                     OperationResult::from_literal(LiteralValue::from_bool(flags.contains(&true)))
                 }
-                NormalFormListOp::AllRow => {
+                ListPredKind::All => {
                     OperationResult::from_literal(LiteralValue::from_bool(!flags.contains(&false)))
                 }
-                _ => filter_rows(rows, flags, unit),
+                ListPredKind::Where => filter_rows(rows, flags, unit),
             }
         }
         NormalFormListOp::Sort { descending } => {
@@ -393,80 +329,37 @@ pub(crate) fn per_row_result(
                 return OperationResult::Veto(veto);
             }
             list_result(
-                order.into_iter().map(|index| rows[index].clone()).collect(),
+                order
+                    .into_iter()
+                    .map(|index| {
+                        rows.get(index)
+                            .expect("BUG: sort order holds positions of the list")
+                            .into_owned()
+                    })
+                    .collect::<Arc<[_]>>(),
                 unit,
             )
         }
-        other => unreachable!("BUG: {other:?} is not an instance-row reduction"),
+        other => unreachable!("BUG: {other:?} is not a per-row list reduction"),
     }
 }
 
-/// Whether `key` (a row's key values) matches `wanted`; the first vetoed comparison decides.
-pub(crate) fn keys_match(
-    key: &[TypedLiteral],
-    wanted: &[TypedLiteral],
-) -> Result<bool, OperationResult> {
-    for (row_value, value) in key.iter().zip(wanted) {
-        match key_matches(row_value, value) {
-            OperationResult::Value(flag) => match flag.value {
-                ValueKind::Boolean(true) => {}
-                ValueKind::Boolean(false) => return Ok(false),
-                other => panic!("BUG: key match returned {other:?}"),
-            },
-            veto @ OperationResult::Veto(_) => return Err(veto),
-        }
-    }
-    Ok(true)
-}
-
-/// Whether `value` selects a row whose key field holds `row_value`: equal, or inside a range key.
-fn key_matches(row_value: &TypedLiteral, value: &TypedLiteral) -> OperationResult {
-    match &row_value.value {
-        ValueKind::Range(lower, upper) => {
-            let endpoint_type = row_value
-                .lemma_type
-                .specifications
-                .element_from_range()
-                .map(|element| Arc::new(LemmaType::primitive(element)))
-                .expect("BUG: range key field has a range type");
-            check_containment(
-                &value.value,
-                &value.lemma_type,
-                &lower.value,
-                &upper.value,
-                &endpoint_type,
-            )
-        }
-        _ => comparison_operation(
-            &row_value.value,
-            &row_value.lemma_type,
-            &ComparisonComputation::Is,
-            &value.value,
-            &value.lemma_type,
-        ),
-    }
-}
-
-pub(crate) fn no_row_with_key(fields: &[String], wanted: &[TypedLiteral]) -> OperationResult {
-    let described = describe_key(fields, wanted);
+pub(crate) fn no_row_with_key(fields: &[KeyField], wanted: &[TypedLiteral]) -> OperationResult {
+    let names: Vec<String> = fields.iter().map(|field| field.name.clone()).collect();
+    let described = describe_key(&names, wanted);
     OperationResult::Veto(VetoType::computation(format!(
         "No row found where {described}."
     )))
 }
 
-/// The row `with` appends: one value per field, typed by the row spec of `list_type`.
-pub(crate) fn appended_instance_row(
-    plan: &ExecutionPlan,
-    list_type: &LemmaType,
-    fields: &[DataPath],
+/// Append local instances (`-> with kim`) and/or other instance lists onto `rows`. An
+/// appended instance is the instance itself: its fields are `kim.*`, bound or data.
+pub(crate) fn append_instance_operands(
+    rows: &ListValue,
     values: Vec<OperationResult>,
-    rows_before: usize,
-) -> TypedLiteral {
-    assert_eq!(
-        fields.len(),
-        values.len(),
-        "BUG: appended row has one value per field"
-    );
+    list_type: &LemmaType,
+    unit: Option<Arc<str>>,
+) -> OperationResult {
     let identity = match &list_type.specifications {
         TypeSpecification::List { element, .. } => match &element.specifications {
             TypeSpecification::Spec { spec: identity } => identity.clone(),
@@ -474,42 +367,83 @@ pub(crate) fn appended_instance_row(
         },
         other => panic!("BUG: list command operand type is {other:?}"),
     };
-    let template = plan.row_template(&identity);
-    let mut bindings = IndexMap::new();
+    let row_type = Arc::new(LemmaType::primitive(TypeSpecification::Spec {
+        spec: identity,
+    }));
+    let mut kept = rows.to_vec();
+    for value in values {
+        let OperationResult::Value(bound) = value else {
+            panic!("BUG: `with` operand vetoed after the veto check");
+        };
+        match bound.value {
+            row @ ValueKind::Spec(_) => kept.push(TypedLiteral {
+                value: row,
+                lemma_type: Arc::clone(&row_type),
+            }),
+            ValueKind::List(items) => {
+                for item in items.iter() {
+                    match &item.value {
+                        row @ ValueKind::Spec(_) => kept.push(TypedLiteral {
+                            value: row.clone(),
+                            lemma_type: Arc::clone(&row_type),
+                        }),
+                        other => panic!("BUG: instance list `with` list item is {other:?}"),
+                    }
+                }
+            }
+            other => panic!("BUG: instance list `with` operand is {other:?}"),
+        }
+    }
+    list_result(kept, unit)
+}
+
+/// The row `-> with field: value` writes inline: one value per field, checked against
+/// the row spec `identity`. It has only the fields the command sets.
+pub(crate) fn inline_row(
+    plan: &ExecutionPlan,
+    identity: &Arc<SpecIdentity>,
+    fields: &[DataPath],
+    values: Vec<OperationResult>,
+    origin: RowOrigin,
+) -> TypedLiteral {
+    assert_eq!(
+        fields.len(),
+        values.len(),
+        "BUG: inline row has one value per field"
+    );
+    assert!(
+        origin.is_inline(),
+        "BUG: inline row built with origin {origin}"
+    );
+    let template = plan.row_template(identity);
+    let mut bindings = vec![None; template.data.len()];
     for (field, value) in fields.iter().zip(values) {
-        bindings.insert(field.clone(), checked_row_field(template, field, value));
+        let slot = template
+            .data
+            .get_index_of(field)
+            .expect("BUG: inline row field is template data");
+        bindings[slot] = Some(RowBinding::Bound(checked_row_field(template, field, value)));
     }
     row_literal(
-        identity.clone(),
-        RowOrigin::Appended {
-            number: rows_before + 1,
-        },
+        Arc::clone(identity),
+        origin,
         bindings,
         Arc::new(LemmaType::primitive(TypeSpecification::Spec {
-            spec: identity,
+            spec: SpecIdentity::clone(identity),
         })),
     )
 }
 
-/// Type of the key field `field` of `row`, and its end on the row spec's template.
+/// Type of a list key field on `row`, and its end on the row spec's template.
 pub(crate) fn key_field_type(
     plan: &ExecutionPlan,
     row: &RowInstance,
-    field: &str,
-) -> (crate::planning::semantics::RowEnd, Arc<LemmaType>) {
+    key_field: &KeyField,
+) -> (RowEnd, Arc<LemmaType>) {
     let template = plan.row_template(&row.identity);
-    let end = crate::planning::instance_list::row_end(template, field)
-        .unwrap_or_else(|| panic!("BUG: key field `{field}` is not a field of the row spec"));
+    let end = RowEnd::Data(key_field.path.clone());
     let field_type = row_end_type(template, &end);
     (end, field_type)
-}
-
-pub(crate) fn key_conflict_result(
-    fields: &[String],
-    keyed: &[KeyedRow],
-) -> Option<OperationResult> {
-    key_conflict(fields, keyed)
-        .map(|conflict| OperationResult::Veto(VetoType::computation(conflict)))
 }
 
 pub(crate) fn typed_operand(value: OperationResult, lemma_type: &Arc<LemmaType>) -> TypedLiteral {

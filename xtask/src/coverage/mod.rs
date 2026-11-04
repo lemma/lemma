@@ -374,6 +374,16 @@ pub fn parse_nextest_summary(output: &str) -> Result<TestRunSummary, String> {
     Err("nextest summary line not found in llvm-cov output".into())
 }
 
+fn without_slow_note(token: &str) -> &str {
+    let token = token.trim();
+    if let Some(open) = token.rfind(" (") {
+        if token.ends_with(" slow)") {
+            return token[..open].trim();
+        }
+    }
+    token
+}
+
 fn parse_test_counts(summary: &str) -> Result<(u32, u32, u32, u32), String> {
     let run_part = summary
         .split(':')
@@ -390,7 +400,7 @@ fn parse_test_counts(summary: &str) -> Result<(u32, u32, u32, u32), String> {
     let mut passed = 0_u32;
     let mut skipped = 0_u32;
     let mut failed = 0_u32;
-    for token in summary.split([',', ':']).map(str::trim) {
+    for token in summary.split([',', ':']).map(without_slow_note) {
         if let Some(n) = token.strip_suffix(" passed") {
             passed = n
                 .parse()

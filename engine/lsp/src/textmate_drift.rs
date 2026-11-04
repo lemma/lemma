@@ -102,6 +102,10 @@ mod tests {
             "type-keyword pattern must include soft suffix range: {type_pat}"
         );
         assert!(
+            type_pat.contains("list"),
+            "type-keyword pattern must include list: {type_pat}"
+        );
+        assert!(
             !type_pat.contains("percent"),
             "type-keyword pattern must not list percent: {type_pat}"
         );

@@ -29,7 +29,7 @@ Bare unit when exactly one declarer is in scope (`5 kilogram`, `5 eur`). When tw
 
 **Ranges: half-open intervals**
 
-Ranges: lower bound inclusive, upper bound exclusive (`lo...hi`). Test with `in`. Width: `lo...hi as <unit>` (duration/measure). Add `as number` only when a bare number is required. Bare `as number` on date/measure ranges fails. Read an endpoint with `lower` / `upper` (`lower 5...10`, `upper period`). `lower` is included; `upper` is excluded. `...` binds tighter than those operators. `-> lower` / `-> upper` still constrain a range slot; they are not the operators. `lower` and `upper` are reserved names. Typedefs: `number range`, `date range`, `measure range`, `ratio range`. Month/year intervals: `uses lemma units` and inline literals (`18 year...67 year`) or `units.calendar range`. Prefix operators (`floor`, `sqrt`, `lower`, …) and `not` take `floor(x)` or one bare operand: `floor(x) + 1` adds to the result, `floor (x + 1)` floors the sum, `floor x + 1` is a parse error.
+Ranges: lower bound inclusive, upper bound exclusive (`lo...hi`). Test with `in`. Width: `lo...hi as <unit>` (duration/measure). Add `as number` only when a bare number is required. Bare `as number` on date/measure ranges fails. Read an endpoint with `lower` / `upper` (`lower 5...10`, `upper period`). `lower` is included; `upper` is excluded. `...` binds tighter than those operators. `-> lower` / `-> upper` still constrain a range slot; they are not the operators. `lower` and `upper` are reserved names. Typedefs: `number range`, `date range`, `measure range`, `ratio range`. Month/year intervals: `uses lemma units` and inline literals (`18 year...67 year`) or `units.calendar range`. Prefix operators (`abs`, `sqrt`, `lower`, …) and `not` take `abs(x)` or one bare operand: `abs(x) + 1` adds to the result, `abs (x + 1)` takes the absolute value of the sum, `abs x + 1` is a parse error. Rounding is postfix: `x -> round` or `price -> round 0.05 eur`.
 
 The snippet below is a syntax sample, not one policy.
 
@@ -74,7 +74,25 @@ rule total:
   wage * time_worked
 ```
 
-Layer compound units: `eur_per_hour` builds on `eur` and `hour`. Dimensional checks run at plan time.
+Layer compound units: `eur_per_hour` builds on `eur` and `hour`. Dimensional checks run at plan time. A quantity raised to an integer power is a declared unit with that composition: `2 meter ^ 2` is `4 square_meter`. A power with no declared unit in scope is a planning error.
+
+**Dynamic unit scales**
+
+The right-hand side of `-> unit <name>:` on a measure may be a literal factor, a compound unit path, or a reference to a `data` or `rule` of type `number`:
+
+```lemma
+spec fx
+
+data rate: number
+data money: measure
+  -> unit eur: 1
+  -> unit gbp: rate
+
+rule total:
+  100 gbp
+```
+
+Scales are evaluated before every rule that holds a value of that measure. A value written in a dynamic unit takes that unit's scale: unbound scale data is missing data, a vetoing scale passes its veto through, and a scale of zero or less is a computation veto. A scale the value does not need leaves the rule's result alone; only that unit's column is left out. A scale rule that itself holds a value of its measure is a circular dependency. A dynamic unit belongs to the spec that declares it, so each `uses` instance and each list row uses its own scale. A spec that imports the measure cannot write or convert to that unit (a planning error). There, a value of a measure whose units are all dynamic is a veto, because that spec cannot express it in any unit. Dynamic units cannot appear in compound unit expressions, or in `minimum`, `maximum`, `suggest`, or `option`. `ratio` units stay literal-only. Strip a unit with `amount as gbp as number` (an explicit unit is required before `as number`).
 
 **Date predicates relative to `now`**
 

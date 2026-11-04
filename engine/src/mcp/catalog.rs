@@ -48,7 +48,7 @@ fn evaluate_input_schema() -> serde_json::Value {
             },
             "data": {
                 "type": "object",
-                "description": "Optional input bindings. Strings, booleans, single-unit maps ({\"eur\": \"84\"}), arrays. A list (Show type kind `list`) is one array that replaces all its rows: items of a value list are literals ([\"89 eur\", \"120 eur\"]), rows of an instance list are objects keyed by the row spec's data names ([{\"price\": \"2\", \"qty\": \"3\"}]), a nested list inside a row is again an array. A missing row field such as `lines.2.qty` is bound by sending the whole `lines` array again, never as a dotted key. JSON numbers are rejected; pass decimals as strings. Partial is fine.",
+                "description": "Optional input bindings. Strings, booleans, single-unit maps ({\"eur\": \"84\"}), arrays. A list (Show type kind `list`) accepts a whole-array replace: items of a value list are literals ([\"89 eur\", \"120 eur\"]), rows of an instance list are objects keyed by the row spec's data names ([{\"price\": \"2\", \"qty\": \"3\"}]), a nested list inside a row is again an array. Unbound row fields may also be supplied as dotted keys matching ask keys (`lines.2.qty`). Sending both the whole list and a dotted key for the same list in one request is an error. JSON numbers are rejected; pass decimals as strings. Partial is fine.",
                 "additionalProperties": true
             },
             "effective": {
@@ -83,7 +83,7 @@ pub fn list_tools() -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: "show",
-            description: "Return a spec's interface. Default: a JSON Schema (Draft 2020-12) for the spec's evaluation data: `properties` per input key (type, pattern, enum, description = help, default = spec value, examples = suggestion; x-lemma-type with units, x-lemma-path, x-lemma-needed-by-rules empty = reuse-only), `required`, `$defs` row schemas of instance lists, and this spec's rule graph under `x-lemma-rules` (local plus reachable imports as ShowRule: type, path, branches, depends_on_rules). `text: true` returns the `lemma show` view instead. Call once after specs. Static catalog — not a required-input list, not a questionnaire, not something to re-call between evaluate/ask turns. Human intake: call guide (default = evaluate guide); bind only missing_data keys, not reuse-only slots.",
+            description: "Return a spec's interface. Default: a JSON Schema (Draft 2020-12) for the spec's evaluation data: `properties` per input key (type, pattern, enum, description = help, default = spec value, examples = suggestion; x-lemma-type with units, x-lemma-path, x-lemma-needed-by-rules empty = reuse-only), `required`, `$defs` row schemas of instance lists, and this spec's own rules under `x-lemma-rules` (ShowRule: type, path, branches, depends_on_rules). Branch Rule leaves may name imports outside that map. `text: true` returns the `lemma show` view instead. Call once after specs. Static catalog — not a required-input list, not a questionnaire, not something to re-call between evaluate/ask turns. Human intake: call guide (default = evaluate guide); bind only missing_data keys, not reuse-only slots.",
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {

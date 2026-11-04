@@ -11,6 +11,7 @@ cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "0.4"
+serde_json = "1"
 
 [dependencies.lemma]
 package = "lemma-engine"
@@ -51,9 +52,4 @@ test = false
 doc = false
 bench = false
 
-[[bin]]
-name = "fuzz_snapshot_decode"
-path = "fuzz_targets/fuzz_snapshot_decode.rs"
-test = false
-doc = false
-bench = false
+

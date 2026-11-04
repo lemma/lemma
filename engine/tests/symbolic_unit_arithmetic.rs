@@ -679,7 +679,6 @@ uses lemma units
 data money: measure
   -> unit usd: 1.00
   -> unit eur: 1.19
-  -> decimals 2
   -> minimum 0 usd
 
 data balance: money
@@ -1198,5 +1197,141 @@ rule runway: (balance / burn_rate) as month"#;
         decimal,
         rust_decimal::Decimal::from(12),
         "expected 12 month"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Anonymous dimensional intermediates: cancel-only (* /), not + - < > abs as number
+// ---------------------------------------------------------------------------
+
+fn length_elapsed_prelude() -> &'static str {
+    r#"spec t
+data length: measure
+  -> unit meter: 1
+data elapsed: measure
+  -> unit second: 1
+"#
+}
+
+#[test]
+fn anonymous_measure_addition_rejected_at_planning() {
+    let code = format!(
+        "{}rule result: ((10 meter * 2 meter) + (5 meter * 4 meter)) / 2 meter",
+        length_elapsed_prelude()
+    );
+    let err = load_expect_error(&code);
+    assert!(
+        err.to_lowercase().contains("anonymous")
+            || err.to_lowercase().contains("cannot add")
+            || err.to_lowercase().contains("cannot"),
+        "unnamed (meter*meter) + (meter*meter) must fail planning, got: {err}"
+    );
+}
+
+#[test]
+fn anonymous_measure_subtraction_rejected_at_planning() {
+    let code = format!(
+        "{}rule result: ((10 meter * 2 meter) - (5 meter * 4 meter)) / 2 meter",
+        length_elapsed_prelude()
+    );
+    let err = load_expect_error(&code);
+    assert!(
+        err.to_lowercase().contains("anonymous")
+            || err.to_lowercase().contains("cannot subtract")
+            || err.to_lowercase().contains("cannot"),
+        "unnamed (meter*meter) - (meter*meter) must fail planning, got: {err}"
+    );
+}
+
+#[test]
+fn anonymous_measure_comparison_rejected_at_planning() {
+    let code = format!(
+        "{}rule result: (10 meter * 2 meter) > (5 meter * 4 meter)",
+        length_elapsed_prelude()
+    );
+    let err = load_expect_error(&code);
+    assert!(
+        err.to_lowercase().contains("anonymous") || err.to_lowercase().contains("cannot compare"),
+        "unnamed (meter*meter) > (meter*meter) must fail planning, got: {err}"
+    );
+}
+
+#[test]
+fn anonymous_measure_range_endpoint_rejected_at_planning() {
+    let code = format!(
+        "{}rule result: (10 meter * 2 meter)...(5 meter * 4 meter)",
+        length_elapsed_prelude()
+    );
+    let err = load_expect_error(&code);
+    assert!(
+        err.to_lowercase().contains("anonymous")
+            || err.to_lowercase().contains("range")
+            || err.to_lowercase().contains("cannot"),
+        "unnamed (meter*meter)...(meter*meter) must fail planning, got: {err}"
+    );
+}
+
+#[test]
+fn anonymous_measure_unary_math_rejected_at_planning() {
+    let code = format!(
+        "{}rule result: abs(10 meter * 2 meter) / 2 meter",
+        length_elapsed_prelude()
+    );
+    let err = load_expect_error(&code);
+    assert!(
+        err.to_lowercase().contains("anonymous")
+            || err.to_lowercase().contains("cannot")
+            || err.to_lowercase().contains("mathematical"),
+        "abs of unnamed (meter*meter) must fail planning, got: {err}"
+    );
+}
+
+#[test]
+fn anonymous_measure_as_number_rejected_at_planning() {
+    let code = format!(
+        "{}rule result: (10 meter * 2 meter) as number",
+        length_elapsed_prelude()
+    );
+    let err = load_expect_error(&code);
+    assert!(
+        err.to_lowercase().contains("anonymous") || err.to_lowercase().contains("as number"),
+        "bare 'as number' on unnamed (meter*meter) must fail planning, got: {err}"
+    );
+}
+
+#[test]
+fn multiply_divide_cancellation_keeps_named_measure() {
+    let code = format!(
+        "{}data dist: 100 meter
+data factor: 2 second
+data elapsed_val: 5 second
+rule result: (dist * factor) / elapsed_val",
+        length_elapsed_prelude()
+    );
+    let decimal = eval_measure_in_unit(&code, "t", "result", "meter");
+    assert_eq!(
+        decimal,
+        rust_decimal::Decimal::from(40),
+        "(100 meter * 2 second) / 5 second must cancel to 40 meter"
+    );
+}
+
+#[test]
+fn division_promotes_to_named_compound_via_as_cast() {
+    let code = r#"spec t
+data length: measure
+  -> unit meter: 1
+data elapsed: measure
+  -> unit second: 1
+data mps: measure
+  -> unit mps: meter/second
+data dist: 100 meter
+data elapsed_val: 20 second
+rule result: (dist / elapsed_val) as mps"#;
+    let decimal = eval_measure_in_unit(code, "t", "result", "mps");
+    assert_eq!(
+        decimal,
+        rust_decimal::Decimal::from(5),
+        "(100 meter / 20 second) as mps must be 5 mps"
     );
 }

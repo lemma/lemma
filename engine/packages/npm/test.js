@@ -42,7 +42,6 @@ function runEx(engine, spec, rules, data, effective, explain = false) {
 const ERROR_KINDS = new Set([
   'parsing',
   'validation',
-  'inversion',
   'registry',
   'request',
   'resource_limit',
@@ -219,44 +218,6 @@ export async function test() {
       assert(threwAbove, 'max_sources beyond f64 safe integer range must throw');
     });
 
-    await run('Engine.snapshot round-trip restores list and evaluate', () => {
-      const source = new Engine();
-      source.load(`
-spec snap_demo
-data x: number
-rule y: x + 1
-`);
-      const bytes = source.snapshot();
-      assert(bytes instanceof Uint8Array, 'snapshot must return Uint8Array');
-      assert(bytes.length > 0, 'snapshot must be non-empty');
-      const restored = Engine.fromSnapshot(bytes);
-      assert(
-        JSON.stringify(restored.specs()) === JSON.stringify(source.specs()),
-        'specs must match after fromSnapshot'
-      );
-      const runSource = source.evaluate({ spec: 'snap_demo', data: { x: 41n } });
-      const runRestored = restored.evaluate({ spec: 'snap_demo', data: { x: 41n } });
-      const dropExplanation = (rule) => {
-        const { explanation: _explanation, ...rest } = rule;
-        return rest;
-      };
-      assert(
-        JSON.stringify(dropExplanation(runRestored.results.y)) ===
-          JSON.stringify(dropExplanation(runSource.results.y)),
-        'run rule y must match after fromSnapshot'
-      );
-      let threwCorrupt = false;
-      try {
-        const corrupt = new Uint8Array(bytes);
-        corrupt[0] = 0x58;
-        Engine.fromSnapshot(corrupt);
-      } catch (err) {
-        threwCorrupt = true;
-        assert(err && typeof err === 'object', 'corrupt snapshot throws EngineError object');
-      }
-      assert(threwCorrupt, 'corrupt snapshot must throw');
-    });
-
     await run('embedded lemma in list + source', () => {
       const fresh = new Engine();
       const groups = fresh.specs();
@@ -289,7 +250,8 @@ data qty: number
 rule cost: price * qty
 
 spec order
-uses lines: line list
+uses line
+data lines: line list
 data discounts: number list
 rule total: lines -> sum cost
 rule priciest: lines -> sort cost desc -> first
@@ -448,6 +410,23 @@ rule r: 1
       assert(Array.isArray(doubleRule.depends_on_rules));
     });
 
+    await run('show lists parent rules per row field', () => {
+      engine.load({ 'row_consumers.lemma': `spec line
+data qty: number
+data label: text
+
+spec order
+uses line
+data lines: line list
+rule total: lines -> sum qty` });
+      const show = engine.show(null, 'order', null);
+      const rowNames = Object.keys(show.$defs);
+      assert(rowNames.length === 1, `$defs: ${rowNames}`);
+      const consumers = show['x-lemma-row-field-needed-by-rules'][rowNames[0]];
+      assert(JSON.stringify(consumers) === JSON.stringify({ qty: ['total'] }), `consumers: ${JSON.stringify(consumers)}`);
+      assert(show.$defs[rowNames[0]].properties.qty['x-lemma-needed-by-rules'].length === 0, 'row schema stays empty');
+    });
+
     await run('show rule result units for measure and ratio', () => {
       engine.load({ 'units_contract.lemma': `spec units_contract
 data money: measure -> unit eur: 1 -> unit usd: 0.91
@@ -601,17 +580,23 @@ rule doubled: n * 2`,
       }
     });
 
-    await run('evaluation data overrides a slot bound to data', () => {
+    await run('evaluation data for a slot sealed by uses is a request error', () => {
       engine.load({
         'bound.lemma': 'spec inner\ndata slot: number\n\nspec outer\ndata base: number\nuses i: inner\n  -> with slot: base\nrule r: i.slot',
       });
-      const r = engine.evaluate({ spec: 'outer', data: { 'i.slot': '5' } });
-      assert(ruleNumber(r.results.r) === 5, `r: ${JSON.stringify(r.results.r)}`);
+      let err = null;
+      try {
+        engine.evaluate({ spec: 'outer', data: { 'i.slot': '5' } });
+      } catch (e) {
+        err = e;
+      }
+      assert(err && err.kind === 'request', `want request error, got: ${JSON.stringify(err)}`);
+      assert(err.related_data === 'i.slot', `related_data: ${err.related_data}`);
     });
 
     await run('show lists source rows of an instance list with their fields', () => {
       engine.load({
-        'menu.lemma': 'spec menu_item\ndata drink: text\ndata size: number\n\nspec cafe\nuses menu: menu_item list\n  -> with drink: "espresso", size: 1\n  -> with drink: "latte"\nrule drinks: menu -> count',
+        'menu.lemma': 'spec menu_item\ndata drink: text\ndata size: number\n\nspec cafe\nuses menu_item\ndata menu: menu_item list\n  -> with drink: "espresso", size: 1\n  -> with drink: "latte"\nrule drinks: menu -> count',
       });
       const menu = engine.show(null, 'cafe', null).properties.menu;
       assert(
@@ -898,7 +883,6 @@ uses lemma units
 data money: measure
   -> unit eur: 1.00
   -> unit inr: 0.0092
-  -> decimals 2
 data labor_cost: measure
   -> unit eur_per_hour: eur/hour
   -> unit inr_per_hour: inr/hour

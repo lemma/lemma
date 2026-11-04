@@ -27,7 +27,8 @@ fn order_spec(body: &str) -> String {
     format!(
         r#"{LINES}
 spec order
-uses items: line list
+uses line
+data items: line list
   -> with qty: 2, cost: 3
   -> with qty: 1, cost: 4
 data n: 1
@@ -44,11 +45,12 @@ fn freight_spec(body: &str) -> String {
     format!(
         r#"{RATES}
 spec order
-uses rates: freight_rate list
+uses freight_rate
+data rates: freight_rate list
   -> key band, volume_band
   -> with band: 0 kilogram...5 kilogram, volume_band: 0 liter...2 liter, price: 6.95 eur
-data parcel_weight: rates.weight
-data parcel_volume: rates.volume
+data parcel_weight: freight_rate.weight
+data parcel_volume: freight_rate.volume
 rule out:
   {body}
 "#
@@ -119,8 +121,8 @@ fn reductions_match_format() {
     for body in [
         "items -> sum cost",
         "items -> sum(cost * 2)",
-        "items -> sum(cost) * 2",
-        "2 * items -> sum cost",
+        "(items -> sum cost) * 2",
+        "2 * (items -> sum cost)",
         "items -> avg cost",
         "items -> min cost",
         "items -> max cost",
@@ -149,7 +151,7 @@ fn row_rule_arguments_match_format() {
         "items -> max subtotal",
         "items -> where subtotal > 3 -> count",
         "items -> sort subtotal desc -> count",
-        "items -> sum(subtotal) * 2",
+        "(items -> sum subtotal) * 2",
     ] {
         assert_body_matches_format(&order_spec(body), IndexMap::new());
     }
@@ -227,7 +229,8 @@ fn binary_operands_use_call_form_on_both_sides() {
     for (body, expected) in [
         ("(sqrt n) * (sqrt n)", "sqrt(n) * sqrt(n)"),
         ("2 * sqrt n", "2 * sqrt(n)"),
-        ("2 * items -> sum cost", "2 * items -> sum(cost)"),
+        ("2 * (items -> sum cost)", "2 * (items -> sum cost)"),
+        ("(items -> sum cost) > 5", "items -> sum(cost) > 5"),
         ("items -> sum cost", "items -> sum cost"),
         ("sqrt n", "sqrt n"),
         ("n > 0 and not flag", "n > 0 and not flag"),

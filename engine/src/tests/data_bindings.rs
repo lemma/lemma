@@ -1,4 +1,4 @@
-use crate::parsing::ast::{DataValue, WithRhs};
+use crate::parsing::ast::{DataValue, UsesBindingRhs};
 
 use crate::parsing::parse;
 
@@ -21,10 +21,16 @@ uses contract: employment_contract"#;
         result[0].data[1].reference,
         crate::parsing::ast::Reference::local("contract".to_string())
     );
-    if let DataValue::Import { spec_ref, bindings } = &result[0].data[1].value {
+    if let DataValue::Import {
+        spec_ref,
+        bindings,
+        effective_ref,
+    } = &result[0].data[1].value
+    {
         assert_eq!(spec_ref.name, "employment_contract");
         assert!(spec_ref.repository.is_none());
         assert!(bindings.is_empty());
+        assert!(effective_ref.is_none());
     } else {
         panic!("Expected Import");
     }
@@ -52,13 +58,19 @@ uses base: base_contract"#;
         result[0].data[0].reference,
         crate::parsing::ast::Reference::local("contract".to_string())
     );
-    if let DataValue::Import { spec_ref, bindings } = &result[0].data[0].value {
+    if let DataValue::Import {
+        spec_ref,
+        bindings,
+        effective_ref,
+    } = &result[0].data[0].value
+    {
         assert_eq!(spec_ref.name, "employment_contract");
         assert!(spec_ref.repository.is_none());
+        assert!(effective_ref.is_none());
         assert_eq!(bindings.len(), 2);
         assert_eq!(bindings[0].path.name, "start_date");
         match &bindings[0].rhs {
-            WithRhs::Literal(lit) => {
+            UsesBindingRhs::Literal(lit) => {
                 assert!(
                     matches!(lit, crate::parsing::ast::Value::Date(_)),
                     "Expected Date literal in binding"
@@ -68,7 +80,7 @@ uses base: base_contract"#;
         }
         assert_eq!(bindings[1].path.name, "employment_type");
         match &bindings[1].rhs {
-            WithRhs::Literal(crate::parsing::ast::Value::Text(s)) => {
+            UsesBindingRhs::Literal(crate::parsing::ast::Value::Text(s)) => {
                 assert_eq!(s, "contractor");
             }
             other => panic!("Expected text literal, got {:?}", other),
@@ -99,10 +111,16 @@ uses base: base_contract"#;
         result[0].data[2].reference,
         crate::parsing::ast::Reference::local("base".to_string())
     );
-    if let DataValue::Import { spec_ref, bindings } = &result[0].data[2].value {
+    if let DataValue::Import {
+        spec_ref,
+        bindings,
+        effective_ref,
+    } = &result[0].data[2].value
+    {
         assert_eq!(spec_ref.name, "base_contract");
         assert!(spec_ref.repository.is_none());
         assert!(bindings.is_empty());
+        assert!(effective_ref.is_none());
     } else {
         panic!("Expected Import");
     }
@@ -167,7 +185,7 @@ rule total: i.tax_rate"#;
         assert_eq!(bindings.len(), 1);
         assert_eq!(bindings[0].path.name, "tax_rate");
         match &bindings[0].rhs {
-            WithRhs::Literal(crate::parsing::ast::Value::Number(n)) => {
+            UsesBindingRhs::Literal(crate::parsing::ast::Value::Number(n)) => {
                 assert_eq!(*n, rust_decimal::Decimal::new(21, 2));
             }
             other => panic!("Expected numeric literal rhs, got {:?}", other),

@@ -163,16 +163,19 @@ rule divided: price / multiplier"#;
 
 #[test]
 fn test_number_op_measure_allowed() {
-    // Test that Number op Measure is allowed
+    // Number * Measure keeps the measure. Number / Measure is an inverse
+    // anonymous intermediate unless cancelled or promoted — keep it in a
+    // cancellation chain so the rule result is a named number.
     let code = r#"spec test
 data money: measure
   -> unit eur: 1.00
 
 data multiplier: number
 data price: money
+data other: money
 
 rule scaled: multiplier * price
-rule divided: multiplier / price"#;
+rule cancelled: (multiplier / price) * other"#;
 
     let mut engine = Engine::new();
     engine
@@ -182,6 +185,7 @@ rule divided: multiplier / price"#;
     let mut data = IndexMap::new();
     data.insert("multiplier".to_string(), "2".into());
     data.insert("price".to_string(), "10 eur".into());
+    data.insert("other".to_string(), "10 eur".into());
 
     let now = DateTimeValue::now();
     let response = engine
@@ -193,10 +197,10 @@ rule divided: multiplier / price"#;
         scaled.contains("20") && scaled.to_lowercase().contains("eur"),
         "2 * 10 eur => ~20 eur, got {scaled}"
     );
-    let divided = rule_value_str(&response, "divided");
-    assert!(
-        divided.contains("0.2") || divided.contains("0,2"),
-        "2 / 10 eur => dimensionless ~0.2, got {divided}"
+    let cancelled = rule_value_str(&response, "cancelled");
+    assert_eq!(
+        cancelled, "2",
+        "(2 / 10 eur) * 10 eur => 2, got {cancelled}"
     );
 }
 
@@ -326,22 +330,18 @@ rule is_equal: price1 is price2"#;
 
 #[test]
 fn test_all_arithmetic_operators_measure_same_type() {
-    // Measure * Measure is rejected at plan time.
-    // All other Measure op Measure/Number combinations compile and run correctly.
-    // Note: Measure ^ Number requires an integer literal exponent (Step 8 rule).
+    // Measure +/-/ and Measure/Measure divide compile. Measure mod/power are
+    // rejected at planning (convert via `as <unit> as number` first).
     let code = r#"spec test
 data money: measure
   -> unit eur: 1.00
 
 data a: money
 data b: money
-data divisor: number
 
 rule add: a + b
 rule subtract: a - b
-rule divide: a / b
-rule modulo: a mod divisor
-rule power: a ^ 2"#;
+rule divide: a / b"#;
 
     let mut engine = Engine::new();
     engine
@@ -351,7 +351,6 @@ rule power: a ^ 2"#;
     let mut data = IndexMap::new();
     data.insert("a".to_string(), "10 eur".into());
     data.insert("b".to_string(), "3 eur".into());
-    data.insert("divisor".to_string(), "3".into());
 
     let now = DateTimeValue::now();
     let response = engine
@@ -374,13 +373,51 @@ rule power: a ^ 2"#;
         !div.to_lowercase().contains("eur"),
         "measure / measure should be dimensionless: {div}"
     );
-    let modulo = rule_value_str(&response, "modulo");
+
+    let mut engine_mod = Engine::new();
+    let mod_err = engine_mod
+        .load([(
+            lemma::SourceType::Volatile,
+            r#"spec test_mod
+data money: measure -> unit eur: 1.00
+data a: money
+data divisor: number
+rule modulo: a mod divisor"#
+                .to_string(),
+        )])
+        .expect_err("Measure mod Number must fail at plan time");
+    let mod_joined = mod_err
+        .iter()
+        .map(|e| e.to_string())
+        .collect::<Vec<_>>()
+        .join("; ");
     assert!(
-        modulo.contains('1') && modulo.to_lowercase().contains("eur"),
-        "modulo: {modulo}"
+        mod_joined.to_lowercase().contains("modulo")
+            || mod_joined.to_lowercase().contains("as number"),
+        "expected modulo rejection, got: {mod_joined}"
     );
-    let pow = rule_value_str(&response, "power");
-    assert!(pow.contains("100"), "power 10^2: {pow}");
+
+    let mut engine_pow = Engine::new();
+    let pow_err = engine_pow
+        .load([(
+            lemma::SourceType::Volatile,
+            r#"spec test_pow
+data money: measure -> unit eur: 1.00
+data a: money
+rule power: a ^ 2"#
+                .to_string(),
+        )])
+        .expect_err("Measure ^ Number must fail at plan time");
+    let pow_joined = pow_err
+        .iter()
+        .map(|e| e.to_string())
+        .collect::<Vec<_>>()
+        .join("; ");
+    assert!(
+        pow_joined.to_lowercase().contains("power")
+            || pow_joined.to_lowercase().contains("as number"),
+        "expected power rejection, got: {pow_joined}"
+    );
 
     // Measure * Measure must be rejected at plan time
     let mut engine2 = Engine::new();

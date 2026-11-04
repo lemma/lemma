@@ -15,8 +15,6 @@ spec family_units
 data money: measure
  -> unit eur: 1.00
  -> unit usd: 0.91
- -> decimals 2
-
 data amount: money
  -> suggest 0 eur
 
@@ -53,8 +51,6 @@ spec family_units_eval
 data money: measure
  -> unit eur: 1.00
  -> unit usd: 0.91
- -> decimals 2
-
 data price: money
  -> unit gbp: 1.17
 

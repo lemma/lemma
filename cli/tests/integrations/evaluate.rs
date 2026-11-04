@@ -121,9 +121,9 @@ fn test_cli_run_nonexistent_spec() {
         .arg(temp_dir.path())
         .arg("nonexistent");
 
-    cmd.assert().failure().stderr(
-        predicate::str::contains("No execution plan").and(predicate::str::contains("nonexistent")),
-    );
+    cmd.assert()
+        .failure()
+        .stderr(predicate::str::contains("not found").and(predicate::str::contains("nonexistent")));
 }
 
 #[test]
@@ -824,7 +824,8 @@ rule result: (mass * 2) as gram
         "stdout:\n{stdout}"
     );
     assert!(!stdout.contains("The measure is"), "stdout:\n{stdout}");
-    assert!(!stdout.contains("4 kilogram"), "stdout:\n{stdout}");
+    assert!(!stdout.contains("mass * 2:"), "stdout:\n{stdout}");
+    assert!(stdout.contains("mass: 2 kilogram"), "stdout:\n{stdout}");
     assert!(stdout.contains("mass"), "stdout:\n{stdout}");
 }
 
@@ -950,7 +951,6 @@ fn test_cli_run_calc_explain_json_includes_total_explanation() {
 spec calc
 
 data money: measure
-  -> decimals 2
   -> unit eur: 1
 
 data hourly_rate: 85.00 eur
@@ -993,7 +993,7 @@ rule total: subtotal + vat
     assert_eq!(json["results"]["total"]["explanation"]["name"], "total");
     assert_eq!(
         json["results"]["total"]["explanation"]["result"],
-        "4821.09 eur"
+        "4821.09375 eur"
     );
 }
 
@@ -1625,5 +1625,149 @@ fn test_cli_explain_compound_total_payment_ascii() {
     assert_cli_explain_ascii(
         &stdout,
         include_str!("../../../engine/tests/fixtures/explain/compound_total_payment.ascii.txt"),
+    );
+}
+
+const RECIPE_SPEC: &str = r#"
+spec recipe
+data name: text
+data is_raw: boolean
+data unit_price: number
+data proportion: number
+data loss: ratio
+data target_weight: number
+data components: recipe list
+
+rule remaining:
+  100% - loss
+
+rule required:
+  target_weight / remaining
+
+rule proportion_sum:
+  components -> sum components.proportion
+
+rule total:
+  required
+  unless components -> count > 1
+  then required * 1.02
+
+rule cost:
+  required * unit_price
+  unless is_raw is false
+  then total * (components -> sum(components.proportion * components.price)) / proportion_sum
+
+rule price:
+  cost / target_weight
+"#;
+
+/// The blend_order fixture binds `mid.required` as `leaf.target_weight` and
+/// `share` as `mid.target_weight`: references inside nested stored rows. They
+/// resolve lazily at the read site, so loading never hits a cycle.
+const BLEND_ORDER_SPEC: &str = r#"
+spec blend_order
+uses leaf: recipe
+  -> with name: "Leaf"
+  -> with is_raw: true
+  -> with unit_price: 5
+  -> with proportion: 1
+  -> with loss: 0%
+  -> with target_weight: mid.required
+
+uses mid: recipe
+  -> with name: "Mid"
+  -> with is_raw: false
+  -> with unit_price: 0
+  -> with proportion: 3
+  -> with loss: 0%
+  -> with target_weight: share
+  -> with components: leaf
+
+uses other: recipe
+  -> with name: "Other"
+  -> with is_raw: true
+  -> with unit_price: 9
+  -> with proportion: 1
+  -> with loss: 0%
+  -> with target_weight: 25
+
+uses mix: recipe
+  -> with name: "Mix"
+  -> with is_raw: false
+  -> with unit_price: 0
+  -> with proportion: 1
+  -> with loss: 0%
+  -> with target_weight: 100
+  -> with components: mid, other
+
+rule share:
+  mix.total * mid.proportion / mix.proportion_sum
+
+rule result_cost:
+  mix.cost
+
+rule result_proportion_sum:
+  mix.proportion_sum
+
+rule result_count:
+  mix.components -> count
+"#;
+
+fn nested_reference_workspace() -> TempDir {
+    let temp_dir = TempDir::new().unwrap();
+    fs::write(
+        temp_dir.path().join("recipes.lemma"),
+        format!("{RECIPE_SPEC}{BLEND_ORDER_SPEC}"),
+    )
+    .unwrap();
+    temp_dir
+}
+
+#[test]
+fn test_cli_evaluate_nested_stored_row_references_json() {
+    let temp_dir = nested_reference_workspace();
+    let output = cargo_bin_cmd!("lemma")
+        .arg("evaluate")
+        .arg("--path")
+        .arg(temp_dir.path())
+        .arg("blend_order")
+        .arg("--json")
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success(),
+        "evaluate --json over nested stored-row references must succeed: {stdout}\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let json: serde_json::Value = serde_json::from_str(&stdout).expect("stdout is valid JSON");
+    assert_eq!(json["results"]["share"]["result"], "76.5");
+    assert_eq!(json["results"]["result_cost"]["result"], "612");
+    assert_eq!(json["results"]["result_proportion_sum"]["result"], "4");
+    assert_eq!(json["results"]["result_count"]["result"], "2");
+}
+
+#[test]
+fn test_cli_explain_nested_stored_row_references() {
+    let temp_dir = nested_reference_workspace();
+    let output = cargo_bin_cmd!("lemma")
+        .arg("evaluate")
+        .arg("--path")
+        .arg(temp_dir.path())
+        .arg("blend_order")
+        .arg("--rules=result_cost")
+        .arg("--explain")
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success(),
+        "evaluate --explain over nested stored-row references must succeed: {stdout}\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        stdout.contains("target_weight") && stdout.contains("76.5"),
+        "explanation must narrate the resolved nested reference with its value, got:\n{}",
+        stdout
     );
 }

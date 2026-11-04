@@ -76,17 +76,6 @@ public final class Engine implements AutoCloseable {
   }
 
   /**
-   * Restores an engine from {@link #snapshot()} bytes.
-   *
-   * @param bytes opaque snapshot from {@link #snapshot()}
-   * @return restored engine
-   */
-  public static Engine fromSnapshot(byte[] bytes) {
-    Objects.requireNonNull(bytes, "bytes");
-    return new Engine(Native.fromSnapshot(bytes));
-  }
-
-  /**
    * Loads Lemma source into the engine.
    *
    * @param code Lemma source text
@@ -339,20 +328,6 @@ public final class Engine implements AutoCloseable {
       state.lock.unlock();
     }
     return JsonSupport.parseLimits(json);
-  }
-
-  /**
-   * Persist parsed specs + plans + limits as opaque bytes. Restore with {@link #fromSnapshot}.
-   *
-   * @return snapshot bytes
-   */
-  public byte[] snapshot() {
-    state.lock.lock();
-    try {
-      return Native.snapshot(state.requireHandle());
-    } finally {
-      state.lock.unlock();
-    }
   }
 
   /** Structural quality recommendations across loaded specs. Advisory only.

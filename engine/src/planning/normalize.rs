@@ -5,26 +5,29 @@
 use crate::computation::rational::{NumericFailure, RationalInteger};
 use crate::formatting::expression::{CommandView, PredicateView, Syntax, SyntaxNode, SyntaxView};
 use crate::parsing::arena::{ExprKind, ExprRef};
-use crate::parsing::ast::{CalendarPeriodUnit, DateCalendarKind, DateRelativeKind, RowCondition};
+use crate::parsing::ast::{
+    CalendarPeriodUnit, DateCalendarKind, DateRelativeKind, ListPredicateForm, LogicalConnective,
+};
 use crate::planning::execution_plan::ExecutionPlan;
+use crate::planning::instance_list::RowHop;
 use crate::planning::ordered_dispatch::DispatchKey;
 use crate::planning::semantics::{
     primitive_boolean_arc, primitive_date_arc, primitive_number_arc, primitive_ratio_arc,
     primitive_text_arc, primitive_time_arc, ArithmeticComputation, ComparisonComputation,
-    DataDefinition, DataPath, Expression, ExpressionKind, LemmaType, LiteralValue,
-    MathematicalComputation, RangeBound, ReferenceEnd, RowEnd, RulePath, SemanticConversionTarget,
-    Source, SpecIdentity, SpecValue, ValueKind, VetoExpression,
+    DataDefinition, DataPath, Expression, ExpressionKind, LemmaType, ListPredKind, LiteralValue,
+    MathematicalComputation, PathSegment, RangeBound, RoundingMode, RowEnd, RulePath,
+    SemanticConversionTarget, Source, SpecIdentity, ValueKind, VetoExpression,
 };
 use crate::planning::typing::{
     comparison_type, compute_arithmetic_result_type, date_predicate_type,
-    infer_range_type_from_endpoint_types, logical_and_type, logical_not_type, math_op_type,
-    past_future_range_type, piecewise_type, range_bound_result_type, result_is_veto_type,
-    unit_conversion_type, MeasureScope,
+    infer_range_type_from_endpoint_types, logical_connective_type, logical_not_type, math_op_type,
+    past_future_range_type, piecewise_type, quantity_integer_power_type, range_bound_result_type,
+    range_containment_type, result_is_veto_type, step_rounding_type, unit_conversion_type,
+    MeasureScope,
 };
 use crate::Error;
 use indexmap::IndexMap;
-use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 
 mod rewrite;
@@ -57,8 +60,6 @@ pub(crate) struct NormalizeContext<'a> {
     pub(crate) row_templates: &'a BTreeMap<SpecIdentity, Arc<ExecutionPlan>>,
     /// The spec being planned: rows of its self-lists read this plan.
     pub(crate) self_identity: &'a SpecIdentity,
-    /// Element identities of instance lists on this consumer (not bare named `uses`).
-    pub(crate) list_element_identities: &'a std::collections::HashSet<SpecIdentity>,
     /// Present rules in topo order (same set as the plan).
     pub(crate) rule_order: &'a [RulePath],
     /// Measure scope cells are typed in: the plan's unit + signature indexes.
@@ -66,37 +67,41 @@ pub(crate) struct NormalizeContext<'a> {
     pub(crate) max_normalized_expression_nodes: usize,
 }
 
-/// Completed rule roots, graph rule types, and reference-chain ends for lower.
+/// Completed rule roots, graph rule types, and data for lower.
 struct LowerCtx<'a> {
     completed_rules: &'a HashMap<RulePath, NormalFormId>,
     /// [`crate::planning::graph::RuleNode::rule_type`] for every rule (pre-topo).
     rule_types: &'a HashMap<RulePath, Arc<LemmaType>>,
-    reference_ends: &'a IndexMap<DataPath, ReferenceEnd>,
     data: &'a IndexMap<DataPath, DataDefinition>,
     row_templates: &'a BTreeMap<SpecIdentity, Arc<ExecutionPlan>>,
     self_identity: &'a SpecIdentity,
-    list_element_identities: &'a std::collections::HashSet<SpecIdentity>,
     rule_order: &'a [RulePath],
 }
 
 impl LowerCtx<'_> {
-    /// Whether values of spec type `identity` are instance-list rows (not a fixed `uses` instance).
-    fn is_row_spec(&self, identity: &SpecIdentity) -> bool {
-        self.list_element_identities.contains(identity)
-    }
-
-    fn row_end(&self, identity: &SpecIdentity, name: &str) -> Option<RowEnd> {
-        if identity == self.self_identity {
-            let rules: Vec<&RulePath> = self.rule_order.iter().collect();
-            return crate::planning::instance_list::row_end_of(
-                crate::planning::instance_list::RowEndView::Root(self.data, &rules),
-                name,
-            );
-        }
-        crate::planning::instance_list::row_end_of(
-            crate::planning::instance_list::RowEndView::Plan(self.template(identity)),
-            name,
-        )
+    /// Member `path.name` on rows of `identity`, hop by hop.
+    fn row_member_chain(
+        &self,
+        identity: &SpecIdentity,
+        path: &[String],
+        name: &str,
+    ) -> Option<Vec<RowHop>> {
+        let parts: Vec<&str> = path
+            .iter()
+            .map(String::as_str)
+            .chain(std::iter::once(name))
+            .collect();
+        let rules: BTreeSet<RulePath>;
+        let view = if identity == self.self_identity {
+            rules = self.rule_order.iter().cloned().collect();
+            crate::planning::instance_list::RowEndView::Root {
+                data: self.data,
+                rules: &rules,
+            }
+        } else {
+            crate::planning::instance_list::RowEndView::Plan(self.template(identity))
+        };
+        crate::planning::instance_list::row_end_chain(identity, view, self.row_templates, &parts)
     }
 
     fn row_end_type(&self, identity: &SpecIdentity, end: &RowEnd) -> Arc<LemmaType> {
@@ -104,14 +109,10 @@ impl LowerCtx<'_> {
             return crate::planning::instance_list::row_end_type(self.template(identity), end);
         }
         match end {
-            RowEnd::Data(path) => {
-                crate::planning::instance_list::row_data_type(self.data, self.row_templates, path)
-            }
-            RowEnd::Rule(rule) => Arc::clone(
-                self.rule_types
-                    .get(rule)
-                    .unwrap_or_else(|| panic!("BUG: self-list row rule '{rule}' has no type")),
-            ),
+            RowEnd::Data(path) => crate::planning::instance_list::row_data_type(self.data, path),
+            RowEnd::Rule(rule) => Arc::clone(self.rule_types.get(rule).unwrap_or_else(|| {
+                panic!("BUG: row rule '{}' has no rule type", rule.input_key())
+            })),
         }
     }
 
@@ -126,7 +127,6 @@ pub(crate) fn build_normalized_rule(
     ctx: &NormalizeContext<'_>,
     completed_rules: &HashMap<RulePath, NormalFormId>,
     rule_types: &HashMap<RulePath, Arc<LemmaType>>,
-    reference_ends: &IndexMap<DataPath, ReferenceEnd>,
     expression: &Expression,
     source: Option<Source>,
     interner: &mut NormalFormInterner,
@@ -135,10 +135,8 @@ pub(crate) fn build_normalized_rule(
     let lower = LowerCtx {
         completed_rules,
         rule_types,
-        reference_ends,
         data: ctx.data,
         row_templates: ctx.row_templates,
-        list_element_identities: ctx.list_element_identities,
         self_identity: ctx.self_identity,
         rule_order: ctx.rule_order,
     };
@@ -276,38 +274,34 @@ pub(crate) fn normal_form_depth(forms: &[NormalForm], root: NormalFormId) -> usi
 }
 
 /// Leaves in the shipped equation DAG: literals and data only.
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub(crate) enum LeafKind {
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum LeafKind {
     Literal(LiteralValue),
     DataPath(crate::planning::semantics::DataPath),
-    /// Field of the current row of the instance-list command at `level` (0 = outermost).
-    Row {
+    /// Value of the current value-list row at `level`.
+    RowValue {
         level: u32,
-        identity: SpecIdentity,
-        end: RowEnd,
     },
-    /// Rule on a named `uses` template; eval peels into that template's context.
-    ImportRule(RulePath),
 }
 
-/// A spec member read on a list row, through the row spec's template plan.
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub(crate) struct RowRead {
-    pub(crate) end: RowEnd,
-    #[serde(with = "crate::snapshot::shared::arc")]
-    pub(crate) result_type: Arc<LemmaType>,
+/// A member chain read on a row, through the row spec's template plans: every end
+/// but the last reads a `uses` slot, as that instance; the last is the member read.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct RowRead {
+    pub ends: Vec<RowEnd>,
+    pub result_type: Arc<LemmaType>,
 }
 
 /// Index into a [`NormalFormInterner`] / shipped [`crate::planning::execution_plan::ExecutionPlan::normal_forms`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub(crate) struct NormalFormId(u32);
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct NormalFormId(u32);
 
 impl NormalFormId {
-    pub(crate) fn index(self) -> usize {
+    pub fn index(self) -> usize {
         self.0 as usize
     }
 
-    pub(crate) fn from_index(index: usize) -> Self {
+    pub fn from_index(index: usize) -> Self {
         Self(u32::try_from(index).expect("BUG: normal_forms table exceeds u32::MAX"))
     }
 }
@@ -315,10 +309,10 @@ impl NormalFormId {
 /// One operand of a [`NormalFormKind::Sum`] or [`NormalFormKind::Product`]. `inverse`
 /// marks a subtracted (Sum) or divided (Product) operand. The first term of a
 /// Sum/Product is never inverse.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub(crate) struct ArithmeticTerm {
-    pub(crate) operand: NormalFormId,
-    pub(crate) inverse: bool,
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct ArithmeticTerm {
+    pub operand: NormalFormId,
+    pub inverse: bool,
 }
 
 impl ArithmeticTerm {
@@ -338,8 +332,8 @@ impl ArithmeticTerm {
 }
 
 /// One region body of a [`NormalFormKind::OrderedDispatch`] table.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub(crate) enum DispatchRegion {
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum DispatchRegion {
     /// The region's value is this origin arm body.
     Body(NormalFormId),
     /// A conjunctive nest: a Piecewise over the residual arms of one key. Its arm
@@ -349,7 +343,7 @@ pub(crate) enum DispatchRegion {
 }
 
 impl DispatchRegion {
-    pub(crate) fn cell(self) -> NormalFormId {
+    pub fn cell(self) -> NormalFormId {
         match self {
             DispatchRegion::Body(id) | DispatchRegion::Conjunctive(id) => id,
         }
@@ -365,8 +359,8 @@ impl DispatchRegion {
 
 /// Algebraic structure only. Children are [`NormalFormId`]. Hash/Eq drive cons —
 /// no source spans or rule-ref identity here (those live on [`NormalForm`]).
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub(crate) enum NormalFormKind {
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum NormalFormKind {
     Leaf(LeafKind),
     Sum(Vec<ArithmeticTerm>),
     Product(Vec<ArithmeticTerm>),
@@ -377,11 +371,12 @@ pub(crate) enum NormalFormKind {
     Negate(NormalFormId),
     Reciprocal(NormalFormId),
     Comparison(NormalFormId, ComparisonComputation, NormalFormId),
-    /// `a and b and c`: operands in source order; evaluated left to right, stopping at the
-    /// first operand that decides the result.
-    And(Vec<NormalFormId>),
+    /// Logical operands in source order.
+    Logical(LogicalConnective, Vec<NormalFormId>),
     Not(NormalFormId),
     MathOp(MathematicalComputation, NormalFormId),
+    /// `operand -> round` or `operand -> round step`.
+    StepRounding(RoundingMode, NormalFormId, Option<NormalFormId>),
     UnitConversion(NormalFormId, SemanticConversionTarget),
     Veto(VetoExpression),
     DateRelative(DateRelativeKind, NormalFormId),
@@ -404,17 +399,24 @@ pub(crate) enum NormalFormKind {
         /// Exactly [`region_count`] entries; see [`crate::planning::ordered_dispatch`].
         regions: Vec<DispatchRegion>,
     },
-    /// Read one field of the spec instance produced by `base`.
-    /// `targets` pairs each candidate instance with the cell for that instance's field.
+    /// Read member `path.name` of the row `base` yields, in that row's context.
     SpecMember {
         base: NormalFormId,
-        member: String,
-        targets: Vec<(crate::planning::semantics::SpecInstance, NormalFormId)>,
-        /// Set when `base` can yield list rows of a spec with a template plan.
-        row: Option<RowRead>,
+        path: Vec<String>,
+        name: String,
+        row: RowRead,
     },
-    /// `row_level` is set when the list holds instance rows; argument cells read the
-    /// current row through [`LeafKind::Row`] leaves at that level.
+    /// Field `end` of the current row of the instance-list command at `level`
+    /// (0 = outermost), read through the template plan of `identity`.
+    RowField {
+        level: u32,
+        identity: SpecIdentity,
+        end: RowEnd,
+        /// Written list qualifier, preserved for explanation display. `None` for bare refs.
+        qualifier: Option<Vec<String>>,
+    },
+    /// `row_level` is set when argument cells read the current list row at that
+    /// level, through [`LeafKind::RowValue`] or [`Self::RowField`].
     ListCommand {
         list: NormalFormId,
         op: NormalFormListOp,
@@ -423,8 +425,8 @@ pub(crate) enum NormalFormKind {
     },
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub(crate) enum NormalFormListOp {
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum NormalFormListOp {
     Find,
     First,
     Last,
@@ -434,20 +436,23 @@ pub(crate) enum NormalFormListOp {
     Product,
     Min,
     Max,
-    Any(RowCondition),
-    All(RowCondition),
-    Where(RowCondition),
-    /// `any`/`all`/`where` over instance rows: `args[0]` is the boolean row expression.
-    AnyRow,
-    AllRow,
-    WhereRow,
+    /// `args[0]` is the boolean expression evaluated once per row.
+    Predicate {
+        kind: crate::planning::semantics::ListPredKind,
+        form: ListPredicateForm,
+    },
     Sort {
         descending: bool,
     },
     Top,
     With,
-    /// Append one instance row; `args` are the values of `fields`, in order.
+    /// Append one row of spec `identity`; `args` are the values of `fields`, in order.
     WithRow {
+        identity: Arc<SpecIdentity>,
+        fields: Vec<DataPath>,
+    },
+    /// Set field key(s) on a Spec-element list; evaluation returns the list unchanged.
+    Key {
         fields: Vec<DataPath>,
     },
 }
@@ -455,13 +460,13 @@ pub(crate) enum NormalFormListOp {
 impl NormalFormKind {
     /// Calls `f` on each child cell id in evaluation order. Piecewise yields `cond, body`
     /// per arm from index 0; OrderedDispatch yields the scrutinee then every region body.
-    pub(crate) fn for_each_child(&self, mut f: impl FnMut(NormalFormId)) {
+    pub fn for_each_child(&self, mut f: impl FnMut(NormalFormId)) {
         match self {
             NormalFormKind::Leaf(_) | NormalFormKind::Veto(_) | NormalFormKind::Now => {}
             NormalFormKind::Sum(terms) | NormalFormKind::Product(terms) => {
                 terms.iter().for_each(|term| f(term.operand));
             }
-            NormalFormKind::And(children) => children.iter().copied().for_each(f),
+            NormalFormKind::Logical(_, children) => children.iter().copied().for_each(f),
             NormalFormKind::Subtract(a, b)
             | NormalFormKind::Divide(a, b)
             | NormalFormKind::Power(a, b)
@@ -471,6 +476,12 @@ impl NormalFormKind {
             | NormalFormKind::RangeContainment(a, b) => {
                 f(*a);
                 f(*b);
+            }
+            NormalFormKind::StepRounding(_, a, step) => {
+                f(*a);
+                if let Some(step) = step {
+                    f(*step);
+                }
             }
             NormalFormKind::Negate(x)
             | NormalFormKind::Reciprocal(x)
@@ -492,10 +503,8 @@ impl NormalFormKind {
                 f(*scrutinee);
                 regions.iter().for_each(|region| f(region.cell()));
             }
-            NormalFormKind::SpecMember { base, targets, .. } => {
-                f(*base);
-                targets.iter().for_each(|(_, target)| f(*target));
-            }
+            NormalFormKind::SpecMember { base, .. } => f(*base),
+            NormalFormKind::RowField { .. } => {}
             NormalFormKind::ListCommand { list, args, .. } => {
                 f(*list);
                 args.iter().copied().for_each(f);
@@ -504,7 +513,7 @@ impl NormalFormKind {
     }
 
     /// Child cell ids in [`Self::for_each_child`] order.
-    pub(crate) fn children(&self) -> Vec<NormalFormId> {
+    pub fn children(&self) -> Vec<NormalFormId> {
         let mut children = Vec::new();
         self.for_each_child(|child| children.push(child));
         children
@@ -533,8 +542,8 @@ impl NormalFormKind {
                     })
                     .collect(),
             ),
-            NormalFormKind::And(children) => {
-                NormalFormKind::And(children.iter().copied().map(map).collect())
+            NormalFormKind::Logical(connective, children) => {
+                NormalFormKind::Logical(*connective, children.iter().copied().map(map).collect())
             }
             NormalFormKind::Subtract(a, b) => NormalFormKind::Subtract(map(*a), map(*b)),
             NormalFormKind::Divide(a, b) => NormalFormKind::Divide(map(*a), map(*b)),
@@ -551,6 +560,9 @@ impl NormalFormKind {
             NormalFormKind::Reciprocal(x) => NormalFormKind::Reciprocal(map(*x)),
             NormalFormKind::Not(x) => NormalFormKind::Not(map(*x)),
             NormalFormKind::MathOp(op, x) => NormalFormKind::MathOp(op.clone(), map(*x)),
+            NormalFormKind::StepRounding(mode, x, step) => {
+                NormalFormKind::StepRounding(*mode, map(*x), step.map(map))
+            }
             NormalFormKind::UnitConversion(x, target) => {
                 NormalFormKind::UnitConversion(map(*x), target.clone())
             }
@@ -584,18 +596,16 @@ impl NormalFormKind {
             },
             NormalFormKind::SpecMember {
                 base,
-                member,
-                targets,
+                path,
+                name,
                 row,
             } => NormalFormKind::SpecMember {
                 base: map(*base),
-                member: member.clone(),
-                targets: targets
-                    .iter()
-                    .map(|(instance, target)| (instance.clone(), map(*target)))
-                    .collect(),
+                path: path.clone(),
+                name: name.clone(),
                 row: row.clone(),
             },
+            NormalFormKind::RowField { .. } => self.clone(),
             NormalFormKind::ListCommand {
                 list,
                 op,
@@ -620,22 +630,20 @@ impl NormalFormKind {
 /// `(kind, rule_ref, result_type)` so a rule reference never collapses into the
 /// bare body cell, and DataPath leaves that differ only in resolved type stay
 /// distinct.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub(crate) struct NormalForm {
-    pub(crate) kind: NormalFormKind,
+#[derive(Clone, Debug)]
+pub struct NormalForm {
+    pub kind: NormalFormKind,
     /// Type of the value this cell evaluates to. Stamped at planning.
-    #[serde(with = "crate::snapshot::shared::arc")]
-    pub(crate) result_type: Arc<LemmaType>,
+    pub result_type: Arc<LemmaType>,
     /// For Sum/Product: type after folding `children[..=k]`. Empty for other kinds.
     /// `fold_types.last()` equals `result_type` for n-ary arithmetic.
-    #[serde(with = "crate::snapshot::shared::arc_vec")]
-    pub(crate) fold_types: Vec<Arc<LemmaType>>,
+    pub fold_types: Vec<Arc<LemmaType>>,
     /// Span for unit-conversion nodes; does not affect sharing.
-    pub(crate) source: Option<Source>,
+    pub source: Option<Source>,
     /// Pre-image destroyed by a fold; blocks sharing when present.
-    pub(crate) origin: Option<NormalFormId>,
+    pub origin: Option<NormalFormId>,
     /// Use-site of a named rule (`None` on ordinary cells).
-    pub(crate) rule_ref: Option<RulePath>,
+    pub rule_ref: Option<RulePath>,
 }
 
 /// Result of [`Cells::type_of`]: stamped result type plus progressive fold types
@@ -791,45 +799,24 @@ impl NormalFormInterner {
     }
 }
 
-/// Resolve `path` in `data`, or after peeling leading Import hops into `row_templates`.
-pub(crate) fn lookup_data_definition<'a>(
-    data: &'a IndexMap<DataPath, DataDefinition>,
-    row_templates: &'a BTreeMap<SpecIdentity, Arc<ExecutionPlan>>,
-    path: &DataPath,
-) -> Option<&'a DataDefinition> {
-    if let Some(definition) = data.get(path) {
-        return Some(definition);
-    }
-    let mut hops = path.segments.iter();
-    let first = hops.next()?;
-    let import_marker = DataPath::local(first.uses.clone());
-    let DataDefinition::Import { identity, .. } = data.get(&import_marker)? else {
-        return None;
-    };
-    let template = row_templates.get(identity)?;
-    let rest: Vec<&str> = hops
-        .map(|hop| hop.uses.as_str())
-        .chain(std::iter::once(path.data.as_str()))
-        .collect();
-    let qualified = template.qualify_data_names(&rest)?;
-    template
-        .peel_data(&qualified)
-        .map(|(_, _, definition)| definition)
-}
-
+/// Result type of a data leaf, from its definition in the flattened data map.
 pub(crate) fn data_path_result_type(
     data: &IndexMap<DataPath, DataDefinition>,
     path: &DataPath,
-    row_templates: &BTreeMap<SpecIdentity, Arc<ExecutionPlan>>,
 ) -> Arc<LemmaType> {
-    match lookup_data_definition(data, row_templates, path) {
+    match data.get(path) {
         Some(DataDefinition::Value { resolved_type, .. })
         | Some(DataDefinition::TypeDeclaration { resolved_type, .. })
         | Some(DataDefinition::Reference { resolved_type, .. })
         | Some(DataDefinition::InstanceList { resolved_type, .. }) => Arc::clone(resolved_type),
-        // Import, or absent (normalize unit tests with an empty data scope):
-        // same as graph `infer_data_type` — undetermined.
-        Some(DataDefinition::Import { .. }) | None => Arc::new(LemmaType::undetermined_type()),
+        Some(DataDefinition::Import { row, .. }) => Arc::new(LemmaType::primitive(
+            crate::planning::semantics::TypeSpecification::Spec {
+                spec: row.identity.as_ref().clone(),
+            },
+        )),
+        // Absent: normalize unit tests with an empty data scope, as graph
+        // `infer_data_type`.
+        None => Arc::new(LemmaType::undetermined_type()),
     }
 }
 
@@ -839,6 +826,14 @@ pub(crate) fn data_path_result_type(
 pub(crate) struct Cells<'a> {
     interner: &'a mut NormalFormInterner,
     measure_scope: MeasureScope<'a>,
+}
+
+/// Owned row-field end plus its optional written list qualifier
+/// (`children` in `children.is_leaf`). Bundled so [`Cells::intern_row_field`]
+/// stays under the argument-count lint.
+pub(crate) struct RowFieldEnd {
+    pub(crate) end: RowEnd,
+    pub(crate) qualifier: Option<Vec<String>>,
 }
 
 impl<'a> Cells<'a> {
@@ -887,20 +882,35 @@ impl<'a> Cells<'a> {
         )
     }
 
-    /// Data leaf, typed from its definition in `plan.data`.
-    fn intern_row_leaf(
+    /// Row field cell, typed from the row spec (the type is the same on every row).
+    fn intern_row_field(
         &mut self,
         level: u32,
         identity: SpecIdentity,
-        end: RowEnd,
+        row_end: RowFieldEnd,
         result_type: Arc<LemmaType>,
     ) -> NormalFormId {
+        let RowFieldEnd { end, qualifier } = row_end;
         self.interner.intern(
-            NormalFormKind::Leaf(LeafKind::Row {
+            NormalFormKind::RowField {
                 level,
                 identity,
                 end,
-            }),
+                qualifier,
+            },
+            None,
+            None,
+            None,
+            Typed {
+                result_type,
+                fold_types: Vec::new(),
+            },
+        )
+    }
+
+    fn intern_row_value_leaf(&mut self, level: u32, result_type: Arc<LemmaType>) -> NormalFormId {
+        self.interner.intern(
+            NormalFormKind::Leaf(LeafKind::RowValue { level }),
             None,
             None,
             None,
@@ -914,23 +924,6 @@ impl<'a> Cells<'a> {
     fn intern_data_leaf(&mut self, path: DataPath, result_type: Arc<LemmaType>) -> NormalFormId {
         self.interner.intern(
             NormalFormKind::Leaf(LeafKind::DataPath(path)),
-            None,
-            None,
-            None,
-            Typed {
-                result_type,
-                fold_types: Vec::new(),
-            },
-        )
-    }
-
-    fn intern_import_rule_leaf(
-        &mut self,
-        path: RulePath,
-        result_type: Arc<LemmaType>,
-    ) -> NormalFormId {
-        self.interner.intern(
-            NormalFormKind::Leaf(LeafKind::ImportRule(path)),
             None,
             None,
             None,
@@ -1062,12 +1055,31 @@ impl<'a> Cells<'a> {
         op: ArithmeticComputation,
         right: NormalFormId,
     ) -> Arc<LemmaType> {
+        let left_type = self.result_type(left);
+        if op == ArithmeticComputation::Power && left_type.is_measure() {
+            if let Some(exponent) = self.integer_exponent_leaf(right) {
+                return quantity_integer_power_type(left_type, exponent, &self.measure_scope);
+            }
+        }
         compute_arithmetic_result_type(
-            Arc::clone(self.result_type(left)),
+            Arc::clone(left_type),
             &op,
             Arc::clone(self.result_type(right)),
             &self.measure_scope,
         )
+    }
+
+    fn integer_exponent_leaf(&self, id: NormalFormId) -> Option<i32> {
+        let NormalFormKind::Leaf(LeafKind::Literal(literal)) = &self.get(id).kind else {
+            return None;
+        };
+        let ValueKind::Number(number) = &literal.value else {
+            return None;
+        };
+        if !number.is_integer() {
+            return None;
+        }
+        number.numer_to_i32()
     }
 }
 
@@ -1082,7 +1094,7 @@ fn literal_value_default_result_type(value: &ValueKind) -> Arc<LemmaType> {
         ValueKind::Date(_) => primitive_date_arc().clone(),
         ValueKind::Time(_) => primitive_time_arc().clone(),
         ValueKind::Ratio(_) => primitive_ratio_arc().clone(),
-        ValueKind::Measure(_) => {
+        ValueKind::Measure(_) | ValueKind::UnscaledMeasure { .. } => {
             panic!(
                 "BUG: Measure literal result_type must be stamped from expression/fold survivor type"
             )
@@ -1124,21 +1136,14 @@ impl Cells<'_> {
             NormalFormKind::Leaf(LeafKind::DataPath(_)) => {
                 panic!("BUG: DataPath leaf result_type must be stamped from plan.data")
             }
-            NormalFormKind::Leaf(LeafKind::Row { .. }) => {
-                panic!("BUG: row leaf result_type must be stamped from the template plan")
+            NormalFormKind::RowField { .. } => {
+                panic!("BUG: row field result_type must be stamped from the row spec")
             }
-            NormalFormKind::Leaf(LeafKind::ImportRule(_)) => {
-                panic!("BUG: ImportRule leaf result_type must be stamped from the template plan")
+            NormalFormKind::Leaf(LeafKind::RowValue { .. }) => {
+                panic!("BUG: row value leaf result_type must be stamped from its list")
             }
             NormalFormKind::Now => (primitive_date_arc().clone(), Vec::new()),
-            NormalFormKind::SpecMember { targets, row, .. } => {
-                let result_type = match (targets.first(), row) {
-                    (Some((_, target)), _) => Arc::clone(self.result_type(*target)),
-                    (None, Some(row)) => Arc::clone(&row.result_type),
-                    (None, None) => Arc::new(LemmaType::undetermined_type()),
-                };
-                (result_type, Vec::new())
-            }
+            NormalFormKind::SpecMember { row, .. } => (Arc::clone(&row.result_type), Vec::new()),
             NormalFormKind::ListCommand { list, op, args, .. } => (
                 list_command_result_type(
                     self.result_type(*list),
@@ -1211,14 +1216,20 @@ impl Cells<'_> {
                 ),
                 Vec::new(),
             ),
-            NormalFormKind::And(children) => {
+            NormalFormKind::Logical(_, children) => {
                 let mut types = children.iter().map(|id| self.result_type(*id));
                 let first = types.next().expect("BUG: And has at least two operands");
-                let ty = types.fold(Arc::clone(first), |acc, next| logical_and_type(&acc, next));
+                let ty = types.fold(Arc::clone(first), |acc, next| {
+                    logical_connective_type(&acc, next)
+                });
                 (ty, Vec::new())
             }
-            NormalFormKind::Comparison(a, _, b) | NormalFormKind::RangeContainment(a, b) => (
+            NormalFormKind::Comparison(a, _, b) => (
                 comparison_type(self.result_type(*a), self.result_type(*b)),
+                Vec::new(),
+            ),
+            NormalFormKind::RangeContainment(a, b) => (
+                range_containment_type(self.result_type(*a), self.result_type(*b)),
                 Vec::new(),
             ),
             NormalFormKind::Not(x) => (logical_not_type(self.result_type(*x)), Vec::new()),
@@ -1228,6 +1239,13 @@ impl Cells<'_> {
             NormalFormKind::ResultIsVeto(_) => (result_is_veto_type(), Vec::new()),
             NormalFormKind::MathOp(op, x) => (
                 math_op_type(op, self.result_type(*x), &self.measure_scope),
+                Vec::new(),
+            ),
+            NormalFormKind::StepRounding(_, x, step) => (
+                step_rounding_type(
+                    self.result_type(*x),
+                    step.map(|step| self.result_type(step)),
+                ),
                 Vec::new(),
             ),
             NormalFormKind::UnitConversion(x, target) => (
@@ -1255,6 +1273,7 @@ impl Cells<'_> {
                 piecewise_type(
                     arms.iter()
                         .map(|(_, body)| Arc::clone(self.result_type(*body))),
+                    &self.measure_scope,
                 ),
                 Vec::new(),
             ),
@@ -1277,38 +1296,45 @@ impl Cells<'_> {
                 NormalFormKind::Sum(terms) | NormalFormKind::Product(terms) => terms
                     .iter()
                     .any(|term| self.result_type(term.operand).is_undetermined()),
-                NormalFormKind::And(children) => children
+                NormalFormKind::Logical(_, children) => children
                     .iter()
                     .any(|id| self.result_type(*id).is_undetermined()),
                 NormalFormKind::Subtract(a, b)
                 | NormalFormKind::Divide(a, b)
                 | NormalFormKind::Power(a, b)
                 | NormalFormKind::Modulo(a, b)
-                | NormalFormKind::Comparison(a, _, b)
-                | NormalFormKind::RangeContainment(a, b)
                 | NormalFormKind::RangeLiteral(a, b) => {
                     self.result_type(*a).is_undetermined() || self.result_type(*b).is_undetermined()
                 }
+                NormalFormKind::StepRounding(_, a, step) => {
+                    self.result_type(*a).is_undetermined()
+                        || step.is_some_and(|step| self.result_type(step).is_undetermined())
+                }
+                // Infer returns Undetermined for invalid operand pairs; validation
+                // rejects those before a plan is built. Normalize unit tests may
+                // lower without validation, so determined operands → Undetermined
+                // is allowed here.
+                NormalFormKind::Comparison(_, _, _) | NormalFormKind::RangeContainment(_, _) => {
+                    true
+                }
                 NormalFormKind::Negate(x)
                 | NormalFormKind::Reciprocal(x)
-                | NormalFormKind::Not(x)
-                | NormalFormKind::DateRelative(_, x)
-                | NormalFormKind::DateCalendar(_, _, x)
-                | NormalFormKind::MathOp(_, x)
                 | NormalFormKind::UnitConversion(x, _)
-                | NormalFormKind::PastFutureRange(_, x)
                 | NormalFormKind::RangeBound(_, x)
                 | NormalFormKind::ResultIsVeto(x) => self.result_type(*x).is_undetermined(),
+                NormalFormKind::Not(_)
+                | NormalFormKind::DateRelative(_, _)
+                | NormalFormKind::DateCalendar(_, _, _)
+                | NormalFormKind::MathOp(_, _)
+                | NormalFormKind::PastFutureRange(_, _) => true,
                 NormalFormKind::Piecewise(arms) => arms.iter().any(|(condition, body)| {
                     self.result_type(*condition).is_undetermined()
                         || self.result_type(*body).is_undetermined()
                 }),
-                NormalFormKind::SpecMember { base, targets, .. } => {
+                NormalFormKind::SpecMember { base, .. } => {
                     self.result_type(*base).is_undetermined()
-                        || targets
-                            .iter()
-                            .any(|(_, target)| self.result_type(*target).is_undetermined())
                 }
+                NormalFormKind::RowField { .. } => false,
                 NormalFormKind::ListCommand { list, args, .. } => {
                     self.result_type(*list).is_undetermined()
                         || args
@@ -1328,55 +1354,22 @@ impl Cells<'_> {
     }
 }
 
-/// Type of a named-`uses` template rule (`alias…rule`), from the template plan.
-fn import_rule_type(lower: &LowerCtx<'_>, path: &RulePath) -> Arc<LemmaType> {
-    if let Some(rule_type) = lower.rule_types.get(path) {
-        return Arc::clone(rule_type);
+impl LowerCtx<'_> {
+    /// Root of an already planned rule. Every rule a cell reads precedes it in topo order.
+    fn completed_rule(&self, path: &RulePath) -> NormalFormId {
+        *self.completed_rules.get(path).unwrap_or_else(|| {
+            panic!(
+                "BUG: rule '{}' read before it was planned (missing dependency edge)",
+                path.input_key()
+            )
+        })
     }
-    assert!(
-        !path.segments.is_empty(),
-        "BUG: local rule '{}' missing from completed_rules/rule_types",
-        path.rule
-    );
-    let first = &path.segments[0];
-    let import_marker = DataPath::local(first.uses.clone());
-    let DataDefinition::Import { identity, .. } = lower
-        .data
-        .get(&import_marker)
-        .unwrap_or_else(|| panic!("BUG: import rule '{}' first hop not an Import", path.rule))
-    else {
-        panic!("BUG: import rule '{}' first hop not an Import", path.rule);
-    };
-    let template = lower.template(identity);
-    let rest: Vec<&str> = path.segments[1..]
-        .iter()
-        .map(|hop| hop.uses.as_str())
-        .chain(std::iter::once(path.rule.as_str()))
-        .collect();
-    let qualified = template.qualify_rule_names(&rest).unwrap_or_else(|| {
-        panic!(
-            "BUG: import rule '{}' does not peel after typing accepted it",
-            path.input_key()
-        )
-    });
-    let (plan, local) = template.peel_rule(&qualified).unwrap_or_else(|| {
-        panic!(
-            "BUG: import rule '{}' does not peel after typing accepted it",
-            path.input_key()
-        )
-    });
-    Arc::clone(
-        &plan
-            .rules
-            .get(local)
-            .unwrap_or_else(|| {
-                panic!(
-                    "BUG: peeled import rule '{}' missing from template plan",
-                    path.input_key()
-                )
-            })
-            .rule_type,
-    )
+
+    fn rule_type(&self, path: &RulePath) -> Arc<LemmaType> {
+        Arc::clone(self.rule_types.get(path).unwrap_or_else(|| {
+            panic!("BUG: rule '{}' has no RuleNode.rule_type", path.input_key())
+        }))
+    }
 }
 
 /// Lower the tree into `cells`, children before parents.
@@ -1388,7 +1381,7 @@ fn to_normal_form(tree: &Expression, cells: &mut Cells<'_>, lower: &LowerCtx<'_>
         children.clear();
         node.kind()
             .for_each_child(|child| children.push(lowered[child.index()]));
-        lowered.push(lower_node(node, &children, cells, lower));
+        lowered.push(lower_node(node, &children, &lowered, cells, lower));
     }
     *lowered.last().expect("BUG: expression tree has a root")
 }
@@ -1501,10 +1494,47 @@ fn lower_binary_arithmetic(
     cells.intern_empty(kind)
 }
 
+/// Member `path.name` read on the row `base` yields, through the template plans of
+/// its spec and of every `uses` hop.
+fn lower_spec_member(
+    base: NormalFormId,
+    path: &[String],
+    name: &str,
+    cells: &mut Cells<'_>,
+    lower: &LowerCtx<'_>,
+) -> NormalFormId {
+    let crate::planning::semantics::TypeSpecification::Spec { spec } =
+        &cells.result_type(base).specifications
+    else {
+        panic!(
+            "BUG: member '{}' read on a base that is not spec-typed after typing",
+            crate::planning::semantics::spec_member_input_key(path, name)
+        );
+    };
+    let chain = lower.row_member_chain(spec, path, name).unwrap_or_else(|| {
+        panic!(
+            "BUG: row member '{}' of '{spec}' passed typing",
+            crate::planning::semantics::spec_member_input_key(path, name)
+        )
+    });
+    let last = chain.last().expect("BUG: a row end chain has a last hop");
+    let result_type = lower.row_end_type(&last.identity, &last.end);
+    cells.intern_empty(NormalFormKind::SpecMember {
+        base,
+        path: path.to_vec(),
+        name: name.to_string(),
+        row: RowRead {
+            ends: chain.into_iter().map(|hop| hop.end).collect(),
+            result_type,
+        },
+    })
+}
+
 /// Lower one node whose children are already lowered to `children`, in `children()` order.
 fn lower_node(
     node: ExprRef<'_, ExpressionKind>,
     children: &[NormalFormId],
+    lowered: &[NormalFormId],
     cells: &mut Cells<'_>,
     lower: &LowerCtx<'_>,
 ) -> NormalFormId {
@@ -1512,114 +1542,20 @@ fn lower_node(
         ExpressionKind::Literal(lit) => {
             cells.intern_literal_leaf(lit.to_literal(), Arc::clone(&lit.lemma_type))
         }
+        // A data slot bound to a rule (`-> with slot: big`) stays a data leaf: the read
+        // takes the rule's value and checks it against the slot's declared type.
         ExpressionKind::DataPath(p) => {
-            if let Some(ReferenceEnd::Rule(rule_path)) = lower.reference_ends.get(p) {
-                if let Some(&body) = lower.completed_rules.get(rule_path) {
-                    cells.intern_rule_ref(
-                        body,
-                        rule_path.clone(),
-                        data_path_result_type(lower.data, p, lower.row_templates),
-                    )
-                } else {
-                    // Named-`uses` overlay rule target (or not-yet-completed local):
-                    // keep a DataPath leaf; eval resolves through the overlay.
-                    cells.intern_data_leaf(
-                        p.clone(),
-                        data_path_result_type(lower.data, p, lower.row_templates),
-                    )
-                }
-            } else {
-                cells.intern_data_leaf(
-                    p.clone(),
-                    data_path_result_type(lower.data, p, lower.row_templates),
-                )
-            }
+            cells.intern_data_leaf(p.clone(), data_path_result_type(lower.data, p))
         }
-        ExpressionKind::SpecMember {
-            path,
-            name,
-            targets,
-            ..
-        } => {
-            let base_cell = children[0];
-            let mut lowered_targets = Vec::with_capacity(targets.len());
-            for target in targets {
-                let target_cell = match &target.end {
-                    crate::planning::semantics::SpecMemberEnd::Rule(rule) => {
-                        if let Some(&body) = lower.completed_rules.get(rule) {
-                            let rule_type =
-                                Arc::clone(lower.rule_types.get(rule).unwrap_or_else(|| {
-                                    panic!("BUG: spec member rule '{}' has no rule type", rule.rule)
-                                }));
-                            cells.intern_rule_ref(body, rule.clone(), rule_type)
-                        } else {
-                            cells.intern_import_rule_leaf(
-                                rule.clone(),
-                                import_rule_type(lower, rule),
-                            )
-                        }
-                    }
-                    crate::planning::semantics::SpecMemberEnd::Data(data_path) => cells
-                        .intern_data_leaf(
-                            data_path.clone(),
-                            data_path_result_type(lower.data, data_path, lower.row_templates),
-                        ),
-                    crate::planning::semantics::SpecMemberEnd::Instance { instance, identity } => {
-                        let lemma_type = Arc::new(LemmaType::primitive(
-                            crate::planning::semantics::TypeSpecification::Spec {
-                                spec: identity.clone(),
-                            },
-                        ));
-                        cells.intern_literal_leaf(
-                            LiteralValue::new(ValueKind::Spec(SpecValue::Fixed(instance.clone()))),
-                            lemma_type,
-                        )
-                    }
-                };
-                lowered_targets.push((target.instance.clone(), target_cell));
-            }
-            let mut member = String::new();
-            for segment in path {
-                member.push_str(segment);
-                member.push('.');
-            }
-            member.push_str(name);
-            let row = match &cells.result_type(base_cell).specifications {
-                crate::planning::semantics::TypeSpecification::Spec { spec } => {
-                    lower.is_row_spec(spec).then(|| {
-                        let end = lower.row_end(spec, &member).unwrap_or_else(|| {
-                            panic!("BUG: row member '{member}' of '{spec}' passed typing")
-                        });
-                        RowRead {
-                            result_type: lower.row_end_type(spec, &end),
-                            end,
-                        }
-                    })
-                }
-                _ => None,
-            };
-            cells.intern_empty(NormalFormKind::SpecMember {
-                base: base_cell,
-                member,
-                targets: lowered_targets,
-                row,
-            })
+        ExpressionKind::SpecMember { path, name, .. } => {
+            lower_spec_member(children[0], path, name, cells, lower)
         }
         ExpressionKind::RulePath(path) => {
-            if let Some(&body) = lower.completed_rules.get(path) {
-                let rule_type = Arc::clone(lower.rule_types.get(path).unwrap_or_else(|| {
-                    panic!(
-                        "BUG: in-plan rule reference '{}' has no RuleNode.rule_type",
-                        path.rule
-                    )
-                }));
-                cells.intern_rule_ref(body, path.clone(), rule_type)
-            } else {
-                cells.intern_import_rule_leaf(path.clone(), import_rule_type(lower, path))
-            }
+            let body = lower.completed_rule(path);
+            cells.intern_rule_ref(body, path.clone(), lower.rule_type(path))
         }
-        ExpressionKind::LogicalAnd { .. } => {
-            cells.intern_empty(NormalFormKind::And(children.to_vec()))
+        ExpressionKind::Logical { connective, .. } => {
+            cells.intern_empty(NormalFormKind::Logical(*connective, children.to_vec()))
         }
         ExpressionKind::Arithmetic { steps, .. } => {
             let (first, operands) = children
@@ -1665,6 +1601,17 @@ fn lower_node(
             };
             cells.intern_empty(NormalFormKind::MathOp(op.clone(), inner_id))
         }
+        ExpressionKind::StepRounding { mode, .. } => match *children {
+            [operand_id] => {
+                cells.intern_empty(NormalFormKind::StepRounding(*mode, operand_id, None))
+            }
+            [operand_id, step_id] => cells.intern_empty(NormalFormKind::StepRounding(
+                *mode,
+                operand_id,
+                Some(step_id),
+            )),
+            _ => unreachable!("BUG: step rounding has an operand and an optional step"),
+        },
         ExpressionKind::Veto(v) => cells.intern_empty(NormalFormKind::Veto(v.clone())),
         ExpressionKind::Now => cells.intern_empty(NormalFormKind::Now),
         ExpressionKind::DateRelative(kind, _) => {
@@ -1731,19 +1678,30 @@ fn lower_node(
             level,
             identity,
             end,
-        } => cells.intern_row_leaf(
+            qualifier,
+        } => cells.intern_row_field(
             *level,
             identity.clone(),
-            end.clone(),
+            RowFieldEnd {
+                end: end.clone(),
+                qualifier: qualifier.clone(),
+            },
             lower.row_end_type(identity, end),
         ),
+        ExpressionKind::RowValue { level, list } => {
+            let list_cell = *lowered.get(list.index()).expect(
+                "BUG: row value type-only list reference must point to an earlier expression",
+            );
+            let element_type = cells.result_type(list_cell).list_element_lemma_type();
+            cells.intern_row_value_leaf(*level, Arc::clone(element_type))
+        }
     }
 }
 
 /// The normal-form operation of a list op. Its operands are the list command's children
 /// in `children()` order.
 fn list_op_kind(op: &crate::planning::semantics::ListOp) -> NormalFormListOp {
-    use crate::planning::semantics::{ListOp, ListPredKind, ListReduce};
+    use crate::planning::semantics::{ListOp, ListReduce};
     match op {
         ListOp::Find { .. } => NormalFormListOp::Find,
         ListOp::First => NormalFormListOp::First,
@@ -1756,23 +1714,21 @@ fn list_op_kind(op: &crate::planning::semantics::ListOp) -> NormalFormListOp {
             ListReduce::Min => NormalFormListOp::Min,
             ListReduce::Max => NormalFormListOp::Max,
         },
-        ListOp::Predicate { kind, op, .. } => match kind {
-            ListPredKind::Any => NormalFormListOp::Any(op.clone()),
-            ListPredKind::All => NormalFormListOp::All(op.clone()),
-            ListPredKind::Where => NormalFormListOp::Where(op.clone()),
-        },
-        ListOp::InstancePredicate { kind, .. } => match kind {
-            ListPredKind::Any => NormalFormListOp::AnyRow,
-            ListPredKind::All => NormalFormListOp::AllRow,
-            ListPredKind::Where => NormalFormListOp::WhereRow,
+        ListOp::Predicate { kind, form, .. } => NormalFormListOp::Predicate {
+            kind: *kind,
+            form: *form,
         },
         ListOp::Sort { descending, .. } => NormalFormListOp::Sort {
             descending: *descending,
         },
         ListOp::Top { .. } => NormalFormListOp::Top,
         ListOp::With { .. } => NormalFormListOp::With,
-        ListOp::WithRow { fields } => NormalFormListOp::WithRow {
+        ListOp::WithRow { identity, fields } => NormalFormListOp::WithRow {
+            identity: Arc::new(identity.clone()),
             fields: fields.iter().map(|(path, _)| path.clone()).collect(),
+        },
+        ListOp::Key { fields } => NormalFormListOp::Key {
+            fields: fields.clone(),
         },
     }
 }
@@ -1791,16 +1747,19 @@ fn list_command_result_type(
     let instance_rows = list_has_instance_rows(list_type);
     let kind = match op {
         NormalFormListOp::Count => ListCommandResultKind::Count,
-        NormalFormListOp::Any(_)
-        | NormalFormListOp::All(_)
-        | NormalFormListOp::AnyRow
-        | NormalFormListOp::AllRow => ListCommandResultKind::BooleanPredicate,
-        NormalFormListOp::Where(_)
-        | NormalFormListOp::WhereRow
+        NormalFormListOp::Predicate {
+            kind: ListPredKind::Any | ListPredKind::All,
+            ..
+        } => ListCommandResultKind::BooleanPredicate,
+        NormalFormListOp::Predicate {
+            kind: ListPredKind::Where,
+            ..
+        }
         | NormalFormListOp::Sort { .. }
         | NormalFormListOp::Top
         | NormalFormListOp::With
-        | NormalFormListOp::WithRow { .. } => ListCommandResultKind::KeepList,
+        | NormalFormListOp::WithRow { .. }
+        | NormalFormListOp::Key { .. } => ListCommandResultKind::KeepList,
         NormalFormListOp::Sum
         | NormalFormListOp::Avg
         | NormalFormListOp::Product
@@ -1819,7 +1778,13 @@ fn list_command_result_type(
         | NormalFormListOp::Min
         | NormalFormListOp::Max => ListCommandResultKind::Element,
     };
-    stamp(list_type, kind, first_argument, measure_scope)
+    let result = stamp(list_type, kind, first_argument, measure_scope);
+    match op {
+        NormalFormListOp::Key { fields } => {
+            crate::planning::typing::refine_list_key_type(&result, fields)
+        }
+        _ => result,
+    }
 }
 
 fn cell(forms: &[NormalForm], id: NormalFormId) -> &NormalForm {
@@ -1834,8 +1799,19 @@ fn cell(forms: &[NormalForm], id: NormalFormId) -> &NormalForm {
 
 /// Expression text for a DAG node. Follows origin when present so folded
 /// nodes display their pre-image.
-pub(crate) fn explanation_display(forms: &[NormalForm], id: NormalFormId) -> String {
-    Syntax(NfNode { forms, id }).to_string()
+/// Display a cell as Lemma syntax. Data paths are qualified by the written row
+/// whose context the cell narrates in (`people.1.age`), bare at the root.
+pub(crate) fn explanation_display(
+    forms: &[NormalForm],
+    id: NormalFormId,
+    qualifier: Option<&NameScope>,
+) -> String {
+    Syntax(NfNode {
+        forms,
+        id,
+        qualifier,
+    })
+    .to_string()
 }
 
 /// Cell whose spelling a node displays: the pre-image of folded cells.
@@ -1929,11 +1905,22 @@ fn arithmetic_chain(
     (current, steps)
 }
 
+/// How an explanation names the data and rules of the instance context a cell narrates
+/// in: as the plan holding the instance names them. Data display under the instance's
+/// hops (`people.1.age`, `i.x`); rules under the `uses` hops above the nearest row or
+/// the root (`i.total`), so a row's own rules stay bare.
+pub(crate) struct NameScope {
+    pub(crate) data: Vec<PathSegment>,
+    pub(crate) rules: Vec<PathSegment>,
+}
+
 /// A normal-form cell printed as Lemma syntax.
 #[derive(Clone, Copy)]
 pub(crate) struct NfNode<'a> {
     pub(crate) forms: &'a [NormalForm],
     pub(crate) id: NormalFormId,
+    /// Instance whose context the cell narrates in; `None` for the root plan.
+    pub(crate) qualifier: Option<&'a NameScope>,
 }
 
 impl<'a> NfNode<'a> {
@@ -1941,6 +1928,7 @@ impl<'a> NfNode<'a> {
         Self {
             forms: self.forms,
             id,
+            qualifier: self.qualifier,
         }
     }
 }
@@ -1950,9 +1938,27 @@ impl<'a> NfNode<'a> {
 pub(crate) enum NfAtom<'a> {
     Literal(&'a LiteralValue, &'a LemmaType),
     DataPath(&'a DataPath),
+    /// Data path qualified by the instance whose context it narrates in.
+    QualifiedDataPath {
+        prefix: &'a [PathSegment],
+        path: &'a DataPath,
+    },
     Rule(&'a RulePath),
+    /// Rule qualified by the `uses` hops of the instance whose context it narrates in.
+    QualifiedRule {
+        prefix: &'a [PathSegment],
+        path: &'a RulePath,
+    },
     Row(&'a RowEnd),
-    Name(&'a str),
+    /// Row field with its written list qualifier: `children.is_leaf`.
+    QualifiedRow {
+        qualifier: &'a [String],
+        end: &'a RowEnd,
+    },
+    SpecMemberField {
+        path: &'a [String],
+        name: &'a str,
+    },
     Now,
     Veto(&'a VetoExpression),
 }
@@ -1964,9 +1970,37 @@ impl std::fmt::Display for NfAtom<'_> {
                 write!(f, "{}", literal.display_value_with_type(lemma_type))
             }
             NfAtom::DataPath(path) => write!(f, "{}", path.input_key()),
+            NfAtom::QualifiedDataPath { prefix, path } => {
+                for segment in prefix.iter() {
+                    write!(f, "{}.", segment.input_key())?;
+                }
+                write!(f, "{}", path.input_key())
+            }
             NfAtom::Rule(path) => write!(f, "{}", path.input_key()),
+            NfAtom::QualifiedRule { prefix, path } => {
+                for segment in prefix.iter() {
+                    write!(f, "{}.", segment.input_key())?;
+                }
+                write!(f, "{}", path.input_key())
+            }
             NfAtom::Row(end) => write!(f, "{end}"),
-            NfAtom::Name(name) => write!(f, "{name}"),
+            NfAtom::QualifiedRow { qualifier, end } => {
+                for (i, segment) in qualifier.iter().enumerate() {
+                    if i > 0 {
+                        f.write_str(".")?;
+                    }
+                    f.write_str(segment)?;
+                }
+                f.write_str(".")?;
+                write!(f, "{end}")
+            }
+            NfAtom::SpecMemberField { path, name } => {
+                write!(
+                    f,
+                    "{}",
+                    crate::planning::semantics::spec_member_input_key(path, name)
+                )
+            }
             NfAtom::Now => write!(f, "now"),
             NfAtom::Veto(veto) => write!(f, "{veto}"),
         }
@@ -2017,7 +2051,13 @@ impl<'a> SyntaxNode<'a> for NfNode<'a> {
             starts_with_sign: false,
         };
         if let Some(path) = &nf.rule_ref {
-            return atom(NfAtom::Rule(path));
+            return match self.qualifier {
+                Some(scope) if !scope.rules.is_empty() => atom(NfAtom::QualifiedRule {
+                    prefix: &scope.rules,
+                    path,
+                }),
+                Some(_) | None => atom(NfAtom::Rule(path)),
+            };
         }
         let node = |id: &NormalFormId| self.at(*id);
         let nodes = |ids: &[NormalFormId]| ids.iter().map(node).collect::<Vec<_>>();
@@ -2026,15 +2066,36 @@ impl<'a> SyntaxNode<'a> for NfNode<'a> {
                 atom: NfAtom::Literal(literal, nf.result_type.as_ref()),
                 starts_with_sign: value_starts_with_sign(&literal.value),
             },
-            NormalFormKind::Leaf(LeafKind::DataPath(path)) => atom(NfAtom::DataPath(path)),
-            NormalFormKind::Leaf(LeafKind::ImportRule(path)) => atom(NfAtom::Rule(path)),
-            NormalFormKind::Leaf(LeafKind::Row { end, .. }) => atom(NfAtom::Row(end)),
+            NormalFormKind::Leaf(LeafKind::DataPath(path)) => match self.qualifier {
+                Some(scope) if !scope.data.is_empty() => atom(NfAtom::QualifiedDataPath {
+                    prefix: &scope.data,
+                    path,
+                }),
+                Some(_) | None => atom(NfAtom::DataPath(path)),
+            },
+            NormalFormKind::RowField {
+                end,
+                qualifier: Some(segments),
+                ..
+            } => atom(NfAtom::QualifiedRow {
+                qualifier: segments,
+                end,
+            }),
+            NormalFormKind::RowField {
+                end,
+                qualifier: None,
+                ..
+            } => atom(NfAtom::Row(end)),
+            NormalFormKind::Leaf(LeafKind::RowValue { .. }) => SyntaxView::ImplicitRowValue,
             NormalFormKind::Now => atom(NfAtom::Now),
             NormalFormKind::Veto(veto) => atom(NfAtom::Veto(veto)),
             NormalFormKind::Comparison(left, op, right) => {
                 SyntaxView::Comparison(node(left), op, node(right))
             }
-            NormalFormKind::And(children) => SyntaxView::Conjunction(nodes(children)),
+            NormalFormKind::Logical(connective, children) => SyntaxView::Logical {
+                connective: *connective,
+                operands: nodes(children),
+            },
             NormalFormKind::Not(operand) => {
                 let shown = displayed_cell(self.forms, *operand);
                 match &shown.kind {
@@ -2073,6 +2134,10 @@ impl<'a> SyntaxNode<'a> for NfNode<'a> {
             NormalFormKind::Negate(operand) => SyntaxView::Negate(node(operand)),
             NormalFormKind::Reciprocal(operand) => SyntaxView::Reciprocal(node(operand)),
             NormalFormKind::MathOp(op, operand) => SyntaxView::Prefix(op, node(operand)),
+            NormalFormKind::StepRounding(mode, operand, step) => SyntaxView::ListCommand {
+                list: node(operand),
+                command: CommandView::Step(mode.keyword(), step.as_ref().map(node)),
+            },
             NormalFormKind::RangeBound(bound, operand) => SyntaxView::Prefix(bound, node(operand)),
             NormalFormKind::UnitConversion(value, target) => {
                 SyntaxView::UnitConversion(node(value), target)
@@ -2095,7 +2160,9 @@ impl<'a> SyntaxNode<'a> for NfNode<'a> {
                     .map(|(condition, result)| (node(condition), node(result)))
                     .collect(),
             ),
-            NormalFormKind::SpecMember { base, member, .. } => {
+            NormalFormKind::SpecMember {
+                base, path, name, ..
+            } => {
                 let base_cell = cell(self.forms, *base);
                 let named = base_cell.rule_ref.is_some()
                     || matches!(
@@ -2104,7 +2171,10 @@ impl<'a> SyntaxNode<'a> for NfNode<'a> {
                     );
                 SyntaxView::Member {
                     base: node(base),
-                    path: NfAtom::Name(member),
+                    path: NfAtom::SpecMemberField {
+                        path,
+                        name: name.as_str(),
+                    },
                     parenthesize_base: !named,
                 }
             }
@@ -2113,21 +2183,6 @@ impl<'a> SyntaxNode<'a> for NfNode<'a> {
                  so displayed_cell never stops at it"
             ),
             NormalFormKind::ListCommand { list, op, args, .. } => {
-                let predicate = |name: &'static str, op: &'a RowCondition| {
-                    CommandView::Predicate(
-                        name,
-                        PredicateView::Value {
-                            op,
-                            right: node(&single_argument(args, name)),
-                        },
-                    )
-                };
-                let row_predicate = |name: &'static str| {
-                    CommandView::Predicate(
-                        name,
-                        PredicateView::Instance(node(&single_argument(args, name))),
-                    )
-                };
                 let reduce = |name: &'static str| {
                     CommandView::Reduce(name, optional_argument(args, name).map(|id| node(&id)))
                 };
@@ -2141,12 +2196,15 @@ impl<'a> SyntaxNode<'a> for NfNode<'a> {
                     NormalFormListOp::Product => reduce("product"),
                     NormalFormListOp::Min => reduce("min"),
                     NormalFormListOp::Max => reduce("max"),
-                    NormalFormListOp::Any(op) => predicate("any", op),
-                    NormalFormListOp::All(op) => predicate("all", op),
-                    NormalFormListOp::Where(op) => predicate("where", op),
-                    NormalFormListOp::AnyRow => row_predicate("any"),
-                    NormalFormListOp::AllRow => row_predicate("all"),
-                    NormalFormListOp::WhereRow => row_predicate("where"),
+                    NormalFormListOp::Predicate { kind, form } => {
+                        let name = kind.keyword();
+                        let expr = node(&single_argument(args, name));
+                        let view = match form {
+                            ListPredicateForm::Value => PredicateView::Value(expr),
+                            ListPredicateForm::Instance => PredicateView::Instance(expr),
+                        };
+                        CommandView::Predicate(name, view)
+                    }
                     NormalFormListOp::Sort { descending } => CommandView::Sort {
                         descending: *descending,
                         argument: optional_argument(args, "sort").map(|id| node(&id)),
@@ -2155,7 +2213,7 @@ impl<'a> SyntaxNode<'a> for NfNode<'a> {
                     NormalFormListOp::With => {
                         CommandView::With(args.iter().map(|id| (None, node(id))).collect())
                     }
-                    NormalFormListOp::WithRow { fields } => {
+                    NormalFormListOp::WithRow { fields, .. } => {
                         assert_eq!(
                             fields.len(),
                             args.len(),
@@ -2168,6 +2226,9 @@ impl<'a> SyntaxNode<'a> for NfNode<'a> {
                                 .map(|(field, value)| (Some(NfAtom::DataPath(field)), node(value)))
                                 .collect(),
                         )
+                    }
+                    NormalFormListOp::Key { fields } => {
+                        CommandView::Key(fields.iter().map(NfAtom::DataPath).collect())
                     }
                 };
                 SyntaxView::ListCommand {
@@ -2184,18 +2245,17 @@ mod tests {
     use super::*;
 
     static EMPTY_ROW_TEMPLATES: BTreeMap<SpecIdentity, Arc<ExecutionPlan>> = BTreeMap::new();
-    static EMPTY_LIST_ELEMENTS: std::sync::LazyLock<std::collections::HashSet<SpecIdentity>> =
-        std::sync::LazyLock::new(std::collections::HashSet::new);
     static TEST_SELF_IDENTITY: std::sync::LazyLock<SpecIdentity> =
         std::sync::LazyLock::new(|| SpecIdentity {
             repository: None,
             spec: "test".to_string(),
             effective: crate::parsing::ast::EffectiveDate::Origin,
+            slice: crate::parsing::ast::EffectiveDate::Origin,
         });
     use crate::computation::arithmetic::SignatureIndex;
     use crate::computation::rational::{rational_new, rational_one, rational_zero};
     use crate::parsing::arena::{ExprId, ExprTable, ExprTree};
-    use crate::parsing::ast::{ChainStep, PrimitiveKind};
+    use crate::parsing::ast::{ChainStep, ConversionTypeKind};
     use crate::planning::semantics::TypedLiteral;
     use crate::planning::semantics::{
         ComparisonComputation, DataPath, ExpressionKind, NegationType, SemanticConversionTarget,
@@ -2208,6 +2268,12 @@ mod tests {
         &interner.forms
     }
 
+    fn empty_named_types() -> &'static IndexMap<String, Arc<LemmaType>> {
+        use std::sync::OnceLock;
+        static EMPTY: OnceLock<IndexMap<String, Arc<LemmaType>>> = OnceLock::new();
+        EMPTY.get_or_init(IndexMap::new)
+    }
+
     fn empty_measure_scope<'a>(
         unit_index: &'a UnitIndex,
         signature_index: &'a SignatureIndex,
@@ -2215,6 +2281,7 @@ mod tests {
         MeasureScope {
             unit_index,
             signature_index,
+            named_types: empty_named_types(),
         }
     }
 
@@ -2300,15 +2367,12 @@ mod tests {
     ) -> NormalFormId {
         let completed_rules = HashMap::new();
         let rule_types = HashMap::new();
-        let reference_ends = IndexMap::new();
         let lower = LowerCtx {
             completed_rules: &completed_rules,
             rule_types: &rule_types,
-            reference_ends: &reference_ends,
             data,
             row_templates: &EMPTY_ROW_TEMPLATES,
             self_identity: &TEST_SELF_IDENTITY,
-            list_element_identities: &EMPTY_LIST_ELEMENTS,
             rule_order: &[],
         };
         let unit_index = UnitIndex::new();
@@ -2355,9 +2419,6 @@ mod tests {
                     }))
                 }
                 NormalFormKind::Leaf(LeafKind::DataPath(p)) => ExpressionKind::DataPath(p.clone()),
-                NormalFormKind::Leaf(LeafKind::ImportRule(p)) => {
-                    ExpressionKind::RulePath(p.clone())
-                }
                 NormalFormKind::Sum(terms) => self.sum_kind(terms),
                 NormalFormKind::Product(terms) => self.product_kind(terms),
                 NormalFormKind::Subtract(a, b) => {
@@ -2391,13 +2452,20 @@ mod tests {
                 NormalFormKind::Comparison(a, op, b) => {
                     ExpressionKind::Comparison(self.child(*a), op.clone(), self.child(*b))
                 }
-                NormalFormKind::And(children) => self.and_kind(children),
+                NormalFormKind::Logical(connective, children) => {
+                    self.logical_kind(*connective, children)
+                }
                 NormalFormKind::Not(x) => {
                     ExpressionKind::LogicalNegation(self.child(*x), NegationType::Not)
                 }
                 NormalFormKind::MathOp(op, x) => {
                     ExpressionKind::MathematicalComputation(op.clone(), self.child(*x))
                 }
+                NormalFormKind::StepRounding(mode, x, step) => ExpressionKind::StepRounding {
+                    operand: self.child(*x),
+                    mode: *mode,
+                    step: step.map(|step| self.child(step)),
+                },
                 NormalFormKind::UnitConversion(x, target) => {
                     ExpressionKind::UnitConversion(self.child(*x), target.clone())
                 }
@@ -2429,25 +2497,28 @@ mod tests {
                         .map(|(condition, result)| (self.child(*condition), self.child(*result)))
                         .collect(),
                 ),
-                NormalFormKind::SpecMember { base, member, .. } => {
-                    let mut parts: Vec<String> = member.split('.').map(str::to_string).collect();
-                    let name = parts.pop().expect("BUG: spec member names a field");
-                    ExpressionKind::SpecMember {
-                        base: self.child(*base),
-                        path: parts,
-                        name,
-                        targets: Vec::new(),
-                    }
-                }
-                NormalFormKind::Leaf(LeafKind::Row {
+                NormalFormKind::SpecMember {
+                    base, path, name, ..
+                } => ExpressionKind::SpecMember {
+                    base: self.child(*base),
+                    path: path.clone(),
+                    name: name.clone(),
+                },
+                NormalFormKind::RowField {
                     level,
                     identity,
                     end,
-                }) => ExpressionKind::RowField {
+                    qualifier,
+                    ..
+                } => ExpressionKind::RowField {
                     level: *level,
                     identity: identity.clone(),
                     end: end.clone(),
+                    qualifier: qualifier.clone(),
                 },
+                NormalFormKind::Leaf(LeafKind::RowValue { .. }) => {
+                    panic!("BUG: normal-form RowValue cannot be rebuilt without its list context")
+                }
                 // A dispatch table has no Expression spelling; its pre-image does.
                 NormalFormKind::OrderedDispatch { .. } => self.kind(
                     nf.origin
@@ -2461,7 +2532,7 @@ mod tests {
                 } => {
                     let list_expr = self.child(*list);
                     let arg_exprs: Vec<ExprId> = args.iter().map(|id| self.child(*id)).collect();
-                    use crate::planning::semantics::{ListOp, ListPredKind, ListReduce};
+                    use crate::planning::semantics::{ListOp, ListReduce};
                     let planned = match op {
                         NormalFormListOp::Find => ListOp::Find { keys: arg_exprs },
                         NormalFormListOp::First => ListOp::First,
@@ -2487,29 +2558,13 @@ mod tests {
                             kind: ListReduce::Max,
                             argument: arg_exprs.into_iter().next(),
                         },
-                        NormalFormListOp::Any(cmp) => ListOp::Predicate {
-                            kind: ListPredKind::Any,
-                            op: cmp.clone(),
-                            right: arg_exprs
+                        NormalFormListOp::Predicate { kind, form } => ListOp::Predicate {
+                            kind: *kind,
+                            form: *form,
+                            expr: arg_exprs
                                 .into_iter()
                                 .next()
-                                .expect("BUG: any needs a right"),
-                        },
-                        NormalFormListOp::All(cmp) => ListOp::Predicate {
-                            kind: ListPredKind::All,
-                            op: cmp.clone(),
-                            right: arg_exprs
-                                .into_iter()
-                                .next()
-                                .expect("BUG: all needs a right"),
-                        },
-                        NormalFormListOp::Where(cmp) => ListOp::Predicate {
-                            kind: ListPredKind::Where,
-                            op: cmp.clone(),
-                            right: arg_exprs
-                                .into_iter()
-                                .next()
-                                .expect("BUG: where needs a right"),
+                                .expect("BUG: predicate needs a row expression"),
                         },
                         NormalFormListOp::Sort { descending } => ListOp::Sort {
                             descending: *descending,
@@ -2519,29 +2574,12 @@ mod tests {
                             n: arg_exprs.into_iter().next().expect("BUG: top needs n"),
                         },
                         NormalFormListOp::With => ListOp::With { rows: arg_exprs },
-                        NormalFormListOp::AnyRow => ListOp::InstancePredicate {
-                            kind: ListPredKind::Any,
-                            expr: arg_exprs
-                                .into_iter()
-                                .next()
-                                .expect("BUG: any needs a row expression"),
-                        },
-                        NormalFormListOp::AllRow => ListOp::InstancePredicate {
-                            kind: ListPredKind::All,
-                            expr: arg_exprs
-                                .into_iter()
-                                .next()
-                                .expect("BUG: all needs a row expression"),
-                        },
-                        NormalFormListOp::WhereRow => ListOp::InstancePredicate {
-                            kind: ListPredKind::Where,
-                            expr: arg_exprs
-                                .into_iter()
-                                .next()
-                                .expect("BUG: where needs a row expression"),
-                        },
-                        NormalFormListOp::WithRow { fields } => ListOp::WithRow {
+                        NormalFormListOp::WithRow { identity, fields } => ListOp::WithRow {
+                            identity: SpecIdentity::clone(identity),
                             fields: fields.iter().cloned().zip(arg_exprs).collect(),
+                        },
+                        NormalFormListOp::Key { fields } => ListOp::Key {
+                            fields: fields.clone(),
                         },
                     };
                     ExpressionKind::ListCommand {
@@ -2612,14 +2650,18 @@ mod tests {
             arithmetic_kind(first, steps)
         }
 
-        fn and_kind(&mut self, children: &[NormalFormId]) -> ExpressionKind {
+        fn logical_kind(
+            &mut self,
+            connective: LogicalConnective,
+            children: &[NormalFormId],
+        ) -> ExpressionKind {
             match children {
-                [] => unreachable!("BUG: And has at least one operand"),
+                [] => unreachable!("BUG: Logical has at least one operand"),
                 [one] => self.kind(*one),
                 [first, rest @ ..] => {
                     let first = self.child(*first);
                     let operands = rest.iter().map(|id| self.child(*id)).collect();
-                    and_kind(first, operands)
+                    logical_kind(connective, first, operands)
                 }
             }
         }
@@ -2668,8 +2710,13 @@ mod tests {
         }
     }
 
-    fn and_kind(first: ExprId, operands: Vec<ExprId>) -> ExpressionKind {
-        ExpressionKind::LogicalAnd {
+    fn logical_kind(
+        connective: LogicalConnective,
+        first: ExprId,
+        operands: Vec<ExprId>,
+    ) -> ExpressionKind {
+        ExpressionKind::Logical {
+            connective,
             first,
             steps: operands
                 .into_iter()
@@ -2797,7 +2844,15 @@ mod tests {
     }
 
     fn and_expr(a: Ex, b: Ex) -> Ex {
-        compose_expr(&[&a, &b], |ids| and_kind(ids[0], vec![ids[1]]))
+        compose_expr(&[&a, &b], |ids| {
+            logical_kind(LogicalConnective::And, ids[0], vec![ids[1]])
+        })
+    }
+
+    fn or_expr(a: Ex, b: Ex) -> Ex {
+        compose_expr(&[&a, &b], |ids| {
+            logical_kind(LogicalConnective::Or, ids[0], vec![ids[1]])
+        })
     }
 
     fn not_expr(inner: Ex) -> Ex {
@@ -2929,7 +2984,7 @@ mod tests {
             };
             let rendered = regions
                 .iter()
-                .map(|region| explanation_display(interner_forms(&interner), region.cell()))
+                .map(|region| explanation_display(interner_forms(&interner), region.cell(), None))
                 .collect();
             (boundaries.to_vec(), rendered)
         }
@@ -3256,6 +3311,23 @@ mod tests {
         }
 
         #[test]
+        fn equality_or_of_is_comparisons_declines() {
+            assert_declines(
+                &chain(
+                    num_expr(0),
+                    vec![(
+                        or_expr(
+                            compare(path_expr("x"), ComparisonComputation::Is, num_expr(1)),
+                            compare(path_expr("y"), ComparisonComputation::Is, num_expr(2)),
+                        ),
+                        num_expr(1),
+                    )],
+                ),
+                "or of equality comparisons is not an And peel",
+            );
+        }
+
+        #[test]
         fn boolean_scrutinee_declines() {
             assert_declines(
                 &chain(
@@ -3386,7 +3458,7 @@ mod tests {
             for (index, region) in regions.iter().enumerate() {
                 if index % 2 == 0 {
                     assert_eq!(
-                        explanation_display(interner_forms(&interner), region.cell()),
+                        explanation_display(interner_forms(&interner), region.cell(), None),
                         "0",
                         "interval region must stay the default"
                     );
@@ -3579,11 +3651,12 @@ mod tests {
     fn and_chain_lowers_to_one_flat_cell() {
         let chain = compose_expr(
             &[&bool_expr(true), &bool_expr(true), &bool_expr(false)],
-            |ids| and_kind(ids[0], vec![ids[1], ids[2]]),
+            |ids| logical_kind(LogicalConnective::And, ids[0], vec![ids[1], ids[2]]),
         );
         let mut interner = NormalFormInterner::new();
         let id = to_normal_form_empty(&chain, &mut interner);
-        let NormalFormKind::And(children) = &interner.get(id).kind else {
+        let NormalFormKind::Logical(LogicalConnective::And, children) = &interner.get(id).kind
+        else {
             panic!("expected And(..), got {:?}", interner.get(id).kind);
         };
         let [first, second, third] = children.as_slice() else {
@@ -3623,11 +3696,104 @@ mod tests {
             and_expr(and_expr(dflag(), dflag2()), x_below_one.clone()),
         ] {
             let norm = normalize_expression(&expr).expect("normalize");
-            let ExpressionKind::LogicalAnd { steps, .. } = norm.root_kind() else {
+            let ExpressionKind::Logical {
+                connective: LogicalConnective::And,
+                steps,
+                ..
+            } = norm.root_kind()
+            else {
                 panic!("expected one conjunction, got {:?}", norm.root_kind());
             };
             assert_eq!(steps.len(), 2, "expected three flat operands, got {norm:?}");
         }
+    }
+
+    #[test]
+    fn or_chain_lowers_to_one_flat_cell() {
+        let chain = compose_expr(
+            &[&bool_expr(false), &bool_expr(false), &bool_expr(true)],
+            |ids| logical_kind(LogicalConnective::Or, ids[0], vec![ids[1], ids[2]]),
+        );
+        let mut interner = NormalFormInterner::new();
+        let id = to_normal_form_empty(&chain, &mut interner);
+        let NormalFormKind::Logical(LogicalConnective::Or, children) = &interner.get(id).kind
+        else {
+            panic!("expected Or(..), got {:?}", interner.get(id).kind);
+        };
+        let [first, second, third] = children.as_slice() else {
+            panic!("expected three flat operands, got {children:?}");
+        };
+        for operand in [first, second, third] {
+            assert!(matches!(
+                &interner.get(*operand).kind,
+                NormalFormKind::Leaf(LeafKind::Literal(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn parenthesized_disjunction_flattens_into_parent() {
+        let x_below_one = lt_expr(dx(), num_expr(1));
+        for expr in [
+            or_expr(dflag(), or_expr(dflag2(), x_below_one.clone())),
+            or_expr(or_expr(dflag(), dflag2()), x_below_one.clone()),
+        ] {
+            let norm = normalize_expression(&expr).expect("normalize");
+            let ExpressionKind::Logical {
+                connective: LogicalConnective::Or,
+                steps,
+                ..
+            } = norm.root_kind()
+            else {
+                panic!("expected one disjunction, got {:?}", norm.root_kind());
+            };
+            assert_eq!(steps.len(), 2, "expected three flat operands, got {norm:?}");
+        }
+    }
+
+    #[test]
+    fn mixed_or_and_does_not_flatten() {
+        let expr = or_expr(dflag(), and_expr(dflag2(), lt_expr(dx(), num_expr(1))));
+        let norm = normalize_expression(&expr).expect("normalize");
+        let ExpressionKind::Logical {
+            connective: LogicalConnective::Or,
+            first,
+            steps,
+        } = norm.root_kind()
+        else {
+            panic!("expected or root, got {:?}", norm.root_kind());
+        };
+        assert_eq!(steps.len(), 1);
+        assert!(matches!(
+            norm.at(*first).kind(),
+            ExpressionKind::DataPath(ref p) if p.data == "flag"
+        ));
+        assert!(matches!(
+            norm.at(steps[0].operand).kind(),
+            ExpressionKind::Logical {
+                connective: LogicalConnective::And,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn true_or_data_absorbs_to_true() {
+        let norm = normalize_expression(&or_expr(bool_expr(true), dflag())).expect("normalize");
+        assert!(matches!(
+            norm.root_kind(),
+            ExpressionKind::Literal(ref literal)
+                if matches!(literal.value, crate::planning::semantics::ValueKind::Boolean(true))
+        ));
+    }
+
+    #[test]
+    fn false_or_data_folds_to_data() {
+        let norm = normalize_expression(&or_expr(bool_expr(false), dflag())).expect("normalize");
+        assert!(matches!(
+            norm.root_kind(),
+            ExpressionKind::DataPath(ref path) if path.data == "flag"
+        ));
     }
 
     #[test]
@@ -3795,7 +3961,13 @@ mod tests {
             panic!("expected preserved negation, got {:?}", norm.root_kind());
         };
         assert!(
-            matches!(norm.at(*inner).kind(), ExpressionKind::LogicalAnd { .. }),
+            matches!(
+                norm.at(*inner).kind(),
+                ExpressionKind::Logical {
+                    connective: LogicalConnective::And,
+                    ..
+                }
+            ),
             "expected preserved conjunction under the negation, got {:?}",
             norm.at(*inner).kind()
         );
@@ -3896,7 +4068,7 @@ mod tests {
         let expr = compose_expr(&[&inner], |ids| {
             ExpressionKind::UnitConversion(
                 ids[0],
-                SemanticConversionTarget::Type(PrimitiveKind::Number),
+                SemanticConversionTarget::Type(ConversionTypeKind::Number),
             )
         });
         let norm = normalize_expression(&expr).expect("normalize");
@@ -3924,7 +4096,6 @@ mod tests {
         let mut interner = NormalFormInterner::new();
         let completed_rules = HashMap::new();
         let rule_types = HashMap::new();
-        let reference_ends = IndexMap::new();
         let data = IndexMap::new();
         let unit_index = UnitIndex::new();
         let signature_index = SignatureIndex::new();
@@ -3932,11 +4103,9 @@ mod tests {
         let lower = LowerCtx {
             completed_rules: &completed_rules,
             rule_types: &rule_types,
-            reference_ends: &reference_ends,
             data: &data,
             row_templates: &EMPTY_ROW_TEMPLATES,
             self_identity: &TEST_SELF_IDENTITY,
-            list_element_identities: &EMPTY_LIST_ELEMENTS,
             rule_order: &[],
         };
         let root = to_normal_form(
@@ -4065,5 +4234,57 @@ mod tests {
             norm.root_kind(),
             ExpressionKind::Literal(ref l) if matches!(l.value, crate::planning::semantics::ValueKind::Number(ref n) if n == &rational_new(5, 1))
         ));
+    }
+
+    /// `i.sub.x` on a `uses` instance is one member read: the `uses` slot leaf, then a
+    /// row end per hop through the templates, no cell of the dependency in this plan.
+    #[test]
+    fn member_read_on_import_lowers_to_row_ends() {
+        let mut engine = crate::Engine::new();
+        engine
+            .load([(
+                crate::SourceType::Path(Arc::new(std::path::PathBuf::from("member.lemma"))),
+                r#"
+spec leaf
+data x: 3
+
+spec mid
+uses sub: leaf
+
+spec outer
+uses i: mid
+rule r: i.sub.x
+"#
+                .to_string(),
+            )])
+            .expect("load member fixture");
+        let plan = engine
+            .plans
+            .get_plans(None, "outer")
+            .and_then(|plans| plans.values().next())
+            .expect("outer plan");
+        let rule = plan
+            .rules
+            .get(&RulePath::new(Vec::new(), "r".to_string()))
+            .expect("rule r");
+        let NormalFormKind::SpecMember { base, row, .. } = &plan.normal_form(rule.normal_form).kind
+        else {
+            panic!(
+                "`i.sub.x` lowers to a member read, got {:?}",
+                plan.normal_form(rule.normal_form).kind
+            );
+        };
+        assert!(matches!(
+            &plan.normal_form(*base).kind,
+            NormalFormKind::Leaf(LeafKind::DataPath(path)) if path.input_key() == "i"
+        ));
+        assert_eq!(
+            row.ends,
+            vec![
+                RowEnd::Data(DataPath::local("sub".to_string())),
+                RowEnd::Data(DataPath::local("x".to_string())),
+            ]
+        );
+        assert!(plan.data.keys().all(|path| path.segments.is_empty()));
     }
 }

@@ -29,7 +29,7 @@ pub fn evaluate(engine: &Engine, args: &Value) -> Result<String, ToolError> {
     let spec_name = parse_spec_set_id(spec_set_id).map_err(engine_error_to_diagnostics)?;
     let repository = optional_nonempty_string(args, "repository")?;
     let now = resolve_effective(args)?;
-    let data_values = parse_evaluate_data_object(&args.get("data").cloned())
+    let data_values = parse_evaluate_data_object(args.get("data").cloned())
         .map_err(|e| ToolError::invalid_arguments(e.to_string()))?;
     let rule_names = resolve_evaluate_rules(&args.get("rules").cloned())
         .map_err(|e| ToolError::invalid_arguments(e.to_string()))?;

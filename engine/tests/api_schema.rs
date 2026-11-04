@@ -173,13 +173,14 @@ data price: measure
   -> unit cent: 0.01
 
 spec coffee_order
-uses menu: menu_item list
+uses menu_item
+data menu: menu_item list
   -> key drink
   -> with drink: "espresso", price: 2.50 eur
   -> with drink: "latte", price: 350 cent
-data ordered: menu.drink
+data ordered: menu_item.drink
   -> with "latte"
-data fares: menu.price list
+data fares: menu_item.price list
   -> with 89 eur, 120 eur
 rule selected:
   menu -> find ordered
@@ -203,7 +204,7 @@ rule any_cheap:
 spec part
 data money: measure
   -> unit eur: 1.00
-uses components: part list
+data components: part list
 data own_cost: money
 rule unit_cost:
   own_cost + (components -> sum components.unit_cost)
@@ -375,12 +376,15 @@ fn list_documents_carry_list_type_rows_and_structured_commands() {
     assert_eq!(by_price["list"]["direction"], "desc");
 
     let response = &documents["coffee_order response"];
-    let selected = &response["results"]["selected"]["row"];
+    // `menu.2` is written in the spec: a planned instance under a `row` path segment.
+    let selected = &response["results"]["selected"]["spec"];
     assert_eq!(selected["instance"], "menu.2");
-    let index = selected["index"].as_u64().expect("row index") as usize;
-    assert_eq!(
-        response["rows"][index]["data"]["drink"]["result"]["text"],
-        "latte"
+    assert_eq!(selected["path"][0]["uses"], "menu");
+    assert_eq!(selected["path"][0]["row"], 2);
+    assert_eq!(selected["data"]["drink"]["result"]["text"], "latte");
+    assert!(
+        response["results"]["selected"].get("row").is_none(),
+        "spec-written rows fill no row table"
     );
     assert_eq!(
         response["results"]["high_fares"]["list"][0]["result"],

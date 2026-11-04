@@ -26,8 +26,8 @@ pub fn parse(
 mod tests {
     use super::{
         parse, ArithmeticComputation, CommandArg, Constraint, DataValue, Expression,
-        ExpressionKind, LemmaSpec, MathematicalComputation, RangeBound, TypeConstraintCommand,
-        UnitArg, UnitFactor,
+        ExpressionKind, LemmaSpec, MathematicalComputation, RangeBound, Reference, RoundingMode,
+        TypeConstraintCommand, UnitArg, UnitFactor,
     };
     use crate::formatting::format_parse_result;
     use crate::parsing::arena::ExprRef;
@@ -768,6 +768,106 @@ data velocity: measure
         assert!(!rows[0].deprecated_without_colon);
     }
 
+    // ─── Parse: dynamic scale reference payload ────────────────────────────
+
+    #[test]
+    fn parse_unit_colon_reference_payload() {
+        let spec = parse_single_spec(
+            r#"spec fx
+data rate: number
+data money: measure
+  -> unit gbp: rate
+"#,
+        );
+        let rows = measure_unit_constraints(&spec);
+        assert_eq!(rows.len(), 1);
+        let (name, unit_arg) = unit_name_and_arg(&rows[0]);
+        assert_eq!(name, "gbp");
+        assert_eq!(
+            unit_arg,
+            UnitArg::Reference(Reference::local("rate".to_string()))
+        );
+        assert!(!rows[0].deprecated_without_colon);
+    }
+
+    #[test]
+    fn parse_unit_colon_dotted_reference_payload() {
+        let specs = parse(
+            r#"spec rate_src
+data rate: number
+spec consumer
+uses rs: rate_src
+data money: measure
+  -> unit gbp: rs.rate
+"#,
+            crate::parsing::source::SourceType::Volatile,
+            &ResourceLimits::default(),
+        )
+        .expect("spec must parse")
+        .into_flattened_specs();
+        let consumer = specs
+            .iter()
+            .find(|s| s.name == "consumer")
+            .expect("consumer spec");
+        let rows = measure_unit_constraints(consumer);
+        assert_eq!(rows.len(), 1);
+        let (name, unit_arg) = unit_name_and_arg(&rows[0]);
+        assert_eq!(name, "gbp");
+        assert_eq!(
+            unit_arg,
+            UnitArg::Reference(Reference {
+                segments: vec!["rs".to_string()],
+                name: "rate".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn parse_unit_colon_reference_display_roundtrips() {
+        let local = UnitArg::Reference(Reference::local("rate".to_string()));
+        assert_eq!(format!("{local}"), "rate");
+        let dotted = UnitArg::Reference(Reference {
+            segments: vec!["rs".to_string()],
+            name: "rate".to_string(),
+        });
+        assert_eq!(format!("{dotted}"), "rs.rate");
+    }
+
+    #[test]
+    fn parse_unit_colon_compound_still_parses_after_reference_support() {
+        // A bare identifier followed by `/` is a compound unit expression, not a
+        // reference. This guards against the reference branch swallowing the
+        // first factor of a compound expression.
+        let spec = parse_single_spec(
+            r#"spec rates
+uses lemma units
+
+data money: measure
+  -> unit eur_per_hour: eur/hour
+"#,
+        );
+        let rows = measure_unit_constraints(&spec);
+        assert_eq!(rows.len(), 1);
+        let (name, unit_arg) = unit_name_and_arg(&rows[0]);
+        assert_eq!(name, "eur_per_hour");
+        assert_eq!(
+            unit_arg,
+            UnitArg::Expr(
+                rust_decimal::Decimal::ONE,
+                vec![
+                    UnitFactor {
+                        measure_ref: "eur".to_string(),
+                        exp: 1,
+                    },
+                    UnitFactor {
+                        measure_ref: "hour".to_string(),
+                        exp: -1,
+                    }
+                ],
+            )
+        );
+    }
+
     // ─── Parse: deprecated space-separated unit form ───────────────────────
 
     #[test]
@@ -1100,10 +1200,7 @@ uses external: @user/workspace somespec"#;
         assert_eq!(specs.len(), 1);
         assert_eq!(specs[0].data.len(), 1);
         match &specs[0].data[0].value {
-            crate::parsing::ast::DataValue::Import {
-                spec_ref,
-                bindings: _,
-            } => {
+            crate::parsing::ast::DataValue::Import { spec_ref, .. } => {
                 assert_eq!(spec_ref.name, "somespec");
                 let repository_hdr = spec_ref
                     .repository
@@ -1146,10 +1243,7 @@ uses a: spec_a"#;
         .unwrap()
         .into_flattened_specs();
         match &specs[0].data[0].value {
-            crate::parsing::ast::DataValue::Import {
-                spec_ref,
-                bindings: _,
-            } => {
+            crate::parsing::ast::DataValue::Import { spec_ref, .. } => {
                 assert_eq!(spec_ref.name, "somespec");
                 let repository_hdr = spec_ref
                     .repository
@@ -1172,10 +1266,7 @@ uses a: spec_a"#;
         .unwrap()
         .into_flattened_specs();
         match &specs[0].data[0].value {
-            crate::parsing::ast::DataValue::Import {
-                spec_ref,
-                bindings: _,
-            } => {
+            crate::parsing::ast::DataValue::Import { spec_ref, .. } => {
                 assert_eq!(spec_ref.name, "myspec");
                 assert!(
                     spec_ref.repository.is_none(),
@@ -1336,15 +1427,14 @@ uses a: spec_a"#;
                 base,
                 constraints,
                 value,
+                list: _,
             } => {
                 assert!(value.is_none());
                 assert_eq!(
                     base.as_ref().expect("expected base"),
                     &crate::parsing::ast::ParentType::Qualified {
                         spec_alias: "alpha2".into(),
-                        inner: Box::new(crate::parsing::ast::ParentType::Custom {
-                            name: "code".into(),
-                        }),
+                        inner: Box::new(crate::parsing::ast::ParentType::custom("code")),
                     }
                 );
 
@@ -1392,9 +1482,7 @@ data incoterm: logistics/terms.incoterm_type
                     base,
                     &crate::parsing::ast::ParentType::Qualified {
                         spec_alias: "logistics/terms".into(),
-                        inner: Box::new(crate::parsing::ast::ParentType::Custom {
-                            name: "incoterm_type".into(),
-                        }),
+                        inner: Box::new(crate::parsing::ast::ParentType::custom("incoterm_type",)),
                     }
                 );
             }
@@ -1576,10 +1664,73 @@ uses child: other
         assert!(
             matches!(
                 &bindings[0].rhs,
-                crate::parsing::ast::WithRhs::Reference { .. }
+                crate::parsing::ast::UsesBindingRhs::References { targets }
+                    if targets.len() == 1
             ),
             "non-dotted RHS must yield Reference; got: {:?}",
             bindings[0].rhs
+        );
+    }
+
+    #[test]
+    fn parse_uses_binding_keeps_ordered_aliases_in_one_binding() {
+        let input = r#"spec s
+uses tree: node
+  -> with children: left, right"#;
+        let result = parse(
+            input,
+            crate::parsing::source::SourceType::Volatile,
+            &ResourceLimits::default(),
+        )
+        .unwrap()
+        .into_flattened_specs();
+        let bindings = match &result[0].data[0].value {
+            crate::parsing::ast::DataValue::Import { bindings, .. } => bindings,
+            other => panic!("expected Import, got: {other:?}"),
+        };
+        assert_eq!(bindings.len(), 1);
+        assert_eq!(bindings[0].path.name, "children");
+        let crate::parsing::ast::UsesBindingRhs::References { targets } = &bindings[0].rhs else {
+            panic!("expected ordered references, got: {:?}", bindings[0].rhs);
+        };
+        assert_eq!(
+            targets.iter().map(ToString::to_string).collect::<Vec<_>>(),
+            ["left", "right"]
+        );
+    }
+
+    #[test]
+    fn parse_uses_alias_sequence_can_precede_another_field_pair() {
+        let input = r#"spec s
+uses tree: node
+  -> with children: left, right, weight: 2"#;
+        let result = parse(
+            input,
+            crate::parsing::source::SourceType::Volatile,
+            &ResourceLimits::default(),
+        )
+        .unwrap()
+        .into_flattened_specs();
+        let bindings = match &result[0].data[0].value {
+            crate::parsing::ast::DataValue::Import { bindings, .. } => bindings,
+            other => panic!("expected Import, got: {other:?}"),
+        };
+        assert_eq!(bindings.len(), 2);
+        assert_eq!(bindings[0].path.name, "children");
+        assert_eq!(bindings[1].path.name, "weight");
+    }
+
+    #[test]
+    fn parse_uses_alias_sequence_rejects_literal_member() {
+        let err = parse(
+            "spec s\nuses tree: node\n  -> with children: left, 2",
+            crate::parsing::source::SourceType::Volatile,
+            &ResourceLimits::default(),
+        )
+        .expect_err("alias sequence containing a literal must fail");
+        assert!(
+            err.to_string().contains("cannot contain literals"),
+            "unexpected error: {err}"
         );
     }
 
@@ -1627,7 +1778,10 @@ uses outer: other
         assert_eq!(bindings[0].path.segments, vec![] as Vec<String>);
         assert_eq!(bindings[0].path.name, "inner");
         match &bindings[0].rhs {
-            crate::parsing::ast::WithRhs::Reference { target } => {
+            crate::parsing::ast::UsesBindingRhs::References { targets } => {
+                let [target] = targets.as_slice() else {
+                    panic!("expected one reference, got: {targets:?}");
+                };
                 assert_eq!(target.segments, vec!["target"]);
                 assert_eq!(target.name, "field");
             }
@@ -2085,6 +2239,22 @@ data y: 2"#;
     }
 
     #[test]
+    fn parse_rejects_data_named_that_in_any_case() {
+        for name in ["that", "That", "THAT"] {
+            let result = parse(
+                &format!("spec s\ndata {name}: 1"),
+                crate::parsing::source::SourceType::Volatile,
+                &ResourceLimits::default(),
+            );
+            let err = result.expect_err("that is reserved");
+            assert!(
+                err.to_string().to_ascii_lowercase().contains("that"),
+                "{name}: expected reserved-keyword error, got: {err}"
+            );
+        }
+    }
+
+    #[test]
     fn parse_rejects_data_named_measure() {
         let result = parse(
             "spec s\ndata measure: 1",
@@ -2313,8 +2483,8 @@ data period: date range
     #[test]
     fn parse_prefix_operand_is_call_or_one_operand() {
         for (body, operator) in [
-            ("floor x + 1", "+"),
-            ("floor x as gram", "as"),
+            ("abs x + 1", "+"),
+            ("abs x as gram", "as"),
             ("sqrt x ^ 2", "^"),
             ("lower p + 1", "+"),
             ("not ok and ok", "and"),
@@ -2331,48 +2501,47 @@ data period: date range
         let message = prefix_parse_error("spec test\nrule out: abs -1");
         assert!(message.contains("`abs(...)`"), "{message}");
 
-        let floor_plus = prefix_expression(
+        let abs_plus = prefix_expression(
             r#"spec test
 data x: 1
-rule out: floor(x) + 1"#,
+rule out: abs(x) + 1"#,
         );
-        let Some((left, ArithmeticComputation::Add, _)) = binary_arithmetic(floor_plus.root())
-        else {
-            panic!("floor(x) + 1 must be add, got {floor_plus}");
+        let Some((left, ArithmeticComputation::Add, _)) = binary_arithmetic(abs_plus.root()) else {
+            panic!("abs(x) + 1 must be add, got {abs_plus}");
         };
         assert!(matches!(
             left.kind(),
-            ExpressionKind::MathematicalComputation(MathematicalComputation::Floor, _)
+            ExpressionKind::MathematicalComputation(MathematicalComputation::Abs, _)
         ));
 
-        let floor_sum = prefix_expression(
+        let abs_sum = prefix_expression(
             r#"spec test
 data x: 1
-rule out: floor (x + 1)"#,
+rule out: abs (x + 1)"#,
         );
-        let ExpressionKind::MathematicalComputation(MathematicalComputation::Floor, operand) =
-            floor_sum.root_kind()
+        let ExpressionKind::MathematicalComputation(MathematicalComputation::Abs, operand) =
+            abs_sum.root_kind()
         else {
-            panic!("floor (x + 1) must be floor of a sum, got {floor_sum}");
+            panic!("abs (x + 1) must be abs of a sum, got {abs_sum}");
         };
         assert!(matches!(
-            floor_sum.at(*operand).kind(),
+            abs_sum.at(*operand).kind(),
             ExpressionKind::Arithmetic { .. }
         ));
 
-        let floor_abs = prefix_expression(
+        let abs_sqrt = prefix_expression(
             r#"spec test
 data x: 1
-rule out: floor abs x"#,
+rule out: abs sqrt x"#,
         );
-        let ExpressionKind::MathematicalComputation(MathematicalComputation::Floor, operand) =
-            floor_abs.root_kind()
+        let ExpressionKind::MathematicalComputation(MathematicalComputation::Abs, operand) =
+            abs_sqrt.root_kind()
         else {
-            panic!("floor abs x must be floor of abs, got {floor_abs}");
+            panic!("abs sqrt x must be abs of sqrt, got {abs_sqrt}");
         };
         assert!(matches!(
-            floor_abs.at(*operand).kind(),
-            ExpressionKind::MathematicalComputation(MathematicalComputation::Abs, _)
+            abs_sqrt.at(*operand).kind(),
+            ExpressionKind::MathematicalComputation(MathematicalComputation::Sqrt, _)
         ));
 
         let lower_range = prefix_expression(
@@ -2429,14 +2598,198 @@ rule out: not (x > 1)"#,
         ));
     }
 
+    fn arrow_expression(body: &str) -> Expression {
+        rule_expression(&format!("spec test\nrule out: {body}"), "out")
+    }
+
+    #[test]
+    fn arrow_takes_the_whole_arithmetic_operand() {
+        let sum = arrow_expression("a + b -> sum x");
+        let ExpressionKind::ListCommand { list, .. } = sum.root_kind() else {
+            panic!("a + b -> sum x must be a command on a + b, got {sum}");
+        };
+        assert!(matches!(
+            binary_arithmetic(sum.at(*list)),
+            Some((_, ArithmeticComputation::Add, _))
+        ));
+
+        let quotient = arrow_expression("total / weight -> round 0.001 eur_per_kg");
+        let ExpressionKind::StepRounding {
+            operand,
+            mode: RoundingMode::Round,
+            step,
+        } = quotient.root_kind()
+        else {
+            panic!("total / weight -> round step must round the quotient, got {quotient}");
+        };
+        assert!(matches!(
+            binary_arithmetic(quotient.at(*operand)),
+            Some((_, ArithmeticComputation::Divide, _))
+        ));
+        let Some(step) = step else {
+            panic!("total / weight -> round step must carry a step");
+        };
+        assert!(matches!(
+            quotient.at(*step).kind(),
+            ExpressionKind::Literal(_)
+        ));
+
+        let prefix = arrow_expression("abs saldo -> floor 1 eur");
+        let ExpressionKind::StepRounding {
+            operand,
+            mode: RoundingMode::Floor,
+            ..
+        } = prefix.root_kind()
+        else {
+            panic!("abs saldo -> floor step must floor abs saldo, got {prefix}");
+        };
+        assert!(matches!(
+            prefix.at(*operand).kind(),
+            ExpressionKind::MathematicalComputation(MathematicalComputation::Abs, _)
+        ));
+
+        let call = arrow_expression("eind - start -> ceil(15 minute)");
+        assert!(matches!(
+            call.root_kind(),
+            ExpressionKind::StepRounding {
+                mode: RoundingMode::Ceil,
+                ..
+            }
+        ));
+
+        let bare = arrow_expression("x -> round");
+        assert!(matches!(
+            bare.root_kind(),
+            ExpressionKind::StepRounding {
+                mode: RoundingMode::Round,
+                step: None,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn arrow_binds_tighter_than_comparison_and_logic() {
+        let count = arrow_expression("items -> count is 0");
+        let ExpressionKind::Comparison(left, _, _) = count.root_kind() else {
+            panic!("items -> count is 0 must compare the count, got {count}");
+        };
+        assert!(matches!(
+            count.at(*left).kind(),
+            ExpressionKind::ListCommand { .. }
+        ));
+
+        let right = arrow_expression("limit > items -> sum cost");
+        let ExpressionKind::Comparison(_, _, right_operand) = right.root_kind() else {
+            panic!("limit > items -> sum cost must compare against the sum, got {right}");
+        };
+        assert!(matches!(
+            right.at(*right_operand).kind(),
+            ExpressionKind::ListCommand { .. }
+        ));
+
+        let logic = arrow_expression("ok and items -> count > 0");
+        let ExpressionKind::Logical { steps, .. } = logic.root_kind() else {
+            panic!("ok and items -> count > 0 must be a conjunction, got {logic}");
+        };
+        let ExpressionKind::Comparison(left, _, _) = logic.at(steps[0].operand).kind() else {
+            panic!("second operand must be a comparison, got {logic}");
+        };
+        assert!(matches!(
+            logic.at(*left).kind(),
+            ExpressionKind::ListCommand { .. }
+        ));
+
+        let chain = arrow_expression("staff -> where paid -> sum bonus");
+        let ExpressionKind::ListCommand { list, .. } = chain.root_kind() else {
+            panic!("chained commands must nest left to right, got {chain}");
+        };
+        assert!(matches!(
+            chain.at(*list).kind(),
+            ExpressionKind::ListCommand { .. }
+        ));
+    }
+
+    #[test]
+    fn operator_after_a_command_is_a_parse_error() {
+        for (body, found, command) in [
+            ("lines -> sum(qty) * 2", "*", "sum(qty)"),
+            ("fares -> sum - 1", "-", "sum"),
+            ("speeds -> max as mps", "as", "max"),
+            ("fares -> count + 1", "+", "count"),
+            ("x -> round(0.01) ^ 2", "^", "round(0.01)"),
+        ] {
+            let message = prefix_parse_error(&format!("spec test\nrule out: {body}"));
+            assert!(
+                message.contains(&format!("found '{found}' after `-> {command}`")),
+                "{body}: {message}"
+            );
+            assert!(message.contains("parentheses"), "{body}: {message}");
+        }
+    }
+
+    #[test]
+    fn arrow_after_bare_not_is_a_parse_error() {
+        let message = prefix_parse_error("spec test\nrule out: not items -> any paid");
+        assert!(
+            message.contains("`not (items -> ...)`"),
+            "not followed by -> must suggest parentheses: {message}"
+        );
+    }
+
+    #[test]
+    fn arrow_after_in_range_suggests_parentheses_around_the_command() {
+        let message = prefix_parse_error("spec test\nrule out: day in periods -> first");
+        assert!(
+            message.contains(
+                "found '->' after `day in periods`; `in` takes one range operand, \
+                 so put parentheses around the command: `day in (periods -> ...)`"
+            ),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn arrow_after_in_calendar_suggests_parentheses_around_the_check() {
+        let message = prefix_parse_error("spec test\nrule out: day in past calendar year -> first");
+        assert!(
+            message.contains("found '->' after `day in past calendar year`"),
+            "{message}"
+        );
+        assert!(
+            message.contains("`(day in past calendar year) -> ...`"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn prefix_rounding_suggests_the_arrow_form() {
+        for (body, keyword, rewrite) in [
+            ("round(x)", "round", "`x -> round`"),
+            ("floor x", "floor", "`x -> floor`"),
+            ("ceil (a / b)", "ceil", "`a / b -> ceil`"),
+        ] {
+            let message = prefix_parse_error(&format!(
+                "spec test\ndata x: 1\ndata a: 1\ndata b: 1\nrule out: {body}"
+            ));
+            assert!(
+                message.contains(&format!("`{keyword}` is written after `->`")),
+                "{body}: {message}"
+            );
+            assert!(message.contains(rewrite), "{body}: {message}");
+        }
+    }
+
     #[test]
     fn format_prefix_operand_round_trips() {
         let source = r#"spec test
 data x: 1.00
-rule tight: floor(x) + 1
-rule wide: floor (x + 1)
+rule tight: abs(x) + 1
+rule wide: abs (x + 1)
 rule ends: lower 5...10
 rule edge: (lower x)...(upper x)
+rule round_bare: x -> round
+rule round_step: x -> round(0.05) > 1
 "#;
         let formatted =
             crate::formatting::format_source(source, crate::parsing::source::SourceType::Volatile)
@@ -2448,7 +2801,7 @@ rule edge: (lower x)...(upper x)
         .expect("reformat");
         assert_eq!(formatted, again, "format must be stable");
 
-        for rule in ["tight", "wide", "ends", "edge"] {
+        for rule in ["tight", "wide", "ends", "edge", "round_bare", "round_step"] {
             let original = rule_expression(source, rule);
             let reparsed = rule_expression(&formatted, rule);
             assert_eq!(
@@ -2460,14 +2813,14 @@ rule edge: (lower x)...(upper x)
 
         let tight = rule_expression(&formatted, "tight");
         let Some((left, ArithmeticComputation::Add, _)) = binary_arithmetic(tight.root()) else {
-            panic!("floor(x) + 1 must stay an addition, got {}", tight);
+            panic!("abs(x) + 1 must stay an addition, got {}", tight);
         };
         assert!(
             matches!(
                 left.kind(),
-                ExpressionKind::MathematicalComputation(MathematicalComputation::Floor, _)
+                ExpressionKind::MathematicalComputation(MathematicalComputation::Abs, _)
             ),
-            "floor(x) + 1 must stay floor-then-add, got {tight}"
+            "abs(x) + 1 must stay abs-then-add, got {tight}"
         );
     }
 }

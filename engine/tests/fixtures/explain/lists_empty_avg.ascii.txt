@@ -1,0 +1,2 @@
+average: Cannot compute the average of an empty list.
+└─ item list -> avg score

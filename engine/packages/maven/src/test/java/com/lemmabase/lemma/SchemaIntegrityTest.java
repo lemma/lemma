@@ -135,7 +135,7 @@ final class SchemaIntegrityTest {
       assertEquals("tax_bracket", spec.spec().spec());
       assertEquals("basic", spec.spec().instance());
       assertEquals(
-          List.of(new Show.PathSegment("basic", null, "tax_bracket")), spec.spec().path());
+          List.of(new Show.PathSegment("basic", null, null, "tax_bracket")), spec.spec().path());
       assertEquals(false, spec.spec().data().get("income").vetoed());
       assertEquals("30000 eur", spec.spec().data().get("income").result().result());
       assertEquals(false, spec.spec().rules().get("tax").vetoed());
@@ -152,10 +152,12 @@ final class SchemaIntegrityTest {
         Map.of(
             "rule_ref",
                 new ExplanationNode.RuleRef(0, "n", new RuleResultValue.ResultOnly("d")),
-            "compose", new ExplanationNode.Compose("e", null, List.of()),
+            "compose", new ExplanationNode.Compose("e", null, List.of(), new RuleResultValue.ResultOnly(null)),
+            "list_command",
+                new ExplanationNode.ListCommand("row list -> key name", "key name", "key", List.of(), new RuleResultValue.ResultOnly(null)),
             "data", new ExplanationNode.Data("n", new RuleResultValue.ResultOnly("d")),
             "data_unused", new ExplanationNode.DataUnused("n"),
-            "conversion", new ExplanationNode.Conversion("e", List.of(), List.of()),
+            "conversion", new ExplanationNode.Conversion("e", List.of(), List.of(), new RuleResultValue.ResultOnly(null)),
             "veto", new ExplanationNode.Veto(null),
             "row", new ExplanationNode.Row(1, false, null, List.of()),
             "filter", new ExplanationNode.Filter("enabled", 1, 2, null));

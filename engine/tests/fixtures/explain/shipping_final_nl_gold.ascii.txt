@@ -1,6 +1,7 @@
 final_shipping: 17.6
-├─ order_total < 100
-│  └─ order_total: 50
+├─ free_shipping_eligible is false
+│  ├─ order_total: 50
+│  └─ destination_country
 └─ shipping_before_discount - shipping_discount_amount
    ├─ shipping_before_discount: 22
    │  └─ base_shipping_rate + weight_surcharge + po_box_fee + expedited_fee + hazardous_fee
@@ -15,10 +16,14 @@ final_shipping: 17.6
    │     │  └─ is_po_box is false
    │     ├─ expedited_fee: 0
    │     │  ├─ is_expedited is false
-   │     │  └─ is_expedited is false
+   │     │  └─ is_expedited and item_weight > 10 is false
+   │     │     ├─ is_expedited: false
+   │     │     └─ item_weight
    │     └─ hazardous_fee: 0
    │        ├─ is_hazardous is false
-   │        └─ is_hazardous is false
+   │        └─ is_hazardous and destination_country is not NL is false
+   │           ├─ is_hazardous: false
+   │           └─ destination_country
    └─ shipping_discount_amount: 4.4
       └─ shipping_before_discount * customer_discount
          ├─ shipping_before_discount: 22 (see above)

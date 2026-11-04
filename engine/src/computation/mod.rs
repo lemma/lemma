@@ -9,7 +9,7 @@ pub mod range;
 pub mod rational;
 pub mod units;
 
-pub use measure_math::mathematical_computation_preserves_measure_magnitude;
+pub use measure_math::mathematical_computation_applies_to_magnitude;
 
 pub use arithmetic::arithmetic_operation;
 pub use comparison::comparison_operation;

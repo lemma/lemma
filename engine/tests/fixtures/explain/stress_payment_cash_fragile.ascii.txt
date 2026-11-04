@@ -1,5 +1,6 @@
 payment_allowed: Cash not accepted for fragile shipments
-├─ is_express is false
+├─ payment_method is not credit and is_express is false
+│  └─ is_express: false
 ├─ payment_method is cash and is_fragile
 │  └─ is_fragile: true
 └─ veto

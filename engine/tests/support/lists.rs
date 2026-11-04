@@ -112,6 +112,21 @@ pub fn load_planning_err(code: &str) -> String {
     load_files_planning_err(&[("test.lemma", code)])
 }
 
+pub fn load_planning_err_with_limits(code: &str, limits: ResourceLimits) -> String {
+    let errors = load_errors_with_limits(&[("test.lemma", code)], limits);
+    let parse = errors
+        .iter()
+        .filter(|error| matches!(error, Error::Parsing(_)))
+        .map(|error| error.to_string())
+        .collect::<Vec<_>>();
+    assert!(
+        parse.is_empty(),
+        "expected planning Error, got parse Error: {}",
+        parse.join("\n")
+    );
+    format_load_errors(&errors)
+}
+
 pub fn load_parse_err(code: &str) -> String {
     let errors = load_errors(&[("test.lemma", code)]);
     let planning = errors
@@ -147,7 +162,11 @@ pub fn load_files_planning_err(files: &[(&str, &str)]) -> String {
 }
 
 fn load_errors(files: &[(&str, &str)]) -> lemma::Errors {
-    let mut engine = Engine::new();
+    load_errors_with_limits(files, ResourceLimits::default())
+}
+
+fn load_errors_with_limits(files: &[(&str, &str)], limits: ResourceLimits) -> lemma::Errors {
+    let mut engine = Engine::with_limits(limits);
     let sources = files
         .iter()
         .map(|(file, code)| (path_source(file), code.to_string()))

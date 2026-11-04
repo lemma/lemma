@@ -5,9 +5,10 @@
 //! From the workspace root:
 //!
 //! ```text
-//! cargo benchmarks engine   # engine evaluation + Python comparison
-//! cargo benchmarks cli      # HTTP evaluate + engine profile
-//! cargo benchmarks all      # both suites, sequentially
+//! cargo benchmarks engine      # engine evaluation + Python comparison
+//! cargo benchmarks logistics   # logistics ladder (embedded + external catalog)
+//! cargo benchmarks cli         # HTTP evaluate + engine profile
+//! cargo benchmarks all         # all suites, sequentially
 //! ```
 //!
 //! Writes reports under `cli/documentation/reference/benchmarks/`. Any subprocess failure
@@ -16,10 +17,12 @@
 mod cli;
 pub mod common;
 mod engine;
+mod logistics;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Suite {
     Engine,
+    Logistics,
     Cli,
     All,
 }
@@ -27,17 +30,21 @@ pub enum Suite {
 pub fn parse_suite(args: &[String]) -> Result<Suite, String> {
     match args {
         [] => Err(
-            "missing suite: expected one of engine, cli, all (e.g. cargo benchmarks engine)".into(),
+            "missing suite: expected one of engine, logistics, cli, all (e.g. cargo benchmarks engine)"
+                .into(),
         ),
         [suite] => match suite.as_str() {
             "engine" => Ok(Suite::Engine),
+            "logistics" => Ok(Suite::Logistics),
             "cli" => Ok(Suite::Cli),
             "all" => Ok(Suite::All),
             other => Err(format!(
-                "unknown suite '{other}': expected one of engine, cli, all"
+                "unknown suite '{other}': expected one of engine, logistics, cli, all"
             )),
         },
-        _ => Err("too many arguments: expected exactly one suite (engine, cli, or all)".into()),
+        _ => Err(
+            "too many arguments: expected exactly one suite (engine, logistics, cli, or all)".into(),
+        ),
     }
 }
 
@@ -45,9 +52,11 @@ pub fn run(root: &std::path::Path, args: &[String]) -> Result<(), String> {
     let suite = parse_suite(args)?;
     match suite {
         Suite::Engine => engine::run(root).map_err(|e| format!("engine: {e}")),
+        Suite::Logistics => logistics::run(root).map_err(|e| format!("logistics: {e}")),
         Suite::Cli => cli::run(root).map_err(|e| format!("cli: {e}")),
         Suite::All => {
             engine::run(root).map_err(|e| format!("engine: {e}"))?;
+            logistics::run(root).map_err(|e| format!("logistics: {e}"))?;
             cli::run(root).map_err(|e| format!("cli: {e}"))?;
             Ok(())
         }
@@ -66,6 +75,10 @@ mod tests {
     #[test]
     fn parse_suite_accepts_known_suites() {
         assert_eq!(parse_suite(&["engine".into()]).unwrap(), Suite::Engine);
+        assert_eq!(
+            parse_suite(&["logistics".into()]).unwrap(),
+            Suite::Logistics
+        );
         assert_eq!(parse_suite(&["cli".into()]).unwrap(), Suite::Cli);
         assert_eq!(parse_suite(&["all".into()]).unwrap(), Suite::All);
     }

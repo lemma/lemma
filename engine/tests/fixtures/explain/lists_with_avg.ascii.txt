@@ -1,0 +1,3 @@
+average: 3
+└─ item list -> with score: 3 -> avg score
+   └─ score: 3

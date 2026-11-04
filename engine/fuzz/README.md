@@ -11,13 +11,13 @@ cargo install cargo-fuzz
 
 ## Run like CI
 
-CI runs the full gate then 5 minutes of fuzz total (split evenly across targets):
+Push to `main` runs the full gate, the coverage-report check, then 5 minutes of fuzz total (split evenly across targets):
 
 ```bash
-cargo precommit --fuzz
+cargo precommit --coverage --fuzz
 ```
 
-Bare `cargo precommit` skips fuzz (local shortcut only).
+Bare `cargo precommit` skips the coverage check and fuzz. `cargo precommit --fuzz` runs fuzz without the coverage check.
 
 ## Running Fuzz Tests Manually
 
@@ -36,12 +36,11 @@ cargo +nightly fuzz run fuzz_parser -- -max_total_time=3600
 
 ### Available Targets
 
-1. `fuzz_parser` - Full spec parsing with random input
-2. `fuzz_expressions` - Expression parsing within valid spec context
+1. `fuzz_parser` - Full spec parsing with random input; on successful load, evaluate with `explain: true`, format explanations, and serialize the API Response
+2. `fuzz_expressions` - Structured typed leaf/operator expressions (numbers, measures, booleans, text) inside a fixed typed preamble; load then evaluate
 3. `fuzz_literals` - Literal value parsing (numbers, strings, units)
 4. `fuzz_deeply_nested` - Nested expressions to test stack limits
-5. `fuzz_data_bindings` - Data binding parsing and evaluation
-6. `fuzz_snapshot_decode` - Snapshot decoding of arbitrary bytes (malformed input returns `Err`; a decoded snapshot must encode again)
+5. `fuzz_data_bindings` - Multi-type and instance-list data overlays: varied keys (dotted, numbered, case-variant, unknown) and Literal/Boolean/Map/List shapes
 
 ### Running Specific Targets
 

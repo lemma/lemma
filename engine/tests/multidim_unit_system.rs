@@ -614,17 +614,16 @@ rule speed_as_eur: (dist / elapsed) as eur"#;
 }
 
 // =============================================================================
-// Integration: Measure ^ Number with integer literal exponent
+// Integration: Measure ^ Number / Measure mod Number rejected at planning
 // =============================================================================
 
 #[test]
-fn integration_measure_power_integer_literal() {
+fn integration_eur_cubed_without_declared_unit_is_rejected() {
     let code = r#"spec t
 data money: measure -> unit eur: 1.00
 data a: 3 eur
 rule cube: a ^ 3"#;
-    let val = eval_rule(code, "t", "cube");
-    assert!(val.contains("27"), "Expected 27 eur, got: {val}");
+    expect_plan_error(code, "anonymous intermediate");
 }
 
 #[test]
@@ -633,7 +632,7 @@ fn integration_measure_power_fractional_rejected() {
 data money: measure -> unit eur: 1.00
 data a: 4 eur
 rule frac_pow: a ^ 0.5"#;
-    expect_plan_error(code, "fractional");
+    expect_plan_error(code, "integer literal");
 }
 
 #[test]
@@ -644,6 +643,32 @@ data a: 4 eur
 data exponent: 2
 rule powered: a ^ exponent"#;
     expect_plan_error(code, "integer literal");
+}
+
+#[test]
+fn power_of_area_over_volume_is_length() {
+    let code = r#"spec tile
+
+uses lemma units
+
+data width: 3 meter
+data depth: 3 meter
+data thickness: 1 meter
+
+rule edge:
+  ((width * depth) ^ 2) / (thickness * thickness * thickness)"#;
+    assert_eq!(eval_rule(code, "tile", "edge"), "81 meter");
+}
+
+#[test]
+fn compound_intermediate_in_modulo_rejected_at_planning() {
+    let code = r#"spec t
+uses lemma units
+data a: 3 meter
+data b: 3 meter
+data c: 1 meter
+rule bad: ((a * b) mod 2) / c"#;
+    expect_plan_error(code, "modulo");
 }
 
 // =============================================================================

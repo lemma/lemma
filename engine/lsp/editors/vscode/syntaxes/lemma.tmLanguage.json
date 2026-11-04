@@ -35,11 +35,11 @@
           "name": "keyword.declaration.lemma"
         },
         {
-          "match": "(?i)\\b(unless|then|not|and|in|as|veto|now|past|future|calendar)\\b",
+          "match": "(?i)\\b(unless|then|that|not|and|or|in|as|veto|now|past|future|calendar)\\b",
           "name": "keyword.control.lemma"
         },
         {
-          "match": "(?i)\\b(boolean|measure|number|ratio|text|date|time|range)\\b",
+          "match": "(?i)\\b(boolean|measure|number|ratio|text|date|time|range|list)\\b",
           "name": "storage.type.lemma"
         },
         {
@@ -47,7 +47,7 @@
           "name": "keyword.operator.constraint.lemma"
         },
         {
-          "match": "(?i)\\b(list|key|find|first|last|sum|avg|product|count|min|max|any|all|where|sort|top|asc|desc)\\b",
+          "match": "(?i)\\b(key|find|first|last|sum|avg|product|count|min|max|any|all|where|sort|top|asc|desc)\\b",
           "name": "keyword.operator.constraint.lemma"
         }
       ]

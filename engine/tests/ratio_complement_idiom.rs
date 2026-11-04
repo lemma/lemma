@@ -193,25 +193,56 @@ rule result: n / r"#;
 }
 
 // ═══════════════════════════════════════════════════════════════════
-// Operand-order correctness: modulo
+// Modulo is numbers only. A ratio or a measure on either side is a planning error.
 // ═══════════════════════════════════════════════════════════════════
 
 #[test]
-fn number_modulo_ratio() {
+fn number_modulo_ratio_is_planning_error() {
     let code = r#"spec t
 data n: 10
 data r: 30%
 rule result: n mod r"#;
-    assert_eq!(eval(code, "t", "result"), "0.1");
+    expect_plan_error(code, "modulo");
 }
 
 #[test]
-fn ratio_modulo_number() {
+fn ratio_modulo_number_is_planning_error() {
     let code = r#"spec t
 data r: 30%
 data n: 10
 rule result: r mod n"#;
-    assert_eq!(eval(code, "t", "result"), "30%");
+    expect_plan_error(code, "modulo");
+}
+
+#[test]
+fn ratio_modulo_ratio_is_planning_error() {
+    let code = r#"spec t
+data rate: 30%
+data band: 10%
+rule result: rate mod band"#;
+    expect_plan_error(code, "modulo");
+}
+
+#[test]
+fn rule_reference_ratio_modulo_number_is_planning_error() {
+    let code = r#"spec t
+data fee: 30%
+data price: 2
+data copies: 3
+rule rate: fee / price
+rule result: rate mod copies"#;
+    expect_plan_error(code, "modulo");
+}
+
+#[test]
+fn measure_data_reference_modulo_number_is_planning_error() {
+    let code = r#"spec t
+data money: measure
+  -> unit eur: 1
+data price: 10 eur
+data seats: 3
+rule result: price mod seats"#;
+    expect_plan_error(code, "modulo");
 }
 
 // ═══════════════════════════════════════════════════════════════════

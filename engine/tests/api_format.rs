@@ -50,8 +50,6 @@ uses lemma units
 data money: measure
   -> unit eur: 1.00
   -> unit inr: 0.0092
-  -> decimals 2
-
 data labor_cost: measure
   -> unit eur_per_hour: eur/hour
   -> unit inr_per_hour: inr/hour
@@ -853,7 +851,6 @@ uses lemma units
 data money: measure
   -> unit eur: 1.00
   -> unit inr: 0.0092
-  -> decimals 2
   -> suggest 100 inr
 rule out: money
 "#;
@@ -864,7 +861,6 @@ uses lemma units
 data money: measure
   -> unit eur: 1.00
   -> unit inr: 0.0092
-  -> decimals 2
 rule out: money
 
 spec priced
@@ -899,27 +895,23 @@ fn show_suggestion_carries_per_unit_magnitude() {
     );
     assert_eq!(
         json["x-lemma-suggestion"]["measure"]["inr"].as_str(),
-        Some("100.00")
+        Some("100")
     );
     assert_eq!(
         suggestion.result.as_deref(),
-        Some("100.00 inr"),
+        Some("100 inr"),
         "suggestion display must use the unit written on -> suggest"
     );
 }
 
 #[test]
-fn show_value_carries_per_unit_magnitude() {
+fn show_omits_slot_sealed_by_uses() {
     let engine = load_engine(PREFILLED_INR_SPEC, "priced.lemma");
     let show = plan_interface_show(&engine, "priced");
-    let entry = show.data.get("base.money").expect("base.money").clone();
-    let json = show_property_json(&engine, &show, "base.money");
-    let value = entry.value.expect("value");
-    let measure = value.measure.as_ref().expect("measure unit map");
-    assert_eq!(measure.get("inr").copied(), Some(decimal_lit("100.00")));
-    assert_eq!(
-        json["x-lemma-value"]["measure"]["inr"].as_str(),
-        Some("100.00")
+    assert!(
+        !show.data.contains_key("base.money"),
+        "sealed uses key must not be an input: {:?}",
+        show.data.keys().collect::<Vec<_>>()
     );
 }
 

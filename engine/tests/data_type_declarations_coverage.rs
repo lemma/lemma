@@ -260,6 +260,83 @@ rule r: b
     );
 }
 
+fn assert_decimals_needs_a_unit(joined: &str, kind: &str, type_name: &str, suggestion: &str) {
+    assert!(
+        joined.contains(&format!(
+            "'decimals' is not valid on {kind} type '{type_name}': precision depends on the unit."
+        )),
+        "`decimals` on a {kind} must be rejected, got: {joined}"
+    );
+    assert!(
+        joined.contains(&format!("for example '{suggestion}'")),
+        "error must suggest '{suggestion}', got: {joined}"
+    );
+}
+
+// `decimals` on measure: INCOMPATIBLE (precision depends on the unit)
+#[test]
+fn measure_decimals_constraint_is_rejected() {
+    let code = r#"
+spec s
+data money: measure -> unit eur: 1 -> unit cent: 0.01 -> decimals 2
+rule r: money
+"#;
+    let mut engine = Engine::new();
+    let joined = load_err_joined(&mut engine, code);
+    assert_decimals_needs_a_unit(&joined, "measure", "money", "money -> round 0.01 eur");
+}
+
+#[test]
+fn zero_decimals_on_a_measure_suggests_a_whole_unit_step() {
+    let code = r#"
+spec s
+data money: measure -> unit eur: 1 -> unit cent: 0.01 -> decimals 0
+rule r: money
+"#;
+    let mut engine = Engine::new();
+    let joined = load_err_joined(&mut engine, code);
+    assert_decimals_needs_a_unit(&joined, "measure", "money", "money -> round 1 eur");
+}
+
+#[test]
+fn decimals_on_a_type_extending_a_measure_is_rejected() {
+    let code = r#"
+spec s
+data money: measure -> unit eur: 1 -> unit cent: 0.01
+data price: money -> decimals 2
+rule r: price
+"#;
+    let mut engine = Engine::new();
+    let joined = load_err_joined(&mut engine, code);
+    assert_decimals_needs_a_unit(&joined, "measure", "money", "price -> round 0.01 eur");
+}
+
+// `decimals` on ratio: INCOMPATIBLE (precision depends on the unit)
+#[test]
+fn ratio_decimals_constraint_is_rejected() {
+    let code = r#"
+spec s
+data rate: ratio -> decimals 2
+rule r: rate
+"#;
+    let mut engine = Engine::new();
+    let joined = load_err_joined(&mut engine, code);
+    assert_decimals_needs_a_unit(&joined, "ratio", "rate", "rate -> round 0.01 percent");
+}
+
+#[test]
+fn decimals_on_a_type_extending_a_ratio_is_rejected() {
+    let code = r#"
+spec s
+data share: ratio -> maximum 100 percent
+data discount: share -> decimals 1
+rule r: discount
+"#;
+    let mut engine = Engine::new();
+    let joined = load_err_joined(&mut engine, code);
+    assert_decimals_needs_a_unit(&joined, "ratio", "share", "discount -> round 0.1 percent");
+}
+
 // `decimals` on text: INCOMPATIBLE
 #[test]
 fn text_decimals_constraint_is_rejected() {

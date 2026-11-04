@@ -20,7 +20,8 @@ data salary: measure
   -> unit eur: 1.00
 
 spec payroll
-uses staff: employee list
+uses employee
+data staff: employee list
   -> with name: "Ada", salary: 9000 eur
 
 rule n:
@@ -57,7 +58,7 @@ fn part_spec() -> &'static str {
 spec part
 data money: measure
   -> unit eur: 1.00
-uses components: part list
+data components: part list
 data quantity: number
 data own_cost: money
 rule unit_cost:
@@ -383,16 +384,16 @@ rule r: i.slot
 "#;
 
 #[test]
-fn json_evaluate_data_overrides_bound_slot() {
+fn json_evaluate_data_cannot_override_sealed_uses_slot() {
     let temp = TempDir::new().unwrap();
     write_spec(temp.path(), "bound.lemma", BOUND_SLOT_SPEC);
     evaluate_with_stdin(temp.path(), "outer", r#"{"i.slot": "5"}"#)
-        .success()
-        .stdout(predicate::str::contains("5"));
+        .failure()
+        .stderr(predicate::str::contains("sealed"));
 }
 
 #[test]
-fn http_post_evaluate_data_overrides_bound_slot() {
+fn http_post_evaluate_data_cannot_override_sealed_uses_slot() {
     let temp = TempDir::new().unwrap();
     write_spec(temp.path(), "bound.lemma", BOUND_SLOT_SPEC);
     let (status, body) = http_post(
@@ -402,8 +403,11 @@ fn http_post_evaluate_data_overrides_bound_slot() {
         "application/json",
         r#"{"i.slot": "5"}"#,
     );
-    assert!(status.is_success(), "POST override: {status} {body}");
-    assert_eq!(body["results"]["r"]["result"], "5", "{body}");
+    assert_eq!(status, reqwest::StatusCode::BAD_REQUEST, "{body}");
+    assert!(
+        body["error"].as_str().is_some_and(|e| e.contains("sealed")),
+        "{body}"
+    );
 }
 
 #[test]

@@ -10,8 +10,6 @@ spec finance
 
 data money: measure
   -> unit eur: 1.00
-  -> decimals 2
-
 
 spec tax_bracket
 
@@ -302,6 +300,18 @@ rule label:
         .collect();
     assert_eq!(hops, [("rack", "shelf"), ("low", "priced")]);
     assert_eq!(low_chosen.to_literal().to_string(), "rack.low");
+    let rebuilt = lemma::result_value::type_scoped_result_value_from_literal(
+        &low_chosen.to_literal(),
+        &low_chosen.rule.rule_type,
+    )
+    .expect("spec literal converts back to an API value");
+    assert_eq!(rebuilt.result.as_deref(), Some("rack.low"));
+    let rebuilt_spec = rebuilt.spec.as_deref().expect("rebuilt spec result");
+    assert_eq!(rebuilt_spec.spec, low_spec.spec);
+    assert_eq!(rebuilt_spec.repository, low_spec.repository);
+    assert_eq!(rebuilt_spec.effective, low_spec.effective);
+    assert_eq!(rebuilt_spec.instance, low_spec.instance);
+    assert_eq!(rebuilt_spec.path, low_spec.path);
 
     let high = run(&engine, "order", "label", flag(true));
     assert_eq!(high.result(), Some("mocha"));
@@ -542,8 +552,6 @@ spec finance
 
 data money: measure
   -> unit eur: 1.00
-  -> decimals 2
-
 
 spec item
 
@@ -582,7 +590,7 @@ rule total:
     assert!(price.vetoed, "price entry should veto on 0 eur");
     let reason = price.veto_reason.as_deref().unwrap_or("");
     assert!(
-        reason.contains("0") && reason.contains("below the minimum of 1.00 eur"),
+        reason.contains("0") && reason.contains("below the minimum of 1 eur"),
         "constraint reason, got {reason:?}"
     );
     let cost = spec.rules.get("cost").expect("cost rule");
@@ -847,4 +855,109 @@ rule b: n + true
         "{errors}"
     );
     assert!(errors.contains("Cannot apply '+'"), "{errors}");
+}
+
+const TWO_HOP_RETURNED_SPEC: &str = r#"
+spec table
+data code: text
+rule lookup: code
+
+spec header
+uses message_type_table: table
+rule lookup: message_type_table.lookup
+
+spec message
+uses h: header
+rule via: h.lookup
+rule out: h
+"#;
+
+/// Returning a spec whose nested uses has unbound data must fill members without
+/// panicking (issue 98). `via` keeps `h.lookup` on the owner plan so fill walks it.
+#[test]
+fn returned_spec_with_nested_uses_and_missing_data_does_not_panic() {
+    let engine = engine(TWO_HOP_RETURNED_SPEC);
+    let result = run(&engine, "message", "out", IndexMap::new());
+    assert!(
+        !result.vetoed,
+        "out returns the h instance, not a MissingData veto: {:?}",
+        result.veto_reason
+    );
+    let spec = spec_of(&result);
+    assert_eq!(spec.spec, "header");
+    assert_eq!(spec.instance, "h");
+    let lookup = spec
+        .rules
+        .get("lookup")
+        .expect("lookup member on returned h");
+    assert!(lookup.vetoed, "nested lookup must veto on unbound code");
+    assert_eq!(
+        lookup.veto_reason.as_deref(),
+        Some("Required data 'h.message_type_table.code' was not provided."),
+    );
+}
+
+/// Row template with nested uses: reading / returning a row must not panic when
+/// nested data is unbound; missing keys use the row_key form.
+#[test]
+fn returned_row_with_nested_uses_and_missing_data_does_not_panic() {
+    let code = r#"
+spec header
+data code: text
+rule lookup: code
+
+spec item
+uses h: header
+rule via: h.lookup
+
+spec cart
+uses item
+data items: item list
+rule lead_via: (items -> first).via
+rule lead: items -> first
+"#;
+    let engine = engine(code);
+    let data = IndexMap::from([(
+        "items".to_string(),
+        EvaluateDataValue::List(vec![EvaluateDataValue::Map(IndexMap::new())]),
+    )]);
+    let via = run(&engine, "cart", "lead_via", data.clone());
+    assert!(via.vetoed, "lead_via must veto");
+    assert_eq!(
+        via.missing_data(),
+        &["items.1.h.code"],
+        "row nested uses key"
+    );
+
+    let response = engine
+        .evaluate(
+            None,
+            "cart",
+            Some(&now()),
+            data,
+            Some(&["lead".to_string()]),
+            false,
+        )
+        .expect("evaluate lead");
+    let lead = response.get("lead").expect("lead");
+    assert!(
+        !lead.vetoed,
+        "lead returns the row instance: {:?}",
+        lead.veto_reason
+    );
+    assert!(
+        lead.result
+            .as_ref()
+            .and_then(|value| value.row.as_ref())
+            .is_some(),
+        "expected a row reference"
+    );
+    assert_eq!(response.rows.len(), 1);
+    let filled = &response.rows[0];
+    let via = filled.rules.get("via").expect("via on filled row");
+    assert!(via.vetoed, "row via must veto on unbound nested code");
+    assert_eq!(
+        via.veto_reason.as_deref(),
+        Some("Required data 'items.1.h.code' was not provided."),
+    );
 }

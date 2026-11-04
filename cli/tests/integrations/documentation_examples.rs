@@ -228,7 +228,10 @@ fn test_05_weather_clothing() {
 
     let (clothing_layer, _) =
         get_rule_value(&engine, "weather_clothing", "clothing_layer", data.clone());
-    assert_eq!(clothing_layer.value, ValueKind::Text("light".to_string()));
+    assert_eq!(
+        clothing_layer.value,
+        ValueKind::Text(std::sync::Arc::from("light"))
+    );
 
     let (needs_jacket, _) = get_rule_value(&engine, "weather_clothing", "needs_jacket", data);
     assert_eq!(needs_jacket.value, ValueKind::Boolean(false));

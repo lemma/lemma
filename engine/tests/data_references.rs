@@ -285,6 +285,98 @@ rule r: i.limited
 }
 
 #[test]
+fn direct_read_of_rule_bound_import_slot_enforces_target_maximum_as_veto() {
+    let code = r#"
+spec inner
+data slot: number -> maximum 100
+rule doubled: slot * 2
+
+spec outer
+rule big: 150
+uses i: inner
+  -> with slot: big
+rule via_inner: i.doubled
+rule direct_read: i.slot
+"#;
+
+    let mut engine = Engine::new();
+    engine
+        .load([(
+            lemma::SourceType::Path(std::sync::Arc::new(std::path::PathBuf::from(
+                "reference.lemma",
+            ))),
+            code.to_string(),
+        )])
+        .expect("plan must succeed; constraint failure is a runtime veto");
+
+    let now = DateTimeValue::now();
+    let resp = engine
+        .evaluate(None, "outer", Some(&now), IndexMap::new(), None, false)
+        .expect("evaluate must complete with veto, not Error");
+
+    for rule_name in ["via_inner", "direct_read"] {
+        let rr = resp
+            .results
+            .get(rule_name)
+            .unwrap_or_else(|| panic!("rule '{rule_name}' missing"));
+        assert!(
+            rr.vetoed,
+            "expected max-constraint veto on '{rule_name}'; got {:?}",
+            rr.result()
+        );
+        let s = rr.veto_reason.as_deref().expect("veto reason");
+        assert!(
+            s.contains("maximum")
+                || s.contains("exceeds")
+                || s.contains("above the maximum")
+                || s.contains("violates its declared constraint"),
+            "expected max-constraint veto on '{rule_name}', got: {s}"
+        );
+    }
+}
+
+#[test]
+fn direct_read_of_rule_bound_import_slot_rejects_runtime_override() {
+    let code = r#"
+spec inner
+data slot: number -> maximum 100
+
+spec outer
+rule big: 42
+uses i: inner
+  -> with slot: big
+rule direct_read: i.slot
+"#;
+
+    let mut engine = Engine::new();
+    engine
+        .load([(
+            lemma::SourceType::Path(std::sync::Arc::new(std::path::PathBuf::from(
+                "reference.lemma",
+            ))),
+            code.to_string(),
+        )])
+        .expect("plan must succeed");
+
+    let now = DateTimeValue::now();
+    let without = engine
+        .evaluate(None, "outer", Some(&now), IndexMap::new(), None, false)
+        .expect("evaluate");
+    assert_eq!(rule_value(&without, "direct_read"), "42");
+
+    let mut data = IndexMap::new();
+    data.insert("i.slot".to_string(), "50".into());
+    let err = engine
+        .evaluate(None, "outer", Some(&now), data, None, false)
+        .expect_err("sealed uses key is a request error");
+    let text = err.to_string();
+    assert!(
+        text.contains("slot") || matches!(err, lemma::Error::Request { .. }),
+        "expected request Error, got: {text}"
+    );
+}
+
+#[test]
 fn local_non_dotted_rhs_stays_definition() {
     let code = r#"
 spec s
@@ -343,6 +435,77 @@ rule r: i.slot
         .evaluate(None, "outer", Some(&now), data, None, false)
         .expect("evaluates");
     assert_eq!(rule_value(&result, "r"), "123");
+}
+
+#[test]
+fn reference_with_its_own_value_keeps_it_when_other_data_is_bound() {
+    let code = r#"
+spec rates
+data base: number
+
+spec shop
+uses r: rates
+data fee: r.base -> with 7
+data discount: number
+rule total: fee + discount
+"#;
+
+    let mut engine = Engine::new();
+    engine
+        .load([(
+            lemma::SourceType::Path(std::sync::Arc::new(std::path::PathBuf::from(
+                "reference.lemma",
+            ))),
+            code.to_string(),
+        )])
+        .expect("loads");
+
+    let now = DateTimeValue::now();
+    let mut data = IndexMap::new();
+    data.insert("discount".to_string(), "5".into());
+    let result = engine
+        .evaluate(None, "shop", Some(&now), data, None, false)
+        .expect("evaluates");
+    assert_eq!(rule_value(&result, "total"), "12");
+}
+
+#[test]
+fn a_row_reference_copies_the_target_its_consumer_binds() {
+    let code = r#"
+spec inner
+data slot: number
+rule doubled: slot * 2
+
+spec shop
+data src: 3
+uses i: inner
+  -> with slot: src
+rule total: i.doubled
+
+spec till
+uses bound: shop
+  -> with src: 10
+uses defaulted: shop
+rule bound_total: bound.total
+rule defaulted_total: defaulted.total
+"#;
+
+    let mut engine = Engine::new();
+    engine
+        .load([(
+            lemma::SourceType::Path(std::sync::Arc::new(std::path::PathBuf::from(
+                "reference.lemma",
+            ))),
+            code.to_string(),
+        )])
+        .expect("loads");
+
+    let now = DateTimeValue::now();
+    let result = engine
+        .evaluate(None, "till", Some(&now), IndexMap::new(), None, false)
+        .expect("evaluates");
+    assert_eq!(rule_value(&result, "bound_total"), "20");
+    assert_eq!(rule_value(&result, "defaulted_total"), "6");
 }
 
 #[test]

@@ -68,6 +68,11 @@ const menuType: LemmaType = showListJson.properties.menu["x-lemma-type"] as {
 };
 void menuType;
 
+const showList = showListJson as unknown as Show;
+const menuRowConsumers: Record<string, string[]> | undefined =
+  showList["x-lemma-row-field-needed-by-rules"]?.LemmaRow_menu__item;
+void menuRowConsumers;
+
 const responseList = responseListJson as {
   spec: "coffee_order";
   effective: string;
@@ -76,7 +81,14 @@ const responseList = responseListJson as {
       vetoed: false;
       rule_type: "menu_item";
       result: "menu.2";
-      row: { spec: "menu_item"; effective: ""; instance: "menu.2"; index: 1 };
+      spec: {
+        spec: "menu_item";
+        effective: "";
+        instance: "menu.2";
+        path: { uses: "menu"; row: 2; spec: "menu_item" }[];
+        data: Record<string, { vetoed: boolean; rule_type: string; result: { result: string } }>;
+        rules: Record<string, never>;
+      };
     };
     high_fares: {
       vetoed: false;

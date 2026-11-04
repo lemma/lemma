@@ -8,9 +8,7 @@ const UNITS_SPEC: &str = r#"
 spec units
 uses lemma units
 data money: measure
-  -> unit eur: 1
-  -> decimals 2
-"#;
+  -> unit eur: 1"#;
 
 const WAREHOUSING_SPEC: &str = r#"
 spec warehousing
@@ -47,7 +45,7 @@ data outbound_handling_per_pallet: units.money
 
 rule storage_cost_per_pallet:
   storage_per_pallet_per_week
-  * ceil (storage_duration as week as number)
+  * (storage_duration as week as number -> ceil)
 
 rule total_logistics_per_pallet:
   interbranch_transport_per_pallet
@@ -127,8 +125,8 @@ fn warehousing_plans_alone() {
         .expect("storage_cost_per_pallet must have display")
         .to_string();
     assert_eq!(
-        display, "20.00 eur",
-        "10 eur/week * ceil(10 day as week) must be 20.00 eur, got: {display}"
+        display, "20 eur",
+        "10 eur/week * ceil(10 day as week) must be 20 eur, got: {display}"
     );
 }
 
@@ -158,8 +156,8 @@ fn quotation_evaluates_cross_spec_duration_conversion() {
         .expect("total must have display")
         .to_string();
     assert_eq!(
-        display, "20.00 eur",
-        "10 eur/week * ceil(10 day as week) / 1 CE must be 20.00 eur, got: {display}"
+        display, "20 eur",
+        "10 eur/week * ceil(10 day as week) / 1 CE must be 20 eur, got: {display}"
     );
 }
 

@@ -4,6 +4,8 @@
 //!   deep N=5000:    594 ms
 //!   wide N=5000:   2008 ms
 //!   unless N=5000:  317 ms
+//! Nested catalog (2026-11-02, spec-written rows planned once and Arc-shared
+//! across nested consumers): rows=2000 consumers=40: 1043 ms
 //! Bounds are 10× those measurements.
 
 use lemma::{Engine, ResourceLimits, SourceType};
@@ -96,6 +98,36 @@ fn load_unless_5000_under_bound() {
     );
 }
 
+/// One catalog of `rows` spec-written list rows; `consumers` specs each `uses`
+/// it, and one shop `uses` every consumer. Rows are checked once against the
+/// shared template plan and Arc-shared by every consumer, so load scales with
+/// `rows`, not `rows × consumers`.
+fn nested_catalog_source(rows: usize, consumers: usize) -> String {
+    let mut code = String::with_capacity(rows * 40 + consumers * 120);
+    writeln!(code, "spec cell\ndata zone: number\ndata price: number\n").unwrap();
+    writeln!(
+        code,
+        "spec catalog\nuses cell\ndata cells: cell list\n  -> key zone"
+    )
+    .unwrap();
+    for i in 0..rows {
+        writeln!(code, "  -> with zone: {i}, price: {i}").unwrap();
+    }
+    for c in 0..consumers {
+        writeln!(
+            code,
+            "\nspec consumer_{c}\nuses cat: catalog\nrule total_{c}: cat.cells -> sum price"
+        )
+        .unwrap();
+    }
+    writeln!(code, "\nspec shop").unwrap();
+    for c in 0..consumers {
+        writeln!(code, "uses c{c}: consumer_{c}").unwrap();
+    }
+    writeln!(code, "rule cheapest: c0.total_0").unwrap();
+    code
+}
+
 /// Pins full alphabetical transitive `needed_by_rules` for the wide shape.
 #[test]
 fn show_wide_200_needed_by_rules_alphabetical_transitive() {
@@ -123,5 +155,17 @@ fn show_wide_200_needed_by_rules_alphabetical_transitive() {
         show.data.get("d199").expect("d199").needed_by_rules,
         expected_d199,
         "d199 must list only p199 and s199"
+    );
+}
+
+/// 10× measured nested-catalog rows=2000 consumers=40 debug load (1043 ms).
+const NESTED_CATALOG_MAX: Duration = Duration::from_secs(11);
+
+#[test]
+fn load_nested_catalog_scales_with_unique_rows() {
+    let elapsed = load_elapsed(nested_catalog_source(2000, 40));
+    assert!(
+        elapsed < NESTED_CATALOG_MAX,
+        "nested catalog rows=2000 consumers=40 load {elapsed:?} exceeded bound {NESTED_CATALOG_MAX:?} (10× measured 1043ms)"
     );
 }

@@ -43,7 +43,7 @@ data money: measure
   -> unit eur: 1
 
 data price: money
-  -> decimals 2
+  -> minimum 0 eur
 
 rule bare:
   5 eur
@@ -51,6 +51,22 @@ rule bare:
 rule priced:
   5 price.eur
 ```
+
+The right-hand side of `-> unit <name>:` on a measure may be a number, a compound expression, or a reference to a `data` or `rule` of type `number`:
+
+```lemma
+spec fx
+
+data rate: number
+data money: measure
+  -> unit eur: 1
+  -> unit gbp: rate
+
+rule total:
+  100 gbp
+```
+
+Scales are evaluated before every rule that holds a value of that measure. A value written in a dynamic unit takes that unit's scale: unbound scale data is missing data, a vetoing scale passes its veto through, and a scale of zero or less is a computation veto. A scale the value does not need leaves the rule's result alone; only that unit's column is left out. A scale rule that itself holds a value of its measure is a circular dependency. A dynamic unit belongs to the spec that declares it, so each `uses` instance and each list row uses its own scale. A spec that imports the measure cannot write or convert to that unit (a planning error). There, a value of a measure whose units are all dynamic is a veto, because that spec cannot express it in any unit. Dynamic units cannot appear in compound unit expressions, or in `minimum`, `maximum`, `suggest`, or `option`. `ratio` units stay literal-only.
 
 ```lemma
 spec packing
@@ -87,7 +103,7 @@ rule compound:
 
 Operators: `+`, `-`, `*`, `/`, `mod`, `^`
 
-`a mod b` is the remainder of `a / b`, floored, so it takes the sign of the divisor: `-7 mod 3` is `2`. The `%` sign is reserved for percent literals such as `50%`.
+`a mod b` takes two numbers. It is the remainder of `a / b`, floored, so it takes the sign of the divisor: `-7 mod 3` is `2`. A ratio or a measure on either side is a planning error. The `%` sign is reserved for percent literals such as `50%`.
 
 ## Comparison
 
@@ -125,7 +141,7 @@ rule can_approve_loan:
   and not has_bankruptcy
 ```
 
-Operators: `and`, `not` (there is no `or`: Unless chains accommodate such logic)
+Operators: `and`, `or`, `not`. `or` binds looser than `and`. A `true` operand decides `or` whatever the other operands are; a `false` operand decides `and` the same way.
 
 ## Mathematical
 
@@ -146,7 +162,46 @@ rule log_value:
   log 10
 ```
 
-Prefix operators: `sqrt`, `sin`, `cos`, `tan`, `log`, `exp`, `abs`, `floor`, `ceil`, `round`, `lower`, `upper`, and also `not`. Write `floor(total) + 1` to add to the result, or `floor (total + 1)` to floor the sum. Without parentheses the argument is one operand and nothing but `then`, `unless`, `)`, `,` or the end may follow, so `floor total` is fine and `floor total + 1` is a parse error. `lower` and `upper` read a range's endpoints (see [Ranges](#ranges)).
+Prefix operators: `sqrt`, `sin`, `cos`, `tan`, `log`, `exp`, `abs`, `lower`, `upper`, and also `not`. Write `abs(total) + 1` to add to the result, or `abs (total + 1)` to take the absolute value of the sum. Without parentheses the argument is one operand and nothing but `then`, `unless`, `)`, `,` or the end may follow, so `abs total` is fine and `abs total + 1` is a parse error. `lower` and `upper` read a range's endpoints (see [Ranges](#ranges)). Rounding is postfix only (see [Rounding](#rounding)).
+
+### Rounding
+
+`x -> round`, `x -> floor` and `x -> ceil` round a number to an integer. An exact half goes away from zero: `5 / 2 -> round` is `3`, `-5 / 2 -> round` is `-3`. A measure or a ratio has no single integer to round to: 1.5 kilogram is 1500 gram. Round those to a step, with `-> round`, `-> floor` or `-> ceil` followed by a literal:
+
+```lemma
+spec invoice
+
+data money: measure
+  -> unit eur: 1.00
+
+data duration: measure
+  -> unit minute: 60
+  -> unit hour: 3600
+
+data hourly_rate: money
+data time_worked: duration
+data vat:         ratio
+
+rule billed_time:
+  time_worked -> ceil 15 minute
+
+rule net:
+  billed_time as hour as number * hourly_rate
+
+rule total:
+  net * (100% + vat) -> round 0.05 eur
+
+rule vat_shown:
+  vat -> round 1%
+```
+
+With 100 minute at 85.30 eur and 20.6% VAT, `billed_time` is 105 minute, `net` is 149.275 eur, `total` is 180.05 eur, and `vat_shown` is 21%.
+
+- `-> round 0.05 eur` rounds to the nearest multiple of 5 cent. An exact half goes away from zero.
+- The step decides the result's unit: `time_worked -> ceil 15 minute` is in minute, whatever unit `time_worked` was given in.
+- `->` applies to everything on its left, up to a comparison, `and`, `or` or `not`. `net * (100% + vat) -> round 0.05 eur` rounds the product. Put parentheses around the command to compute with its result: `(total -> round 1 eur) - net`.
+- The step must be a positive literal of the same kind: a number for a number (`x -> round 0.01`), a ratio for a ratio, and a unit of the same measure for a measure.
+- A step followed by a comparison takes the call form: `total -> round(1 eur) > 100 eur`.
 
 ## Standard library: `uses lemma units`
 
@@ -307,7 +362,7 @@ A vetoed Rule is not `false`. `x is false` does not match a vetoed `x`. To test 
 | Situation | Use |
 |-----------|-----|
 | Out-of-range input (negative score, age above 120) | `-> minimum` / `-> maximum` on `data` |
-| Closed choice list | `-> option` on `data` |
+| Closed option list | `-> option` on `data` |
 | Normal business "no" | `false` or `no` |
 | Lookup / no mapped result | default `veto` + `unless` arm per known case |
 | Test veto without propagating | `x is veto` (returns boolean) |
@@ -323,7 +378,6 @@ spec coffee_prices
 
 data money: measure
   -> unit eur: 1.00
-  -> decimals 2
 
 data drink: text
   -> option "latte"
@@ -377,7 +431,7 @@ If `weight` is missing or vetoed on constraints but `use_estimated` is true, `sh
 
 When a Data field has no value (not provided), Rules that depend on it Veto with a "Missing data" reason. See the lookup example above when `product` is absent.
 
-After a `MissingData` on one operand of an arithmetic or comparison operator, evaluation still walks the other operand: a definitive veto there settles the result, and nested control can record for explain and prune. `and` is order-independent. A `false` operand decides the `and` whatever the other operands are, so a missing or vetoed sibling never appears on `missing_data`. Without a `false` operand, the first missing or vetoed operand in source order decides the result, and every operand not yet known to be `true` stays on `missing_data`, since a later `false` could still decide. Intake keeps unbound keys on `missing_data` only when some completion can still produce a **value**. Product and other operators that need both values settle on a definitive factor and clear keys that cannot un-veto. `is veto` stays a boolean probe and does not change this intake rule.
+After a `MissingData` on one operand of an arithmetic or comparison operator, evaluation still walks the other operand: a definitive veto there settles the result, and nested control can record for explain and prune. `and` and `or` are order-independent for their absorbing operand. A `false` operand decides the `and`, and a `true` operand decides the `or`, whatever the other operands are, so a missing or vetoed sibling never appears on `missing_data`. Without an absorbing operand, the first missing or vetoed operand in source order decides the result, and every operand not yet known to be the identity (`true` for `and`, `false` for `or`) stays on `missing_data`. Intake keeps unbound keys on `missing_data` only when some completion can still produce a **value**. Product and other operators that need both values settle on a definitive factor and clear keys that cannot un-veto. `is veto` stays a boolean probe and does not change this intake rule.
 
 ### `is veto` (boolean test)
 

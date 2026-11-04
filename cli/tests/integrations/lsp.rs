@@ -121,6 +121,80 @@ rule total: qty
 }
 
 #[test]
+fn lsp_instance_list_with_field_pairs_has_no_diagnostics() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let source = r#"spec item
+data score: number
+
+spec cart
+uses item
+data items: item list
+  -> with score: 3
+rule average:
+  items -> avg score
+"#;
+    let path = write_lemma_file(dir.path(), "cart.lemma", source);
+    let uri = path_to_uri(&path);
+
+    let mut session = LspSession::spawn_lemma_lsp();
+    session.initialize(None);
+    session.initialized();
+    session.did_open(&uri, source);
+
+    let notification = session.wait_for_diagnostics(&uri);
+    let diagnostics = notification["params"]["diagnostics"]
+        .as_array()
+        .expect("diagnostics array");
+    assert!(
+        diagnostics.is_empty(),
+        "expected no diagnostics for item/cart with field pairs, got: {diagnostics:?}"
+    );
+
+    session.shutdown();
+}
+
+#[test]
+fn lsp_or_expression_has_no_diagnostics() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let source = r#"spec logical
+data a: boolean
+data b: boolean
+rule r: a or b
+"#;
+    let path = write_lemma_file(dir.path(), "logical.lemma", source);
+    let uri = path_to_uri(&path);
+
+    let mut session = LspSession::spawn_lemma_lsp();
+    session.initialize(None);
+    session.initialized();
+    session.did_open(&uri, source);
+
+    let notification = session.wait_for_diagnostics(&uri);
+    let diagnostics = notification["params"]["diagnostics"]
+        .as_array()
+        .expect("diagnostics array");
+    assert!(
+        diagnostics.is_empty(),
+        "expected no diagnostics for `a or b`, got: {diagnostics:?}"
+    );
+
+    let tokens = session.request(
+        "textDocument/semanticTokens/full",
+        json!({
+            "textDocument": { "uri": uri }
+        }),
+    );
+    assert!(
+        tokens["data"]
+            .as_array()
+            .is_some_and(|data| !data.is_empty()),
+        "expected semantic tokens for or expression, got: {tokens:?}"
+    );
+
+    session.shutdown();
+}
+
+#[test]
 fn lsp_quality_issues_are_not_hint_diagnostics() {
     let dir = tempfile::tempdir().expect("tempdir");
     let source = r#"spec pricing
@@ -265,6 +339,37 @@ fn lsp_did_close_clears_diagnostics() {
         "didClose must publish empty diagnostics, got: {diagnostics:?}"
     );
 
+    session.shutdown();
+}
+
+#[test]
+fn lsp_did_save_without_open_does_not_kill_server() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = write_lemma_file(dir.path(), "orphan_save.lemma", "spec x\ndata n: 1\n");
+    let uri = path_to_uri(&path);
+
+    let mut session = LspSession::spawn_lemma_lsp();
+    session.initialize(None);
+    session.initialized();
+    session.did_save(&uri, None);
+    session.shutdown();
+}
+
+#[test]
+fn lsp_did_save_after_close_does_not_kill_server() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let source = "spec saved\ndata n: 1\n";
+    let path = write_lemma_file(dir.path(), "closed_save.lemma", source);
+    let uri = path_to_uri(&path);
+
+    let mut session = LspSession::spawn_lemma_lsp();
+    session.initialize(None);
+    session.initialized();
+    session.did_open(&uri, source);
+    let _ = session.wait_for_diagnostics(&uri);
+    session.did_close(&uri);
+    let _ = session.wait_for_diagnostics(&uri);
+    session.did_save(&uri, None);
     session.shutdown();
 }
 

@@ -12,12 +12,6 @@ fn logistics_ladder_pins_and_ground_eval() {
             "{} rate_cells",
             fixture.profile
         );
-        assert_eq!(
-            fixture.source.len(),
-            rung.source_bytes,
-            "{} source length",
-            fixture.profile
-        );
     }
 
     let embedded = fixture::logistics(LADDER[0].rate_cells);

@@ -104,7 +104,7 @@ fn self_list_double_read_is_linear_not_exponential() {
         r#"
 spec part
 data quantity: number
-uses components: part list
+data components: part list
 rule unit_cost:
   1 + (components -> sum unit_cost) + (components -> max unit_cost)
 "#,

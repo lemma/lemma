@@ -19,7 +19,7 @@ env:
 
 jobs:
   precommit:
-    name: cargo precommit${{ github.event_name == 'push' && ' --fuzz' || '' }}
+    name: cargo precommit --coverage${{ github.event_name == 'push' && ' --fuzz' || '' }}
     runs-on: ubuntu-latest
     timeout-minutes: 120
     steps:
@@ -103,10 +103,10 @@ jobs:
       - name: Install uniffi-bindgen-cs
         run: cargo install uniffi-bindgen-cs --git https://github.com/NordSecurity/uniffi-bindgen-cs --tag v0.11.0+v0.31.0 --force
 
-      - name: cargo precommit
+      - name: cargo precommit --coverage
         if: github.event_name == 'pull_request'
-        run: cargo precommit
+        run: cargo precommit --coverage
 
-      - name: cargo precommit --fuzz
+      - name: cargo precommit --coverage --fuzz
         if: github.event_name == 'push'
-        run: cargo precommit --fuzz
+        run: cargo precommit --coverage --fuzz

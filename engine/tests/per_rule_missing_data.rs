@@ -771,6 +771,76 @@ rule main: missing_flag and (loading > 0)
     );
 }
 
+/// Dividend still MissingData while the divisor is a present definitive Computation
+/// factor: intake must settle and clear the dividend key (same contract as d5).
+#[test]
+fn d5b_divide_present_zero_divisor_clears_missing_dividend() {
+    let mut engine = Engine::new();
+    load(
+        &mut engine,
+        r#"
+spec demo
+data loading: number
+data denom: number
+rule main: loading / denom
+"#,
+    );
+    let mut data = IndexMap::new();
+    data.insert("denom".to_string(), "0".into());
+    let plain = run(
+        &engine,
+        "demo",
+        data.clone(),
+        Some(&["main".to_string()]),
+        false,
+    );
+    let explained = run(&engine, "demo", data, Some(&["main".to_string()]), true);
+    let main = rule(&plain, "main");
+    assert!(main.vetoed, "present zero divisor must settle Computation");
+    assert!(
+        !main.is_missing_data(),
+        "settled Computation must not stay MissingData: {:?}",
+        main.veto_detail
+    );
+    assert!(
+        main.missing_data().is_empty(),
+        "intake must clear loading; no completion can produce a value: {:?}",
+        main.missing_data()
+    );
+    assert_eq!(
+        missing(&plain, "main"),
+        missing(&explained, "main"),
+        "explain parity for settled empty missing_data"
+    );
+}
+
+/// Product inverse term is a present zero: clear unbound factors that cannot un-veto.
+#[test]
+fn d5c_product_inverse_zero_clears_missing_factors() {
+    let mut engine = Engine::new();
+    load(
+        &mut engine,
+        r#"
+spec demo
+data a: number
+data b: number
+data c: number
+rule main: a * b / c
+"#,
+    );
+    let mut data = IndexMap::new();
+    data.insert("c".to_string(), "0".into());
+    let response = run(&engine, "demo", data, Some(&["main".to_string()]), false);
+    let main = rule(&response, "main");
+    assert!(main.vetoed, "zero inverse factor must settle Computation");
+    assert!(!main.is_missing_data());
+    assert!(
+        main.missing_data().is_empty(),
+        "intake must clear a and b: {:?}",
+        main.missing_data()
+    );
+}
+
 /// Definitive Computation veto must not continue sibling walk for missing_data —
 /// settled answer ⇒ empty missing_data even if later operands stay unbound.
 #[test]
@@ -1067,7 +1137,8 @@ fn explanation_rule_names(nodes: &[ExplanationNode]) -> Vec<String> {
                 names.push(name.rule.clone());
             }
             ExplanationNode::Compose { operands, .. }
-            | ExplanationNode::Conversion { operands, .. } => {
+            | ExplanationNode::Conversion { operands, .. }
+            | ExplanationNode::ListCommand { operands, .. } => {
                 for child in operands {
                     walk(child, names);
                 }
@@ -1463,9 +1534,9 @@ rule total: weight * item_cost
 spec calc
 uses bag
   -> with item_cost: item_cost
-data type_of_nut: text -> options "peanut", "cashew"
+data kind: text -> options "red", "blue"
 rule item_cost: 1
-  unless type_of_nut is "cashew" then 2
+  unless kind is "blue" then 2
 rule total: bag.total
 "#;
     let mut engine = Engine::new();
@@ -1484,7 +1555,7 @@ rule total: bag.total
     );
     assert_eq!(
         missing(&response, "total"),
-        &["bag.weight", "type_of_nut"],
+        &["bag.weight", "kind"],
         "live unbound inputs; with-bound bag.item_cost omitted"
     );
 }
@@ -1812,6 +1883,93 @@ rule r: i.half + 1
         missing(&nested, "r"),
         &["i.slot"],
         "nested uses arm must pin qualified missing key"
+    );
+}
+
+const TWO_HOP_LOOKUP: &str = r#"
+spec table
+data code: text
+rule lookup: code
+
+spec header
+uses message_type_table: table
+rule lookup: message_type_table.lookup
+
+spec message
+uses h: header
+rule via: h.lookup
+"#;
+
+/// Two-hop ImportRule: veto key and missing_data list must both be
+/// `h.message_type_table.code` (issue 98 attach shape).
+#[test]
+fn g6_two_hop_import_rule_attach_invariant() {
+    let mut engine = Engine::new();
+    load(&mut engine, TWO_HOP_LOOKUP);
+    for explain in [false, true] {
+        let response = run(
+            &engine,
+            "message",
+            IndexMap::new(),
+            Some(&["via".to_string()]),
+            explain,
+        );
+        assert_attach_invariant(&response);
+        let via = rule(&response, "via");
+        assert!(via.is_missing_data(), "via must be MissingData");
+        assert_eq!(
+            via.missing_data(),
+            &["h.message_type_table.code"],
+            "explain={explain}"
+        );
+        assert_eq!(
+            via.veto_reason.as_deref(),
+            Some("Required data 'h.message_type_table.code' was not provided."),
+            "explain={explain}"
+        );
+    }
+}
+
+/// Owner declaring a local `data code` must not steal the nested field's qualify.
+#[test]
+fn g6b_two_hop_import_rule_name_collision_still_qualifies() {
+    let mut engine = Engine::new();
+    load(
+        &mut engine,
+        r#"
+spec table
+data code: text
+rule lookup: code
+
+spec header
+uses message_type_table: table
+rule lookup: message_type_table.lookup
+
+spec message
+data code: text
+uses h: header
+rule via: h.lookup
+"#,
+    );
+    let response = run(
+        &engine,
+        "message",
+        IndexMap::new(),
+        Some(&["via".to_string()]),
+        false,
+    );
+    assert_attach_invariant(&response);
+    let via = rule(&response, "via");
+    assert!(via.is_missing_data());
+    assert_eq!(
+        via.missing_data(),
+        &["h.message_type_table.code"],
+        "owner-local data code must not collapse nested MissingData to code"
+    );
+    assert!(
+        !via.missing_data().iter().any(|key| key == "code"),
+        "must not report owner-local code: {:?}",
+        via.missing_data()
     );
 }
 

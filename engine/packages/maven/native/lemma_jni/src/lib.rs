@@ -4,10 +4,8 @@ mod error_json;
 
 use error_json::engine_errors_json;
 use indexmap::IndexMap;
-use jni::objects::{
-    JByteArray, JClass, JObject, JObjectArray, JString, JThrowable, JValue, JValueOwned,
-};
-use jni::sys::{jboolean, jbyteArray, jint, jlong, jstring, JNI_FALSE};
+use jni::objects::{JClass, JObject, JObjectArray, JString, JThrowable, JValue, JValueOwned};
+use jni::sys::{jboolean, jint, jlong, jstring, JNI_FALSE};
 use jni::{jni_sig, jni_str, Env, EnvUnowned};
 use lemma::{DateTimeValue, Engine, EvaluateDataValue, ResourceLimits, SourceType};
 use std::sync::Mutex;
@@ -670,20 +668,6 @@ fn return_string(env: &mut Env, value: String) -> jstring {
         .into_raw()
 }
 
-fn bytes_from_jbyte_array(env: &Env, array: &JByteArray) -> Result<Vec<u8>, String> {
-    if array.is_null() {
-        return Err("BUG: snapshot bytes array is null".to_string());
-    }
-    env.convert_byte_array(array)
-        .map_err(|e| format!("BUG: failed to read Java byte array: {e}"))
-}
-
-fn return_bytes(env: &mut Env, bytes: &[u8]) -> Result<jbyteArray, String> {
-    env.byte_array_from_slice(bytes)
-        .map(|arr| arr.into_raw())
-        .map_err(|e| format!("BUG: failed to allocate Java byte array: {e}"))
-}
-
 #[no_mangle]
 pub extern "system" fn Java_com_lemmabase_lemma_Native_version(
     mut unowned: EnvUnowned,
@@ -726,31 +710,6 @@ pub extern "system" fn Java_com_lemmabase_lemma_Native_createWithLimits(
         };
         let engine = Box::new(Mutex::new(Engine::with_limits(limits)));
         Ok(Box::into_raw(engine) as jlong)
-    })
-}
-
-#[no_mangle]
-pub extern "system" fn Java_com_lemmabase_lemma_Native_fromSnapshot(
-    mut unowned: EnvUnowned,
-    _class: JClass,
-    bytes: JByteArray,
-) -> jlong {
-    with_catch(&mut unowned, |env| {
-        let raw = bytes_from_jbyte_array(env, &bytes)?;
-        match Engine::from_snapshot(&raw) {
-            Ok(engine) => {
-                let handle = Box::new(Mutex::new(engine));
-                Ok(Box::into_raw(handle) as jlong)
-            }
-            Err(err) => {
-                throw_lemma_exception(
-                    env,
-                    "fromSnapshot failed",
-                    &engine_errors_json(std::slice::from_ref(&err)),
-                );
-                Ok(0)
-            }
-        }
     })
 }
 
@@ -1294,31 +1253,6 @@ pub extern "system" fn Java_com_lemmabase_lemma_Native_limits(
         let json = serde_json::to_string(guard.limits())
             .map_err(|e| format!("BUG: limits serialization failed: {e}"))?;
         Ok(return_string(env, json))
-    })
-}
-
-#[no_mangle]
-pub extern "system" fn Java_com_lemmabase_lemma_Native_snapshot(
-    mut unowned: EnvUnowned,
-    _class: JClass,
-    handle: jlong,
-) -> jbyteArray {
-    with_catch(&mut unowned, |env| {
-        let engine = handle_from_jlong(handle)?;
-        let guard = engine
-            .lock()
-            .map_err(|_| "BUG: Engine lock poisoned".to_string())?;
-        match guard.snapshot() {
-            Ok(bytes) => return_bytes(env, &bytes),
-            Err(err) => {
-                throw_lemma_exception(
-                    env,
-                    "snapshot failed",
-                    &engine_errors_json(std::slice::from_ref(&err)),
-                );
-                Ok(std::ptr::null_mut())
-            }
-        }
     })
 }
 

@@ -18,7 +18,6 @@ const CALC_SPEC: &str = r#"
 spec calc
 
 data money: measure
-  -> decimals 2
   -> unit eur: 1
 
 data hourly_rate: 85.00 eur
@@ -149,10 +148,10 @@ fn inlined_piecewise_subexpression_does_not_return_early_from_parent_rule() {
     data.insert("is_super_rush".into(), "false".into());
     let response = evaluate_calc(data);
 
-    assert_eq!(rule_display(&response, "total"), "4821.09 eur");
+    assert_eq!(rule_display(&response, "total"), "4821.09375 eur");
     assert_eq!(
         rule_measure_display(&response, "rush_surcharge"),
-        "796.88 eur"
+        "796.875 eur"
     );
     assert_ne!(
         rule_display(&response, "total"),
@@ -254,9 +253,6 @@ fn calc_total_without_rush_is_not_zero_surcharge_path() {
     data.insert("is_rush".into(), "false".into());
     data.insert("is_super_rush".into(), "false".into());
     let response = evaluate_calc(data);
-    assert_eq!(rule_display(&response, "total"), "3856.88 eur");
-    assert_eq!(
-        rule_measure_display(&response, "rush_surcharge"),
-        "0.00 eur"
-    );
+    assert_eq!(rule_display(&response, "total"), "3856.875 eur");
+    assert_eq!(rule_measure_display(&response, "rush_surcharge"), "0 eur");
 }

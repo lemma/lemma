@@ -26,7 +26,8 @@ pub fn rule_ref_names(nodes: &[ExplanationNode]) -> Vec<String> {
         match node {
             ExplanationNode::RuleRef { name, .. } => names.push(name.rule.clone()),
             ExplanationNode::Compose { operands, .. }
-            | ExplanationNode::Conversion { operands, .. } => {
+            | ExplanationNode::Conversion { operands, .. }
+            | ExplanationNode::ListCommand { operands, .. } => {
                 for child in operands {
                     walk(child, names);
                 }

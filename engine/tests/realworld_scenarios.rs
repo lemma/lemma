@@ -531,9 +531,9 @@ spec math_ops
 data value: number
 
 rule remainder: value mod 7
-rule rounded: round(value / 3)
-rule floored: floor(value / 3)
-rule ceiled: ceil(value / 3)
+rule rounded: value / 3 -> round
+rule floored: value / 3 -> floor
+rule ceiled: value / 3 -> ceil
 rule absolute: abs(0 - value)
 "#
             .to_string(),

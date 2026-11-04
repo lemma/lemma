@@ -5,8 +5,7 @@ use inquire::validator::Validation;
 use inquire::{Confirm, DateSelect, MultiSelect, Select, Text};
 use lemma::{
     numbered_row_origin, row_field_input_key, DateTimeValue, Engine, EvaluateDataValue, LemmaType,
-    LiteralValue, Response, Show, ShowData, SpecIdentity, SpecVersion, TypeSpecification,
-    ValueKind, VetoType,
+    LiteralValue, Show, ShowData, SpecIdentity, SpecVersion, TypeSpecification, ValueKind,
 };
 use rust_decimal::Decimal;
 use std::collections::{HashSet, VecDeque};
@@ -617,12 +616,7 @@ fn select_rules(
     now: &DateTimeValue,
 ) -> Result<Option<Vec<String>>> {
     let show = load_static_show(engine, repo, spec_name, now)?;
-    let rule_names: Vec<String> = show
-        .rules
-        .iter()
-        .filter(|(_, rule)| rule.path.is_empty())
-        .map(|(name, _)| name.clone())
-        .collect();
+    let rule_names: Vec<String> = show.rules.keys().cloned().collect();
 
     if rule_names.is_empty() {
         return Ok(None);
@@ -735,6 +729,31 @@ fn run_prompt_tasks(session: &mut PromptSession<'_>, mut tasks: Vec<Task>) -> Re
     Ok(())
 }
 
+fn show_option(value: &EvaluateDataValue) -> String {
+    match value {
+        EvaluateDataValue::Literal(text) => text.clone(),
+        EvaluateDataValue::Boolean(bit) => bit.to_string(),
+        EvaluateDataValue::Map(fields) => fields
+            .iter()
+            .map(|(name, field)| format!("{name}: {}", show_option_leaf(field)))
+            .collect::<Vec<_>>()
+            .join(", "),
+        EvaluateDataValue::List(items) => items
+            .iter()
+            .map(show_option_leaf)
+            .collect::<Vec<_>>()
+            .join(", "),
+    }
+}
+
+fn show_option_leaf(value: &EvaluateDataValue) -> String {
+    match value {
+        EvaluateDataValue::Literal(text) => text.clone(),
+        EvaluateDataValue::Boolean(bit) => bit.to_string(),
+        EvaluateDataValue::Map(_) | EvaluateDataValue::List(_) => String::new(),
+    }
+}
+
 fn fill_missing_step(session: &mut PromptSession<'_>, tasks: &mut Vec<Task>) -> Result<()> {
     let response = session
         .engine
@@ -758,8 +777,70 @@ fn fill_missing_step(session: &mut PromptSession<'_>, tasks: &mut Vec<Task>) -> 
         Some(name) => name,
         None => return Ok(()),
     };
+    let options = response
+        .results
+        .values()
+        .find(|result| result.missing_data().iter().any(|key| key == &name))
+        .and_then(|result| result.missing_data_options().get(&name))
+        .cloned();
+
+    let options = options.or_else(|| match session.slots.get(&name)? {
+        Slot::Prompt { lemma_type, .. } => {
+            let static_opts = lemma_type.static_options();
+            if static_opts.is_empty() {
+                None
+            } else {
+                Some(
+                    static_opts
+                        .into_iter()
+                        .map(EvaluateDataValue::Literal)
+                        .collect(),
+                )
+            }
+        }
+        Slot::DeclaredRow { .. } => None,
+    });
 
     tasks.push(Task::FillMissing);
+
+    if let Some(options) = options {
+        if options.is_empty() {
+            anyhow::bail!("data '{name}' has no valid option");
+        }
+        let (lemma_type, location) = match session.slots.get(&name) {
+            Some(Slot::Prompt {
+                lemma_type,
+                location,
+                ..
+            }) => (lemma_type.clone(), location.clone()),
+            _ => panic!("BUG: MissingData key '{name}' has no interactive slot"),
+        };
+        let chosen = if options.len() == 1 {
+            options.into_iter().next().expect("BUG: one option")
+        } else {
+            let shown: Vec<String> = options.iter().map(show_option).collect();
+            let display = lemma_type.label_for_data_input(&step_label(&location));
+            let selected = Select::new(&display, shown)
+                .raw_prompt()
+                .context(format!("Failed to get option for {name}"))?;
+            options
+                .into_iter()
+                .nth(selected.index)
+                .expect("BUG: selected option index is one of the options")
+        };
+        write_at(session.collected, &location, chosen);
+        if let Err(error) = session.engine.evaluate(
+            session.repo,
+            session.spec_name,
+            Some(session.now),
+            trial_evaluate_data(session.provided_data, session.collected),
+            session.rules_for_request,
+            false,
+        ) {
+            anyhow::bail!("{error}");
+        }
+        return Ok(());
+    }
 
     match session.slots.get(&name).cloned() {
         Some(Slot::Prompt {
@@ -788,13 +869,7 @@ fn fill_missing_step(session: &mut PromptSession<'_>, tasks: &mut Vec<Task>) -> 
                     session.rules_for_request,
                     false,
                 ) {
-                    Ok(response) => {
-                        if let Some(reason) = computation_veto_reason_for_trial_input(&response) {
-                            eprintln!("  {reason}\n");
-                            continue;
-                        }
-                        break;
-                    }
+                    Ok(_) => break,
                     Err(e) => {
                         eprintln!("  {}\n", e);
                     }
@@ -1048,21 +1123,6 @@ fn next_prompt_name_from_results<'a>(
     next
 }
 
-fn computation_veto_reason_for_trial_input(response: &Response) -> Option<String> {
-    for rule_result in response.results.values() {
-        if !rule_result.vetoed {
-            continue;
-        }
-        if matches!(
-            rule_result.veto_detail.as_ref(),
-            Some(VetoType::Computation { .. })
-        ) {
-            return rule_result.veto_reason.clone();
-        }
-    }
-    None
-}
-
 fn prompt_value_for_type(
     data_name: &str,
     lemma_type: &LemmaType,
@@ -1074,70 +1134,26 @@ fn prompt_value_for_type(
         TypeSpecification::Boolean { .. } => {
             prompt_boolean_data(&input_label, data_name, suggestion)
         }
-        TypeSpecification::Text {
-            options,
-            length,
-            help,
-            ..
-        } => {
-            if !options.is_empty() {
-                if options.len() == 1 {
-                    return Ok(options[0].clone());
-                }
-                let mut prompt =
-                    Select::new(&input_label, options.clone()).with_help_message(help.as_str());
-                if let Some(lit) = suggestion {
-                    if let ValueKind::Text(s) = &lit.value {
-                        if let Some(idx) = options.iter().position(|o| o == s) {
-                            prompt = prompt.with_starting_cursor(idx);
-                        }
-                    }
-                }
-                prompt
-                    .prompt()
-                    .context(format!("Failed to get option for {}", data_name))
-            } else {
-                let constraints = TextConstraints {
-                    length: *length,
-                    help: help.clone(),
-                };
-                prompt_text_data_with_constraints(&input_label, lemma_type, suggestion, &constraints)
-            }
-        }
-        TypeSpecification::Measure {
-            minimum,
-            maximum,
-            decimals,
-            units,
-            help,
-            traits,
-            decomposition,
-            ..
-        } => {
-            let measure_spec = TypeSpecification::Measure {
-                minimum: minimum.clone(),
-                maximum: maximum.clone(),
-                decimals: *decimals,
-                units: units.clone(),
-                traits: traits.clone(),
-                decomposition: decomposition.clone(),
-                unit: None,
+        TypeSpecification::Text { length, help } => {
+            let constraints = TextConstraints {
+                length: *length,
                 help: help.clone(),
             };
-            let constraints = NumericConstraints {
-                minimum: measure_spec.minimum_decimal(),
-                maximum: measure_spec.maximum_decimal(),
-                decimals: *decimals,
-                help: help.clone(),
-            };
-            prompt_measure_data(
-                data_name,
+            prompt_text_data_with_constraints(
                 &input_label,
-                suggestion,
                 lemma_type,
-                units,
+                suggestion,
                 &constraints,
             )
+        }
+        TypeSpecification::Measure { units, help, .. } => {
+            let constraints = NumericConstraints {
+                minimum: None,
+                maximum: None,
+                decimals: None,
+                help: help.clone(),
+            };
+            prompt_measure_data(data_name, suggestion, lemma_type, units, &constraints)
         }
         TypeSpecification::Number {
             minimum,
@@ -1160,36 +1176,14 @@ fn prompt_value_for_type(
             };
             prompt_number_data(&input_label, suggestion, &constraints)
         }
-        TypeSpecification::Ratio {
-            minimum,
-            maximum,
-            decimals,
-            units,
-            help,
-            ..
-        } => {
-            let ratio_spec = TypeSpecification::Ratio {
-                minimum: minimum.clone(),
-                maximum: maximum.clone(),
-                decimals: *decimals,
-                units: units.clone(),
-                unit: None,
-                help: help.clone(),
-            };
+        TypeSpecification::Ratio { units, help, .. } => {
             let constraints = NumericConstraints {
-                minimum: ratio_spec.minimum_decimal(),
-                maximum: ratio_spec.maximum_decimal(),
-                decimals: *decimals,
+                minimum: None,
+                maximum: None,
+                decimals: None,
                 help: help.clone(),
             };
-            prompt_ratio_data(
-                data_name,
-                &input_label,
-                suggestion,
-                lemma_type,
-                units,
-                &constraints,
-            )
+            prompt_ratio_data(data_name, suggestion, lemma_type, units, &constraints)
         }
         TypeSpecification::Date { .. } => prompt_date_data(&input_label, data_name, suggestion),
         TypeSpecification::Time { help, .. } => {
@@ -1376,8 +1370,8 @@ fn prompt_range_data(
         _ => unreachable!("BUG: prompt_range_data called with non-range type"),
     };
 
-    let start_title = lemma_type.label_for_data_input(&format!("{data_name}.start"));
-    let end_title = lemma_type.label_for_data_input(&format!("{data_name}.end"));
+    let start_title = lemma_type.label_for_data_input(&format!("{data_name} › start"));
+    let end_title = lemma_type.label_for_data_input(&format!("{data_name} › end"));
 
     let left_value = prompt_simple_text(
         &start_title,
@@ -1402,12 +1396,15 @@ fn prompt_number_data(
 
 fn prompt_measure_data(
     data_name: &str,
-    prompt_title: &str,
     suggestion: Option<&LiteralValue>,
     lemma_type: &LemmaType,
     units: &lemma::MeasureUnits,
     constraints: &NumericConstraints,
 ) -> Result<String> {
+    if units.is_empty() {
+        unreachable!("BUG: Measure type has no units");
+    }
+
     let default_unit = suggestion.and_then(|lit| match &lit.value {
         ValueKind::Measure(_) => lemma_type
             .measure_runtime_signature()
@@ -1415,13 +1412,6 @@ fn prompt_measure_data(
             .map(|(name, _)| name.clone()),
         _ => None,
     });
-
-    if units.is_empty() {
-        let default_str = suggestion
-            .and_then(|lit| lit.magnitude_suggestion_for_decimal_prompt(lemma_type))
-            .map(|decimal| decimal.to_string());
-        return prompt_decimal_input(prompt_title, default_str.as_deref(), constraints, "7.65");
-    }
 
     let unit_names: Vec<String> = units.iter().map(|u| u.name.clone()).collect();
     let unit = if unit_names.len() == 1 {
@@ -1443,13 +1433,18 @@ fn prompt_measure_data(
         .and_then(|lit| lit.magnitude_in_unit(lemma_type, &unit))
         .map(|decimal| decimal.to_string());
 
+    let selected = units
+        .get(&unit)
+        .expect("BUG: selected measure unit must exist on planned type");
     let value_constraints = NumericConstraints {
+        minimum: selected.minimum_decimal(),
+        maximum: selected.maximum_decimal(),
+        decimals: None,
         help: if constraints.help.is_empty() {
             format!("Enter numeric value (unit: {})", unit)
         } else {
             constraints.help.clone()
         },
-        ..constraints.clone()
     };
     let value = prompt_decimal_input(
         &format!("Enter value for {} ({})", data_name, unit),
@@ -1463,48 +1458,99 @@ fn prompt_measure_data(
 
 fn prompt_ratio_data(
     data_name: &str,
-    prompt_title: &str,
     suggestion: Option<&LiteralValue>,
     lemma_type: &LemmaType,
     units: &lemma::RatioUnits,
     constraints: &NumericConstraints,
 ) -> Result<String> {
-    let selected_unit = if units.len() == 1 {
-        units
-            .iter()
-            .next()
-            .map(|u| u.name.clone())
-            .expect("BUG: units.len() == 1 yields one unit")
-    } else {
-        let mut unit_choices: Vec<String> = vec!["(none)".to_string()];
-        unit_choices.extend(units.iter().map(|u| u.name.clone()));
-        Select::new(
-            &format!("Select ratio unit for {}", data_name),
-            unit_choices,
-        )
-        .prompt()
-        .context(format!("Failed to get ratio unit for {}", data_name))?
-    };
-    let default_decimal = if selected_unit == "(none)" {
-        suggestion.and_then(|lit| lit.magnitude_suggestion_for_decimal_prompt(lemma_type))
-    } else {
-        suggestion.and_then(|lit| lit.magnitude_in_unit(lemma_type, &selected_unit))
+    if units.is_empty() {
+        unreachable!("BUG: Ratio type has no units");
     }
-    .map(|decimal| decimal.to_string());
 
+    let default_unit = suggestion.and_then(|lit| match &lit.value {
+        ValueKind::Ratio(_) => lemma_type.ratio_primary_unit().map(|name| name.to_string()),
+        _ => None,
+    });
+
+    let unit_names: Vec<String> = units.iter().map(|u| u.name.clone()).collect();
+    let selected_unit = if unit_names.len() == 1 {
+        unit_names[0].clone()
+    } else {
+        let prompt_msg = format!("Select ratio unit for {}", data_name);
+        let mut select = Select::new(&prompt_msg, unit_names);
+        if let Some(def_unit) = default_unit.as_deref() {
+            if let Some(idx) = units.iter().position(|u| u.name == def_unit) {
+                select = select.with_starting_cursor(idx);
+            }
+        }
+        select
+            .prompt()
+            .context(format!("Failed to get ratio unit for {}", data_name))?
+    };
+
+    let default_decimal = suggestion
+        .and_then(|lit| lit.magnitude_in_unit(lemma_type, &selected_unit))
+        .map(|decimal| decimal.to_string());
+
+    let selected = units
+        .get(&selected_unit)
+        .expect("BUG: selected ratio unit must exist on planned type");
+    let value_constraints = NumericConstraints {
+        minimum: selected.minimum_decimal(),
+        maximum: selected.maximum_decimal(),
+        decimals: None,
+        help: if constraints.help.is_empty() {
+            format!("Enter numeric value (unit: {})", selected_unit)
+        } else {
+            constraints.help.clone()
+        },
+    };
     let value = prompt_decimal_input(
-        prompt_title,
+        &format!("Enter value for {} ({})", data_name, selected_unit),
         default_decimal.as_deref(),
-        constraints,
+        &value_constraints,
         "0.10",
     )?;
 
     match selected_unit.as_str() {
-        "(none)" => Ok(value),
         "percent" => Ok(format!("{}%", value)),
         "permille" => Ok(format!("{}%%", value)),
         other => Ok(format!("{} {}", value, other)),
     }
+}
+
+fn validate_decimal_input(input: &str, constraints: &NumericConstraints) -> Validation {
+    let raw = input.trim();
+    if raw.is_empty() {
+        return Validation::Invalid("Value is required".into());
+    }
+    let clean = raw.replace('_', "");
+    let provided_decimals = clean
+        .split_once('.')
+        .map(|(_, frac)| frac.len())
+        .unwrap_or(0);
+    if let Some(d) = constraints.decimals {
+        if provided_decimals > d as usize {
+            return Validation::Invalid(format!("Too many decimals (max {})", d).into());
+        }
+    }
+    let value = match Decimal::from_str_exact(&clean) {
+        Ok(v) => v,
+        Err(_) => {
+            return Validation::Invalid(format!("Invalid number: '{}'", raw).into());
+        }
+    };
+    if let Some(min) = constraints.minimum {
+        if value < min {
+            return Validation::Invalid(format!("Must be >= {}", min).into());
+        }
+    }
+    if let Some(max) = constraints.maximum {
+        if value > max {
+            return Validation::Invalid(format!("Must be <= {}", max).into());
+        }
+    }
+    Validation::Valid
 }
 
 fn prompt_decimal_input(
@@ -1513,56 +1559,15 @@ fn prompt_decimal_input(
     constraints: &NumericConstraints,
     example: &str,
 ) -> Result<String> {
-    let NumericConstraints {
-        minimum: min,
-        maximum: max,
-        decimals: decs,
-        help,
-    } = constraints.clone();
-
-    let validator = move |input: &str| {
-        let raw = input.trim();
-        if raw.is_empty() {
-            return Ok(Validation::Invalid("Value is required".into()));
-        }
-        let clean = raw.replace('_', "");
-        let provided_decimals = clean
-            .split_once('.')
-            .map(|(_, frac)| frac.len())
-            .unwrap_or(0);
-        if let Some(d) = decs {
-            if provided_decimals > d as usize {
-                return Ok(Validation::Invalid(
-                    format!("Too many decimals (max {})", d).into(),
-                ));
-            }
-        }
-        let value = match Decimal::from_str_exact(&clean) {
-            Ok(v) => v,
-            Err(_) => {
-                return Ok(Validation::Invalid(
-                    format!("Invalid number: '{}'", raw).into(),
-                ))
-            }
-        };
-        if let Some(min) = min {
-            if value < min {
-                return Ok(Validation::Invalid(format!("Must be >= {}", min).into()));
-            }
-        }
-        if let Some(max) = max {
-            if value > max {
-                return Ok(Validation::Invalid(format!("Must be <= {}", max).into()));
-            }
-        }
-        Ok(Validation::Valid)
-    };
+    let constraints_for_validator = constraints.clone();
+    let validator =
+        move |input: &str| Ok(validate_decimal_input(input, &constraints_for_validator));
 
     let mut prompt = Text::new(prompt_message).with_validator(validator);
-    let help_message = if help.is_empty() {
+    let help_message = if constraints.help.is_empty() {
         format!("Example: {}", example)
     } else {
-        help.clone()
+        constraints.help.clone()
     };
     prompt = prompt.with_help_message(&help_message);
 
@@ -1581,11 +1586,114 @@ fn prompt_decimal_input(
 mod tests {
     use super::{
         load_static_show, next_prompt_name_from_results, prompt_data, select_rules,
-        spec_picker_label,
+        spec_picker_label, validate_decimal_input, NumericConstraints,
     };
     use indexmap::IndexMap;
-    use lemma::{DateTimeValue, Engine, SourceType, VetoType};
+    use inquire::validator::Validation;
+    use lemma::{DateTimeValue, Engine, SourceType, TypeSpecification, VetoType};
+    use rust_decimal::Decimal;
+    use std::str::FromStr;
     use std::sync::Arc;
+
+    fn decimal_lit(s: &str) -> Decimal {
+        Decimal::from_str(s).expect("test decimal")
+    }
+
+    fn validation_message(result: Validation) -> String {
+        match result {
+            Validation::Valid => String::new(),
+            Validation::Invalid(inquire::validator::ErrorMessage::Custom(msg)) => msg,
+            Validation::Invalid(inquire::validator::ErrorMessage::Default) => "default".to_string(),
+        }
+    }
+
+    #[test]
+    fn ratio_prompt_constraints_use_percent_unit_bounds() {
+        let mut engine = Engine::new();
+        engine
+            .load([(
+                SourceType::Path(Arc::new(std::path::PathBuf::from("ratio_bounds.lemma"))),
+                "spec s\ndata p: ratio -> minimum 0% -> maximum 100% -> suggest 100%\nrule out: p\n"
+                    .to_string(),
+            )])
+            .expect("load");
+        let now = DateTimeValue::now();
+        let show = engine.show(None, "s", Some(&now)).expect("show");
+        let entry = show.data.get("p").expect("data p");
+        assert_eq!(
+            entry.lemma_type.specifications.maximum_decimal(),
+            Some(decimal_lit("1")),
+            "type-level max is canonical"
+        );
+        let TypeSpecification::Ratio { units, .. } = &entry.lemma_type.specifications else {
+            panic!("expected ratio");
+        };
+        let percent = units.get("percent").expect("percent unit");
+        assert_eq!(percent.minimum_decimal(), Some(decimal_lit("0")));
+        assert_eq!(percent.maximum_decimal(), Some(decimal_lit("100")));
+        let constraints = NumericConstraints {
+            minimum: percent.minimum_decimal(),
+            maximum: percent.maximum_decimal(),
+            decimals: None,
+            help: String::new(),
+        };
+        assert!(matches!(
+            validate_decimal_input("100", &constraints),
+            Validation::Valid
+        ));
+        let over = validation_message(validate_decimal_input("101", &constraints));
+        assert!(
+            over.contains("Must be <="),
+            "expected max message, got {over}"
+        );
+    }
+
+    #[test]
+    fn measure_prompt_constraints_use_selected_unit_bounds() {
+        let mut engine = Engine::new();
+        engine
+            .load([(
+                SourceType::Path(Arc::new(std::path::PathBuf::from("measure_bounds.lemma"))),
+                r#"
+spec s
+data mass: measure
+  -> unit kilogram: 1
+  -> unit gram: 0.001
+  -> maximum 10 kilogram
+rule out: mass
+"#
+                .to_string(),
+            )])
+            .expect("load");
+        let now = DateTimeValue::now();
+        let show = engine.show(None, "s", Some(&now)).expect("show");
+        let entry = show.data.get("mass").expect("data mass");
+        assert_eq!(
+            entry.lemma_type.specifications.maximum_decimal(),
+            Some(decimal_lit("10")),
+            "type-level max is declaring-unit magnitude"
+        );
+        let TypeSpecification::Measure { units, .. } = &entry.lemma_type.specifications else {
+            panic!("expected measure");
+        };
+        let gram = units.get("gram").expect("gram unit");
+        assert_eq!(gram.maximum_decimal(), Some(decimal_lit("10000")));
+        let constraints = NumericConstraints {
+            minimum: gram.minimum_decimal(),
+            maximum: gram.maximum_decimal(),
+            decimals: None,
+            help: String::new(),
+        };
+        assert!(matches!(
+            validate_decimal_input("10000", &constraints),
+            Validation::Valid
+        ));
+        let over = validation_message(validate_decimal_input("10001", &constraints));
+        assert!(
+            over.contains("Must be <="),
+            "expected max message, got {over}"
+        );
+    }
 
     fn colliding_alpha2_engine() -> Engine {
         let mut engine = Engine::new();
@@ -1747,7 +1855,8 @@ rule use_gender: gender
 spec line
 data qty: number
 spec order
-uses lines: line list
+uses line
+data lines: line list
 data extra: number
 rule total: lines -> sum qty
 rule other: extra
@@ -1814,7 +1923,8 @@ spec line
 data price: number
 data qty: number
 spec order
-uses lines: line list
+uses line
+data lines: line list
   -> with price: 2
 rule total: lines -> sum qty
 "#
@@ -1863,7 +1973,8 @@ rule total: lines -> sum qty
 spec item
 data score: number
 spec cart
-uses items: item list
+uses item
+data items: item list
   -> with score: 10
   -> with score: 11
 rule average: items -> avg score
@@ -2172,6 +2283,93 @@ rule other: need
             ),
             Some("need".to_string()),
             "only unsettled other.need must be next"
+        );
+
+        let mut with_need = IndexMap::<String, String>::new();
+        with_need.insert("denom".to_string(), "0".into());
+        with_need.insert("need".to_string(), "3".into());
+        let after_need = run(
+            &engine,
+            "demo",
+            with_need,
+            Some(&["premium".to_string(), "other".to_string()]),
+        );
+        assert!(
+            matches!(
+                after_need
+                    .results
+                    .get("premium")
+                    .expect("premium")
+                    .veto_detail
+                    .as_ref(),
+                Some(VetoType::Computation { .. })
+            ),
+            "premium stays Computation after binding need"
+        );
+        assert!(
+            !after_need
+                .results
+                .get("other")
+                .expect("other")
+                .is_missing_data(),
+            "other settles once need is bound"
+        );
+        assert_eq!(
+            next_prompt_name_from_results(
+                after_need.results.values(),
+                &IndexMap::new(),
+                &IndexMap::new(),
+            ),
+            None,
+            "settled Computation on premium must not block finishing after need"
+        );
+    }
+
+    #[test]
+    fn next_prompt_skips_dividend_when_divisor_already_settles() {
+        let mut engine = Engine::new();
+        engine
+            .load([(
+                SourceType::Volatile,
+                r#"
+spec demo
+data loading: number
+data denom: number
+rule premium: loading / denom
+"#
+                .to_string(),
+            )])
+            .expect("load");
+
+        let mut data = IndexMap::<String, String>::new();
+        data.insert("denom".to_string(), "0".into());
+        let response = run(&engine, "demo", data, Some(&["premium".to_string()]));
+        let premium = response.results.get("premium").expect("premium");
+        assert!(
+            matches!(
+                premium.veto_detail.as_ref(),
+                Some(VetoType::Computation { .. })
+            ),
+            "{:?}",
+            premium.veto_detail
+        );
+        assert!(
+            !premium.is_missing_data(),
+            "present zero divisor must settle premium"
+        );
+        assert!(
+            premium.missing_data().is_empty(),
+            "intake must clear loading: {:?}",
+            premium.missing_data()
+        );
+        assert_eq!(
+            next_prompt_name_from_results(
+                response.results.values(),
+                &IndexMap::new(),
+                &IndexMap::new(),
+            ),
+            None,
+            "must not ask for loading after divisor settled Computation"
         );
     }
 

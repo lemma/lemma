@@ -177,6 +177,7 @@ pub mod http {
             .route("/openapi.json", get(openapi_spec))
             .route("/docs", get(scalar_docs))
             .route("/scalar.js", get(scalar_js))
+            .route("/favicon.svg", get(favicon_svg))
             .route("/{*path}", get(spec_get_show).post(spec_post_evaluate))
             .fallback(fallback_404);
         let router = if cors {
@@ -328,9 +329,11 @@ pub mod http {
       showOperationId: false,
       hideDarkModeToggle: false,
       withDefaultFonts: false,
+      favicon: '/favicon.svg',
       defaultOpenAllTags: false,
-      expandAllModelSections: true,
-      expandAllResponses: true,
+      expandAllModelSections: false,
+      expandAllResponses: false,
+      expandAllSchemaProperties: false,
       orderSchemaPropertiesBy: 'alpha',
       orderRequiredPropertiesFirst: true,
       customCss: `
@@ -400,6 +403,7 @@ pub mod http {
   <title>Lemma API</title>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
 </head>
 <body>
   <div id="app"></div>
@@ -425,6 +429,19 @@ pub mod http {
                 "application/javascript; charset=utf-8",
             )],
             SCALAR_JS,
+        )
+    }
+
+    /// Serve the vendored Lemma icon as the docs favicon.
+    async fn favicon_svg() -> impl IntoResponse {
+        static FAVICON: &str = include_str!("../vendor/lemma-icon.svg");
+
+        (
+            [(
+                axum::http::header::CONTENT_TYPE,
+                "image/svg+xml; charset=utf-8",
+            )],
+            FAVICON,
         )
     }
 
@@ -524,7 +541,7 @@ pub mod http {
                         }),
                     )
                 })?;
-                lemma::parse_evaluate_data_object(&Some(value)).map_err(|e| {
+                lemma::parse_evaluate_data_object(Some(value)).map_err(|e| {
                     (
                         StatusCode::BAD_REQUEST,
                         Json(ErrorResponse {

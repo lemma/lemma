@@ -1,10 +1,10 @@
-//! Port of `benchmarks/java` `SpecGenerator.logistics`: multi-spec logistics
-//! rating workspace on the research ladder 1050 / 6300 / 18900 / 126000 rate cells.
+//! Multi-spec logistics rating workspace on the research ladder
+//! 1050 / 6300 / 18900 / 126000 rate cells.
 //!
 //! Catalog tables (ZIP3→zone, zone×lb rates, fuel brackets) are instance lists
-//! with `-> key` / `find`. The Rust and Java generators must emit byte-identical
-//! source for the embedded placement; [`LADDER`] carries the expected length of
-//! each profile and [`logistics`] asserts it.
+//! with `-> key` / `find`. [`LADDER`] is those four workloads. [`logistics`]
+//! embeds the catalog rows; [`logistics_external_catalog`] leaves the lists
+//! empty and puts the rows in run data.
 //!
 //! [`logistics_external_catalog`] emits the same workspace with empty keyed lists
 //! and puts the catalog rows in [`LogisticsFixture::catalog_json`] for run data.
@@ -15,7 +15,7 @@ use serde_json::{json, Value};
 use std::fmt::Write;
 
 /// UPS Ground zones 2 to 8.
-const ZONES: usize = 7;
+pub(crate) const ZONES: usize = 7;
 /// 1 to 150 lb breaks.
 const WEIGHTS: usize = 150;
 /// Cells in one Ground matrix.
@@ -30,8 +30,10 @@ const D2C_CARRIERS: usize = 3;
 const ENTERPRISE_CONTRACTS: usize = 20;
 /// Open end for last weight / fuel band (`[lo, hi)` containment).
 const BAND_OPEN_END: i32 = 1_000_000;
+/// `fuel_bracket_rows` length: the low open bracket, 23 steps, and the high open bracket.
+pub(crate) const FUEL_BRACKET_ROWS: usize = 25;
 
-const SERVICE_IDS: [&str; SERVICES] = [
+pub(crate) const SERVICE_IDS: [&str; SERVICES] = [
     "ground",
     "select_3day",
     "air_2day",
@@ -40,35 +42,29 @@ const SERVICE_IDS: [&str; SERVICES] = [
     "nda",
 ];
 
-/// One rung of the research ladder with the source length the Java generator
-/// produces for it.
+/// One rung of the research ladder.
 pub struct Rung {
     pub rate_cells: usize,
-    pub source_bytes: usize,
 }
 
 pub const LADDER: [Rung; 4] = [
     Rung {
         rate_cells: GROUND_CELLS,
-        source_bytes: 87_898,
     },
     Rung {
         rate_cells: GROUND_CELLS * SERVICES,
-        source_bytes: 509_122,
     },
     Rung {
         rate_cells: GROUND_CELLS * SERVICES * D2C_CARRIERS,
-        source_bytes: 1_520_554,
     },
     Rung {
         rate_cells: GROUND_CELLS * SERVICES * ENTERPRISE_CONTRACTS,
-        source_bytes: 10_121_625,
     },
 ];
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum CatalogPlacement {
-    /// Rows embedded as `-> with` (Java-identical source).
+    /// Rows embedded as `-> with`.
     Embedded,
     /// Empty keyed lists; rows in [`LogisticsFixture::catalog_json`].
     External,
@@ -110,40 +106,54 @@ struct Profile {
     carriers: Vec<String>,
     service_count: usize,
     rate_cells: usize,
+    zones: usize,
+    weights: usize,
+    zip_start: usize,
+    zip_count: usize,
+}
+
+fn ladder_profile(
+    name: &'static str,
+    carriers: Vec<String>,
+    service_count: usize,
+    rate_cells: usize,
+) -> Profile {
+    Profile {
+        name,
+        carriers,
+        service_count,
+        rate_cells,
+        zones: ZONES,
+        weights: WEIGHTS,
+        zip_start: 0,
+        zip_count: ZIP3_COUNT,
+    }
 }
 
 fn profile(rate_cells: usize) -> Profile {
     match rate_cells {
-        GROUND_CELLS => Profile {
-            name: "ground",
-            carriers: vec!["ups".to_string()],
-            service_count: 1,
-            rate_cells,
-        },
-        cells if cells == GROUND_CELLS * SERVICES => Profile {
-            name: "carrier",
-            carriers: vec!["ups".to_string()],
-            service_count: SERVICES,
-            rate_cells,
-        },
-        cells if cells == GROUND_CELLS * SERVICES * D2C_CARRIERS => Profile {
-            name: "d2c",
-            carriers: vec![
+        GROUND_CELLS => ladder_profile("ground", vec!["ups".to_string()], 1, rate_cells),
+        cells if cells == GROUND_CELLS * SERVICES => {
+            ladder_profile("carrier", vec!["ups".to_string()], SERVICES, rate_cells)
+        }
+        cells if cells == GROUND_CELLS * SERVICES * D2C_CARRIERS => ladder_profile(
+            "d2c",
+            vec![
                 "ups".to_string(),
                 "fedex".to_string(),
                 "regional".to_string(),
             ],
-            service_count: SERVICES,
+            SERVICES,
             rate_cells,
-        },
-        cells if cells == GROUND_CELLS * SERVICES * ENTERPRISE_CONTRACTS => Profile {
-            name: "enterprise",
-            carriers: (1..=ENTERPRISE_CONTRACTS)
+        ),
+        cells if cells == GROUND_CELLS * SERVICES * ENTERPRISE_CONTRACTS => ladder_profile(
+            "enterprise",
+            (1..=ENTERPRISE_CONTRACTS)
                 .map(|index| format!("contract_{index:02}"))
                 .collect(),
-            service_count: SERVICES,
+            SERVICES,
             rate_cells,
-        },
+        ),
         other => panic!(
             "BUG: logistics rate_cells must be one of {:?}, got {other}",
             LADDER.map(|rung| rung.rate_cells)
@@ -170,15 +180,12 @@ fn limits_for_scale(scale: usize, placement: CatalogPlacement) -> ResourceLimits
     limits
 }
 
-/// Java `%.2f`. Every emitted price is an exact two-decimal value in real
-/// arithmetic (sums of two-decimal terms), so the double sits within 1e-13 of
-/// it and both Java's half-up-on-shortest-digits and Rust's exact-binary
-/// rounding land on the same two decimals; the byte-length assertion guards it.
+/// Two decimal places. Emitted prices are exact two-decimal values.
 fn two_decimals(value: f64) -> String {
     format!("{value:.2}")
 }
 
-/// Embedded catalog rows (byte-identical to the Java generator).
+/// Embedded catalog rows.
 pub fn logistics(rate_cells: usize) -> LogisticsFixture {
     build(rate_cells, CatalogPlacement::Embedded)
 }
@@ -188,14 +195,52 @@ pub fn logistics_external_catalog(rate_cells: usize) -> LogisticsFixture {
     build(rate_cells, CatalogPlacement::External)
 }
 
+/// Embedded workspace for a caller-supplied shape. [`build`] uses this for every
+/// ladder rung, so the logistics bench compiles it.
+pub(crate) fn embedded_catalog(
+    name: &'static str,
+    carriers: Vec<String>,
+    service_count: usize,
+    zones: usize,
+    weights: usize,
+    zip_start: usize,
+    zip_count: usize,
+) -> LogisticsFixture {
+    let rate_cells = zones * weights * carriers.len() * service_count;
+    build_from(
+        &Profile {
+            name,
+            carriers,
+            service_count,
+            rate_cells,
+            zones,
+            weights,
+            zip_start,
+            zip_count,
+        },
+        CatalogPlacement::Embedded,
+    )
+}
+
 fn build(rate_cells: usize, placement: CatalogPlacement) -> LogisticsFixture {
     let profile = profile(rate_cells);
-    let rung = LADDER
-        .iter()
-        .find(|rung| rung.rate_cells == rate_cells)
-        .expect("BUG: profile() accepted a rate_cells value absent from LADDER");
+    match placement {
+        CatalogPlacement::Embedded => embedded_catalog(
+            profile.name,
+            profile.carriers,
+            profile.service_count,
+            profile.zones,
+            profile.weights,
+            profile.zip_start,
+            profile.zip_count,
+        ),
+        CatalogPlacement::External => build_from(&profile, placement),
+    }
+}
+
+fn build_from(profile: &Profile, placement: CatalogPlacement) -> LogisticsFixture {
     let capacity = match placement {
-        CatalogPlacement::Embedded => rung.source_bytes.max(rate_cells * 48),
+        CatalogPlacement::Embedded => profile.rate_cells * 48,
         CatalogPlacement::External => 64 * 1024,
     };
     let mut out = String::with_capacity(capacity);
@@ -236,7 +281,12 @@ fn build(rate_cells: usize, placement: CatalogPlacement) -> LogisticsFixture {
     let mut quote_spec_names = Vec::new();
     let mut quote_index = 0usize;
     for carrier in &profile.carriers {
-        let zone_tables = zone_tables(profile.service_count);
+        let zone_tables = zone_tables(
+            profile.service_count,
+            profile.zip_start,
+            profile.zip_count,
+            profile.zones,
+        );
         emit_zones_spec(&mut out, carrier, &zone_tables, placement);
         out.push('\n');
         for (service_index, service) in SERVICE_IDS
@@ -245,7 +295,7 @@ fn build(rate_cells: usize, placement: CatalogPlacement) -> LogisticsFixture {
             .enumerate()
             .take(profile.service_count)
         {
-            let cells = rate_cell_rows(service_index);
+            let cells = rate_cell_rows(service_index, profile.zones, profile.weights);
             emit_rates_spec(&mut out, carrier, service, &cells, placement);
             out.push('\n');
             let quote_name = format!("quote_{carrier}_{service}");
@@ -277,18 +327,9 @@ fn build(rate_cells: usize, placement: CatalogPlacement) -> LogisticsFixture {
     emit_rate_shop(&mut out, &quote_spec_names);
     out.push('\n');
 
-    if placement == CatalogPlacement::Embedded {
-        assert_eq!(
-            out.len(),
-            rung.source_bytes,
-            "logistics {} source diverged from the Java generator (actual {})",
-            profile.name,
-            out.len()
-        );
-    }
-
-    let limit_scale =
-        profile.rate_cells + profile.carriers.len() * ZIP3_COUNT * profile.service_count + 256;
+    let limit_scale = profile.rate_cells
+        + profile.carriers.len() * profile.zip_count * profile.service_count
+        + 256;
 
     LogisticsFixture {
         profile: profile.name,
@@ -388,6 +429,11 @@ fn fuel_bracket_rows(
         band_hi: BAND_OPEN_END.to_string(),
         pct: two_decimals(pct),
     });
+    assert_eq!(
+        rows.len(),
+        FUEL_BRACKET_ROWS,
+        "BUG: fuel bracket row count drifted from FUEL_BRACKET_ROWS"
+    );
     rows
 }
 
@@ -414,7 +460,8 @@ fn emit_fuel_spec(
 ) {
     writeln!(out, "spec {name}").expect("BUG: writing to String never fails");
     writeln!(out, "\"\"\"{doc}\"\"\"\n").expect("BUG: writing to String never fails");
-    out.push_str("uses brackets: fuel_bracket list\n");
+    out.push_str("uses fuel_bracket\n");
+    out.push_str("data brackets: fuel_bracket list\n");
     out.push_str("  -> key band\n");
     if placement == CatalogPlacement::Embedded {
         for row in rows {
@@ -437,13 +484,18 @@ struct ZoneRow {
     zone: usize,
 }
 
-fn zone_tables(service_count: usize) -> Vec<Vec<ZoneRow>> {
+fn zone_tables(
+    service_count: usize,
+    zip_start: usize,
+    zip_count: usize,
+    zones: usize,
+) -> Vec<Vec<ZoneRow>> {
     (0..service_count)
         .map(|service_index| {
-            (0..ZIP3_COUNT)
+            (zip_start..zip_start + zip_count)
                 .map(|zip3| ZoneRow {
                     dest_zip3: format!("{zip3:03}"),
-                    zone: 2 + (zip3 + service_index) % ZONES,
+                    zone: 2 + (zip3 + service_index) % zones,
                 })
                 .collect()
         })
@@ -471,13 +523,14 @@ fn emit_zones_spec(
 ) {
     writeln!(out, "spec zones_{carrier}").expect("BUG: writing to String never fails");
     out.push_str("\"\"\"ZIP3 → zone for ship-from origin (one warehouse chart).\"\"\"\n\n");
+    out.push_str("uses zip_zone\n");
     for (service_index, service) in SERVICE_IDS
         .iter()
         .copied()
         .enumerate()
         .take(zone_tables.len())
     {
-        writeln!(out, "uses {service}_zones: zip_zone list")
+        writeln!(out, "data {service}_zones: zip_zone list")
             .expect("BUG: writing to String never fails");
         out.push_str("  -> key dest_zip3\n");
         if placement == CatalogPlacement::Embedded {
@@ -509,13 +562,13 @@ struct RateCellRow {
     price: String,
 }
 
-fn rate_cell_rows(service_index: usize) -> Vec<RateCellRow> {
-    let mut rows = Vec::with_capacity(GROUND_CELLS);
-    for zone_index in 0..ZONES {
+fn rate_cell_rows(service_index: usize, zones: usize, weights: usize) -> Vec<RateCellRow> {
+    let mut rows = Vec::with_capacity(zones * weights);
+    for zone_index in 0..zones {
         let zone = 2 + zone_index;
-        for lb in 1..=WEIGHTS {
+        for lb in 1..=weights {
             let price = 8.0 + zone as f64 * 1.15 + lb as f64 * 0.42 + service_index as f64 * 0.75;
-            let band_hi = if lb == WEIGHTS {
+            let band_hi = if lb == weights {
                 BAND_OPEN_END
             } else {
                 (lb + 1) as i32
@@ -555,10 +608,12 @@ fn emit_rates_spec(
     writeln!(out, "spec rates_{carrier}_{service}").expect("BUG: writing to String never fails");
     writeln!(
         out,
-        "\"\"\"Zone × lb rate card ({GROUND_CELLS} cells).\"\"\"\n"
+        "\"\"\"Zone × lb rate card ({} cells).\"\"\"\n",
+        cells.len()
     )
     .expect("BUG: writing to String never fails");
-    out.push_str("uses cells: rate_cell list\n");
+    out.push_str("uses rate_cell\n");
+    out.push_str("data cells: rate_cell list\n");
     out.push_str("  -> key zone, band\n");
     if placement == CatalogPlacement::Embedded {
         for row in cells {

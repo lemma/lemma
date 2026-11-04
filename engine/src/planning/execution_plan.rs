@@ -5,49 +5,61 @@
 //! ([`ExecutionPlan::normal_forms`]) addressed by [`NormalFormId`], plus all data —
 //! no spec structure needed during evaluation.
 //!
+//! Imports are flattened at planning: every data and rule of an imported spec is an
+//! entry of the consumer plan under its `uses` hop, and a row written in a data list is
+//! an instance under the list path (`staff.1`). Evaluation has one context.
+//!
 //! Reliability model:
 //! - [`Show`] is the IO contract surface for consumers (data and rule outputs).
 //!   IO compatibility is the consumer-facing guarantee.
 
+use crate::computation::arithmetic::SignatureIndex;
+use crate::computation::rational::RationalInteger;
+use crate::computation::units::{conversion_target_declares_unit, owning_type_declares_unit_name};
+use crate::computation::{OperationResult, VetoType};
+use crate::engine::write_effective_window;
+use crate::limits::ResourceLimits;
 use crate::literals::Value;
-use crate::parsing::ast::{DateTimeValue, EffectiveDate, LemmaSpec};
+use crate::parsing::ast::{canonical_logical_name, DateTimeValue, EffectiveDate, LemmaSpec};
 use crate::parsing::source::{Source, SourceType};
-use crate::planning::graph::absolute_import_member_path;
-use crate::planning::graph::peel_rule_from;
 use crate::planning::graph::Graph;
 use crate::planning::graph::ResolvedSpecTypes;
-use crate::planning::instance_list::{row_end_type, DataSource, InstanceListSource};
+use crate::planning::instance_list::InstanceListSource;
 use crate::planning::normalize::{
-    data_path_result_type, lookup_data_definition, DispatchRegion, NormalForm, NormalFormId,
+    build_normalized_rule, data_path_result_type, DispatchRegion, NormalForm, NormalFormId,
     NormalFormInterner, NormalizeContext, NormalizedRule,
 };
 use crate::planning::semantics::{
-    value_kind_matches_spec, ComparisonComputation, DataDefinition, DataPath, ImportOverlay,
-    LemmaType, LiteralValue, PathSegment, ReferenceEnd, ReferenceTarget, RowEnd, RulePath,
-    SpecIdentity, SpecInstance, TypeSpecification, ValueKind,
+    lemma_type_with_display_binding, option_detail_line, primitive_number_arc, primitive_ratio_arc,
+    value_kind_matches_spec, BoundValueKind, ComparisonComputation, DataDefinition, DataPath,
+    LemmaType, LiteralValue, PathSegment, ReferenceEnd, ReferenceTarget, RowBinding, RowEnd,
+    RowInstance, RulePath, SpecIdentity, TypeFamily, TypeSpecification, TypedLiteral, ValueKind,
 };
-use crate::planning::show_expression::{
-    prefix_show_expression, project_depends_on_rules, show_branches_from,
-};
+use crate::planning::show_expression::{project_depends_on_rules, show_branches_from, ShowScope};
 use crate::planning::spec_set::LemmaSpecSet;
+use crate::planning::spec_value::{RowFieldRead, SpecCandidates};
+use crate::planning::typing::MeasureScope;
 use crate::planning::unit_family::FamilyUnitCatalog;
-use crate::result_value::RuleResultValue;
+use crate::planning::unit_index::UnitIndex;
+use crate::result_value::{
+    rule_result_value_failure_message, type_scoped_result_value_from_literal, RuleResultValue,
+};
 use crate::Error;
 use indexmap::IndexMap;
-use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 
 pub use crate::planning::show_expression::{
     ShowBranch, ShowConversionTarget, ShowExpression, ShowListCommand, ShowRule, SortDirection,
 };
 
-/// Show-rule positions that need one [`ExecutionPlan::data`] slot.
+/// Rule positions that need one [`ExecutionPlan::data`] slot.
 ///
-/// For an instance list, [`Self::fields`] is parallel to that list's row-template
-/// `data` (which rules need each row field through this list). Otherwise `fields`
-/// is empty.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+/// For an instance list, [`Self::fields`] is parallel to the row template's row fields
+/// ([`ExecutionPlan::row_field_count`]): which rules need each row field of
+/// evaluation-data rows through this list.
+/// Otherwise `fields` is empty.
+#[derive(Debug, Clone, Default)]
 pub(crate) struct NeededByRules {
     pub rules: Vec<u32>,
     pub fields: Vec<Vec<u32>>,
@@ -58,10 +70,11 @@ pub(crate) struct NeededByRules {
 /// Contains drift-free normal-form equations in a table, named rule roots, and all data.
 /// Self-contained structure - no spec lookups required during evaluation.
 ///
-/// A plan is immutable once stored. Show-cache fields such as `effective_to` depend on
-/// neighboring versions, and those boundaries are part of `planning_input`, so a plan is
-/// reused exactly when its inputs are unchanged and rebuilt otherwise.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// A plan is immutable once stored. A committed plan is reused only when its own spec's
+/// bytes are still the spec set's `Arc` (kept while the version's bytes are unchanged),
+/// its version's boundaries (show-cache fields such as `effective_to`) and the
+/// slices its edges resolve to are unchanged, and every one of those slices is reused.
+#[derive(Debug, Clone)]
 pub struct ExecutionPlan {
     /// Main spec name
     pub spec_name: String,
@@ -69,14 +82,16 @@ pub struct ExecutionPlan {
     /// Optional commentary from the `"""..."""` block in the spec source.
     pub commentary: Option<String>,
 
-    /// Per-data data in definition order: value, type-only, or spec reference.
+    /// This spec's own data slots in definition order, every path local. A `uses`
+    /// import is one [`DataDefinition::Import`] slot holding its row over the
+    /// template plan; spec-written list rows live in their [`RowStore`].
     pub data: IndexMap<DataPath, DataDefinition>,
 
     /// Dense table of interned NormalForm cells — the expanded shared graph.
     /// Index = [`NormalFormId`].
-    pub(crate) normal_forms: Vec<NormalForm>,
+    pub normal_forms: Vec<NormalForm>,
 
-    /// Named rules → root of each rule in [`Self::normal_forms`].
+    /// This spec's own rules → root of that rule in [`Self::normal_forms`].
     /// Insertion order is planning topo order (deps before consumers).
     pub rules: IndexMap<RulePath, ExecutableRule>,
 
@@ -94,15 +109,14 @@ pub struct ExecutionPlan {
     pub resolved_types: ResolvedSpecTypes,
 
     /// Precomputed measure/ratio family unit expansion for rule results and show rule schemas.
-    #[serde(with = "crate::snapshot::shared::arc")]
-    pub family_units: Arc<FamilyUnitCatalog>,
+    pub(crate) family_units: Arc<FamilyUnitCatalog>,
 
     /// Reverse index: canonical-form unit signature `Vec<(unit_name, exponent)>` →
     /// (unit_name, owning type). Built from expression-scope units during planning so
     /// cross-type Multiply/Divide arithmetic can deterministically resolve a combined
     /// signature back to a single named unit. Ambiguous signatures (the same key matched
     /// by units in two distinct types) are rejected at planning time.
-    pub signature_index: crate::computation::arithmetic::SignatureIndex,
+    pub signature_index: SignatureIndex,
 
     pub effective: EffectiveDate,
 
@@ -117,23 +131,29 @@ pub struct ExecutionPlan {
     /// Source type of the LemmaSpec version this plan was built from.
     pub source_type: Option<SourceType>,
 
-    /// Per [`Self::data`] position: show-rule positions that need that slot (through
-    /// rule references), alphabetical rule-name order. Non-promptable slots have empty
-    /// `rules`. Instance-list slots also carry `fields` parallel to the row template's
-    /// bindable fields. `len() == data.len()`. Built in [`build_execution_plan`].
+    /// Per [`Self::data`] position: [`Self::rules`] positions that need that slot
+    /// (through rule references). Non-promptable slots have empty `rules`.
+    /// Instance-list slots also carry `fields` parallel to the row template's `data`.
+    /// `len() == data.len()`. Built in [`build_execution_plan`].
     pub(crate) needed_by_rules: Vec<NeededByRules>,
-
-    /// Named-`uses` members (not in [`Self::data`]): show-rule positions that need each
-    /// nested path. Built with [`Self::needed_by_rules`].
-    pub(crate) nested_needed_by_rules: IndexMap<DataPath, Vec<u32>>,
 
     /// Prefill/suggestion [`BoundValueKind`]s for show, keyed by data path.
     /// Built once at plan time; [`RuleResultValue`] is expanded at show.
     pub(crate) data_display: IndexMap<DataPath, ShowDataCache>,
 
-    /// Show rule graph (type, branches, depends_on_rules), keyed by local rule path.
-    /// Built in [`build_execution_plan`].
+    /// Public Show rule catalog: this spec's own rules only (empty path). Built in
+    /// [`build_execution_plan`]. Reachable import rules stay on Graph `show_edges` /
+    /// `show_imports` for planning and nested-data attribution.
     pub(crate) show_rules: IndexMap<RulePath, ShowRule>,
+
+    /// Positions in [`Self::show_rules`] of the Show rules that need each data path, in
+    /// input-key order: every reader of data of `uses` imports by composed path (`i.x`),
+    /// and the readers of data of this plan that [`Self::needed_by_rules`] does not list
+    /// (local rules that need it only through an import).
+    pub(crate) show_needed_by: IndexMap<DataPath, Vec<u32>>,
+
+    /// Template identity of every import data path in [`Self::show_needed_by`].
+    pub(crate) show_import_data: IndexMap<DataPath, SpecIdentity>,
 
     /// Every [`DataDefinition::Reference`] path → where its chain ends.
     /// Copied from [`Graph::reference_ends`] in [`build_execution_plan`].
@@ -141,9 +161,9 @@ pub struct ExecutionPlan {
     pub(crate) reference_ends: IndexMap<DataPath, ReferenceEnd>,
 
     /// Precomputed `input_key` → `DataPath` index for [`EvaluateData::resolve`].
-    /// Built once at plan time from [`ExecutionPlan::input_key_entries`]. Keyed lookups
-    /// index this map; they do not walk the data tree.
-    pub(crate) input_key_index: IndexMap<String, DataPath>,
+    /// One entry per [`Self::data`] slot. Keyed lookups index this map; they do not
+    /// walk the data tree.
+    pub input_key_index: IndexMap<String, DataPath>,
 
     /// Precomputed `input_key` → `RulePath` for [`Self::show_rules`].
     /// Built once so [`Self::get_rule`] is O(1) without allocating per candidate.
@@ -154,50 +174,76 @@ pub struct ExecutionPlan {
     /// the value table by [`NormalFormId`] instead of a parallel path map.
     pub(crate) data_leaf: IndexMap<DataPath, NormalFormId>,
 
-    /// Template plans of instance-list row specs, by row spec. Each row of an
-    /// instance list is evaluated in its own context over its template.
-    #[serde(with = "crate::snapshot::shared::arc_map")]
+    /// Every reference target through `uses` hops (`i.x`, `i.j.r`) that a binding
+    /// resolving in this plan's context names → its member cell: the read of the
+    /// target on the import row this plan holds.
+    pub(crate) member_targets: IndexMap<ReferenceTarget, NormalFormId>,
+
+    /// Template plans of instance-list row specs, by row spec. Rows supplied by
+    /// evaluation data (and option rows) are checked and evaluated against them.
     pub(crate) row_templates: BTreeMap<SpecIdentity, Arc<ExecutionPlan>>,
 
     /// This plan's own spec. Rows of its self-lists read this plan as their template.
     pub(crate) identity: SpecIdentity,
 
-    /// Canonical bytes this plan was built from (see [`crate::planning::planning_input`]).
-    /// A committed plan is reused only when these bytes equal the next pass's bytes.
-    #[serde(with = "crate::snapshot::shared::arc")]
-    pub(crate) planning_input: Arc<Vec<u8>>,
+    /// The `Arc` of this plan's own spec version, shared with its [`LemmaSpecSet`].
+    pub(crate) own_spec: Arc<LemmaSpec>,
 
-    /// Instances each local rule can yield, relative to this plan (empty when not
-    /// spec-valued). Copied from [`Graph::rule_candidates`]; a consumer re-qualifies
-    /// them under its `uses` hops.
-    pub(crate) rule_candidates: BTreeMap<RulePath, Vec<SpecInstance>>,
+    /// Slices this plan's dependency edges resolved to, in edge order, self-edges left
+    /// out.
+    pub(crate) edges: Vec<SpecIdentity>,
 
-    /// Rules read on rows of this plan's self-lists, in [`Self::rules`] order. A row
-    /// tree fills them bottom-up, so a parent reads its children's values without
-    /// evaluating down the tree.
+    /// Instances each rule can yield (empty when not spec-valued). Copied from
+    /// [`Graph::rule_candidates`].
+    pub(crate) rule_candidates: BTreeMap<RulePath, SpecCandidates>,
+
+    /// Rules read on evaluation-data rows of this plan's self-lists, in [`Self::rules`]
+    /// order. A row tree fills them bottom-up, so a parent reads its children's values
+    /// without evaluating down the tree.
     pub(crate) self_row_rules: Vec<RulePath>,
 
     /// Source rows of every [`DataDefinition::InstanceList`] path.
     pub(crate) instance_lists: IndexMap<DataPath, InstanceListSource>,
 
     /// Per [`Self::normal_forms`] cell: bit `L` is set when the cell reads the current
-    /// row of the instance-list command at level `L` that encloses it. Such cells
+    /// list row at level `L` that encloses it (`RowField` or `RowValue`). Such cells
     /// differ per row and are never cached in the value table.
     pub(crate) row_mask: Vec<u32>,
+
+    /// Precomputed initial value table (length = `normal_forms.len()`): plan defaults
+    /// and pre-evaluated data-target reference chains in their data-leaf slots, `None` elsewhere.
+    pub(crate) initial_values: Vec<Option<OperationResult>>,
+
+    /// Data-leaf cell ids that must run a walk step before `ready` returns their
+    /// stored value: an options check, or a stored `UnscaledMeasure` to settle.
+    pub(crate) walk_settled_leaves: Vec<NormalFormId>,
+
+    /// Per [`Self::normal_forms`] cell: the [`RuleIndex`] of the rule a `rule_ref`
+    /// cell reads, `None` for every other cell.
+    pub(crate) rule_ref_indexes: Vec<Option<RuleIndex>>,
+
+    /// Per [`Self::data`] slot: its [`Self::data_leaf`] cell. Row bindings travel by
+    /// slot and land in the value table through this.
+    pub(crate) data_slot_leaves: Vec<NormalFormId>,
+
+    /// Scale target of every dynamic unit this plan's spec declares, in this plan's
+    /// coordinates, keyed by family and unit name. A dynamic unit another spec declares
+    /// has no entry here.
+    pub(crate) unit_scale_targets: IndexMap<(TypeFamily, String), ReferenceTarget>,
 }
 
 /// Plan-time prefill/suggestion for one data path (show cache).
 ///
-/// Stores domain [`BoundValueKind`] — postcard-safe. [`RuleResultValue`] is built at
-/// show time (JSON / API boundary), not snapshotted.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Stores domain [`BoundValueKind`]. [`RuleResultValue`] is built at
+/// show time (JSON / API boundary).
+#[derive(Debug, Clone)]
 pub(crate) struct ShowDataCache {
-    pub value: Option<crate::planning::semantics::BoundValueKind>,
-    pub suggestion: Option<crate::planning::semantics::BoundValueKind>,
+    pub value: Option<BoundValueKind>,
+    pub suggestion: Option<BoundValueKind>,
 }
 
 /// A named rule's root in the normal-form table, plus declaration metadata.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct ExecutableRule {
     /// Unique identifier for this rule
     pub path: RulePath,
@@ -212,8 +258,12 @@ pub struct ExecutableRule {
     /// planning, equal to validation's inferred type. The root cell at
     /// `normal_form` has the same value type but may carry a different name
     /// after rewrites (`x + 0` → `x`), so the API type reads this field.
-    #[serde(with = "crate::snapshot::shared::arc")]
     pub rule_type: Arc<LemmaType>,
+
+    /// Scale targets of every dynamic unit of the families this rule's nodes hold, in
+    /// this plan's coordinates. Evaluated before the rule body; topological order puts
+    /// local scale rules first.
+    pub scale_dependencies: Vec<ReferenceTarget>,
 }
 
 impl ExecutableRule {
@@ -225,7 +275,7 @@ impl ExecutableRule {
 /// Position of a rule in [`ExecutionPlan::rules`]; indexes the evaluation
 /// context's `rule_values` table. Plain `Copy` so the evaluation walk can
 /// unwind to a rule without cloning its [`RulePath`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) struct RuleIndex(usize);
 
 impl RuleIndex {
@@ -246,6 +296,20 @@ pub(crate) fn plan_at<'a>(
         .map(|(_, plan)| plan.as_ref())
 }
 
+fn assert_list_elements_determined(root: &LemmaType) {
+    let mut stack = vec![root];
+    while let Some(lemma_type) = stack.pop() {
+        if let TypeSpecification::List { element, .. } = &lemma_type.specifications {
+            assert!(
+                !element.is_undetermined(),
+                "BUG: validated List type '{}' has an Undetermined element type",
+                lemma_type.name()
+            );
+            stack.push(element);
+        }
+    }
+}
+
 /// Builds an execution plan from a Graph for one temporal slice.
 ///
 /// `interner` dedups cons cells while the plan is built. The plan's dense `normal_forms`
@@ -255,9 +319,10 @@ pub(crate) fn build_execution_plan(
     graph: &Graph<'_>,
     resolved_types: ResolvedSpecTypes,
     effective: &EffectiveDate,
-    limits: &crate::limits::ResourceLimits,
+    limits: &ResourceLimits,
     interner: &mut NormalFormInterner,
-    planning_input: Arc<Vec<u8>>,
+    own_spec: Arc<LemmaSpec>,
+    edges: Vec<SpecIdentity>,
 ) -> Result<ExecutionPlan, Vec<Error>> {
     let rule_order = graph.rule_order();
 
@@ -308,11 +373,14 @@ pub(crate) fn build_execution_plan(
         return Err(undetermined_errors);
     }
 
+    for lemma_type in resolved_types.resolved.values() {
+        assert_list_elements_determined(lemma_type);
+    }
+
     let signature_index = resolved_types.signature_index.clone();
 
     let family_units = Arc::new(FamilyUnitCatalog::build(&resolved_types.unit_index));
 
-    let reference_ends = graph.reference_ends();
     let rule_types: HashMap<RulePath, Arc<LemmaType>> = graph
         .rules()
         .iter()
@@ -320,66 +388,36 @@ pub(crate) fn build_execution_plan(
         .collect();
     let mut rules: IndexMap<RulePath, ExecutableRule> = IndexMap::new();
     let mut completed_rules: HashMap<RulePath, NormalFormId> = HashMap::new();
-    let mut show_rules: IndexMap<RulePath, ShowRule> = IndexMap::new();
+    let mut local_show_rules: HashMap<RulePath, ShowRule> = HashMap::new();
 
-    // Local rules plus depends_on_rules closure = Show.rules universe.
-    let mut reachable: HashSet<RulePath> = HashSet::new();
-    let mut stack: Vec<RulePath> = graph
-        .rules()
-        .keys()
-        .filter(|path| path.segments.is_empty())
-        .cloned()
-        .collect();
-    while let Some(path) = stack.pop() {
-        if !reachable.insert(path.clone()) {
-            continue;
-        }
-        let node = graph
-            .rules()
-            .get(&path)
-            .expect("BUG: reachable rule path missing from graph.rules");
-        for dep in &node.depends_on_rules {
-            // Named-`uses` template rules are outside this graph; peel at eval.
-            if graph.has_local_rule(dep) && !reachable.contains(dep) {
-                stack.push(dep.clone());
-            }
-        }
-    }
-    let (show_keys, import_show_rules) = import_show_universe(graph, &reachable);
-
-    let list_element_identities: HashSet<SpecIdentity> = graph
-        .instance_lists()
-        .sources
-        .values()
-        .map(|source| source.identity.clone())
-        .collect();
+    let show_imports = graph.show_imports();
+    let show_edges = graph.show_edges();
+    let show_order = graph.show_order();
+    let show_keys: HashSet<RulePath> = show_edges.keys().cloned().collect();
+    let catalog_keys: HashSet<RulePath> = rule_order.iter().cloned().collect();
 
     for rule_path in rule_order {
-        if !reachable.contains(rule_path) {
-            continue;
-        }
         let rule_node = graph.rules().get(rule_path).expect(
             "bug: rule from topological sort not in graph - validation should have caught this",
         );
 
-        let measure_scope = crate::planning::typing::MeasureScope {
+        let measure_scope = MeasureScope {
             unit_index: &resolved_types.unit_index,
             signature_index: &resolved_types.signature_index,
+            named_types: &resolved_types.resolved,
         };
         let normalize_ctx = NormalizeContext {
             data: &data,
             row_templates: &graph.instance_lists().templates,
             self_identity: &graph.instance_lists().self_identity,
-            list_element_identities: &list_element_identities,
             rule_order,
             measure_scope,
             max_normalized_expression_nodes: limits.max_normalized_expression_nodes,
         };
-        let normalized = crate::planning::normalize::build_normalized_rule(
+        let normalized = build_normalized_rule(
             &normalize_ctx,
             &completed_rules,
             &rule_types,
-            reference_ends,
             &rule_node.expression,
             Some(rule_node.source.clone()),
             interner,
@@ -402,7 +440,7 @@ pub(crate) fn build_execution_plan(
         );
         completed_rules.insert(rule_path.clone(), body);
 
-        show_rules.insert(
+        local_show_rules.insert(
             rule_path.clone(),
             ShowRule {
                 lemma_type: family_units.rule_type_for_show(rule_node.rule_type.as_ref()),
@@ -410,9 +448,13 @@ pub(crate) fn build_execution_plan(
                 branches: show_branches_from(
                     &rule_node.expression,
                     &rule_node.branches,
-                    &show_keys,
+                    &ShowScope {
+                        show_keys: &show_keys,
+                        data: &data,
+                        templates: &graph.instance_lists().templates,
+                    },
                 ),
-                depends_on_rules: project_depends_on_rules(&rule_node.depends_on_rules, &show_keys),
+                depends_on_rules: project_depends_on_rules(&show_edges[rule_path], &catalog_keys),
             },
         );
 
@@ -423,83 +465,99 @@ pub(crate) fn build_execution_plan(
                 normal_form: body,
                 source: rule_node.source.clone(),
                 rule_type: source_type,
+                scale_dependencies: Vec::new(),
             },
         );
     }
 
-    for (path, show_rule) in import_show_rules {
-        show_rules.insert(path, show_rule);
+    let unit_scale_targets = graph.unit_scale_targets().clone();
+    for (rule_path, rule) in rules.iter_mut() {
+        let families = &graph
+            .rules()
+            .get(rule_path)
+            .expect("BUG: executable rule missing from its graph")
+            .scale_families;
+        rule.scale_dependencies = unit_scale_targets
+            .iter()
+            .filter(|((family, _), _)| families.contains(family))
+            .map(|(_, target)| target.clone())
+            .collect();
+    }
+    let scale_member_targets: Vec<ReferenceTarget> = unit_scale_targets
+        .values()
+        .filter(|target| !reference_target_segments(target).is_empty())
+        .cloned()
+        .collect();
+    let mut member_target_paths: Vec<&ReferenceTarget> = Vec::new();
+    crate::planning::graph::for_each_owned_reference(
+        &data,
+        graph.instance_lists(),
+        |_, _, target| {
+            if !reference_target_segments(target).is_empty()
+                && !member_target_paths.contains(&target)
+            {
+                member_target_paths.push(target);
+            }
+        },
+    );
+    for target in &scale_member_targets {
+        if !member_target_paths.contains(&target) {
+            member_target_paths.push(target);
+        }
+    }
+    let mut member_target_roots: Vec<NormalFormId> = Vec::new();
+    for target in &member_target_paths {
+        let normalize_ctx = NormalizeContext {
+            data: &data,
+            row_templates: &graph.instance_lists().templates,
+            self_identity: &graph.instance_lists().self_identity,
+            rule_order,
+            measure_scope: MeasureScope {
+                unit_index: &resolved_types.unit_index,
+                signature_index: &resolved_types.signature_index,
+                named_types: &resolved_types.resolved,
+            },
+            max_normalized_expression_nodes: limits.max_normalized_expression_nodes,
+        };
+        let normalized = build_normalized_rule(
+            &normalize_ctx,
+            &completed_rules,
+            &rule_types,
+            &member_target_expression(target),
+            None,
+            interner,
+        )
+        .map_err(|error| vec![error])?;
+        member_target_roots.push(normalized.body);
     }
 
-    let root_ids: Vec<NormalFormId> = rules.values().map(|rule| rule.normal_form).collect();
-    let (mut normal_forms, remapped_roots) = interner.extract_reachable(&root_ids);
+    let root_ids: Vec<NormalFormId> = rules
+        .values()
+        .map(|rule| rule.normal_form)
+        .chain(member_target_roots)
+        .collect();
+    let (normal_forms, mut remapped_roots) = interner.extract_reachable(&root_ids);
+    let remapped_members = remapped_roots.split_off(rules.len());
     for (rule, remapped) in rules.values_mut().zip(remapped_roots) {
         rule.normal_form = remapped;
     }
-
-    // Reachable named-`uses` rules: ExecutableRule + ImportRule leaf so run/show
-    // can address `alias.rule` like a local rule (eval peels into the template).
-    let import_rule_paths: Vec<RulePath> = show_rules
-        .keys()
-        .filter(|path| !path.segments.is_empty())
+    let member_targets: IndexMap<ReferenceTarget, NormalFormId> = member_target_paths
+        .into_iter()
         .cloned()
+        .zip(remapped_members)
         .collect();
-    for path in import_rule_paths {
-        if rules.contains_key(&path) {
-            continue;
-        }
-        let (template, local) = peel_rule_from(&data, &graph.instance_lists().templates, &path)
-            .unwrap_or_else(|| {
-                panic!(
-                    "BUG: import show rule '{}' does not peel while building ExecutableRule",
-                    path.input_key()
-                )
-            });
-        let template_rule = template.rules.get(local).unwrap_or_else(|| {
-            panic!(
-                "BUG: peeled import rule '{}' missing from template.rules",
-                path.input_key()
-            )
-        });
-        let id = NormalFormId::from_index(normal_forms.len());
-        normal_forms.push(NormalForm {
-            kind: crate::planning::normalize::NormalFormKind::Leaf(
-                crate::planning::normalize::LeafKind::ImportRule(path.clone()),
-            ),
-            result_type: Arc::clone(&template_rule.rule_type),
-            fold_types: Vec::new(),
-            source: Some(template_rule.source.clone()),
-            origin: None,
-            rule_ref: None,
-        });
-        rules.insert(
-            path.clone(),
-            ExecutableRule {
-                path: path.clone(),
-                normal_form: id,
-                source: template_rule.source.clone(),
-                rule_type: Arc::clone(&template_rule.rule_type),
-            },
-        );
-    }
 
-    let mut ordered: IndexMap<RulePath, ExecutableRule> = IndexMap::with_capacity(rules.len());
-    for path in graph.execution_order() {
-        match rules.shift_remove(path) {
-            Some(rule) => {
-                ordered.insert(path.clone(), rule);
-            }
-            None => assert!(
-                graph.has_local_rule(path) && !reachable.contains(path),
-                "BUG: execution-order rule '{}' has no ExecutableRule",
-                path.input_key()
-            ),
+    let mut show_rules: IndexMap<RulePath, ShowRule> =
+        IndexMap::with_capacity(local_show_rules.len());
+    for path in show_order {
+        if let Some(local) = local_show_rules.remove(path) {
+            show_rules.insert(path.clone(), local);
         }
     }
-    // Template-internal named-`uses` rules (Show deps of reached ones): every owner
-    // rule their overlays bind is already bound by a reached one, so already ordered.
-    ordered.extend(rules);
-    let rules = ordered;
+    assert!(
+        local_show_rules.is_empty(),
+        "BUG: local rules missing from the Show order"
+    );
 
     let mut plan = ExecutionPlan {
         spec_name: main_spec.name.clone(),
@@ -523,17 +581,24 @@ pub(crate) fn build_execution_plan(
         start_line: 1,
         source_type: None,
         needed_by_rules: Vec::new(),
-        nested_needed_by_rules: IndexMap::new(),
         data_display: IndexMap::new(),
         show_rules,
         // Filled below after validation succeeds.
+        show_needed_by: IndexMap::new(),
+        show_import_data: show_imports
+            .data
+            .iter()
+            .map(|(path, identity)| (path.clone(), identity.clone()))
+            .collect(),
         reference_ends: IndexMap::new(),
         input_key_index: IndexMap::new(),
         show_rule_index: IndexMap::new(),
         data_leaf: IndexMap::new(),
+        member_targets,
         row_templates: graph.instance_lists().templates.clone(),
         identity: graph.instance_lists().self_identity.clone(),
-        planning_input,
+        own_spec,
+        edges,
         rule_candidates: graph
             .rule_candidates()
             .iter()
@@ -542,6 +607,11 @@ pub(crate) fn build_execution_plan(
         self_row_rules: Vec::new(),
         instance_lists: graph.instance_lists().sources.clone(),
         row_mask: Vec::new(),
+        initial_values: Vec::new(),
+        walk_settled_leaves: Vec::new(),
+        rule_ref_indexes: Vec::new(),
+        data_slot_leaves: Vec::new(),
+        unit_scale_targets,
     };
 
     let mut plan_errors = validate_literal_data_against_types(&plan);
@@ -553,17 +623,8 @@ pub(crate) fn build_execution_plan(
     }
 
     plan.reference_ends = graph.reference_ends().clone();
-    let input_keys: Vec<DataPath> = plan
-        .input_key_entries()
-        .into_iter()
-        .map(|(path, _)| path.clone())
-        .collect();
-    plan.data_leaf = ensure_data_leaves(
-        &mut plan.normal_forms,
-        &input_keys,
-        &plan.data,
-        &plan.row_templates,
-    );
+    let input_keys: Vec<DataPath> = plan.data.keys().cloned().collect();
+    plan.data_leaf = ensure_data_leaves(&mut plan.normal_forms, &input_keys, &plan.data);
     plan.input_key_index = input_keys
         .iter()
         .map(|path| (path.input_key(), path.clone()))
@@ -576,71 +637,168 @@ pub(crate) fn build_execution_plan(
     for (path, &id) in &plan.data_leaf {
         debug_assert_eq!(
             plan.result_type(id).as_ref(),
-            data_path_result_type(&plan.data, path, &plan.row_templates).as_ref(),
+            data_path_result_type(&plan.data, path).as_ref(),
             "BUG: DataPath leaf result_type drift for {path}"
         );
     }
-    let (needed, nested_needed) = plan.build_needed_by_rules();
-    plan.needed_by_rules = needed;
-    plan.nested_needed_by_rules = nested_needed;
+    let bits_by_rule = plan.build_needed_by_rules();
+    plan.show_needed_by =
+        plan.build_show_needed_by(show_order, show_edges, show_imports, &bits_by_rule);
+    plan.fill_row_field_needs(&bits_by_rule);
     plan.row_mask = build_row_mask(&plan.normal_forms).map_err(|error| vec![error])?;
     plan.self_row_rules = self_row_rules(&plan);
+    plan.populate_evaluation_tables();
+    validate_option_rules(&plan)?;
     Ok(plan)
 }
 
-/// Bitset for `identity`'s bindable template fields ([`ExecutionPlan::nested_input_keys`]).
+/// The `uses` hops a reference target is read through; empty for a target of the plan itself.
+pub(crate) fn reference_target_segments(target: &ReferenceTarget) -> &[PathSegment] {
+    match target {
+        ReferenceTarget::Data(path) => &path.segments,
+        ReferenceTarget::Rule(rule) => &rule.segments,
+    }
+}
+
+/// `i.j.x` as a member read on the plan's import slot `i`: the expression a member
+/// target cell lowers.
+fn member_target_expression(target: &ReferenceTarget) -> crate::planning::semantics::Expression {
+    let (first, rest) = reference_target_segments(target)
+        .split_first()
+        .expect("BUG: a member target has a `uses` hop");
+    let name = match target {
+        ReferenceTarget::Data(path) => path.data.clone(),
+        ReferenceTarget::Rule(rule) => rule.rule.clone(),
+    };
+    let mut table = crate::parsing::arena::ExprTable::default();
+    let base = table.push(
+        crate::planning::semantics::ExpressionKind::DataPath(DataPath::local(
+            first.uses.to_string(),
+        )),
+        None,
+    );
+    let root = table.push(
+        crate::planning::semantics::ExpressionKind::SpecMember {
+            base,
+            path: rest
+                .iter()
+                .map(|segment| segment.uses.to_string())
+                .collect(),
+            name,
+        },
+        None,
+    );
+    crate::planning::semantics::Expression::new(table, root)
+}
+
+/// Rule the options of data `path` come from: the rule named by the slot's type, in
+/// the spec that declared the slot (the hops of `path`). `None` when the type has no
+/// options rule.
+pub(crate) fn options_rule_path(data_path: &DataPath, lemma_type: &LemmaType) -> Option<RulePath> {
+    let name = lemma_type.options_rule()?;
+    Some(RulePath {
+        segments: data_path.segments.clone(),
+        rule: name.to_string(),
+    })
+}
+
+fn validate_option_rules(plan: &ExecutionPlan) -> Result<(), Vec<Error>> {
+    let mut errors = Vec::new();
+    for (path, definition) in &plan.data {
+        let Some(lemma_type) = definition.schema_type() else {
+            continue;
+        };
+        let owners = option_owners(lemma_type);
+        for owner in owners {
+            // The owner's own rule: a list's element is checked as its own owner.
+            let Some(name) = &owner.options.rule else {
+                continue;
+            };
+            let rule_path = RulePath {
+                segments: path.segments.clone(),
+                rule: name.clone(),
+            };
+            let Some(rule) = plan.rules.get(&rule_path) else {
+                errors.push(Error::validation(
+                    format!("options rule '{name}' does not exist"),
+                    None,
+                    None::<String>,
+                ));
+                continue;
+            };
+            let TypeSpecification::List { element, .. } = &rule.rule_type.specifications else {
+                errors.push(Error::validation(
+                    format!("options rule '{name}' must return a list"),
+                    None,
+                    None::<String>,
+                ));
+                continue;
+            };
+            if !option_element_matches(owner, element) {
+                errors.push(Error::validation(
+                    format!(
+                        "options rule '{name}' returns {}, not a list of {}",
+                        rule.rule_type.name(),
+                        owner.name()
+                    ),
+                    None,
+                    None::<String>,
+                ));
+            }
+        }
+    }
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors)
+    }
+}
+
+fn option_owners(lemma_type: &LemmaType) -> Vec<&LemmaType> {
+    let mut owners = vec![lemma_type];
+    if let TypeSpecification::List { element, .. } = &lemma_type.specifications {
+        owners.push(element.as_ref());
+    }
+    owners
+}
+
+fn option_element_matches(owner: &LemmaType, element: &LemmaType) -> bool {
+    match (&owner.specifications, &element.specifications) {
+        (TypeSpecification::Spec { spec: left }, TypeSpecification::Spec { spec: right }) => {
+            left == right
+        }
+        _ => {
+            owner.has_same_base_type(element)
+                && !matches!(owner.specifications, TypeSpecification::Spec { .. })
+        }
+    }
+}
+
+/// Bitset over the row fields ([`ExecutionPlan::row_field_position`]) of rows of `identity`.
 fn row_bits_entry<'a>(
     plan: &ExecutionPlan,
     row_bits: &'a mut BTreeMap<SpecIdentity, Vec<u64>>,
     identity: &SpecIdentity,
 ) -> &'a mut Vec<u64> {
-    let words = plan
-        .row_template(identity)
-        .nested_input_keys()
-        .len()
-        .div_ceil(64);
+    let words = plan.row_template(identity).row_field_count().div_ceil(64);
     row_bits
         .entry(identity.clone())
         .or_insert_with(|| vec![0u64; words])
 }
 
-fn template_bindable_field_index(template: &ExecutionPlan, path: &DataPath) -> Option<usize> {
-    template
-        .nested_input_keys()
-        .iter()
-        .position(|(candidate, _)| candidate == path)
-}
-
+/// Set the bit of the slot an evaluation-data row binds when a rule reads `path` on it.
 fn mark_template_data_path(template: &ExecutionPlan, path: &DataPath, bits: &mut [u64]) {
-    let target = match template.peel_data(path) {
-        Some((_, _, DataDefinition::InstanceList { .. })) => Some(path),
-        Some((_, _, DataDefinition::Value { .. } | DataDefinition::TypeDeclaration { .. })) => {
-            Some(path)
-        }
-        Some((_, _, DataDefinition::Reference { .. })) => template.promptable_data_path(path),
-        Some((_, _, DataDefinition::Import { .. })) | None => {
-            if path.segments.is_empty() {
-                template.promptable_data_path(path)
-            } else {
-                None
-            }
-        }
-    };
-    if let Some(target) = target {
-        let data_pos = template_bindable_field_index(template, target).unwrap_or_else(|| {
-            panic!(
-                "BUG: promptable row field '{}' absent from template bindable fields",
-                target.input_key()
-            )
-        });
+    if let Some(target) = template.bindable_row_field(path) {
+        let data_pos = template
+            .data
+            .get_index_of(target)
+            .unwrap_or_else(|| panic!("BUG: bindable row field '{target}' absent from plan.data"));
         bits[data_pos / 64] |= 1u64 << (data_pos % 64);
     }
 }
 
-/// Data positions a finished template's show rule needs (from its `needed_by_rules`).
-///
-/// Bit indices match [`template_bindable_field_index`] / [`ExecutionPlan::nested_input_keys`],
-/// not raw `template.data` positions.
+/// Row fields a finished template's rule needs: its data (from `needed_by_rules`) and
+/// the data of its `uses` imports (from `show_needed_by`).
 fn mark_template_rule_data(template: &ExecutionPlan, rule: &RulePath, bits: &mut [u64]) {
     let rule_pos = u32::try_from(template.rules.get_index_of(rule).unwrap_or_else(|| {
         panic!(
@@ -650,89 +808,241 @@ fn mark_template_rule_data(template: &ExecutionPlan, rule: &RulePath, bits: &mut
     }))
     .expect("BUG: rule count exceeds u32");
     for (data_pos, consumers) in template.needed_by_rules.iter().enumerate() {
-        if !consumers.rules.contains(&rule_pos) {
-            continue;
+        if consumers.rules.contains(&rule_pos) {
+            bits[data_pos / 64] |= 1u64 << (data_pos % 64);
         }
-        let (path, definition) = template
-            .data
-            .get_index(data_pos)
-            .expect("BUG: needed_by_rules index past template.data");
-        if matches!(definition, DataDefinition::Import { .. }) {
-            panic!(
-                "BUG: Import marker '{}' carries needed_by bits in template '{}'",
-                path.input_key(),
-                template.spec_name
-            );
-        }
-        let field_pos = template_bindable_field_index(template, path).unwrap_or_else(|| {
-            panic!(
-                "BUG: needed template data '{}' absent from template bindable fields",
-                path.input_key()
-            )
-        });
-        bits[field_pos / 64] |= 1u64 << (field_pos % 64);
     }
-    for (nested_path, rule_positions) in &template.nested_needed_by_rules {
-        if !rule_positions.contains(&rule_pos) {
-            continue;
+    mark_template_import_data(template, rule, bits);
+}
+
+/// Row fields of `uses` imports of `template` that its Show rule `rule` (a path composed
+/// from import hops) needs.
+fn mark_template_import_data(template: &ExecutionPlan, rule: &RulePath, bits: &mut [u64]) {
+    let Some(rule_pos) = template.show_rule_position(rule) else {
+        return;
+    };
+    for (index, path) in template.show_import_data.keys().enumerate() {
+        let needed = template
+            .show_needed_by
+            .get(path)
+            .expect("BUG: Show import data has readers");
+        if needed.contains(&rule_pos) {
+            let field_pos = template.data.len() + index;
+            bits[field_pos / 64] |= 1u64 << (field_pos % 64);
         }
-        let field_pos = template_bindable_field_index(template, nested_path).unwrap_or_else(|| {
-            panic!(
-                "BUG: nested needed_by path '{}' absent from template bindable fields",
-                nested_path.input_key()
-            )
-        });
-        bits[field_pos / 64] |= 1u64 << (field_pos % 64);
     }
 }
 
+/// One `uses` level below a row spec in [`mark_row_end_needs`]: the instance the slot
+/// holds there (a consumer-written override or the template's own) and its template.
+#[derive(Clone)]
+struct MemberLevel<'p> {
+    segment: PathSegment,
+    row: &'p RowInstance,
+    template: &'p ExecutionPlan,
+}
+
+/// A read on rows of a row spec, at a chain of `uses` levels below it.
+enum MemberNeed<'p> {
+    Data(Vec<MemberLevel<'p>>, DataPath),
+    Rule(Vec<MemberLevel<'p>>, RulePath),
+}
+
+/// `chain` extended by the `uses` slots `aliases`, starting at the template of the
+/// chain's last level (or `holder` for an empty chain).
+fn member_levels<'p, 'a>(
+    plan: &'p ExecutionPlan,
+    holder: &'p ExecutionPlan,
+    mut chain: Vec<MemberLevel<'p>>,
+    aliases: impl IntoIterator<Item = &'a str>,
+) -> Vec<MemberLevel<'p>> {
+    for alias in aliases {
+        let template = chain.last().map_or(holder, |level| level.template);
+        let slot = DataPath::local(alias.to_string());
+        let Some(DataDefinition::Import { row, .. }) = template.data.get(&slot) else {
+            panic!("BUG: member hop '{slot}' is not a `uses` slot");
+        };
+        let row: &RowInstance = match chain
+            .last()
+            .and_then(|level| level.row.get_binding(template, &slot))
+        {
+            Some(RowBinding::Instance(written)) => written,
+            Some(other) => panic!("BUG: `uses` slot '{slot}' bound to {other:?}"),
+            None => row,
+        };
+        chain.push(MemberLevel {
+            segment: PathSegment::import(&slot.data, &row.identity),
+            row,
+            template: plan.row_template(&row.identity),
+        });
+    }
+    chain
+}
+
+/// Record what reading the member chain `ends` on evaluation-data rows of `identity`
+/// needs. Every end but the last reads a `uses` slot.
 fn mark_row_end_needs(
     plan: &ExecutionPlan,
     identity: &SpecIdentity,
-    end: &RowEnd,
+    ends: &[RowEnd],
     bits_by_rule: &[Vec<u64>],
     row_bits: &mut BTreeMap<SpecIdentity, Vec<u64>>,
     consumer_rule: &RulePath,
 ) {
     let bits = row_bits_entry(plan, row_bits, identity);
-    match end {
-        RowEnd::Data(path) => {
-            if *identity == plan.identity {
-                if let Some(ReferenceEnd::Rule(rule)) = plan.reference_ends.get(path) {
-                    let rule_pos = plan.rules.get_index_of(rule).unwrap_or_else(|| {
-                        panic!(
-                            "BUG: reference rule '{rule}' missing from plan.rules (rule '{consumer_rule}')"
-                        )
-                    });
-                    for (word, dep) in bits.iter_mut().zip(bits_by_rule[rule_pos].iter()) {
-                        *word |= *dep;
+    let holder = plan.row_template(identity);
+    let (end, hops) = ends.split_last().expect("BUG: a row read has a last end");
+    let chain = member_levels(
+        plan,
+        holder,
+        Vec::new(),
+        hops.iter().map(|hop| match hop {
+            RowEnd::Data(slot) => slot.data.as_str(),
+            RowEnd::Rule(rule) => panic!("BUG: a row read hop is a `uses` slot, got rule '{rule}'"),
+        }),
+    );
+    let mut pending = vec![match end {
+        RowEnd::Data(path) => MemberNeed::Data(chain, path.clone()),
+        RowEnd::Rule(rule) => MemberNeed::Rule(chain, rule.clone()),
+    }];
+    while let Some(need) = pending.pop() {
+        match need {
+            MemberNeed::Data(chain, path) if !path.segments.is_empty() => {
+                let chain = member_levels(
+                    plan,
+                    holder,
+                    chain,
+                    path.segments.iter().map(|segment| &*segment.uses),
+                );
+                pending.push(MemberNeed::Data(chain, DataPath::local(path.data)));
+            }
+            MemberNeed::Rule(chain, rule) if !rule.segments.is_empty() => {
+                let chain = member_levels(
+                    plan,
+                    holder,
+                    chain,
+                    rule.segments.iter().map(|segment| &*segment.uses),
+                );
+                pending.push(MemberNeed::Rule(
+                    chain,
+                    RulePath::new(Vec::new(), rule.rule),
+                ));
+            }
+            MemberNeed::Data(chain, path) if chain.is_empty() => {
+                mark_holder_data(plan, identity, &path, bits_by_rule, bits, consumer_rule);
+            }
+            MemberNeed::Rule(chain, rule) if chain.is_empty() => {
+                mark_holder_rule(plan, identity, &rule, bits_by_rule, bits, consumer_rule);
+            }
+            MemberNeed::Data(mut chain, path) => {
+                let level = chain.last().expect("BUG: non-empty member chain");
+                match level.row.get_binding(level.template, &path) {
+                    None => match level.template.data.get(&path) {
+                        Some(DataDefinition::Reference { .. }) => {
+                            match level.template.reference_ends.get(&path) {
+                                Some(ReferenceEnd::Promptable(target)) => {
+                                    pending.push(MemberNeed::Data(chain, target.clone()));
+                                }
+                                Some(ReferenceEnd::Rule(rule)) => {
+                                    pending.push(MemberNeed::Rule(chain, rule.clone()));
+                                }
+                                None => panic!(
+                                    "BUG: reference '{path}' missing from reference_ends after planning"
+                                ),
+                            }
+                        }
+                        Some(_) => {
+                            let composed = DataPath {
+                                segments: chain.iter().map(|level| level.segment.clone()).collect(),
+                                data: path.data,
+                            };
+                            if let Some(index) = holder.show_import_data.get_index_of(&composed) {
+                                let field_pos = holder.data.len() + index;
+                                bits[field_pos / 64] |= 1u64 << (field_pos % 64);
+                            }
+                        }
+                        None => panic!("BUG: member data '{path}' absent from its template"),
+                    },
+                    Some(RowBinding::Deferred { target, hops }) => {
+                        let frame = chain
+                            .len()
+                            .checked_sub(1 + *hops as usize)
+                            .expect("BUG: a `uses` binding hops above the row spec");
+                        let target = target.clone();
+                        chain.truncate(frame);
+                        pending.push(match target {
+                            ReferenceTarget::Data(path) => MemberNeed::Data(chain, path),
+                            ReferenceTarget::Rule(rule) => MemberNeed::Rule(chain, rule),
+                        });
                     }
-                } else {
-                    mark_template_data_path(plan, path, bits);
+                    Some(
+                        RowBinding::Bound(_) | RowBinding::Rows { .. } | RowBinding::Instance(_),
+                    ) => {}
                 }
-            } else {
-                let template = plan.row_template(identity);
-                if let Some(ReferenceEnd::Rule(rule)) = template.reference_ends.get(path) {
-                    mark_template_rule_data(template, rule, bits);
-                } else {
-                    mark_template_data_path(template, path, bits);
+            }
+            MemberNeed::Rule(chain, rule) => {
+                let template = chain.last().expect("BUG: non-empty member chain").template;
+                let rule_pos =
+                    u32::try_from(template.rules.get_index_of(&rule).unwrap_or_else(|| {
+                        panic!("BUG: member rule '{rule}' missing from its template")
+                    }))
+                    .expect("BUG: rule count exceeds u32");
+                let show_pos = template
+                    .show_rule_position(&rule)
+                    .expect("BUG: a local rule is a Show rule of its plan");
+                for ((path, _), needed) in template.data.iter().zip(&template.needed_by_rules) {
+                    if needed.rules.contains(&rule_pos) {
+                        pending.push(MemberNeed::Data(chain.clone(), path.clone()));
+                    }
+                }
+                for (path, needed) in &template.show_needed_by {
+                    if !path.segments.is_empty() && needed.contains(&show_pos) {
+                        pending.push(MemberNeed::Data(chain.clone(), path.clone()));
+                    }
                 }
             }
         }
-        RowEnd::Rule(rule) => {
-            if *identity == plan.identity {
-                let rule_pos = plan.rules.get_index_of(rule).unwrap_or_else(|| {
-                    panic!(
-                        "BUG: row rule '{rule}' missing from plan.rules (rule '{consumer_rule}')"
-                    )
-                });
-                for (word, dep) in bits.iter_mut().zip(bits_by_rule[rule_pos].iter()) {
-                    *word |= *dep;
-                }
-            } else {
-                mark_template_rule_data(plan.row_template(identity), rule, bits);
-            }
+    }
+}
+
+/// What reading data `path` on rows of the row spec `identity` itself needs.
+fn mark_holder_data(
+    plan: &ExecutionPlan,
+    identity: &SpecIdentity,
+    path: &DataPath,
+    bits_by_rule: &[Vec<u64>],
+    bits: &mut [u64],
+    consumer_rule: &RulePath,
+) {
+    let template = plan.row_template(identity);
+    match template.reference_ends.get(path) {
+        Some(ReferenceEnd::Rule(rule)) => {
+            mark_holder_rule(plan, identity, rule, bits_by_rule, bits, consumer_rule);
         }
+        Some(ReferenceEnd::Promptable(_)) | None => mark_template_data_path(template, path, bits),
+    }
+}
+
+/// What reading rule `rule` on rows of the row spec `identity` itself needs.
+fn mark_holder_rule(
+    plan: &ExecutionPlan,
+    identity: &SpecIdentity,
+    rule: &RulePath,
+    bits_by_rule: &[Vec<u64>],
+    bits: &mut [u64],
+    consumer_rule: &RulePath,
+) {
+    let template = plan.row_template(identity);
+    if *identity == plan.identity {
+        let rule_pos = plan.rules.get_index_of(rule).unwrap_or_else(|| {
+            panic!("BUG: row rule '{rule}' missing from plan.rules (rule '{consumer_rule}')")
+        });
+        for (word, dep) in bits.iter_mut().zip(bits_by_rule[rule_pos].iter()) {
+            *word |= *dep;
+        }
+        mark_template_import_data(template, rule, bits);
+    } else {
+        mark_template_rule_data(template, rule, bits);
     }
 }
 
@@ -745,7 +1055,7 @@ fn mark_list_key_fields(
     use crate::planning::semantics::ListKey;
 
     let list_type = plan.result_type(list);
-    let TypeSpecification::List { element, key } = &list_type.specifications else {
+    let TypeSpecification::List { element, key, .. } = &list_type.specifications else {
         panic!(
             "BUG: Find/WithRow list cell is not a list type (rule '{consumer_rule}'): {list_type:?}"
         );
@@ -758,37 +1068,28 @@ fn mark_list_key_fields(
     };
     let template = plan.row_template(identity);
     let bits = row_bits_entry(plan, row_bits, identity);
-    for field in fields {
-        let path = template.input_key_index.get(field).unwrap_or_else(|| {
-            panic!(
-                "BUG: list key field '{field}' missing from template '{}' (rule '{consumer_rule}')",
-                identity
-            )
-        });
-        mark_template_data_path(template, path, bits);
+    for key_field in fields {
+        mark_template_data_path(template, &key_field.path, bits);
     }
 }
 
-/// [`ExecutionPlan::self_row_rules`]: every rule a row leaf or row member read of a
+/// [`ExecutionPlan::self_row_rules`]: every rule a row field or row member read of a
 /// self-list names, directly or through a data reference to a rule.
 fn self_row_rules(plan: &ExecutionPlan) -> Vec<RulePath> {
-    use crate::planning::normalize::{LeafKind, NormalFormKind};
+    use crate::planning::normalize::NormalFormKind;
     use crate::planning::semantics::RowEnd;
 
     let mut rules_read: HashSet<&RulePath> = HashSet::new();
     for (index, cell) in plan.normal_forms.iter().enumerate() {
         let end = match &cell.kind {
-            NormalFormKind::Leaf(LeafKind::Row { identity, end, .. })
-                if *identity == plan.identity =>
+            NormalFormKind::RowField { identity, end, .. } if *identity == plan.identity => end,
+            NormalFormKind::SpecMember { base, row, .. } => match &plan
+                .result_type(*base)
+                .specifications
             {
-                end
-            }
-            NormalFormKind::SpecMember {
-                base,
-                row: Some(row_read),
-                ..
-            } => match &plan.result_type(*base).specifications {
-                TypeSpecification::Spec { spec } if *spec == plan.identity => &row_read.end,
+                TypeSpecification::Spec { spec } if *spec == plan.identity => {
+                    row.ends.first().expect("BUG: a row read has a first end")
+                }
                 TypeSpecification::Spec { .. } => continue,
                 other => panic!("BUG: row member read on cell {index} of non-spec type {other:?}"),
             },
@@ -813,6 +1114,34 @@ fn self_row_rules(plan: &ExecutionPlan) -> Vec<RulePath> {
 }
 
 impl ExecutionPlan {
+    /// Consumer-coordinate scale target of `unit` on `family`.
+    pub(crate) fn unit_scale_target(
+        &self,
+        family: &TypeFamily,
+        unit: &str,
+    ) -> Option<&ReferenceTarget> {
+        self.unit_scale_targets
+            .get(&(family.clone(), unit.to_string()))
+    }
+
+    /// Scale target of `unit` on a measure type of this plan.
+    ///
+    /// The type must carry its measure family (including range endpoints from
+    /// [`LemmaType::range_element_type`]). Missing family is a planning bug.
+    pub(crate) fn scale_target_of(
+        &self,
+        lemma_type: &LemmaType,
+        unit: &str,
+    ) -> Option<&ReferenceTarget> {
+        let family = lemma_type.measure_family().unwrap_or_else(|| {
+            panic!(
+                "BUG: scale lookup on '{}' has no measure family",
+                lemma_type.name()
+            )
+        });
+        self.unit_scale_target(family, unit)
+    }
+
     /// Template plan rows of `identity` read: this plan for its own self-lists.
     pub(crate) fn row_template(&self, identity: &SpecIdentity) -> &ExecutionPlan {
         if *identity == self.identity {
@@ -823,178 +1152,143 @@ impl ExecutionPlan {
             .unwrap_or_else(|| panic!("BUG: rows of '{identity}' without a template plan"))
     }
 
-    /// Identity of the local `uses` Import named `name` on this plan.
-    fn import_identity(&self, name: &str) -> Option<&SpecIdentity> {
-        let import_path = self.input_key_index.get(name)?;
-        let DataDefinition::Import { identity, .. } = self.data.get(import_path)? else {
+    /// Row of this plan's `uses` slot `slot` as read on `row` of this plan (`None` for
+    /// the plan's own context): the nested row the holder bound over it, else the
+    /// plan's own import row.
+    ///
+    /// `dynamic_rows` supplies the body chosen for a `uses … -> effective` slot of this
+    /// plan (keyed by the slot path). Nested `RowBinding::Instance` hops ignore it.
+    /// Pass `None` when no dynamic imports are in play (or only nested instance hops).
+    pub(crate) fn import_row<'a>(
+        &'a self,
+        row: Option<&'a RowInstance>,
+        slot: &DataPath,
+        dynamic_rows: Option<&'a HashMap<DataPath, Arc<RowInstance>>>,
+    ) -> &'a Arc<RowInstance> {
+        let (index, _, definition) = self
+            .data
+            .get_full(slot)
+            .unwrap_or_else(|| panic!("BUG: `uses` slot '{slot}' is not data of its plan"));
+        if let Some(RowBinding::Instance(nested)) = row.and_then(|row| row.bindings[index].as_ref())
+        {
+            return nested;
+        }
+        let DataDefinition::Import { row, pin, .. } = definition else {
+            panic!("BUG: data '{slot}' read as a `uses` slot is not an import");
+        };
+        if pin.is_some() {
+            return dynamic_rows
+                .and_then(|rows| rows.get(slot))
+                .unwrap_or_else(|| {
+                    panic!("BUG: dynamic import '{slot}' hop without a selected body")
+                });
+        }
+        row
+    }
+
+    /// Select the candidate body of a dynamic import active at `at`.
+    pub(crate) fn select_dynamic_import_row(
+        &self,
+        slot: &DataPath,
+        at: &crate::parsing::ast::EffectiveDate,
+    ) -> Option<&Arc<RowInstance>> {
+        let DataDefinition::Import {
+            pin: Some(_),
+            candidates,
+            ..
+        } = self.data.get(slot)?
+        else {
             return None;
         };
-        Some(identity)
+        candidates
+            .iter()
+            .filter(|(identity, _)| identity.slice <= *at)
+            .max_by(|a, b| a.0.slice.cmp(&b.0.slice))
+            .map(|(_, row)| row)
     }
 
-    /// Walk leading Import hops on this plan; each hop must be a local `uses` Import.
-    pub(crate) fn peel_hops(&self, hops: &[PathSegment]) -> Option<&ExecutionPlan> {
-        let mut plan = self;
-        for hop in hops {
-            plan = plan.row_template(plan.import_identity(&hop.uses)?);
-        }
-        Some(plan)
-    }
-
-    /// Walk `hop_names` as leading `uses` Imports, qualifying each hop. Returns the template
-    /// plan reached and the qualified hops.
-    fn qualify_hops<'a>(
-        &'a self,
-        hop_names: &[&str],
-    ) -> Option<(&'a ExecutionPlan, Vec<PathSegment>)> {
-        let mut plan = self;
-        let mut segments = Vec::with_capacity(hop_names.len());
-        for hop_name in hop_names {
-            let identity = plan.import_identity(hop_name)?;
-            segments.push(PathSegment {
-                uses: (*hop_name).to_string(),
-                repository: identity.repository.clone(),
-                spec: identity.spec.clone(),
-            });
-            plan = plan.row_template(identity);
-        }
-        Some((plan, segments))
-    }
-
-    /// Qualified [`DataPath`] of the data named by `names` (`uses` hops, then the data name),
-    /// `None` when a hop or the data name does not exist.
-    pub(crate) fn qualify_data_names(&self, names: &[&str]) -> Option<DataPath> {
-        let (data_name, hop_names) = names.split_last()?;
-        let (plan, segments) = self.qualify_hops(hop_names)?;
-        plan.data.get(plan.input_key_index.get(*data_name)?)?;
-        Some(DataPath {
-            segments,
-            data: (*data_name).to_string(),
-        })
-    }
-
-    /// Qualified [`RulePath`] of the rule named by `names` (`uses` hops, then the rule name),
-    /// `None` when a hop or the rule does not exist.
-    pub(crate) fn qualify_rule_names(&self, names: &[&str]) -> Option<RulePath> {
-        let (rule_name, hop_names) = names.split_last()?;
-        let (plan, segments) = self.qualify_hops(hop_names)?;
-        let rule = RulePath {
-            segments,
-            rule: (*rule_name).to_string(),
-        };
-        plan.peel_rule(&RulePath {
-            segments: Vec::new(),
-            rule: (*rule_name).to_string(),
-        })?;
-        Some(rule)
-    }
-
-    /// Local data on this plan, or after peeling `path.segments` Import hops into a nested
-    /// template. Returns the nested plan and that plan's local data path.
-    pub(crate) fn peel_data<'a>(
-        &'a self,
-        path: &DataPath,
-    ) -> Option<(&'a ExecutionPlan, &'a DataPath, &'a DataDefinition)> {
-        let plan = self.peel_hops(&path.segments)?;
-        let local = plan.input_key_index.get(path.data.as_str())?;
-        let definition = plan.data.get(local)?;
-        Some((plan, local, definition))
-    }
-
-    /// Local rule on this plan, or after peeling `path.segments` Import hops.
-    pub(crate) fn peel_rule<'a>(
-        &'a self,
-        path: &RulePath,
-    ) -> Option<(&'a ExecutionPlan, &'a RulePath)> {
-        let plan = self.peel_hops(&path.segments)?;
-        let local = plan
-            .rules
-            .keys()
-            .find(|rule| rule.segments.is_empty() && rule.rule == path.rule)?;
-        Some((plan, local))
-    }
-
-    /// Every bindable input key of this plan, relative to this plan: local data (Import
-    /// markers included) and the nested non-marker members of each Import, through its
-    /// row template. The only enumeration: leaves, `input_key_index`, show and the row
-    /// bit sets all derive from it.
-    pub(crate) fn input_key_entries(&self) -> Vec<(DataPath, &DataDefinition)> {
-        let mut out = Vec::new();
-        Self::push_input_key_entries(self, &mut out);
-        out
-    }
-
-    /// [`Self::input_key_entries`] without the root Import markers: the members show and
-    /// the row bit sets expose.
-    pub(crate) fn nested_input_keys(&self) -> Vec<(DataPath, &DataDefinition)> {
-        self.input_key_entries()
-            .into_iter()
+    /// Every [`Self::data`] slot that is not an Import marker: the members show and
+    /// the row field sets expose.
+    pub(crate) fn input_slots(&self) -> impl Iterator<Item = (&DataPath, &DataDefinition)> {
+        self.data
+            .iter()
             .filter(|(_, definition)| !matches!(definition, DataDefinition::Import { .. }))
+    }
+
+    /// Row-suppliable slots a read of `end` on a row of this plan touches: the slot
+    /// `end` is, or every slot the rule `end` names (or the data reference `end`
+    /// resolves to) reads. `unbound` marks slots the spec gives no value: a row
+    /// appended inline must write each of them.
+    pub(crate) fn row_end_reads(&self, end: &RowEnd) -> Vec<RowFieldRead> {
+        let rule_reads = |rule: &RulePath| -> Vec<&DataPath> {
+            let rule_pos = u32::try_from(self.rules.get_index_of(rule).unwrap_or_else(|| {
+                panic!(
+                    "BUG: row rule '{rule}' missing from plan '{}'",
+                    self.spec_name
+                )
+            }))
+            .expect("BUG: rule count exceeds u32");
+            self.needed_by_rules
+                .iter()
+                .enumerate()
+                .filter(|(_, consumers)| consumers.rules.contains(&rule_pos))
+                .map(|(data_pos, _)| {
+                    self.data
+                        .get_index(data_pos)
+                        .expect("BUG: needed_by_rules position outside plan.data")
+                        .0
+                })
+                .collect()
+        };
+        let slots: Vec<&DataPath> = match end {
+            RowEnd::Data(path) => match self.reference_ends.get(path) {
+                Some(ReferenceEnd::Rule(rule)) => rule_reads(rule),
+                Some(ReferenceEnd::Promptable(_)) | None => {
+                    self.bindable_row_field(path).into_iter().collect()
+                }
+            },
+            RowEnd::Rule(rule) => rule_reads(rule),
+        };
+        slots
+            .into_iter()
+            .map(|slot| RowFieldRead {
+                slot: slot.clone(),
+                unbound: self.data[slot].value().is_none(),
+            })
             .collect()
     }
 
-    fn push_input_key_entries<'a>(
-        root: &'a ExecutionPlan,
-        out: &mut Vec<(DataPath, &'a DataDefinition)>,
-    ) {
-        struct PlanLevel<'a> {
-            plan: &'a ExecutionPlan,
-            next: usize,
-            prefix: Vec<PathSegment>,
-        }
-
-        let mut levels = vec![PlanLevel {
-            plan: root,
-            next: 0,
-            prefix: Vec::new(),
-        }];
-        while let Some(top) = levels.last_mut() {
-            let Some((path, definition)) = top.plan.data.get_index(top.next) else {
-                levels.pop();
-                continue;
-            };
-            top.next += 1;
-            if !path.segments.is_empty() {
-                continue;
-            }
-            let child = match definition {
-                DataDefinition::Import { identity, .. } => {
-                    if top.prefix.is_empty() {
-                        out.push((path.clone(), definition));
-                    }
-                    let mut nested_prefix = top.prefix.clone();
-                    nested_prefix.push(PathSegment {
-                        uses: path.data.clone(),
-                        repository: identity.repository.clone(),
-                        spec: identity.spec.clone(),
-                    });
-                    PlanLevel {
-                        plan: top.plan.row_template(identity),
-                        next: 0,
-                        prefix: nested_prefix,
-                    }
+    /// Slot an evaluation-data row of this plan binds when a field read lands on
+    /// `path`: the slot itself, or the end of its reference chain. `None` when the slot
+    /// is bound by the spec, computed by a rule, or an instance marker.
+    fn bindable_row_field<'a>(&'a self, path: &'a DataPath) -> Option<&'a DataPath> {
+        match self
+            .data
+            .get(path)
+            .unwrap_or_else(|| panic!("BUG: row field '{path}' absent from plan.data"))
+        {
+            DataDefinition::Value { .. }
+            | DataDefinition::TypeDeclaration { .. }
+            | DataDefinition::InstanceList { .. } => Some(path),
+            DataDefinition::Reference { .. } => match self.reference_ends.get(path) {
+                Some(ReferenceEnd::Promptable(target)) => Some(target),
+                Some(ReferenceEnd::Rule(_)) => None,
+                None => {
+                    panic!("BUG: reference '{path}' missing from reference_ends after planning")
                 }
-                _ => {
-                    out.push((
-                        DataPath {
-                            segments: top.prefix.clone(),
-                            data: path.data.clone(),
-                        },
-                        definition,
-                    ));
-                    continue;
-                }
-            };
-            levels.push(child);
+            },
+            DataDefinition::Import { .. } => None,
         }
+        .filter(|target| !self.data[*target].is_bound())
     }
 }
 
-/// Nesting of instance-list commands a plan supports: one bit per level in [`ExecutionPlan::row_mask`].
+/// Nesting of list commands a plan supports: one bit per level in [`ExecutionPlan::row_mask`].
 const MAX_ROW_LEVELS: u32 = u32::BITS;
 
-/// [`ExecutionPlan::row_mask`]: a row leaf sets its level, a list command clears its
-/// own level, every other cell takes the union of its children.
+/// [`ExecutionPlan::row_mask`]: a list-row leaf (`RowField` or `RowValue`) sets its
+/// level, a list command clears its own level, every other cell takes the union of
+/// its children.
 fn build_row_mask(normal_forms: &[NormalForm]) -> Result<Vec<u32>, Error> {
     use crate::planning::normalize::{LeafKind, NormalFormKind};
 
@@ -1024,9 +1318,14 @@ fn build_row_mask(normal_forms: &[NormalForm]) -> Result<Vec<u32>, Error> {
                 union |= mask[child.index()]
                     .expect("BUG: child row mask missing after post-order visit");
             });
-            let bits = match &cell.kind {
-                NormalFormKind::Leaf(LeafKind::Row { level, .. }) => {
-                    if *level >= MAX_ROW_LEVELS {
+            let level = match &cell.kind {
+                NormalFormKind::RowField { level, .. }
+                | NormalFormKind::Leaf(LeafKind::RowValue { level }) => Some(*level),
+                _ => None,
+            };
+            let bits = match (level, &cell.kind) {
+                (Some(level), _) => {
+                    if level >= MAX_ROW_LEVELS {
                         return Err(Error::validation(
                             format!(
                                 "list commands nest {} levels deep; at most {MAX_ROW_LEVELS} are supported",
@@ -1036,13 +1335,16 @@ fn build_row_mask(normal_forms: &[NormalForm]) -> Result<Vec<u32>, Error> {
                             None::<String>,
                         ));
                     }
-                    1u32 << level
+                    union | (1u32 << level)
                 }
-                NormalFormKind::ListCommand {
-                    row_level: Some(level),
-                    ..
-                } if *level < MAX_ROW_LEVELS => union & !(1u32 << level),
-                _ => union,
+                (
+                    None,
+                    NormalFormKind::ListCommand {
+                        row_level: Some(level),
+                        ..
+                    },
+                ) if *level < MAX_ROW_LEVELS => union & !(1u32 << level),
+                (None, _) => union,
             };
             mask[index] = Some(bits);
         }
@@ -1053,512 +1355,10 @@ fn build_row_mask(normal_forms: &[NormalForm]) -> Result<Vec<u32>, Error> {
         .collect())
 }
 
-/// Local reachable Show keys plus ShowRule entries for named-`uses` template rules
-/// those locals depend on (absolute `alias…rule` keys).
-fn import_show_universe(
-    graph: &Graph<'_>,
-    local_reachable: &HashSet<RulePath>,
-) -> (HashSet<String>, IndexMap<RulePath, ShowRule>) {
-    let mut show_keys: HashSet<String> = local_reachable
-        .iter()
-        .map(|path| path.input_key())
-        .collect();
-    let mut import_shows: IndexMap<RulePath, ShowRule> = IndexMap::new();
-    let mut stack: Vec<RulePath> = local_reachable
-        .iter()
-        .flat_map(|path| {
-            graph
-                .rules()
-                .get(path)
-                .expect("BUG: reachable local rule missing from graph.rules")
-                .depends_on_rules
-                .iter()
-                .cloned()
-        })
-        .filter(|dep| !graph.has_local_rule(dep))
-        .collect();
-
-    while let Some(path) = stack.pop() {
-        let key = path.input_key();
-        if !show_keys.insert(key.clone()) {
-            continue;
-        }
-        let (template, local) =
-            peel_rule_from(graph.data(), &graph.instance_lists().templates, &path).unwrap_or_else(
-                || {
-                    panic!(
-                        "BUG: import Show rule '{}' does not peel after planning accepted it",
-                        path.input_key()
-                    )
-                },
-            );
-        let template_show = template.show_rules.get(local).unwrap_or_else(|| {
-            panic!(
-                "BUG: peeled import rule '{}' missing from template show_rules",
-                path.input_key()
-            )
-        });
-        let prefix = path
-            .segments
-            .iter()
-            .map(|segment| segment.uses.as_str())
-            .collect::<Vec<_>>()
-            .join(".");
-        let mut abs_deps = Vec::with_capacity(template_show.depends_on_rules.len());
-        for dep_key in &template_show.depends_on_rules {
-            let abs_key = format!("{prefix}.{dep_key}");
-            abs_deps.push(abs_key.clone());
-            let abs_path = absolute_import_rule_path(&path.segments, dep_key, template);
-            if !show_keys.contains(&abs_key) {
-                stack.push(abs_path);
-            }
-        }
-        let branches = template_show
-            .branches
-            .iter()
-            .map(|branch| ShowBranch {
-                condition: branch
-                    .condition
-                    .as_ref()
-                    .map(|expression| prefix_show_expression(&prefix, expression)),
-                result: prefix_show_expression(&prefix, &branch.result),
-            })
-            .collect();
-        import_shows.insert(
-            path.clone(),
-            ShowRule {
-                lemma_type: template_show.lemma_type.clone(),
-                path: path.segments.clone(),
-                branches,
-                depends_on_rules: abs_deps,
-            },
-        );
-    }
-
-    (show_keys, import_shows)
-}
-
-fn absolute_import_rule_path(
-    prefix: &[crate::planning::semantics::PathSegment],
-    local_key: &str,
-    template: &ExecutionPlan,
-) -> RulePath {
-    let local = template
-        .show_rules
-        .keys()
-        .find(|path| path.input_key() == local_key)
-        .unwrap_or_else(|| {
-            panic!(
-                "BUG: template depends_on_rules entry '{local_key}' missing from template show_rules"
-            )
-        });
-    RulePath {
-        segments: prefix
-            .iter()
-            .cloned()
-            .chain(local.segments.iter().cloned())
-            .collect(),
-        rule: local.rule.clone(),
-    }
-}
-
-/// Owner-frame input of a read, references resolved. Named-`uses` reads peel into
-/// templates and apply each hop's site overlay; the outermost site overlay wins over
-/// inner template binds on the same path, as in evaluation
-/// ([`crate::evaluation::imports::eval_import_member`]).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum ImportNeed {
-    /// Non-reference local slot, or a nested member the template declares
-    /// (unbound or bound to an overlay literal).
+/// What evaluating one input cell needs: a data slot or a rule.
+enum InputNeed {
     Data(DataPath),
-    /// Local rule.
     Rule(RulePath),
-}
-
-/// A planning view that resolves named-`uses` members: a finished [`ExecutionPlan`]
-/// or the planning graph. Static dispatch only.
-pub(crate) trait ReferenceOwner {
-    fn owner_data(&self) -> &IndexMap<DataPath, DataDefinition>;
-    fn owner_templates(&self) -> &BTreeMap<SpecIdentity, Arc<ExecutionPlan>>;
-}
-
-impl ReferenceOwner for ExecutionPlan {
-    fn owner_data(&self) -> &IndexMap<DataPath, DataDefinition> {
-        &self.data
-    }
-
-    fn owner_templates(&self) -> &BTreeMap<SpecIdentity, Arc<ExecutionPlan>> {
-        &self.row_templates
-    }
-}
-
-struct ImportHop<'p> {
-    marker: DataPath,
-    identity: &'p SpecIdentity,
-    overlay: &'p IndexMap<DataPath, ImportOverlay>,
-    template: &'p ExecutionPlan,
-}
-
-impl ImportHop<'_> {
-    fn absolute(&self, relative: &DataPath) -> DataPath {
-        absolute_import_member_path(&self.marker, self.identity, relative)
-    }
-
-    fn absolute_rule(&self, relative: &RulePath) -> RulePath {
-        let absolute = self.absolute(&DataPath {
-            segments: relative.segments.clone(),
-            data: relative.rule.clone(),
-        });
-        RulePath {
-            segments: absolute.segments,
-            rule: absolute.data,
-        }
-    }
-}
-
-/// First hop of a named-`uses` path; `None` when `data` has no Import (or no
-/// template) for it.
-fn import_hop<'p>(
-    data: &'p IndexMap<DataPath, DataDefinition>,
-    templates: &'p BTreeMap<SpecIdentity, Arc<ExecutionPlan>>,
-    segment: &PathSegment,
-) -> Option<ImportHop<'p>> {
-    let marker = DataPath::local(segment.uses.clone());
-    let DataDefinition::Import {
-        identity, overlay, ..
-    } = data.get(&marker)?
-    else {
-        return None;
-    };
-    let template = templates.get(identity)?;
-    Some(ImportHop {
-        marker,
-        identity,
-        overlay,
-        template,
-    })
-}
-
-/// Owner-frame [`ReferenceEnd`] of named-`uses` member `path` (non-empty segments):
-/// the first hop's site overlay entry, else the template's own end re-qualified
-/// under the hop. `None` when `path` does not peel.
-/// Frame owner of a named-`uses` walk: the caller's owner, or a row template plan reached
-/// through a hop.
-enum ReferenceFrameOwner<'a, O: ReferenceOwner> {
-    Root(&'a O),
-    Template(&'a ExecutionPlan),
-}
-
-impl<O: ReferenceOwner> Clone for ReferenceFrameOwner<'_, O> {
-    fn clone(&self) -> Self {
-        *self
-    }
-}
-
-impl<O: ReferenceOwner> Copy for ReferenceFrameOwner<'_, O> {}
-
-impl<'a, O: ReferenceOwner> ReferenceFrameOwner<'a, O> {
-    fn data(self) -> &'a IndexMap<DataPath, DataDefinition> {
-        match self {
-            Self::Root(owner) => owner.owner_data(),
-            Self::Template(plan) => plan.owner_data(),
-        }
-    }
-
-    fn templates(self) -> &'a BTreeMap<SpecIdentity, Arc<ExecutionPlan>> {
-        match self {
-            Self::Root(owner) => owner.owner_templates(),
-            Self::Template(plan) => plan.owner_templates(),
-        }
-    }
-
-    fn reference_end_on(self, path: &DataPath) -> Option<ReferenceEnd> {
-        match self {
-            Self::Root(owner) => reference_end_on(owner, path),
-            Self::Template(plan) => reference_end_on(plan, path),
-        }
-    }
-}
-
-struct ReferenceFrame<'a, O: ReferenceOwner> {
-    owner: ReferenceFrameOwner<'a, O>,
-    path: DataPath,
-    hop: ImportHop<'a>,
-    relative: DataPath,
-}
-
-enum ReferenceStep<'a, O: ReferenceOwner> {
-    /// Resolution finished with this value (`None`: the path does not peel).
-    Value(Option<ReferenceEnd>),
-    /// Resolve this path on this owner; its value is the value of the current frame.
-    Next(ReferenceFrameOwner<'a, O>, DataPath),
-}
-
-/// [`ReferenceEnd`] of data path `path` on `owner`: local reference chains and
-/// named-`uses` members (first hop's site overlay entry, else the template's own end
-/// re-qualified under the hop), resolved in one worklist. `None` when `path` does not
-/// peel or reaches missing data.
-pub(crate) fn reference_end_on<O: ReferenceOwner>(
-    owner: &O,
-    path: &DataPath,
-) -> Option<ReferenceEnd> {
-    let mut frames: Vec<ReferenceFrame<'_, O>> = Vec::new();
-    let mut owner = ReferenceFrameOwner::Root(owner);
-    let mut path = path.clone();
-    let mut chain = 0usize;
-    loop {
-        let depth = frames.len();
-        let data_len = owner.data().len();
-        let mut end = match resolve_reference_step(owner, &path, &mut frames) {
-            ReferenceStep::Value(end) => end,
-            ReferenceStep::Next(next_owner, next_path) => {
-                chain = if frames.len() == depth { chain + 1 } else { 0 };
-                assert!(
-                    chain <= data_len,
-                    "BUG: data reference chain from '{path}' outlasts plan data (cycles are rejected)"
-                );
-                owner = next_owner;
-                path = next_path;
-                continue;
-            }
-        };
-        loop {
-            let Some(frame) = frames.pop() else {
-                return end;
-            };
-            let template_end = end?;
-            match finish_reference_frame(frame, template_end) {
-                ReferenceStep::Value(value) => end = value,
-                ReferenceStep::Next(next_owner, next_path) => {
-                    chain = 0;
-                    owner = next_owner;
-                    path = next_path;
-                    break;
-                }
-            }
-        }
-    }
-}
-
-fn resolve_reference_step<'a, O: ReferenceOwner>(
-    owner: ReferenceFrameOwner<'a, O>,
-    path: &DataPath,
-    frames: &mut Vec<ReferenceFrame<'a, O>>,
-) -> ReferenceStep<'a, O> {
-    match owner.data().get(path) {
-        Some(
-            DataDefinition::Value { .. }
-            | DataDefinition::TypeDeclaration { .. }
-            | DataDefinition::InstanceList { .. },
-        ) => return ReferenceStep::Value(Some(ReferenceEnd::Promptable(path.clone()))),
-        Some(DataDefinition::Import { .. }) => {
-            return ReferenceStep::Value(Some(ReferenceEnd::Import));
-        }
-        Some(DataDefinition::Reference {
-            target: ReferenceTarget::Rule(rule),
-            ..
-        }) => return ReferenceStep::Value(Some(ReferenceEnd::Rule(rule.clone()))),
-        Some(DataDefinition::Reference {
-            target: ReferenceTarget::Data(next),
-            ..
-        }) => return ReferenceStep::Next(owner, next.clone()),
-        None => {}
-    }
-    if path.segments.is_empty() {
-        return ReferenceStep::Value(None);
-    }
-    let (first, rest) = path
-        .segments
-        .split_first()
-        .unwrap_or_else(|| panic!("BUG: reference_end_on empty member path '{path}'"));
-    let Some(hop) = import_hop(owner.data(), owner.templates(), first) else {
-        return ReferenceStep::Value(None);
-    };
-    let relative = DataPath {
-        segments: rest.to_vec(),
-        data: path.data.clone(),
-    };
-    if let Some(entry) = hop.overlay.get(&relative) {
-        return match entry {
-            ImportOverlay::Literal(_) => {
-                ReferenceStep::Value(Some(ReferenceEnd::Promptable(path.clone())))
-            }
-            ImportOverlay::Reference {
-                target: ReferenceTarget::Data(target),
-                ..
-            } => ReferenceStep::Next(owner, target.clone()),
-            ImportOverlay::Reference {
-                target: ReferenceTarget::Rule(rule),
-                ..
-            } => ReferenceStep::Value(Some(ReferenceEnd::Rule(rule.clone()))),
-        };
-    }
-    let template = hop.template;
-    if relative.segments.is_empty() && !template.data.contains_key(&relative) {
-        return ReferenceStep::Value(None);
-    }
-    frames.push(ReferenceFrame {
-        owner,
-        path: path.clone(),
-        hop,
-        relative: relative.clone(),
-    });
-    ReferenceStep::Next(ReferenceFrameOwner::Template(template), relative)
-}
-
-fn finish_reference_frame<'a, O: ReferenceOwner>(
-    frame: ReferenceFrame<'a, O>,
-    template_end: ReferenceEnd,
-) -> ReferenceStep<'a, O> {
-    match template_end {
-        ReferenceEnd::Promptable(target) if target == frame.relative => {
-            ReferenceStep::Value(Some(ReferenceEnd::Promptable(frame.path)))
-        }
-        ReferenceEnd::Promptable(target) => {
-            ReferenceStep::Next(frame.owner, frame.hop.absolute(&target))
-        }
-        ReferenceEnd::Rule(rule) => {
-            ReferenceStep::Value(Some(ReferenceEnd::Rule(frame.hop.absolute_rule(&rule))))
-        }
-        ReferenceEnd::Import => ReferenceStep::Value(Some(ReferenceEnd::Import)),
-    }
-}
-
-/// The need a resolved end contributes by itself, or the non-empty-`uses` rule it still
-/// has to expand through its owner.
-fn need_of_end(end: ReferenceEnd) -> Result<Option<ImportNeed>, RulePath> {
-    match end {
-        ReferenceEnd::Promptable(path) => Ok(Some(ImportNeed::Data(path))),
-        ReferenceEnd::Rule(rule) if rule.segments.is_empty() => Ok(Some(ImportNeed::Rule(rule))),
-        ReferenceEnd::Rule(rule) => Err(rule),
-        ReferenceEnd::Import => Ok(None),
-    }
-}
-
-fn needs_of_end<O: ReferenceOwner>(owner: &O, end: ReferenceEnd) -> Vec<ImportNeed> {
-    match need_of_end(end) {
-        Ok(need) => need.into_iter().collect(),
-        Err(rule) => import_rule_needs(owner, &rule),
-    }
-}
-
-/// Owner-frame needs of evaluating named-`uses` rule `path` (non-empty segments):
-/// the template rule's needs, each re-qualified under the hop and resolved through
-/// [`reference_end_on`].
-pub(crate) fn import_rule_needs<O: ReferenceOwner>(owner: &O, path: &RulePath) -> Vec<ImportNeed> {
-    let mut frames = vec![NeedsFrame::new(
-        ReferenceFrameOwner::Root(owner),
-        path.clone(),
-        false,
-    )];
-    loop {
-        let top = frames
-            .last_mut()
-            .expect("BUG: import rule frames empty before the root finished");
-        if top.hop.is_none() {
-            let (first, rest) = top.rule.segments.split_first().unwrap_or_else(|| {
-                panic!("BUG: import_rule_needs on local rule '{}'", top.rule.rule)
-            });
-            let hop =
-                import_hop(top.owner.data(), top.owner.templates(), first).unwrap_or_else(|| {
-                    panic!(
-                        "BUG: import rule '{}' first hop does not peel",
-                        top.rule.input_key()
-                    )
-                });
-            let relative = RulePath {
-                segments: rest.to_vec(),
-                rule: top.rule.rule.clone(),
-            };
-            let template = hop.template;
-            top.hop = Some(hop);
-            if relative.segments.is_empty() {
-                top.needs = Some(template.rule_needs(&relative));
-            } else {
-                frames.push(NeedsFrame::new(
-                    ReferenceFrameOwner::Template(template),
-                    relative,
-                    true,
-                ));
-                continue;
-            }
-        }
-
-        let needs = top
-            .needs
-            .as_ref()
-            .expect("BUG: entered import rule frame has no template needs");
-        if top.next == needs.len() {
-            let finished = frames
-                .pop()
-                .expect("BUG: finished import rule frame missing from stack");
-            match frames.last_mut() {
-                None => return finished.out,
-                Some(parent) if finished.feeds_parent_needs => {
-                    parent.needs = Some(finished.out);
-                    parent.next = 0;
-                }
-                Some(parent) => parent.out.extend(finished.out),
-            }
-            continue;
-        }
-
-        let item = needs[top.next].clone();
-        top.next += 1;
-        let owner = top.owner;
-        let hop = top
-            .hop
-            .as_ref()
-            .expect("BUG: entered import rule frame has no hop");
-        let child = match item {
-            ImportNeed::Data(field) => {
-                let absolute = hop.absolute(&field);
-                let end = owner.reference_end_on(&absolute).unwrap_or_else(|| {
-                    panic!("BUG: template need '{absolute}' does not peel on its owner")
-                });
-                match need_of_end(end) {
-                    Ok(Some(need)) => {
-                        top.out.push(need);
-                        None
-                    }
-                    Ok(None) => None,
-                    Err(rule) => Some(NeedsFrame::new(owner, rule, false)),
-                }
-            }
-            ImportNeed::Rule(rule) => Some(NeedsFrame::new(owner, hop.absolute_rule(&rule), false)),
-        };
-        if let Some(child) = child {
-            frames.push(child);
-        }
-    }
-}
-
-/// One named-`uses` rule being expanded by [`import_rule_needs`]. `hop` and `needs` are set
-/// once the frame is entered; `needs` are the template-level needs it maps through `hop`.
-/// A frame with `feeds_parent_needs` supplies its parent's template-level needs instead of
-/// its output.
-struct NeedsFrame<'a, O: ReferenceOwner> {
-    owner: ReferenceFrameOwner<'a, O>,
-    rule: RulePath,
-    hop: Option<ImportHop<'a>>,
-    needs: Option<Vec<ImportNeed>>,
-    next: usize,
-    out: Vec<ImportNeed>,
-    feeds_parent_needs: bool,
-}
-
-impl<'a, O: ReferenceOwner> NeedsFrame<'a, O> {
-    fn new(owner: ReferenceFrameOwner<'a, O>, rule: RulePath, feeds_parent_needs: bool) -> Self {
-        Self {
-            owner,
-            rule,
-            hop: None,
-            needs: None,
-            next: 0,
-            out: Vec::new(),
-            feeds_parent_needs,
-        }
-    }
 }
 
 /// Pass-1 accumulator of [`ExecutionPlan::build_needed_by_rules`] for one rule.
@@ -1566,19 +1366,13 @@ struct NeedsMarker<'a> {
     plan: &'a ExecutionPlan,
     rule_pos: usize,
     bits: &'a mut [u64],
-    nested_hits: &'a mut HashSet<DataPath>,
     bits_by_rule: &'a [Vec<u64>],
-    nested_hits_by_rule: &'a [HashSet<DataPath>],
 }
 
 impl NeedsMarker<'_> {
-    fn mark_slot(&mut self, data_pos: usize) {
-        self.bits[data_pos / 64] |= 1u64 << (data_pos % 64);
-    }
-
-    fn mark(&mut self, need: ImportNeed) {
+    fn mark(&mut self, need: InputNeed) {
         match need {
-            ImportNeed::Rule(rule) => {
+            InputNeed::Rule(rule) => {
                 let ref_pos =
                     self.plan.rules.get_index_of(&rule).unwrap_or_else(|| {
                         panic!("BUG: needed rule '{rule}' missing from plan.rules")
@@ -1592,27 +1386,34 @@ impl NeedsMarker<'_> {
                 for (word, dep_word) in self.bits.iter_mut().zip(&self.bits_by_rule[ref_pos]) {
                     *word |= *dep_word;
                 }
-                self.nested_hits
-                    .extend(self.nested_hits_by_rule[ref_pos].iter().cloned());
             }
-            ImportNeed::Data(path) if path.segments.is_empty() => {
+            InputNeed::Data(path) => {
                 let data_pos =
                     self.plan.data.get_index_of(&path).unwrap_or_else(|| {
                         panic!("BUG: needed data '{path}' missing from plan.data")
                     });
-                self.mark_slot(data_pos);
+                self.bits[data_pos / 64] |= 1u64 << (data_pos % 64);
             }
-            ImportNeed::Data(path) => match self.plan.data.get_index_of(&path) {
-                Some(data_pos) => self.mark_slot(data_pos),
-                None => {
-                    self.nested_hits.insert(path);
+        }
+    }
+
+    fn mark_scale_target(&mut self, stack: &mut Vec<NormalFormId>, target: &ReferenceTarget) {
+        if let Some(&cell) = self.plan.member_targets.get(target) {
+            stack.push(cell);
+            return;
+        }
+        match target {
+            ReferenceTarget::Rule(rule) => self.mark(InputNeed::Rule(rule.clone())),
+            ReferenceTarget::Data(path) => {
+                if let Some(need) = self.plan.data_read_needs(path) {
+                    self.mark(need);
                 }
-            },
+            }
         }
     }
 }
 
-/// Ensure every input key (see [`ExecutionPlan::input_key_entries`]) has a [`LeafKind::DataPath`] cell in `normal_forms`
+/// Ensure every [`ExecutionPlan::data`] path has a [`LeafKind::DataPath`] cell in `normal_forms`
 /// and return the path → id index. Expression lowering already creates leaves for
 /// referenced paths; unused paths get orphan leaves appended so evaluation can
 /// still store bindings/defaults/reference copies in the value table.
@@ -1624,10 +1425,6 @@ fn ensure_data_leaves(
     normal_forms: &mut Vec<NormalForm>,
     input_keys: &[DataPath],
     data: &IndexMap<DataPath, DataDefinition>,
-    row_templates: &std::collections::BTreeMap<
-        crate::planning::semantics::SpecIdentity,
-        std::sync::Arc<ExecutionPlan>,
-    >,
 ) -> IndexMap<DataPath, NormalFormId> {
     use crate::planning::normalize::LeafKind;
     use crate::planning::normalize::NormalFormKind;
@@ -1648,7 +1445,7 @@ fn ensure_data_leaves(
         let id = NormalFormId::from_index(normal_forms.len());
         normal_forms.push(NormalForm {
             kind: NormalFormKind::Leaf(LeafKind::DataPath(path.clone())),
-            result_type: data_path_result_type(data, path, row_templates),
+            result_type: data_path_result_type(data, path),
             fold_types: Vec::new(),
             source: None,
             origin: None,
@@ -1680,34 +1477,7 @@ fn build_data_display(plan: &ExecutionPlan) -> IndexMap<DataPath, ShowDataCache>
     for (path, data) in &plan.data {
         insert_data_display_entry(&mut out, path, data);
     }
-    for (path, data) in plan.nested_input_keys() {
-        if out.contains_key(&path) {
-            continue;
-        }
-        // Overlay literal on the owning Import prefills the nested slot.
-        if let Some(bound) = overlay_literal_for(plan, &path) {
-            out.insert(
-                path,
-                ShowDataCache {
-                    value: Some(bound),
-                    suggestion: None,
-                },
-            );
-            continue;
-        }
-        insert_data_display_entry(&mut out, &path, data);
-    }
     out
-}
-
-fn overlay_literal_for(
-    plan: &ExecutionPlan,
-    path: &DataPath,
-) -> Option<crate::planning::semantics::BoundValueKind> {
-    match plan.import_overlay_entry(path)? {
-        ImportOverlay::Literal(bound) => Some(bound.clone()),
-        ImportOverlay::Reference { .. } => None,
-    }
 }
 
 fn insert_data_display_entry(
@@ -1723,7 +1493,7 @@ fn insert_data_display_entry(
             value,
             resolved_type,
             ..
-        } => Some(crate::planning::semantics::BoundValueKind {
+        } => Some(BoundValueKind {
             value: value.value.clone(),
             unit: resolved_type.unit().map(Arc::from),
         }),
@@ -1743,22 +1513,17 @@ pub(crate) enum ShowBoundRole {
 }
 
 pub(crate) fn show_bound_result_value(
-    bound: &crate::planning::semantics::BoundValueKind,
-    schema_type: &crate::planning::semantics::LemmaType,
+    bound: &BoundValueKind,
+    schema_type: &LemmaType,
     input_key: &str,
     role: ShowBoundRole,
-) -> crate::result_value::RuleResultValue {
+) -> RuleResultValue {
     let (fill, suggestion) = match role {
         ShowBoundRole::Value => (Some(bound), None),
         ShowBoundRole::Suggestion => (None, Some(bound)),
     };
-    let display_type = crate::planning::semantics::lemma_type_with_display_binding(
-        schema_type,
-        None,
-        fill,
-        suggestion,
-    );
-    crate::result_value::type_scoped_result_value_from_literal(&bound.to_literal(), &display_type)
+    let display_type = lemma_type_with_display_binding(schema_type, None, fill, suggestion);
+    type_scoped_result_value_from_literal(&bound.to_literal(), &display_type)
         .unwrap_or_else(|failure| {
             let role_name = match role {
                 ShowBoundRole::Value => "value",
@@ -1766,15 +1531,15 @@ pub(crate) fn show_bound_result_value(
             };
             panic!(
                 "BUG: show {role_name} value for '{input_key}' failed type_scoped_result_value_from_literal: {}",
-                crate::result_value::rule_result_value_failure_message(failure)
+                rule_result_value_failure_message(failure)
             )
         })
 }
 
-/// Show value of instance list `path`: its source rows in order, each with the fields
-/// it sets and no `result` (a row has no value of its own to display). Literal fields
-/// carry their value; referenced fields carry [`RuleResultValue::reference`]. `None`
-/// when the list has no source rows.
+/// Show value of instance list `path`: its spec-written rows in order, each with the
+/// fields the row binds and no `result` (a row has no value of its own to display).
+/// Literal fields carry their value; referenced fields carry
+/// [`RuleResultValue::reference`]. `None` when the list has no spec-written rows.
 pub(crate) fn show_instance_list_value(
     plan: &ExecutionPlan,
     path: &DataPath,
@@ -1783,33 +1548,17 @@ pub(crate) fn show_instance_list_value(
         .instance_lists
         .get(path)
         .expect("BUG: instance list data without a source");
-    if source.rows.is_empty() {
+    if source.store.rows.is_empty() {
         return None;
     }
-    let template = plan.row_template(&source.identity);
-    let mut items = Vec::with_capacity(source.rows.len());
-    for row in source.rows.iter() {
-        let mut fields = IndexMap::with_capacity(row.fields.len());
-        for (field, row_source) in &row.fields {
-            let key = field.input_key();
-            let value = match row_source {
-                DataSource::Literal(bound) => {
-                    let field_type = row_end_type(template, &RowEnd::Data(field.clone()));
-                    show_bound_result_value(bound, &field_type, &key, ShowBoundRole::Value)
-                }
-                DataSource::Reference(relative) => {
-                    let consumer =
-                        crate::planning::instance_list::absolute_reference(path, relative);
-                    RuleResultValue {
-                        reference: Some(consumer.input_key()),
-                        ..Default::default()
-                    }
-                }
-            };
-            fields.insert(key, value);
-        }
+    let template = plan
+        .row_templates
+        .get(&source.identity)
+        .expect("BUG: list with spec-written rows has a row template");
+    let mut items = Vec::with_capacity(source.store.rows.len());
+    for row in &source.store.rows {
         items.push(RuleResultValue {
-            fields: Some(fields),
+            fields: Some(show_written_row_fields(plan, row, template)),
             ..Default::default()
         });
     }
@@ -1817,6 +1566,85 @@ pub(crate) fn show_instance_list_value(
         list: Some(items),
         ..Default::default()
     })
+}
+
+/// Fields a spec-written row binds, keyed by their path under the row. A nested `uses`
+/// instance the row writes through (`-> with item.price: 3 eur`) shows the fields it
+/// writes there, not those the row spec's own `uses` already binds.
+fn show_written_row_fields(
+    plan: &ExecutionPlan,
+    row: &RowInstance,
+    template: &ExecutionPlan,
+) -> IndexMap<String, RuleResultValue> {
+    struct Level<'r> {
+        row: &'r RowInstance,
+        base: Option<&'r RowInstance>,
+        template: &'r ExecutionPlan,
+        prefix: String,
+        next: usize,
+    }
+    let mut fields = IndexMap::new();
+    let mut levels: Vec<Level<'_>> = vec![Level {
+        row,
+        base: None,
+        template,
+        prefix: String::new(),
+        next: 0,
+    }];
+    while let Some(level) = levels.last_mut() {
+        let slot = level.next;
+        let Some((field_path, definition)) = level.template.data.get_index(slot) else {
+            levels.pop();
+            continue;
+        };
+        level.next += 1;
+        let binding = level.row.bindings[slot].as_ref();
+        let base_binding = level.base.and_then(|base| base.bindings[slot].as_ref());
+        let copied = match (binding, base_binding) {
+            (Some(binding), Some(base)) => binding.is_copy_of(base),
+            (None, _) => true,
+            (Some(_), None) => false,
+        };
+        if copied {
+            continue;
+        }
+        let key = format!("{}{}", level.prefix, field_path.input_key());
+        let value = match binding.expect("BUG: unbound slots are skipped above") {
+            RowBinding::Rows { .. } => continue,
+            RowBinding::Bound(OperationResult::Value(bound)) => {
+                let schema = definition
+                    .resolved_type_arc()
+                    .expect("BUG: stored row bound field has a resolved type");
+                show_bound_result_value(bound, schema, &key, ShowBoundRole::Value)
+            }
+            RowBinding::Bound(OperationResult::Veto(_)) => {
+                unreachable!("BUG: stored row literal binding is never a Veto")
+            }
+            RowBinding::Deferred { target, .. } => RuleResultValue {
+                reference: Some(match target {
+                    ReferenceTarget::Data(target) => target.input_key(),
+                    ReferenceTarget::Rule(target) => target.input_key(),
+                }),
+                ..Default::default()
+            },
+            RowBinding::Instance(nested) => {
+                let DataDefinition::Import { row: base, .. } = definition else {
+                    panic!("BUG: nested instance binding on non-`uses` slot '{field_path}'");
+                };
+                let nested_template = plan.row_template(&nested.identity);
+                levels.push(Level {
+                    row: nested,
+                    base: Some(base),
+                    template: nested_template,
+                    prefix: format!("{key}."),
+                    next: 0,
+                });
+                continue;
+            }
+        };
+        fields.insert(key, value);
+    }
+    fields
 }
 
 /// One data entry in a [`Show`].
@@ -1830,7 +1658,7 @@ pub(crate) fn show_instance_list_value(
 pub struct ShowData {
     pub lemma_type: LemmaType,
     /// Import hops to this slot (`[]` = this spec). Clone of [`DataPath::segments`].
-    pub path: Vec<crate::planning::semantics::PathSegment>,
+    pub path: Vec<PathSegment>,
     pub value: Option<RuleResultValue>,
     pub suggestion: Option<RuleResultValue>,
     /// Show.rules keys that transitively need this data after normalize.
@@ -1839,21 +1667,22 @@ pub struct ShowData {
 }
 
 /// Consumer [`Engine::show`] result: local offered types, inputs rules need,
-/// this spec's rule graph (local rules plus reachable imports), and resolved
-/// temporal window. Source: [`Engine::source`].
+/// this spec's own rules (empty path), and resolved temporal window.
+/// Source: [`Engine::source`]. Branch Rule leaves may name reachable imports that
+/// are not keys of [`Self::rules`]; follow those via `show` on the imported spec.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Show {
     /// Interned repository name (`specs()` string). `None` = unnamed workspace.
     pub repository: Option<String>,
     pub spec: String,
     pub commentary: Option<String>,
-    pub effective_from: Option<crate::parsing::ast::DateTimeValue>,
-    pub effective_to: Option<crate::parsing::ast::DateTimeValue>,
+    pub effective_from: Option<DateTimeValue>,
+    pub effective_to: Option<DateTimeValue>,
     /// Planning instant of the execution-plan slice that produced this Show.
     /// Distinguishes temporal dependency slices that share the same declared window.
     pub plan_effective: EffectiveDate,
     pub start_line: usize,
-    pub source_type: Option<crate::parsing::source::SourceType>,
+    pub source_type: Option<SourceType>,
     /// Local `data` declarations (empty path; type or value), declaration order.
     pub types: indexmap::IndexMap<String, LemmaType>,
     /// Inputs rules need (`needed_by_rules` non-empty), local or imported.
@@ -1869,11 +1698,7 @@ impl std::fmt::Display for Show {
             Some(repository) => write!(f, "Spec: {} {}", repository, self.spec)?,
             None => write!(f, "Spec: {}", self.spec)?,
         }
-        crate::engine::write_effective_window(
-            f,
-            self.effective_from.as_ref(),
-            self.effective_to.as_ref(),
-        )?;
+        write_effective_window(f, self.effective_from.as_ref(), self.effective_to.as_ref())?;
 
         if let Some(commentary) = &self.commentary {
             for line in commentary.lines() {
@@ -1913,6 +1738,9 @@ impl std::fmt::Display for Show {
             for (name, entry) in &self.data {
                 write!(f, "\n  {} ({})", name, entry.lemma_type.specifications)?;
                 for line in type_detail_lines(&entry.lemma_type.specifications) {
+                    write!(f, "\n    {}", line)?;
+                }
+                if let Some(line) = option_detail_line(&entry.lemma_type) {
                     write!(f, "\n    {}", line)?;
                 }
                 let help = entry.lemma_type.specifications.help();
@@ -1960,7 +1788,11 @@ impl std::fmt::Display for Show {
                     write!(
                         f,
                         "\n    depends_on_rules: {}",
-                        rule.depends_on_rules.join(", ")
+                        rule.depends_on_rules
+                            .iter()
+                            .map(|path| path.input_key())
+                            .collect::<Vec<_>>()
+                            .join(", ")
                     )?;
                 }
             }
@@ -1985,16 +1817,12 @@ pub fn type_detail_lines(spec: &TypeSpecification) -> Vec<String> {
         TypeSpecification::Measure {
             minimum,
             maximum,
-            decimals,
             units,
             ..
         } => {
             let unit_names: Vec<&str> = units.0.iter().map(|u| u.name.as_str()).collect();
             if !unit_names.is_empty() {
                 lines.push(format!("units: {}", unit_names.join(", ")));
-            }
-            if let Some(d) = decimals {
-                lines.push(format!("decimals: {}", d));
             }
             if let Some((magnitude, unit_name)) = minimum {
                 lines.push(format!(
@@ -2030,16 +1858,12 @@ pub fn type_detail_lines(spec: &TypeSpecification) -> Vec<String> {
         TypeSpecification::Ratio {
             minimum,
             maximum,
-            decimals,
             units,
             ..
         } => {
             let unit_names: Vec<&str> = units.0.iter().map(|u| u.name.as_str()).collect();
             if !unit_names.is_empty() {
                 lines.push(format!("units: {}", unit_names.join(", ")));
-            }
-            if let Some(d) = decimals {
-                lines.push(format!("decimals: {}", d));
             }
             if let Some(v) = minimum {
                 lines.push(format!("minimum: {}", v.display_str()));
@@ -2048,15 +1872,9 @@ pub fn type_detail_lines(spec: &TypeSpecification) -> Vec<String> {
                 lines.push(format!("maximum: {}", v.display_str()));
             }
         }
-        TypeSpecification::Text {
-            options, length, ..
-        } => {
+        TypeSpecification::Text { length, .. } => {
             if let Some(l) = length {
                 lines.push(format!("length: {}", l));
-            }
-            if !options.is_empty() {
-                let quoted: Vec<String> = options.iter().map(|o| format!("\"{}\"", o)).collect();
-                lines.push(format!("options: {}", quoted.join(", ")));
             }
         }
         TypeSpecification::Date {
@@ -2217,14 +2035,24 @@ pub fn type_detail_lines(spec: &TypeSpecification) -> Vec<String> {
         | TypeSpecification::Veto { .. }
         | TypeSpecification::Undetermined
         | TypeSpecification::Spec { .. } => {}
-        TypeSpecification::List { element, key } => {
+        TypeSpecification::List { element, key, help } => {
             lines.push(format!("element: {element}"));
+            if !help.is_empty() {
+                lines.push(format!("help: {help}"));
+            }
             match key {
                 crate::planning::semantics::ListKey::Numbered => {
                     lines.push("key: numbered".to_string());
                 }
                 crate::planning::semantics::ListKey::Fields(fields) => {
-                    lines.push(format!("key: {}", fields.join(", ")));
+                    lines.push(format!(
+                        "key: {}",
+                        fields
+                            .iter()
+                            .map(|field| field.name.as_str())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ));
                 }
             }
         }
@@ -2234,35 +2062,120 @@ pub fn type_detail_lines(spec: &TypeSpecification) -> Vec<String> {
 
 impl ExecutionPlan {
     /// Expression-scope unit index (local types plus direct `uses` imports).
-    pub(crate) fn expression_unit_index(&self) -> &crate::planning::unit_index::UnitIndex {
+    pub(crate) fn expression_unit_index(&self) -> &UnitIndex {
         &self.resolved_types.unit_index
     }
 
-    /// Per [`Self::data`] position: local [`Self::rules`] positions that transitively
-    /// need that slot / row field (through rule references), alphabetical rule-name order.
+    /// [`Self::show_needed_by`], each list in input-key order: a catalog rule needs the
+    /// data it reads that no binding fills, the data `bits_by_rule` gives a local rule,
+    /// and the needs of every rule it reads (including reachable imports walked in
+    /// `show_order`). A local rule is not listed for the data `bits_by_rule` already
+    /// gives it. Reader positions are catalog ([`Self::show_rules`]) indices only.
+    fn build_show_needed_by(
+        &self,
+        show_order: &[RulePath],
+        show_edges: &BTreeMap<RulePath, BTreeSet<RulePath>>,
+        show_imports: &crate::planning::graph::ShowImports,
+        bits_by_rule: &[Vec<u64>],
+    ) -> IndexMap<DataPath, Vec<u32>> {
+        let mut paths: indexmap::IndexSet<&DataPath> = self.data.keys().collect();
+        for reads in show_imports.data_reads.values() {
+            paths.extend(reads);
+        }
+        let words = paths.len().div_ceil(64);
+        let mut needs: HashMap<&RulePath, Vec<u64>> = HashMap::with_capacity(show_order.len());
+        for path in show_order {
+            let mut bits = match self.rules.get_index_of(path) {
+                Some(rule_pos) => {
+                    let mut bits = bits_by_rule[rule_pos].clone();
+                    bits.resize(words, 0);
+                    bits
+                }
+                None => vec![0u64; words],
+            };
+            for read in show_imports.data_reads.get(path).into_iter().flatten() {
+                let position = paths
+                    .get_index_of(read)
+                    .expect("BUG: Show data read indexed above");
+                bits[position / 64] |= 1u64 << (position % 64);
+            }
+            let reads = match show_imports.need_edges.get(path) {
+                Some(edges) => edges,
+                None => &show_edges[path],
+            };
+            for dependency in reads {
+                let dependency_bits = needs
+                    .get(dependency)
+                    .expect("BUG: Show dependency needs computed before its reader");
+                for (word, dependency_word) in bits.iter_mut().zip(dependency_bits) {
+                    *word |= *dependency_word;
+                }
+            }
+            needs.insert(path, bits);
+        }
+        let mut readers: Vec<(usize, &RulePath)> = self.show_rules.keys().enumerate().collect();
+        readers.sort_by_cached_key(|(_, path)| path.input_key());
+        let mut lists: Vec<Vec<u32>> = vec![Vec::new(); paths.len()];
+        for (rule_pos, path) in readers {
+            let rule_pos = u32::try_from(rule_pos).expect("BUG: Show rule count exceeds u32");
+            // `bits_by_rule` covers this plan's data only; import data is never listed.
+            let listed: &[u64] = match self.rules.get_index_of(path) {
+                Some(local_pos) => &bits_by_rule[local_pos],
+                None => &[],
+            };
+            for (word_idx, &word) in needs[path].iter().enumerate() {
+                let mut remaining = word & !listed.get(word_idx).copied().unwrap_or(0);
+                while remaining != 0 {
+                    let bit = remaining.trailing_zeros() as usize;
+                    lists[word_idx * 64 + bit].push(rule_pos);
+                    remaining &= remaining - 1;
+                }
+            }
+        }
+        paths
+            .into_iter()
+            .zip(lists)
+            .filter(|(_, list)| !list.is_empty())
+            .map(|(path, list)| (path.clone(), list))
+            .collect()
+    }
+
+    /// Per [`Self::data`] position: [`Self::rules`] positions that transitively
+    /// need that slot (through rule references). Row-field columns are sized and left
+    /// empty for [`Self::fill_row_field_needs`]. Returns the per-rule data-slot bitsets.
     ///
     /// Built in plan topological order: at a rule-ref cell, OR the target rule's
     /// already-computed bitsets instead of descending Kind (rule references are
     /// evaluation boundaries). Walks the normalized body so constant-dead unless
-    /// arms removed by normalize stay out of the index. Row fields land on the
-    /// instance-list slot's [`NeededByRules::fields`] column.
-    fn build_needed_by_rules(&self) -> (Vec<NeededByRules>, IndexMap<DataPath, Vec<u32>>) {
-        use crate::planning::normalize::{LeafKind, NormalFormKind, NormalFormListOp};
+    /// arms removed by normalize stay out of the index. Fields read on
+    /// evaluation-data rows land on the instance-list slot's [`NeededByRules::fields`]
+    /// column; fields read on spec-written rows are ordinary slots of this plan.
+    fn build_needed_by_rules(&mut self) -> Vec<Vec<u64>> {
+        use crate::planning::normalize::{LeafKind, NormalFormKind};
 
         let data_len = self.data.len();
         let words = data_len.div_ceil(64);
         let mut bits_by_rule: Vec<Vec<u64>> = Vec::with_capacity(self.rules.len());
-        let mut nested_hits_by_rule: Vec<HashSet<DataPath>> = Vec::with_capacity(self.rules.len());
 
         let mut visited = HashSet::new();
         let mut stack = Vec::new();
 
-        // Pass 1: data-slot bitsets (topo / rule_ref OR). Row field reads ignored here.
+        // Pass 1: data-slot bitsets (topo / rule_ref OR). Evaluation-data row reads ignored here.
         for (rule_pos, (_, rule)) in self.rules.iter().enumerate() {
             let mut bits = vec![0u64; words];
-            let mut nested_hits: HashSet<DataPath> = HashSet::new();
             visited.clear();
             stack.push(rule.normal_form);
+            {
+                let mut needs = NeedsMarker {
+                    plan: self,
+                    rule_pos,
+                    bits: &mut bits,
+                    bits_by_rule: &bits_by_rule,
+                };
+                for target in &rule.scale_dependencies {
+                    needs.mark_scale_target(&mut stack, target);
+                }
+            }
             while let Some(id) = stack.pop() {
                 if !visited.insert(id) {
                     continue;
@@ -2272,27 +2185,20 @@ impl ExecutionPlan {
                     plan: self,
                     rule_pos,
                     bits: &mut bits,
-                    nested_hits: &mut nested_hits,
                     bits_by_rule: &bits_by_rule,
-                    nested_hits_by_rule: &nested_hits_by_rule,
                 };
                 if let Some(ref_path) = &nf.rule_ref {
-                    needs.mark(ImportNeed::Rule(ref_path.clone()));
+                    needs.mark(InputNeed::Rule(ref_path.clone()));
                     continue;
                 }
                 match &nf.kind {
                     NormalFormKind::Leaf(LeafKind::DataPath(path)) => {
-                        for need in self.data_read_needs(path) {
+                        if let Some(need) = self.data_read_needs(path) {
                             needs.mark(need);
                         }
-                    }
-                    NormalFormKind::Leaf(LeafKind::ImportRule(path)) if *path == rule.path => {
-                        for need in self.rule_needs(path) {
-                            needs.mark(need);
+                        if let Some(rule) = self.options_rule_of(path) {
+                            needs.mark(InputNeed::Rule(rule));
                         }
-                    }
-                    NormalFormKind::Leaf(LeafKind::ImportRule(path)) => {
-                        needs.mark(ImportNeed::Rule(path.clone()));
                     }
                     NormalFormKind::OrderedDispatch { .. } => {
                         let origin = nf.origin.unwrap_or_else(|| {
@@ -2307,11 +2213,67 @@ impl ExecutionPlan {
                 }
             }
             bits_by_rule.push(bits);
-            nested_hits_by_rule.push(nested_hits);
         }
 
-        // Pass 2: row-field bitsets. Self RowEnd::Rule expands via completed bits_by_rule
-        // (row rule reads are not topo edges).
+        let mut consumers: Vec<usize> = (0..self.rules.len()).collect();
+        consumers.sort_by(|&a, &b| {
+            self.rules[a]
+                .path
+                .input_key()
+                .cmp(&self.rules[b].path.input_key())
+        });
+
+        let mut needed_by_rules: Vec<NeededByRules> = self
+            .data
+            .iter()
+            .map(|(path, definition)| {
+                let fields = match definition {
+                    DataDefinition::InstanceList { .. } => {
+                        let identity = &self
+                            .instance_lists
+                            .get(path)
+                            .unwrap_or_else(|| {
+                                panic!("BUG: InstanceList '{path}' missing from instance_lists")
+                            })
+                            .identity;
+                        vec![Vec::new(); self.row_template(identity).row_field_count()]
+                    }
+                    _ => Vec::new(),
+                };
+                NeededByRules {
+                    rules: Vec::new(),
+                    fields,
+                }
+            })
+            .collect();
+
+        for &rule_pos in &consumers {
+            let rule_id = u32::try_from(rule_pos).expect("BUG: rule count exceeds u32");
+            let bits = &bits_by_rule[rule_pos];
+            for (word_idx, &word) in bits.iter().enumerate() {
+                let mut remaining = word;
+                while remaining != 0 {
+                    let bit = remaining.trailing_zeros() as usize;
+                    let data_pos = word_idx * 64 + bit;
+                    needed_by_rules[data_pos].rules.push(rule_id);
+                    remaining &= remaining - 1;
+                }
+            }
+        }
+        self.needed_by_rules = needed_by_rules;
+        bits_by_rule
+    }
+
+    /// Fills the row-field columns of [`Self::needed_by_rules`]: which rules need each row
+    /// field of evaluation-data rows. Runs after [`Self::show_needed_by`] so reads of a
+    /// self-recursive row see the needs of its `uses` imports.
+    fn fill_row_field_needs(&mut self, bits_by_rule: &[Vec<u64>]) {
+        use crate::planning::normalize::{LeafKind, NormalFormKind, NormalFormListOp};
+
+        let mut visited = HashSet::new();
+        let mut stack = Vec::new();
+        // Evaluation-data row-field bitsets per row spec. Self RowEnd::Rule
+        // expands via completed bits_by_rule (row rule reads are not topo edges).
         let mut row_bits_by_rule: Vec<BTreeMap<SpecIdentity, Vec<u64>>> =
             Vec::with_capacity(self.rules.len());
         for (rule_pos, (_, rule)) in self.rules.iter().enumerate() {
@@ -2345,37 +2307,44 @@ impl ExecutionPlan {
                     continue;
                 }
                 match &nf.kind {
-                    NormalFormKind::Leaf(LeafKind::Row { identity, end, .. }) => {
-                        mark_row_end_needs(
-                            self,
-                            identity,
-                            end,
-                            &bits_by_rule,
-                            &mut row_bits,
-                            &rule.path,
-                        );
+                    NormalFormKind::RowField { identity, end, .. } => {
+                        if self.has_row_template(identity) {
+                            mark_row_end_needs(
+                                self,
+                                identity,
+                                std::slice::from_ref(end),
+                                bits_by_rule,
+                                &mut row_bits,
+                                &rule.path,
+                            );
+                        }
+                        nf.kind.for_each_child(|child| stack.push(child));
                     }
-                    NormalFormKind::SpecMember {
-                        base,
-                        row: Some(row_read),
-                        ..
-                    } => {
-                        let identity = match &self.result_type(*base).specifications {
-                            TypeSpecification::Spec { spec } => spec,
-                            other => panic!(
-                                "BUG: SpecMember row read on non-spec type {other:?} (rule '{}')",
-                                rule.path
-                            ),
+                    NormalFormKind::SpecMember { base, row, .. } => {
+                        let on_import_slot = match &self.normal_form(*base).kind {
+                            NormalFormKind::Leaf(LeafKind::DataPath(path)) => {
+                                matches!(self.data.get(path), Some(DataDefinition::Import { .. }))
+                            }
+                            _ => false,
                         };
-                        mark_row_end_needs(
-                            self,
-                            identity,
-                            &row_read.end,
-                            &bits_by_rule,
-                            &mut row_bits,
-                            &rule.path,
-                        );
-                        stack.push(*base);
+                        if !on_import_slot {
+                            let identity = match &self.result_type(*base).specifications {
+                                TypeSpecification::Spec { spec } => spec,
+                                other => panic!(
+                                    "BUG: SpecMember row read on non-spec type {other:?} (rule '{}')",
+                                    rule.path
+                                ),
+                            };
+                            mark_row_end_needs(
+                                self,
+                                identity,
+                                &row.ends,
+                                bits_by_rule,
+                                &mut row_bits,
+                                &rule.path,
+                            );
+                        }
+                        nf.kind.for_each_child(|child| stack.push(child));
                     }
                     NormalFormKind::ListCommand {
                         list,
@@ -2401,89 +2370,69 @@ impl ExecutionPlan {
             row_bits_by_rule.push(row_bits);
         }
 
-        let mut consumers: Vec<usize> = self
-            .rules
-            .keys()
-            .enumerate()
-            .filter(|(_, path)| self.show_rules.contains_key(*path))
-            .map(|(pos, _)| pos)
-            .collect();
+        let mut consumers: Vec<usize> = (0..self.rules.len()).collect();
         consumers.sort_by(|&a, &b| {
             self.rules[a]
                 .path
                 .input_key()
                 .cmp(&self.rules[b].path.input_key())
         });
-
-        let mut needed_by_rules: Vec<NeededByRules> = self
-            .data
-            .iter()
-            .map(|(path, definition)| {
-                let fields = match definition {
-                    DataDefinition::InstanceList { .. } => {
-                        let identity = &self
-                            .instance_lists
-                            .get(path)
-                            .unwrap_or_else(|| {
-                                panic!("BUG: InstanceList '{path}' missing from instance_lists")
-                            })
-                            .identity;
-                        vec![Vec::new(); self.row_template(identity).nested_input_keys().len()]
-                    }
-                    _ => Vec::new(),
-                };
-                NeededByRules {
-                    rules: Vec::new(),
-                    fields,
-                }
-            })
-            .collect();
-
+        let mut row_fields: Vec<(usize, usize, u32)> = Vec::new();
         for &rule_pos in &consumers {
             let rule_id = u32::try_from(rule_pos).expect("BUG: rule count exceeds u32");
-            let bits = &bits_by_rule[rule_pos];
-            for (word_idx, &word) in bits.iter().enumerate() {
-                let mut remaining = word;
-                while remaining != 0 {
-                    let bit = remaining.trailing_zeros() as usize;
-                    let data_pos = word_idx * 64 + bit;
-                    needed_by_rules[data_pos].rules.push(rule_id);
-                    remaining &= remaining - 1;
-                }
-            }
             for (identity, row_bits) in &row_bits_by_rule[rule_pos] {
                 let list_positions = self.instance_list_data_positions(identity);
-                if list_positions.is_empty() {
-                    panic!(
-                        "BUG: row field needs for '{identity}' but no instance list of that type"
-                    );
-                }
-                let template_len = self.row_template(identity).nested_input_keys().len();
+                let template_len = self.row_template(identity).row_field_count();
                 for (word_idx, &word) in row_bits.iter().enumerate() {
                     let mut remaining = word;
                     while remaining != 0 {
                         let bit = remaining.trailing_zeros() as usize;
                         let field_pos = word_idx * 64 + bit;
-                        if field_pos < template_len {
-                            for &list_pos in &list_positions {
-                                needed_by_rules[list_pos].fields[field_pos].push(rule_id);
-                            }
+                        assert!(
+                            field_pos < template_len,
+                            "BUG: row field bit {field_pos} past the row fields of '{identity}'"
+                        );
+                        for &list_pos in &list_positions {
+                            row_fields.push((list_pos, field_pos, rule_id));
                         }
                         remaining &= remaining - 1;
                     }
                 }
             }
         }
-        let mut nested_needed: IndexMap<DataPath, Vec<u32>> = IndexMap::new();
-        for &rule_pos in &consumers {
-            let rule_id = u32::try_from(rule_pos).expect("BUG: rule count exceeds u32");
-            let mut paths: Vec<DataPath> = nested_hits_by_rule[rule_pos].iter().cloned().collect();
-            paths.sort();
-            for path in paths {
-                nested_needed.entry(path).or_default().push(rule_id);
-            }
+        for (list_pos, field_pos, rule_id) in row_fields {
+            self.needed_by_rules[list_pos].fields[field_pos].push(rule_id);
         }
-        (needed_by_rules, nested_needed)
+    }
+
+    /// Position of `rule` in [`Self::show_rules`].
+    fn show_rule_position(&self, rule: &RulePath) -> Option<u32> {
+        self.show_rules
+            .get_index_of(rule)
+            .map(|position| u32::try_from(position).expect("BUG: Show rule count exceeds u32"))
+    }
+
+    /// Row fields of rows of this spec: its data, then the data of its `uses` imports
+    /// Show reads ([`Self::show_import_data`]).
+    pub(crate) fn row_field_count(&self) -> usize {
+        self.data.len() + self.show_import_data.len()
+    }
+
+    /// Position of row field `input_key` among [`Self::row_field_count`].
+    fn row_field_position(&self, input_key: &str) -> Option<usize> {
+        if let Some(path) = self.input_key_index.get(input_key) {
+            return self.data.get_index_of(path);
+        }
+        self.show_import_data
+            .keys()
+            .position(|path| path.input_key() == input_key)
+            .map(|index| self.data.len() + index)
+    }
+
+    /// Whether rows of `identity` can come from evaluation data on this plan: it is this
+    /// spec or a row spec of one of its data lists.
+    fn has_row_template(&self, identity: &SpecIdentity) -> bool {
+        *identity == self.identity || self.row_templates.contains_key(identity)
     }
 
     /// [`Self::data`] positions of instance lists whose element identity is `identity`.
@@ -2506,20 +2455,12 @@ impl ExecutionPlan {
         identity: &SpecIdentity,
         field_input_key: &str,
     ) -> Vec<u32> {
-        let template = self.row_template(identity);
-        let path = template
-            .input_key_index
-            .get(field_input_key)
+        let field_pos = self
+            .row_template(identity)
+            .row_field_position(field_input_key)
             .unwrap_or_else(|| {
-                panic!(
-                    "BUG: row field '{field_input_key}' absent from template data of '{identity}'"
-                )
+                panic!("BUG: row field '{field_input_key}' is not a row field of '{identity}'")
             });
-        let field_pos = template_bindable_field_index(template, path).unwrap_or_else(|| {
-            panic!(
-                "BUG: row field '{field_input_key}' path missing from template bindable fields of '{identity}'"
-            )
-        });
         let mut seen = HashSet::new();
         let mut union = Vec::new();
         for list_pos in self.instance_list_data_positions(identity) {
@@ -2558,127 +2499,45 @@ impl ExecutionPlan {
 
     /// Promptable [`DataPath`] for a normal-form data leaf, following reference
     /// chain ends for references. `None` when the leaf is a rule-target, import
-    /// alias, instance list, or a named-`uses` member covered by site overlay /
-    /// template default (not caller-promptable).
+    /// marker, instance list, or a slot bound by the spec (not caller-promptable).
     ///
     /// Reference paths must appear in [`Self::reference_ends`].
     pub(crate) fn promptable_data_path<'a>(&'a self, path: &'a DataPath) -> Option<&'a DataPath> {
-        match self.data.get(path) {
-            Some(DataDefinition::Value { .. } | DataDefinition::TypeDeclaration { .. }) => {
-                Some(path)
-            }
-            Some(DataDefinition::Reference { .. }) => match self.reference_ends.get(path) {
-                Some(ReferenceEnd::Promptable(target)) => Some(target),
-                Some(ReferenceEnd::Rule(_) | ReferenceEnd::Import) => None,
+        let target = match self.data.get(path).unwrap_or_else(|| {
+            panic!("BUG: normal-form DataPath leaf absent from plan.data: {path}")
+        }) {
+            DataDefinition::Value { .. } | DataDefinition::TypeDeclaration { .. } => path,
+            DataDefinition::Reference { .. } => match self.reference_ends.get(path) {
+                Some(ReferenceEnd::Promptable(target)) => target,
+                Some(ReferenceEnd::Rule(_)) => return None,
                 None => {
                     panic!("BUG: reference '{path}' missing from reference_ends after planning")
                 }
             },
-            Some(DataDefinition::Import { .. } | DataDefinition::InstanceList { .. }) => None,
-            None => {
-                if let Some(end) = self.reference_ends.get(path) {
-                    return match end {
-                        ReferenceEnd::Promptable(target) => Some(target),
-                        ReferenceEnd::Rule(_) | ReferenceEnd::Import => None,
-                    };
-                }
-                match lookup_data_definition(&self.data, &self.row_templates, path) {
-                    Some(DataDefinition::TypeDeclaration { .. } | DataDefinition::Value { .. })
-                        if !self.import_overlay_binds(path) =>
-                    {
-                        Some(path)
-                    }
-                    Some(
-                        DataDefinition::Value { .. }
-                        | DataDefinition::TypeDeclaration { .. }
-                        | DataDefinition::Reference { .. }
-                        | DataDefinition::Import { .. }
-                        | DataDefinition::InstanceList { .. },
-                    ) => None,
-                    None => panic!("BUG: normal-form DataPath leaf absent from plan.data: {path}"),
-                }
+            DataDefinition::Import { .. } | DataDefinition::InstanceList { .. } => return None,
+        };
+        match self
+            .data
+            .get(target)
+            .unwrap_or_else(|| panic!("BUG: reference end '{target}' absent from plan.data"))
+        {
+            DataDefinition::Value { .. } | DataDefinition::TypeDeclaration { .. }
+                if !self.data[target].is_bound() =>
+            {
+                Some(target)
+            }
+            DataDefinition::Value { .. } | DataDefinition::TypeDeclaration { .. } => None,
+            DataDefinition::InstanceList { .. } => None,
+            DataDefinition::Reference { .. } | DataDefinition::Import { .. } => {
+                panic!("BUG: reference end '{target}' is not a slot")
             }
         }
     }
 
-    /// Needs of evaluating `path` on this plan: local rules from
-    /// [`Self::needed_by_rules`] / [`Self::nested_needed_by_rules`], named-`uses`
-    /// rules through [`import_rule_needs`].
-    pub(crate) fn rule_needs(&self, path: &RulePath) -> Vec<ImportNeed> {
-        if !path.segments.is_empty() {
-            return import_rule_needs(self, path);
-        }
-        let rule_pos = self.rules.get_index_of(path).unwrap_or_else(|| {
-            panic!(
-                "BUG: rule '{}' missing from plan '{}' while reading its needs",
-                path.rule, self.spec_name
-            )
-        });
-        let rule_id = u32::try_from(rule_pos).expect("BUG: rule count exceeds u32");
-        let mut out: Vec<ImportNeed> = self
-            .needed_by_rules
-            .iter()
-            .zip(self.data.keys())
-            .filter(|(needed, _)| needed.rules.contains(&rule_id))
-            .map(|(_, data_path)| ImportNeed::Data(data_path.clone()))
-            .collect();
-        out.extend(
-            self.nested_needed_by_rules
-                .iter()
-                .filter(|(_, rules)| rules.contains(&rule_id))
-                .map(|(nested, _)| ImportNeed::Data(nested.clone())),
-        );
-        out
-    }
-
-    /// Rule positions whose evaluation needs input `path`: [`Self::needed_by_rules`] for
-    /// paths in [`Self::data`] (locals, projected lists), else
-    /// [`Self::nested_needed_by_rules`], as [`NeedsMarker::mark`] stores them.
-    pub(crate) fn data_needed_by(&self, path: &DataPath) -> &[u32] {
-        match self.data.get_index_of(path) {
-            Some(position) => {
-                &self
-                    .needed_by_rules
-                    .get(position)
-                    .unwrap_or_else(|| {
-                        panic!(
-                            "BUG: needed_by_rules len {} < data position {position}",
-                            self.needed_by_rules.len()
-                        )
-                    })
-                    .rules
-            }
-            None => self
-                .nested_needed_by_rules
-                .get(path)
-                .map_or(&[], Vec::as_slice),
-        }
-    }
-
-    /// Needs of reading `path` on this plan (local slot or named-`uses` member).
-    ///
-    /// A nested path bound by `ImportOverlay::Reference` also marks itself so Show
-    /// lists the LHS as an optional evaluate override, while still needing the wire
-    /// source through [`Self::reference_end_of`].
-    pub(crate) fn data_read_needs(&self, path: &DataPath) -> Vec<ImportNeed> {
-        let mut needs = needs_of_end(self, self.reference_end_of(path));
-        if self.import_overlay_reference_target(path).is_some() {
-            needs.push(ImportNeed::Data(path.clone()));
-        }
-        needs
-    }
-
-    /// [`ReferenceEnd`] of any data path on this plan: local slots by definition and
-    /// [`Self::reference_ends`], named-`uses` members by [`reference_end_on`].
-    pub(crate) fn reference_end_of(&self, path: &DataPath) -> ReferenceEnd {
-        if !path.segments.is_empty() {
-            return reference_end_on(self, path).unwrap_or_else(|| {
-                panic!(
-                    "BUG: member '{path}' does not peel on plan '{}'",
-                    self.spec_name
-                )
-            });
-        }
+    /// What reading `path` needs: the slot itself, the end of its reference chain, or
+    /// the rule a reference chain ends at. An import marker needs nothing (its value
+    /// is the instance).
+    fn data_read_needs(&self, path: &DataPath) -> Option<InputNeed> {
         match self
             .data
             .get(path)
@@ -2686,109 +2545,95 @@ impl ExecutionPlan {
         {
             DataDefinition::Value { .. }
             | DataDefinition::TypeDeclaration { .. }
-            | DataDefinition::InstanceList { .. } => ReferenceEnd::Promptable(path.clone()),
-            DataDefinition::Import { .. } => ReferenceEnd::Import,
+            | DataDefinition::InstanceList { .. } => Some(InputNeed::Data(path.clone())),
+            DataDefinition::Import { .. } => None,
             DataDefinition::Reference { .. } => {
-                self.reference_ends.get(path).cloned().unwrap_or_else(|| {
+                match self.reference_ends.get(path).unwrap_or_else(|| {
                     panic!("BUG: reference '{path}' missing from reference_ends")
-                })
+                }) {
+                    ReferenceEnd::Promptable(target) => Some(InputNeed::Data(target.clone())),
+                    ReferenceEnd::Rule(rule) => Some(InputNeed::Rule(rule.clone())),
+                }
             }
         }
     }
 
-    /// Whether a site overlay on a leading Import hop binds `path`'s relative member.
-    pub(crate) fn import_overlay_binds(&self, path: &DataPath) -> bool {
-        self.import_overlay_entry(path).is_some()
+    /// Options rule of data `path`, when its type names one ([`options_rule_path`]).
+    pub(crate) fn options_rule_of(&self, path: &DataPath) -> Option<RulePath> {
+        let lemma_type = self.data.get(path)?.schema_type()?;
+        let rule = options_rule_path(path, lemma_type)?;
+        assert!(
+            self.rules.contains_key(&rule),
+            "BUG: options rule '{rule}' missing after planning validated it"
+        );
+        Some(rule)
     }
 
-    /// Site overlay entry for `path` walking named `uses` hops (outermost hit wins).
-    pub(crate) fn import_overlay_entry(&self, path: &DataPath) -> Option<&ImportOverlay> {
-        let mut plan: &ExecutionPlan = self;
-        let mut path = path.clone();
-        loop {
-            let mut hops = path.segments.iter();
-            let first = hops.next()?;
-            let import_marker = DataPath::local(first.uses.clone());
-            let Some(DataDefinition::Import {
-                identity, overlay, ..
-            }) = plan.data.get(&import_marker)
-            else {
-                return None;
-            };
-            let relative = DataPath {
-                segments: hops.cloned().collect(),
-                data: path.data.clone(),
-            };
-            if let Some(entry) = overlay.get(&relative) {
-                return Some(entry);
-            }
-            if relative.segments.is_empty() {
-                return None;
-            }
-            plan = plan.row_template(identity);
-            path = relative;
-        }
-    }
-
-    /// Wire target input key when `path` is bound by `ImportOverlay::Reference`.
-    pub(crate) fn import_overlay_reference_target(&self, path: &DataPath) -> Option<String> {
-        match self.import_overlay_entry(path)? {
-            ImportOverlay::Reference {
-                target: ReferenceTarget::Data(target),
-                ..
-            } => Some(target.input_key()),
-            ImportOverlay::Reference {
-                target: ReferenceTarget::Rule(target),
-                ..
-            } => Some(target.input_key()),
-            ImportOverlay::Literal(_) => None,
-        }
-    }
-
-    /// Validate caller-requested rule names and return resolved [`RulePath`]s.
+    /// Validate caller-requested rule names and return resolved [`RulePath`]s in
+    /// [`Self::show_rules`] order, each once.
     ///
     /// `None` means all local rules (this spec's outputs). `Some(&[])` is an error.
-    /// Unknown names in `Some` slice error. Explicit names may be any Show.rules key.
+    /// Unknown names in `Some` slice error. Explicit names are this spec's Show.rules
+    /// keys only (empty path).
     pub fn validated_response_rule_paths(
         &self,
         rules: Option<&[String]>,
-    ) -> Result<std::collections::HashSet<&RulePath>, Error> {
-        let Some(rules) = rules else {
-            return Ok(self
-                .rules
-                .values()
-                .filter(|r| r.path.segments.is_empty())
-                .map(|r| &r.path)
-                .collect());
+    ) -> Result<Vec<&RulePath>, Error> {
+        let show_position = |path: &RulePath| {
+            self.show_rules
+                .get_index_of(path)
+                .unwrap_or_else(|| panic!("BUG: response rule '{path}' missing from show_rules"))
         };
-        if rules.is_empty() {
-            return Err(Error::request(
-                "at least one rule required".to_string(),
-                None::<String>,
-            ));
-        }
-        let mut paths = std::collections::HashSet::new();
-        for rule_name in rules {
-            let rule = self.get_rule(rule_name).ok_or_else(|| {
-                Error::request(
-                    format!("Rule '{rule_name}' not found in spec '{}'", self.spec_name),
+        let mut positions: Vec<usize> = match rules {
+            None => self.rules.keys().map(show_position).collect(),
+            Some([]) => {
+                return Err(Error::request(
+                    "at least one rule required".to_string(),
                     None::<String>,
-                )
-            })?;
-            paths.insert(&rule.path);
-        }
-        Ok(paths)
+                ));
+            }
+            Some(rules) => {
+                let mut positions = Vec::with_capacity(rules.len());
+                for rule_name in rules {
+                    let path = self
+                        .show_rule_index
+                        .get(canonical_logical_name(rule_name).as_ref())
+                        .ok_or_else(|| {
+                            Error::request(
+                                format!(
+                                    "Rule '{rule_name}' not found in spec '{}'",
+                                    self.spec_name
+                                ),
+                                None::<String>,
+                            )
+                        })?;
+                    positions.push(show_position(path));
+                }
+                positions
+            }
+        };
+        positions.sort_unstable();
+        positions.dedup();
+        Ok(positions
+            .into_iter()
+            .map(|position| {
+                self.show_rules
+                    .get_index(position)
+                    .expect("BUG: show_rules position taken from show_rules")
+                    .0
+            })
+            .collect())
     }
 
-    /// Look up a Show.rules key (`RulePath::input_key`) in the reachable graph.
+    /// Look up a Show.rules key (`RulePath::input_key`) among this spec's local rules.
     pub fn get_rule(&self, name: &str) -> Option<&ExecutableRule> {
-        let canonical = crate::parsing::ast::canonical_logical_name(name);
+        let canonical = canonical_logical_name(name);
         let path = self.show_rule_index.get(canonical.as_ref())?;
         self.rules.get(path)
     }
 
     /// Look up a normal-form cell by id.
-    pub(crate) fn normal_form(&self, id: NormalFormId) -> &NormalForm {
+    pub fn normal_form(&self, id: NormalFormId) -> &NormalForm {
         self.normal_forms.get(id.index()).unwrap_or_else(|| {
             panic!(
                 "BUG: NormalFormId {} out of range (table len {})",
@@ -2826,26 +2671,126 @@ impl ExecutionPlan {
             })
     }
 
-    /// Data paths a caller can be prompted for, in declaration order.
-    ///
-    /// A path is promptable when it carries its own value slot: [`DataDefinition::Value`]
-    /// (spec prefill, overridable) or [`DataDefinition::TypeDeclaration`] (typed input).
-    /// [`DataDefinition::Reference`] paths are not promptable — a data target copies from
-    /// its ultimate target (see [`ExecutionPlan::reference_ends`]) and a rule target is
-    /// computed — and [`DataDefinition::Import`] paths are owned by the imported spec.
-    ///
-    /// Domain of keys that may appear in `RuleResult.missing_data` (as a set).
-    /// Evaluation decides which unbound members are live and in what order; this
-    /// iterator does not fix list order.
-    pub(crate) fn promptable_data_paths(&self) -> impl Iterator<Item = &DataPath> {
-        self.data
-            .iter()
-            .filter_map(|(path, definition)| match definition {
-                DataDefinition::Value { .. } | DataDefinition::TypeDeclaration { .. } => Some(path),
-                DataDefinition::Reference { .. }
-                | DataDefinition::Import { .. }
-                | DataDefinition::InstanceList { .. } => None,
+    fn compute_initial_values(&self) -> Vec<Option<OperationResult>> {
+        let mut values: Vec<Option<OperationResult>> = vec![None; self.normal_forms.len()];
+        for (path, definition) in &self.data {
+            let leaf = *self
+                .data_leaf
+                .get(path)
+                .expect("BUG: every plan.data path must have a data_leaf entry");
+            if let Some(fill) = definition.bound_value() {
+                values[leaf.index()] = Some(OperationResult::from_bound(fill.clone()));
+            } else if let Some(literal) = definition.value() {
+                let unit = definition
+                    .schema_type()
+                    .and_then(|schema| schema.unit().map(Arc::from));
+                values[leaf.index()] = Some(OperationResult::from_bound(BoundValueKind {
+                    value: literal.value,
+                    unit,
+                }));
+            }
+        }
+        self.copy_reference_targets(&mut values, |_, _| false);
+        values
+    }
+
+    /// Copy each data-target reference's target value into its leaf, in
+    /// `data_reference_order`, checked against the reference's declared type. A
+    /// reference bound by the caller (`is_bound` of its data slot and path) or
+    /// holding its own value keeps it.
+    pub(crate) fn copy_reference_targets(
+        &self,
+        values: &mut [Option<OperationResult>],
+        is_bound: impl Fn(usize, &DataPath) -> bool,
+    ) {
+        for reference_path in &self.data_reference_order {
+            let Some((
+                slot,
+                _,
+                DataDefinition::Reference {
+                    target: ReferenceTarget::Data(target_path),
+                    resolved_type,
+                    local_value,
+                    ..
+                },
+            )) = self.data.get_full(reference_path)
+            else {
+                unreachable!("BUG: data_reference_order holds only data-target references");
+            };
+            if local_value.is_some() || is_bound(slot, reference_path) {
+                continue;
+            }
+            let leaf = self.data_slot_leaves[slot];
+            let target_leaf = *self
+                .data_leaf
+                .get(target_path)
+                .expect("BUG: reference target missing from data_leaf");
+            values[leaf.index()] =
+                match &values[target_leaf.index()] {
+                    None => None,
+                    Some(OperationResult::Veto(veto)) => Some(OperationResult::Veto(veto.clone())),
+                    Some(OperationResult::Value(value)) if value.value.has_unscaled_measure() => {
+                        Some(OperationResult::from_bound(value.clone()))
+                    }
+                    Some(OperationResult::Value(value)) => Some(match validate_value_against_type(
+                        resolved_type.as_ref(),
+                        &value.to_literal(),
+                        &self.resolved_types.unit_index,
+                    ) {
+                        Ok(()) => OperationResult::from_bound(value.clone()),
+                        Err(msg) => OperationResult::Veto(VetoType::computation(format!(
+                            "Reference '{reference_path}' violates its declared constraint: {msg}"
+                        ))),
+                    }),
+                };
+        }
+    }
+
+    pub(crate) fn populate_evaluation_tables(&mut self) {
+        self.data_slot_leaves = self
+            .data
+            .keys()
+            .map(|path| {
+                *self
+                    .data_leaf
+                    .get(path)
+                    .expect("BUG: every plan.data path must have a data_leaf entry")
             })
+            .collect();
+        self.initial_values = self.compute_initial_values();
+        self.rule_ref_indexes = self
+            .normal_forms
+            .iter()
+            .map(|cell| cell.rule_ref.as_ref().map(|path| self.rule_index(path)))
+            .collect();
+        self.walk_settled_leaves = self
+            .data
+            .iter()
+            .filter_map(|(path, definition)| {
+                let options = definition
+                    .schema_type()
+                    .is_some_and(|schema| schema.needs_runtime_option_check());
+                let unscaled = definition
+                    .value()
+                    .is_some_and(|literal| literal.value.has_unscaled_measure())
+                    || definition
+                        .bound_value()
+                        .is_some_and(|bound| bound.value.has_unscaled_measure())
+                    || definition
+                        .schema_type()
+                        .is_some_and(LemmaType::has_dynamic_units);
+                if options || unscaled {
+                    Some(
+                        *self
+                            .data_leaf
+                            .get(path)
+                            .expect("BUG: every plan.data path must have a data_leaf entry"),
+                    )
+                } else {
+                    None
+                }
+            })
+            .collect();
     }
 }
 
@@ -2856,7 +2801,7 @@ impl ExecutionPlan {
 /// `None` when a slot the walk reads is unset or vetoed (not decided yet).
 pub(crate) fn resolve_nested_dispatch_body(
     plan: &ExecutionPlan,
-    values: &[Option<crate::computation::OperationResult>],
+    values: &[Option<OperationResult>],
     mut region: DispatchRegion,
 ) -> Option<NormalFormId> {
     use crate::computation::OperationResult;
@@ -2885,6 +2830,7 @@ pub(crate) fn resolve_nested_dispatch_body(
                 panic!("BUG: single-scrutinee region body is a Piecewise, not a conjunctive group")
             }
             NormalFormKind::Leaf(_)
+            | NormalFormKind::RowField { .. }
             | NormalFormKind::Sum(_)
             | NormalFormKind::Product(_)
             | NormalFormKind::Subtract(_, _)
@@ -2894,9 +2840,10 @@ pub(crate) fn resolve_nested_dispatch_body(
             | NormalFormKind::Negate(_)
             | NormalFormKind::Reciprocal(_)
             | NormalFormKind::Comparison(_, _, _)
-            | NormalFormKind::And(_)
+            | NormalFormKind::Logical(_, _)
             | NormalFormKind::Not(_)
             | NormalFormKind::MathOp(_, _)
+            | NormalFormKind::StepRounding(_, _, _)
             | NormalFormKind::UnitConversion(_, _)
             | NormalFormKind::Veto(_)
             | NormalFormKind::DateRelative(_, _)
@@ -2925,7 +2872,7 @@ pub(crate) fn resolve_nested_dispatch_body(
 /// normalization rewrote (into a dispatch or a collapsed value) is itself the body.
 fn conjunctive_winner_body(
     plan: &ExecutionPlan,
-    values: &[Option<crate::computation::OperationResult>],
+    values: &[Option<OperationResult>],
     group: NormalFormId,
 ) -> Option<NormalFormId> {
     use crate::evaluation::branch_semantics::{
@@ -2953,9 +2900,8 @@ fn conjunctive_winner_body(
 ///
 /// Control liveness is derived from `values` (the evaluation value table), matching
 /// the evaluator's own decisions:
-/// - [`NormalFormKind::And`]: a filled `false` operand decides the conjunction, so it
-///   is the only live operand; a missing sibling is never reported. Otherwise every
-///   operand not settled `true` is live, since a later `false` can still decide.
+/// - [`NormalFormKind::Logical`]: an absorbing operand decides the connective and is
+///   the only live operand. Otherwise every operand not settled at the identity is live.
 /// - [`NormalFormKind::Piecewise`]: arms decided from filled condition slots, high to
 ///   low. An unfilled or vetoed condition before a winner is found means no decision:
 ///   every arm stays live.
@@ -2973,7 +2919,7 @@ fn conjunctive_winner_body(
 pub(crate) fn reachable_data_paths(
     plan: &ExecutionPlan,
     root: NormalFormId,
-    values: &[Option<crate::computation::OperationResult>],
+    values: &[Option<OperationResult>],
 ) -> Vec<ReachableInput> {
     use crate::computation::OperationResult;
     use crate::evaluation::branch_semantics::{
@@ -3064,33 +3010,49 @@ pub(crate) fn reachable_data_paths(
         }
         let nf = plan.normal_form(id);
         let live: Vec<NormalFormId> = match &nf.kind {
-            NormalFormKind::Leaf(LeafKind::DataPath(path)) => {
-                if seen_paths.insert(path.clone()) {
-                    out.push(ReachableInput::Data(path.clone()));
+            // A slot bound to a rule has that rule's inputs.
+            NormalFormKind::Leaf(LeafKind::DataPath(path)) => match plan.reference_ends.get(path) {
+                Some(ReferenceEnd::Rule(rule)) => vec![
+                    plan.rules
+                        .get(rule)
+                        .unwrap_or_else(|| {
+                            panic!("BUG: rule-bound slot '{path}' names missing rule '{rule}'")
+                        })
+                        .normal_form,
+                ],
+                Some(ReferenceEnd::Promptable(_)) | None => {
+                    if seen_paths.insert(path.clone()) {
+                        out.push(ReachableInput::Data(path.clone()));
+                    }
+                    Vec::new()
                 }
-                Vec::new()
-            }
-            NormalFormKind::Leaf(LeafKind::ImportRule(path)) => {
-                out.push(ReachableInput::ImportRule(path.clone()));
-                Vec::new()
-            }
-            NormalFormKind::Leaf(LeafKind::Row { .. }) => Vec::new(),
+            },
+            NormalFormKind::RowField { .. } => Vec::new(),
+            NormalFormKind::Leaf(LeafKind::RowValue { .. }) => Vec::new(),
             NormalFormKind::ListCommand { row_level, .. } => {
                 if row_level.is_some() {
                     out.push(ReachableInput::RowReads(id));
                 }
                 nf.kind.children()
             }
-            NormalFormKind::And(children) => {
+            NormalFormKind::Logical(connective, children) => {
+                let absorbing = connective.absorbing_operand();
                 match children.iter().copied().find(|&child| {
-                    matches!(slot_outcome(values, child), Some(BranchOutcome::NotTaken))
+                    matches!(
+                        (absorbing, slot_outcome(values, child)),
+                        (true, Some(BranchOutcome::Taken)) | (false, Some(BranchOutcome::NotTaken))
+                    )
                 }) {
                     Some(decider) => vec![decider],
                     None => children
                         .iter()
                         .copied()
                         .filter(|&child| {
-                            !matches!(slot_outcome(values, child), Some(BranchOutcome::Taken))
+                            !matches!(
+                                (absorbing, slot_outcome(values, child)),
+                                (true, Some(BranchOutcome::NotTaken))
+                                    | (false, Some(BranchOutcome::Taken))
+                            )
                         })
                         .collect(),
                 }
@@ -3133,28 +3095,9 @@ pub(crate) fn reachable_data_paths(
                     }
                 }
             }
-            NormalFormKind::SpecMember {
-                base, targets, row, ..
-            } => {
-                if row.is_some() {
-                    out.push(ReachableInput::RowReads(id));
-                }
-                let chosen = match values.get(base.index()).and_then(|slot| slot.as_ref()) {
-                    Some(OperationResult::Value(bound)) => match &bound.value {
-                        crate::planning::semantics::ValueKind::Spec(
-                            crate::planning::semantics::SpecValue::Fixed(instance),
-                        ) => targets
-                            .iter()
-                            .find(|(candidate, _)| candidate == instance)
-                            .map(|(_, target)| *target),
-                        _ => None,
-                    },
-                    Some(OperationResult::Veto(_)) | None => None,
-                };
-                match chosen {
-                    Some(target) => vec![*base, target],
-                    None => vec![*base],
-                }
+            NormalFormKind::SpecMember { base, .. } => {
+                out.push(ReachableInput::RowReads(id));
+                vec![*base]
             }
             NormalFormKind::Leaf(LeafKind::Literal(_))
             | NormalFormKind::Now
@@ -3168,6 +3111,7 @@ pub(crate) fn reachable_data_paths(
             | NormalFormKind::Comparison(_, _, _)
             | NormalFormKind::RangeLiteral(_, _)
             | NormalFormKind::RangeContainment(_, _)
+            | NormalFormKind::StepRounding(_, _, _)
             | NormalFormKind::Negate(_)
             | NormalFormKind::Reciprocal(_)
             | NormalFormKind::Not(_)
@@ -3189,15 +3133,12 @@ pub(crate) enum ReachableInput {
     Data(DataPath),
     /// A cell that reads list rows; its missing row fields are in the request state.
     RowReads(NormalFormId),
-    /// A named-`uses` rule: its inputs follow the template's own walk under the
-    /// import context (see `EvaluationContext::missing_data_for_rule`).
-    ImportRule(RulePath),
 }
 
 pub(crate) fn validate_value_against_type(
     expected_type: &LemmaType,
     value: &LiteralValue,
-    unit_index: &crate::planning::unit_index::UnitIndex,
+    unit_index: &UnitIndex,
 ) -> Result<(), String> {
     use std::borrow::Cow;
 
@@ -3209,6 +3150,16 @@ pub(crate) fn validate_value_against_type(
                     pending.push((element.as_ref(), Cow::Owned(row.to_literal())));
                 }
             }
+            (TypeSpecification::Measure { .. }, ValueKind::UnscaledMeasure { .. }) => {}
+            (TypeSpecification::MeasureRange { .. }, ValueKind::Range(left, right))
+                if matches!(
+                    (&left.value, &right.value),
+                    (
+                        ValueKind::UnscaledMeasure { .. },
+                        ValueKind::UnscaledMeasure { .. }
+                    ) | (ValueKind::UnscaledMeasure { .. }, ValueKind::Measure(_))
+                        | (ValueKind::Measure(_), ValueKind::UnscaledMeasure { .. })
+                ) => {}
             (
                 range_spec @ (TypeSpecification::NumberRange { .. }
                 | TypeSpecification::DateRange { .. }
@@ -3223,7 +3174,10 @@ pub(crate) fn validate_value_against_type(
                 right.as_ref(),
                 unit_index,
             )?,
-            _ => validate_scalar_against_type(expected, &value)?,
+            _ => {
+                validate_scalar_against_type(expected, &value)?;
+                expected.reject_disallowed(&value.value)?;
+            }
         }
     }
     Ok(())
@@ -3257,7 +3211,7 @@ fn validate_scalar_against_type(
     }
 
     fn format_rational_for_validation_message(
-        expected_type: &crate::planning::semantics::LemmaType,
+        expected_type: &LemmaType,
         magnitude: &RationalInteger,
     ) -> String {
         expected_type
@@ -3315,7 +3269,6 @@ fn validate_scalar_against_type(
             TypeSpecification::Measure {
                 minimum,
                 maximum,
-                decimals,
                 units,
                 ..
             },
@@ -3324,102 +3277,47 @@ fn validate_scalar_against_type(
             use crate::computation::rational::checked_div;
             use crate::planning::semantics::measure_declared_bound_to_canonical;
             use std::cmp::Ordering;
-            let unit = expected_type
-                .unit()
-                .or_else(|| {
-                    units
-                        .iter()
-                        .find(|u| u.is_canonical_factor())
-                        .or_else(|| units.iter().next())
-                        .map(|u| u.name.as_str())
-                })
-                .ok_or_else(|| {
-                    format!(
-                        "Measure type '{}' has no declared units for validation.",
-                        expected_type.name()
-                    )
+            for (bound, label, violation, relation) in [
+                (minimum, "minimum", Ordering::Less, "below"),
+                (maximum, "maximum", Ordering::Greater, "above"),
+            ] {
+                let Some((bound_magnitude, bound_unit)) = bound else {
+                    continue;
+                };
+                let canonical_bound = measure_declared_bound_to_canonical(
+                    bound_magnitude,
+                    bound_unit,
+                    units,
+                    expected_type.name().as_str(),
+                    label,
+                )?;
+                if magnitude.try_cmp(&canonical_bound).map_err(|failure| {
+                    format!("Comparing against the {label} bound failed: {failure}.")
+                })? != violation
+                {
+                    continue;
+                }
+                let display_unit = match expected_type.unit() {
+                    Some(written) => units.get(written)?,
+                    None => units.get(bound_unit)?,
+                };
+                let factor = display_unit.require_literal_factor();
+                let value_in_unit = checked_div(magnitude, factor).map_err(|failure| {
+                    format!("Cannot de-canonicalize the measure for validation: {failure}.")
                 })?;
-            let measure_unit = units.get(unit)?;
-            let factor = &measure_unit.factor;
-            let in_unit = checked_div(magnitude, factor).map_err(|failure| {
-                format!("Cannot de-canonicalize the measure for validation: {failure}.")
-            })?;
-            if let Some(d) = decimals {
-                if exceeds_decimal_places(&in_unit, *d) {
-                    return Err(format!(
-                        "{} {unit} exceeds the decimals constraint of {d}.",
-                        in_unit.display_str()
-                    ));
-                }
-            }
-            if let Some(bound) = minimum {
-                let canonical_min = measure_declared_bound_to_canonical(
-                    &bound.0,
-                    &bound.1,
-                    units,
-                    expected_type.name().as_str(),
-                    "minimum",
-                )?;
-                if magnitude.try_cmp(&canonical_min).map_err(|failure| {
-                    format!("Comparing against the minimum bound failed: {failure}.")
-                })? == Ordering::Less
-                {
-                    let min_in_unit = checked_div(&canonical_min, factor).map_err(|failure| {
-                        format!("Cannot de-canonicalize the minimum for validation: {failure}.")
-                    })?;
-                    let value_display = format!(
-                        "{} {}",
-                        format_rational_for_validation_message(expected_type, &in_unit),
-                        unit
-                    );
-                    let bound_display = format!(
-                        "{} {}",
-                        format_rational_for_validation_message(expected_type, &min_in_unit),
-                        measure_unit.name
-                    );
-                    return Err(format!(
-                        "{value_display} is below the minimum of {bound_display}."
-                    ));
-                }
-            }
-            if let Some(bound) = maximum {
-                let canonical_max = measure_declared_bound_to_canonical(
-                    &bound.0,
-                    &bound.1,
-                    units,
-                    expected_type.name().as_str(),
-                    "maximum",
-                )?;
-                if magnitude.try_cmp(&canonical_max).map_err(|failure| {
-                    format!("Comparing against the maximum bound failed: {failure}.")
-                })? == Ordering::Greater
-                {
-                    let max_in_unit = checked_div(&canonical_max, factor).map_err(|failure| {
-                        format!("Cannot de-canonicalize the maximum for validation: {failure}.")
-                    })?;
-                    let value_display = format!(
-                        "{} {}",
-                        format_rational_for_validation_message(expected_type, &in_unit),
-                        unit
-                    );
-                    let bound_display = format!(
-                        "{} {}",
-                        format_rational_for_validation_message(expected_type, &max_in_unit),
-                        measure_unit.name
-                    );
-                    return Err(format!(
-                        "{value_display} is above the maximum of {bound_display}."
-                    ));
-                }
+                let bound_in_unit = checked_div(&canonical_bound, factor).map_err(|failure| {
+                    format!("Cannot de-canonicalize the {label} for validation: {failure}.")
+                })?;
+                return Err(format!(
+                    "{} {unit} is {relation} the {label} of {} {unit}.",
+                    format_rational_for_validation_message(expected_type, &value_in_unit),
+                    format_rational_for_validation_message(expected_type, &bound_in_unit),
+                    unit = display_unit.name
+                ));
             }
             Ok(())
         }
-        (
-            TypeSpecification::Text {
-                length, options, ..
-            },
-            ValueKind::Text(s),
-        ) => {
+        (TypeSpecification::Text { length, .. }, ValueKind::Text(s)) => {
             let len = s.chars().count();
             if let Some(exact) = length {
                 if len != *exact {
@@ -3429,20 +3327,12 @@ fn validate_scalar_against_type(
                     ));
                 }
             }
-            if !options.is_empty() && !options.iter().any(|opt| opt == s) {
-                return Err(format!(
-                    "'{}' is not one of the allowed options: {}.",
-                    s,
-                    options.join(", ")
-                ));
-            }
             Ok(())
         }
         (
             TypeSpecification::Ratio {
                 minimum,
                 maximum,
-                decimals,
                 units,
                 ..
             },
@@ -3451,31 +3341,14 @@ fn validate_scalar_against_type(
             use crate::computation::rational::checked_mul;
             use std::cmp::Ordering;
 
-            let primary_unit = expected_type
-                .unit()
-                .or_else(|| expected_type.ratio_primary_unit());
+            let written_unit = expected_type.unit();
 
-            if let Some(d) = decimals {
-                let magnitude_for_decimals = match primary_unit {
-                    Some(unit) => {
-                        let ratio_unit = units.get(unit)?;
-                        checked_mul(r, &ratio_unit.value).map_err(|failure| failure.to_string())?
-                    }
-                    None => r.clone(),
-                };
-                if exceeds_decimal_places(&magnitude_for_decimals, *d) {
-                    return Err(format!(
-                        "{} exceeds the decimals constraint of {d}.",
-                        magnitude_for_decimals.display_str()
-                    ));
-                }
-            }
             if let Some(type_minimum) = minimum {
                 if r.try_cmp(type_minimum).map_err(|failure| {
                     format!("Comparing against the minimum bound failed: {failure}.")
                 })? == Ordering::Less
                 {
-                    let message = match primary_unit {
+                    let message = match written_unit {
                         Some(unit) => {
                             let ratio_unit = units.get(unit)?;
                             let value_per_unit = checked_mul(r, &ratio_unit.value)
@@ -3509,7 +3382,7 @@ fn validate_scalar_against_type(
                     format!("Comparing against the maximum bound failed: {failure}.")
                 })? == Ordering::Greater
                 {
-                    let message = match primary_unit {
+                    let message = match written_unit {
                         Some(unit) => {
                             let ratio_unit = units.get(unit)?;
                             let value_per_unit = checked_mul(r, &ratio_unit.value)
@@ -3612,9 +3485,9 @@ fn validate_scalar_against_type(
 fn validate_range_literal(
     expected_type: &LemmaType,
     range_spec: &TypeSpecification,
-    left: &crate::planning::semantics::TypedLiteral,
-    right: &crate::planning::semantics::TypedLiteral,
-    unit_index: &crate::planning::unit_index::UnitIndex,
+    left: &TypedLiteral,
+    right: &TypedLiteral,
+    unit_index: &UnitIndex,
 ) -> Result<(), String> {
     use crate::computation::{comparison_operation, OperationResult};
     use crate::planning::semantics::{
@@ -3694,7 +3567,7 @@ fn validate_range_literal(
             if let Some(min_w) = minimum {
                 compare_width(
                     &LiteralValue::number(min_w.clone()),
-                    crate::planning::semantics::primitive_number_arc(),
+                    primitive_number_arc(),
                     ComparisonComputation::GreaterThanOrEqual,
                     format!(
                         "The span is below the minimum width of {}.",
@@ -3705,7 +3578,7 @@ fn validate_range_literal(
             if let Some(max_w) = maximum {
                 compare_width(
                     &LiteralValue::number(max_w.clone()),
-                    crate::planning::semantics::primitive_number_arc(),
+                    primitive_number_arc(),
                     ComparisonComputation::LessThanOrEqual,
                     format!(
                         "The span is above the maximum width of {}.",
@@ -3720,7 +3593,7 @@ fn validate_range_literal(
             if let Some(min_w) = minimum {
                 compare_width(
                     &LiteralValue::ratio(min_w.clone()),
-                    crate::planning::semantics::primitive_ratio_arc(),
+                    primitive_ratio_arc(),
                     ComparisonComputation::GreaterThanOrEqual,
                     format!(
                         "The span is below the minimum width of {}.",
@@ -3731,7 +3604,7 @@ fn validate_range_literal(
             if let Some(max_w) = maximum {
                 compare_width(
                     &LiteralValue::ratio(max_w.clone()),
-                    crate::planning::semantics::primitive_ratio_arc(),
+                    primitive_ratio_arc(),
                     ComparisonComputation::LessThanOrEqual,
                     format!(
                         "The span is above the maximum width of {}.",
@@ -3786,10 +3659,7 @@ fn validate_range_literal(
             minimum, maximum, ..
         } => {
             let allow_calendar = matches!(range_spec, TypeSpecification::DateRange { .. });
-            let resolve_bound = |bound: &(
-                crate::computation::rational::RationalInteger,
-                String,
-            ),
+            let resolve_bound = |bound: &(RationalInteger, String),
                                  command: &str|
              -> Result<(LiteralValue, Arc<LemmaType>), String> {
                 let (bare, owner) = unit_index
@@ -3854,6 +3724,8 @@ fn validate_range_literal(
     Ok(())
 }
 
+/// Literal plan data against its declared type. Written row values are validated
+/// when their row is built (`source_row_literal` in the graph builder).
 fn validate_literal_data_against_types(plan: &ExecutionPlan) -> Vec<Error> {
     let mut errors = Vec::new();
 
@@ -3864,8 +3736,8 @@ fn validate_literal_data_against_types(plan: &ExecutionPlan) -> Vec<Error> {
                 resolved_type,
                 ..
             } => (resolved_type, value),
-            DataDefinition::TypeDeclaration { .. }
-            | DataDefinition::Import { .. }
+            DataDefinition::Import { .. }
+            | DataDefinition::TypeDeclaration { .. }
             | DataDefinition::InstanceList { .. }
             | DataDefinition::Reference { .. } => continue,
         };
@@ -3904,13 +3776,8 @@ fn validate_unit_conversion_targets(plan: &ExecutionPlan) -> Result<(), Error> {
         let nf = plan.normal_form(id);
         nf.kind.for_each_child(|child| worklist.push(child));
         if let NormalFormKind::UnitConversion(_, target) = &nf.kind {
-            if let Some((unit_name, owning_type)) =
-                crate::computation::units::conversion_target_declares_unit(target)
-            {
-                if !crate::computation::units::owning_type_declares_unit_name(
-                    owning_type.as_ref(),
-                    unit_name,
-                ) {
+            if let Some((unit_name, owning_type)) = conversion_target_declares_unit(target) {
+                if !owning_type_declares_unit_name(owning_type.as_ref(), unit_name) {
                     errors.push(Error::validation(
                         format!(
                             "Unit conversion target '{unit_name}' is not declared on owning type '{}'",
@@ -3932,17 +3799,16 @@ fn validate_unit_conversion_targets(plan: &ExecutionPlan) -> Result<(), Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::computation::rational::{rational_new, rational_zero};
+    use crate::computation::rational::rational_new;
     use crate::computation::{OperationResult, VetoType};
     use crate::evaluation::evaluate_data::EvaluateData;
     use crate::literals::DateGranularity;
     use crate::literals::TimezoneValue;
     use crate::parsing::ast::DateTimeValue;
-    use crate::planning::semantics::{DataDefinition, DataPath, PathSegment, TypeSpecification};
+    use crate::planning::semantics::{DataDefinition, DataPath, TypeSpecification};
     use crate::Engine;
     use crate::{EvaluateDataValue, ResourceLimits};
     use serde_json;
-    use std::str::FromStr;
     use std::sync::Arc;
 
     fn default_limits() -> ResourceLimits {
@@ -3956,8 +3822,24 @@ mod tests {
         EvaluateData::resolve(plan, values, &default_limits()).expect("resolve")
     }
 
-    fn veto_reason<'a>(evaluate_data: &'a EvaluateData, path: &DataPath) -> Option<&'a str> {
-        match evaluate_data.bindings.get(path) {
+    fn binding<'a>(
+        plan: &ExecutionPlan,
+        evaluate_data: &'a EvaluateData,
+        path: &DataPath,
+    ) -> Option<&'a OperationResult> {
+        let slot = plan
+            .data
+            .get_index_of(path)
+            .expect("BUG: test path is plan data");
+        evaluate_data.bindings.get(&slot)
+    }
+
+    fn veto_reason<'a>(
+        plan: &ExecutionPlan,
+        evaluate_data: &'a EvaluateData,
+        path: &DataPath,
+    ) -> Option<&'a str> {
+        match binding(plan, evaluate_data, path) {
             Some(OperationResult::Veto(veto)) => Some(match veto {
                 VetoType::Computation { message } => message.as_str(),
                 other => panic!("expected Computation veto, got {other:?}"),
@@ -3967,13 +3849,11 @@ mod tests {
     }
 
     fn bound_value<'a>(
+        plan: &ExecutionPlan,
         evaluate_data: &'a EvaluateData,
         path: &DataPath,
     ) -> Option<&'a crate::planning::semantics::BoundValueKind> {
-        evaluate_data
-            .bindings
-            .get(path)
-            .and_then(OperationResult::value)
+        binding(plan, evaluate_data, path).and_then(OperationResult::value)
     }
 
     fn input_data(pairs: &[(&str, &str)]) -> IndexMap<String, EvaluateDataValue> {
@@ -4009,7 +3889,7 @@ mod tests {
         let values = input_data(&[("age", "30")]);
 
         let evaluate_data = resolve_evaluate_data(plan, values);
-        let updated_value = bound_value(&evaluate_data, &data_path).expect("bound value");
+        let updated_value = bound_value(plan, &evaluate_data, &data_path).expect("bound value");
         match &updated_value.value {
             crate::planning::semantics::ValueKind::Number(n) => {
                 assert_eq!(n, &rational_new(30, 1));
@@ -4044,7 +3924,7 @@ mod tests {
 
         let evaluate_data = resolve_evaluate_data(plan, values);
         let data_path = DataPath::new(vec![], "age".to_string());
-        match veto_reason(&evaluate_data, &data_path) {
+        match veto_reason(plan, &evaluate_data, &data_path) {
             Some(reason) => {
                 assert!(
                     reason.contains("number"),
@@ -4112,15 +3992,20 @@ mod tests {
         let values = input_data(&[("rules.base_price", "100")]);
 
         let evaluate_data = resolve_evaluate_data(plan, values);
-        let data_path = DataPath {
-            segments: vec![PathSegment {
-                uses: "rules".to_string(),
-                repository: None,
-                spec: "private".to_string(),
-            }],
-            data: "base_price".to_string(),
+        let Some(DataDefinition::Import { row, .. }) =
+            plan.data.get(&DataPath::local("rules".into()))
+        else {
+            panic!("`rules` is the import slot of the plan");
         };
-        let updated_value = bound_value(&evaluate_data, &data_path).expect("bound value");
+        let instance = crate::planning::semantics::InstanceKey::new(Arc::clone(row), None);
+        let slot = plan
+            .row_template(&row.identity)
+            .data
+            .get_index_of(&DataPath::local("base_price".into()))
+            .expect("`base_price` is data of the imported template");
+        let updated_value = evaluate_data.row_overrides.fields[&instance][&slot]
+            .value()
+            .expect("bound value");
         match &updated_value.value {
             crate::planning::semantics::ValueKind::Number(n) => {
                 assert_eq!(n, &rational_new(100, 1));
@@ -4159,6 +4044,7 @@ mod tests {
                 value: crate::planning::semantics::LiteralValue::number(rational_new(0, 1)),
                 resolved_type: Arc::new(max10.clone()),
                 source: source.clone(),
+                origin: crate::planning::semantics::DataOrigin::Declared,
             },
         );
 
@@ -4181,30 +4067,39 @@ mod tests {
             start_line: 1,
             source_type: None,
             needed_by_rules: vec![NeededByRules::default(); data_len],
-            nested_needed_by_rules: IndexMap::new(),
             data_display: IndexMap::new(),
             show_rules: IndexMap::new(),
+            show_needed_by: IndexMap::new(),
+            show_import_data: IndexMap::new(),
             reference_ends: IndexMap::new(),
             input_key_index,
             show_rule_index: IndexMap::new(),
             data_leaf: IndexMap::new(),
+            member_targets: IndexMap::new(),
             row_templates: std::collections::BTreeMap::new(),
-            planning_input: Arc::new(Vec::new()),
+            own_spec: Arc::new(LemmaSpec::new("test".to_string())),
+            edges: Vec::new(),
             identity: SpecIdentity {
                 repository: None,
                 spec: "test".to_string(),
                 effective: EffectiveDate::Origin,
+                slice: EffectiveDate::Origin,
             },
             rule_candidates: std::collections::BTreeMap::new(),
             self_row_rules: Vec::new(),
             instance_lists: IndexMap::new(),
             row_mask: Vec::new(),
+            initial_values: Vec::new(),
+            walk_settled_leaves: Vec::new(),
+            rule_ref_indexes: Vec::new(),
+            data_slot_leaves: Vec::new(),
+            unit_scale_targets: IndexMap::new(),
         };
 
         let values = input_data(&[("x", "11")]);
 
         let evaluate_data = resolve_evaluate_data(&plan, values);
-        match veto_reason(&evaluate_data, &data_path) {
+        match veto_reason(&plan, &evaluate_data, &data_path) {
             Some(reason) => {
                 assert!(
                     reason.contains("maximum") || reason.contains("10"),
@@ -4220,13 +4115,24 @@ mod tests {
         // Higher-standard requirement: enum options must be enforced for text types.
         let data_path = DataPath::new(vec![], "tier".to_string());
 
-        let tier = crate::planning::semantics::LemmaType::primitive(
+        let mut tier = crate::planning::semantics::LemmaType::primitive(
             crate::planning::semantics::TypeSpecification::Text {
                 length: None,
-                options: vec!["silver".to_string(), "gold".to_string()],
                 help: String::new(),
             },
         );
+        tier.options.values = vec![
+            crate::planning::semantics::OptionValue {
+                value: crate::planning::semantics::BoundValueKind::unbound(
+                    crate::planning::semantics::ValueKind::Text(Arc::from("silver")),
+                ),
+            },
+            crate::planning::semantics::OptionValue {
+                value: crate::planning::semantics::BoundValueKind::unbound(
+                    crate::planning::semantics::ValueKind::Text(Arc::from("gold")),
+                ),
+            },
+        ];
         let source = Source::new(
             crate::parsing::source::SourceType::Volatile,
             crate::parsing::ast::Span {
@@ -4242,6 +4148,7 @@ mod tests {
             crate::planning::semantics::DataDefinition::Value {
                 value: crate::planning::semantics::LiteralValue::text("silver".to_string()),
                 resolved_type: Arc::new(tier.clone()),
+                origin: crate::planning::semantics::DataOrigin::Declared,
                 source,
             },
         );
@@ -4265,30 +4172,39 @@ mod tests {
             start_line: 1,
             source_type: None,
             needed_by_rules: vec![NeededByRules::default(); data_len],
-            nested_needed_by_rules: IndexMap::new(),
             data_display: IndexMap::new(),
             show_rules: IndexMap::new(),
+            show_needed_by: IndexMap::new(),
+            show_import_data: IndexMap::new(),
             reference_ends: IndexMap::new(),
             input_key_index,
             show_rule_index: IndexMap::new(),
             data_leaf: IndexMap::new(),
+            member_targets: IndexMap::new(),
             row_templates: std::collections::BTreeMap::new(),
-            planning_input: Arc::new(Vec::new()),
+            own_spec: Arc::new(LemmaSpec::new("test".to_string())),
+            edges: Vec::new(),
             identity: SpecIdentity {
                 repository: None,
                 spec: "test".to_string(),
                 effective: EffectiveDate::Origin,
+                slice: EffectiveDate::Origin,
             },
             rule_candidates: std::collections::BTreeMap::new(),
             self_row_rules: Vec::new(),
             instance_lists: IndexMap::new(),
             row_mask: Vec::new(),
+            initial_values: Vec::new(),
+            walk_settled_leaves: Vec::new(),
+            rule_ref_indexes: Vec::new(),
+            data_slot_leaves: Vec::new(),
+            unit_scale_targets: IndexMap::new(),
         };
 
         let values = input_data(&[("tier", "platinum")]);
 
         let evaluate_data = resolve_evaluate_data(&plan, values);
-        match veto_reason(&evaluate_data, &data_path) {
+        match veto_reason(&plan, &evaluate_data, &data_path) {
             Some(reason) => {
                 assert!(
                     reason.contains("allowed options") || reason.contains("platinum"),
@@ -4296,103 +4212,6 @@ mod tests {
                 );
             }
             None => panic!("expected veto-bound data for tier=platinum"),
-        }
-    }
-
-    #[test]
-    fn evaluate_data_should_enforce_measure_decimals() {
-        // Higher-standard requirement: decimals should be enforced on measure inputs,
-        // unless the language explicitly defines rounding semantics.
-        let data_path = DataPath::new(vec![], "price".to_string());
-
-        let money = crate::planning::semantics::LemmaType::primitive(
-            crate::planning::semantics::TypeSpecification::Measure {
-                minimum: None,
-                maximum: None,
-                decimals: Some(2),
-                units: crate::planning::semantics::MeasureUnits::from(vec![
-                    crate::planning::semantics::MeasureUnit::from_decimal_factor(
-                        "eur".to_string(),
-                        rust_decimal::Decimal::from_str("1.0").unwrap(),
-                        Vec::new(),
-                    )
-                    .expect("eur unit factor must be exact decimal"),
-                ]),
-                traits: Vec::new(),
-                decomposition: None,
-                unit: None,
-                help: String::new(),
-            },
-        );
-        let source = Source::new(
-            crate::parsing::source::SourceType::Volatile,
-            crate::parsing::ast::Span {
-                start: 0,
-                end: 0,
-                line: 1,
-                col: 0,
-            },
-        );
-        let mut data = IndexMap::new();
-        data.insert(
-            data_path.clone(),
-            crate::planning::semantics::DataDefinition::Value {
-                value: crate::planning::semantics::LiteralValue::measure(rational_zero()),
-                resolved_type: Arc::new(money.clone()),
-                source,
-            },
-        );
-
-        let input_key_index = data.keys().map(|p| (p.input_key(), p.clone())).collect();
-        let data_len = data.len();
-        let plan = ExecutionPlan {
-            spec_name: "test".to_string(),
-            commentary: None,
-            data,
-            normal_forms: Vec::new(),
-            rules: IndexMap::new(),
-            data_reference_order: Vec::new(),
-            meta: IndexMap::new(),
-            resolved_types: ResolvedSpecTypes::default(),
-            family_units: Arc::new(FamilyUnitCatalog::default()),
-            signature_index: IndexMap::new(),
-            effective: EffectiveDate::Origin,
-            effective_from: None,
-            effective_to: None,
-            start_line: 1,
-            source_type: None,
-            needed_by_rules: vec![NeededByRules::default(); data_len],
-            nested_needed_by_rules: IndexMap::new(),
-            data_display: IndexMap::new(),
-            show_rules: IndexMap::new(),
-            reference_ends: IndexMap::new(),
-            input_key_index,
-            show_rule_index: IndexMap::new(),
-            data_leaf: IndexMap::new(),
-            row_templates: std::collections::BTreeMap::new(),
-            planning_input: Arc::new(Vec::new()),
-            identity: SpecIdentity {
-                repository: None,
-                spec: "test".to_string(),
-                effective: EffectiveDate::Origin,
-            },
-            rule_candidates: std::collections::BTreeMap::new(),
-            self_row_rules: Vec::new(),
-            instance_lists: IndexMap::new(),
-            row_mask: Vec::new(),
-        };
-
-        let values = input_data(&[("price", "1.234 eur")]);
-
-        let evaluate_data = resolve_evaluate_data(&plan, values);
-        match veto_reason(&evaluate_data, &data_path) {
-            Some(reason) => {
-                assert!(
-                    reason.contains("decimals") || reason.contains("decimal"),
-                    "1.234 eur must violate decimals=2, got: {reason}"
-                );
-            }
-            None => panic!("expected veto-bound data for price=1.234 eur"),
         }
     }
 
@@ -4414,24 +4233,33 @@ mod tests {
             start_line: 1,
             source_type: None,
             needed_by_rules: Vec::new(),
-            nested_needed_by_rules: IndexMap::new(),
             data_display: IndexMap::new(),
             show_rules: IndexMap::new(),
+            show_needed_by: IndexMap::new(),
+            show_import_data: IndexMap::new(),
             reference_ends: IndexMap::new(),
             input_key_index: IndexMap::new(),
             show_rule_index: IndexMap::new(),
             data_leaf: IndexMap::new(),
+            member_targets: IndexMap::new(),
             row_templates: std::collections::BTreeMap::new(),
-            planning_input: Arc::new(Vec::new()),
+            own_spec: Arc::new(LemmaSpec::new("test".to_string())),
+            edges: Vec::new(),
             identity: SpecIdentity {
                 repository: None,
                 spec: "s".to_string(),
                 effective: EffectiveDate::Origin,
+                slice: EffectiveDate::Origin,
             },
             rule_candidates: std::collections::BTreeMap::new(),
             self_row_rules: Vec::new(),
             instance_lists: IndexMap::new(),
             row_mask: Vec::new(),
+            initial_values: Vec::new(),
+            walk_settled_leaves: Vec::new(),
+            rule_ref_indexes: Vec::new(),
+            data_slot_leaves: Vec::new(),
+            unit_scale_targets: IndexMap::new(),
         }
     }
 
@@ -4817,7 +4645,6 @@ uses lemma units
 data money: measure
   -> unit eur: 1.00
   -> unit inr: 0.0092
-  -> decimals 2
 
 data labor_cost: measure
   -> unit eur_per_hour: eur/hour
@@ -4977,9 +4804,7 @@ rule can_view: no
         );
         let evaluate_data = resolve_evaluate_data(plan, data);
         assert!(matches!(
-            evaluate_data
-                .bindings
-                .get(&DataPath::local("labor_cost".into())),
+            binding(plan, &evaluate_data, &DataPath::local("labor_cost".into())),
             Some(OperationResult::Veto(_))
         ));
     }
@@ -5024,7 +4849,7 @@ rule can_view: no
     }
 
     #[test]
-    fn evaluate_prunes_inactive_nut_branches_for_total_price() {
+    fn evaluate_prunes_inactive_kind_branches_for_total_price() {
         let code = r#"
 spec bag
 uses lemma units
@@ -5039,31 +4864,31 @@ data price_per_weight: measure
   -> unit eur_per_kg: eur/kg
 
 data item_cost: price_per_weight
-data roasting: price_per_weight
-data chocolatizing: price_per_weight
+data finish_a: price_per_weight
+data finish_b: price_per_weight
 
-rule total_price: weight * (item_cost + roasting + chocolatizing)
+rule total_price: weight * (item_cost + finish_a + finish_b)
 
 spec calc
 uses bag
   -> with item_cost: item_cost
-  -> with roasting: roasting
+  -> with finish_a: finish_a
 
-data type_of_nut: text -> options "peanut", "cashew"
+data kind: text -> options "red", "blue"
 
-rule price_peanut: 1.5 eur_per_kg
-rule price_peanut_roasting: 0.45 eur_per_kg
+rule price_red: 1.5 eur_per_kg
+rule price_red_finish_a: 0.45 eur_per_kg
 
-rule price_cashew: 2.0 eur_per_kg
-rule price_cashew_roasting: 0.55 eur_per_kg
+rule price_blue: 2.0 eur_per_kg
+rule price_blue_finish_a: 0.55 eur_per_kg
 
 rule item_cost: veto "No item cost"
-  unless type_of_nut is "peanut" then price_peanut
-  unless type_of_nut is "cashew" then price_cashew
+  unless kind is "red" then price_red
+  unless kind is "blue" then price_blue
 
-rule roasting: veto "No roasting"
-  unless type_of_nut is "peanut" then price_peanut_roasting
-  unless type_of_nut is "cashew" then price_cashew_roasting
+rule finish_a: veto "No finish_a"
+  unless kind is "red" then price_red_finish_a
+  unless kind is "blue" then price_blue_finish_a
 
 rule total_price: bag.total_price
 "#;
@@ -5080,7 +4905,7 @@ rule total_price: bag.total_price
 
         let now = DateTimeValue::now();
         let mut inputs = IndexMap::new();
-        inputs.insert("type_of_nut".to_string(), "peanut".into());
+        inputs.insert("kind".to_string(), "red".into());
         let response = engine
             .evaluate(
                 None,
@@ -5094,8 +4919,8 @@ rule total_price: bag.total_price
 
         assert_eq!(
             response_missing_data_union(&response),
-            vec!["bag.weight".to_string(), "bag.chocolatizing".to_string(),],
-            "supplied type_of_nut and with-bound roasting/item_cost omitted"
+            vec!["bag.weight".to_string(), "bag.finish_b".to_string(),],
+            "supplied kind and with-bound finish_a/item_cost omitted"
         );
     }
 
@@ -5168,7 +4993,6 @@ spec units
 uses lemma units
 data money: measure
   -> unit eur: 1
-  -> decimals 2
 "#;
 
     const WAREHOUSING_SPEC: &str = r#"
@@ -5206,7 +5030,7 @@ data outbound_handling_per_pallet: units.money
 
 rule storage_cost_per_pallet:
   storage_per_pallet_per_week
-  * ceil (storage_duration as week as number)
+  * (storage_duration as week as number -> ceil)
 
 rule total_logistics_per_pallet:
   interbranch_transport_per_pallet
@@ -5331,8 +5155,8 @@ rule total: wh.total_logistics_per_ce
             .expect("total must have display")
             .to_string();
         assert_eq!(
-            display, "20.00 eur",
-            "10 eur/week * ceil(10 day as week) / 1 CE must be 20.00 eur, got: {display}"
+            display, "20 eur",
+            "10 eur/week * ceil(10 day as week) / 1 CE must be 20 eur, got: {display}"
         );
     }
 
@@ -5529,152 +5353,85 @@ uses m: mid
         (engine, plan)
     }
 
+    /// Template plan of import `alias` of `plan`.
+    fn import_template<'a>(plan: &'a ExecutionPlan, alias: &str) -> &'a ExecutionPlan {
+        let Some(DataDefinition::Import { row, .. }) =
+            plan.data.get(&DataPath::local(alias.to_string()))
+        else {
+            panic!("`{alias}` must be an import of `{}`", plan.spec_name);
+        };
+        plan.row_template(&row.identity)
+    }
+
     #[test]
-    fn input_key_index_matches_input_key_entries_for_nested_plan() {
+    fn input_key_index_covers_own_slots_only() {
         let (_, plan) = nested_import_plan();
 
-        let mut entry_keys: Vec<String> = plan
-            .input_key_entries()
-            .into_iter()
-            .map(|(path, _)| path.input_key())
-            .collect();
+        let mut entry_keys: Vec<String> = plan.data.keys().map(DataPath::input_key).collect();
         let mut index_keys: Vec<String> = plan.input_key_index.keys().cloned().collect();
         entry_keys.sort();
         index_keys.sort();
         assert_eq!(entry_keys, index_keys);
-
-        let show_keys: Vec<String> = plan
-            .nested_input_keys()
-            .into_iter()
-            .map(|(path, _)| path.input_key())
-            .collect();
-        assert!(!show_keys.iter().any(|key| key == "m"), "{show_keys:?}");
-        assert!(entry_keys.iter().any(|key| key == "m"), "{entry_keys:?}");
-        assert!(
-            show_keys.len() < entry_keys.len(),
-            "{show_keys:?} vs {entry_keys:?}"
-        );
+        assert_eq!(entry_keys, vec!["m".to_string()]);
+        assert_eq!(plan.input_slots().count(), 0);
     }
 
     #[test]
-    fn peel_data_local_one_hop_two_hops_and_non_import() {
+    fn import_rows_carry_their_template_data() {
         let (_, plan) = nested_import_plan();
 
-        let local = DataPath::local("m".into());
-        let (_, path, def) = plan
-            .peel_data(&local)
-            .expect("local import marker peels on outer");
-        assert_eq!(path.data, "m");
-        assert!(matches!(def, DataDefinition::Import { .. }));
-
-        let one = DataPath {
-            segments: vec![PathSegment {
-                uses: "m".into(),
-                repository: None,
-                spec: "mid".into(),
-            }],
-            data: "y".into(),
-        };
-        let (body, path, def) = plan.peel_data(&one).expect("one hop");
-        assert_eq!(body.identity.spec, "mid");
-        assert_eq!(path.data, "y");
+        let mid = import_template(&plan, "m");
+        assert_eq!(mid.spec_name, "mid");
         assert!(matches!(
-            def,
+            mid.data.get(&DataPath::local("y".into())),
+            Some(DataDefinition::Value { .. } | DataDefinition::TypeDeclaration { .. })
+        ));
+        let leaf = import_template(mid, "nested");
+        assert_eq!(leaf.spec_name, "leaf");
+        assert!(matches!(
+            leaf.data.get(&DataPath::local("x".into())),
+            Some(DataDefinition::Value { .. } | DataDefinition::TypeDeclaration { .. })
+        ));
+        assert!(plan
+            .data
+            .keys()
+            .chain(mid.data.keys())
+            .chain(leaf.data.keys())
+            .all(|path| path.segments.is_empty()));
+    }
+
+    #[test]
+    fn rules_of_imports_stay_in_their_templates() {
+        let (_, plan) = nested_import_plan();
+
+        assert!(plan.rules.is_empty());
+        let mid = import_template(&plan, "m");
+        let leaf = import_template(mid, "nested");
+        let keys = |template: &ExecutionPlan| -> Vec<String> {
+            template.rules.keys().map(RulePath::input_key).collect()
+        };
+        assert_eq!(keys(mid), vec!["ry".to_string()]);
+        assert_eq!(keys(leaf), vec!["rx".to_string()]);
+        assert!(plan.get_rule("m.ry").is_none());
+    }
+
+    #[test]
+    fn dotted_key_resolves_through_import_templates() {
+        let (_, plan) = nested_import_plan();
+        let (template, definition, _, field) =
+            crate::evaluation::evaluate_data::row_field_definition(&plan, "m.nested.x")
+                .expect("`m.nested.x` names data of the leaf template");
+        assert_eq!(template.spec_name, "leaf");
+        assert_eq!(field.data, "x");
+        assert!(matches!(
+            definition,
             DataDefinition::Value { .. } | DataDefinition::TypeDeclaration { .. }
         ));
-
-        let two = DataPath {
-            segments: vec![
-                PathSegment {
-                    uses: "m".into(),
-                    repository: None,
-                    spec: "mid".into(),
-                },
-                PathSegment {
-                    uses: "nested".into(),
-                    repository: None,
-                    spec: "leaf".into(),
-                },
-            ],
-            data: "x".into(),
-        };
-        let (body, path, def) = plan.peel_data(&two).expect("two hops");
-        assert_eq!(body.identity.spec, "leaf");
-        assert_eq!(path.data, "x");
-        assert!(matches!(
-            def,
-            DataDefinition::Value { .. } | DataDefinition::TypeDeclaration { .. }
-        ));
-
-        let bad = DataPath {
-            segments: vec![PathSegment {
-                uses: "y".into(),
-                repository: None,
-                spec: "mid".into(),
-            }],
-            data: "x".into(),
-        };
-        assert!(plan.peel_data(&bad).is_none());
-
-        let (mid, _, _) = plan.peel_data(&one).expect("mid for non-import hop");
-        let non_import_hop = DataPath {
-            segments: vec![PathSegment {
-                uses: "y".into(),
-                repository: None,
-                spec: "mid".into(),
-            }],
-            data: "x".into(),
-        };
-        assert!(mid.peel_data(&non_import_hop).is_none());
-    }
-
-    #[test]
-    fn peel_rule_local_one_hop_two_hops() {
-        let (_, plan) = nested_import_plan();
-
-        let one = RulePath {
-            segments: vec![PathSegment {
-                uses: "m".into(),
-                repository: None,
-                spec: "mid".into(),
-            }],
-            rule: "ry".into(),
-        };
-        let (body, local) = plan.peel_rule(&one).expect("one hop rule");
-        assert_eq!(body.identity.spec, "mid");
-        assert_eq!(local.rule, "ry");
-        assert!(local.segments.is_empty());
-
-        let two = RulePath {
-            segments: vec![
-                PathSegment {
-                    uses: "m".into(),
-                    repository: None,
-                    spec: "mid".into(),
-                },
-                PathSegment {
-                    uses: "nested".into(),
-                    repository: None,
-                    spec: "leaf".into(),
-                },
-            ],
-            rule: "rx".into(),
-        };
-        let (body, local) = plan.peel_rule(&two).expect("two hop rule");
-        assert_eq!(body.identity.spec, "leaf");
-        assert_eq!(local.rule, "rx");
-    }
-
-    #[test]
-    fn qualify_data_names_returns_qualified_path_that_peels() {
-        let (_, plan) = nested_import_plan();
-        let qualified = plan
-            .qualify_data_names(&["m", "nested", "x"])
-            .expect("qualified path");
-        assert_eq!(qualified.input_key(), "m.nested.x");
-        assert_eq!(qualified.segments.len(), 2);
-        assert_eq!(qualified.data, "x");
-        let (body, _, _) = plan.peel_data(&qualified).expect("qualified path peels");
-        assert_eq!(body.identity.spec, "leaf");
+        assert!(crate::evaluation::evaluate_data::row_field_definition(&plan, "m.x").is_none());
+        let (template, definition, _, _) =
+            crate::evaluation::evaluate_data::row_field_definition(&plan, "m.nested")
+                .expect("`m.nested` names the `uses` slot of the mid template");
+        assert_eq!(template.spec_name, "mid");
+        assert!(matches!(definition, DataDefinition::Import { .. }));
     }
 }

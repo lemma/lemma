@@ -148,3 +148,51 @@ rule after_first: original_price - first_discount
 "#;
     expect_plan_error(code, "scale explicitly");
 }
+
+#[test]
+fn distinct_measure_families_cannot_compare() {
+    expect_plan_error(
+        r#"
+spec mix
+data money: measure
+  -> unit eur: 1
+data mass: measure
+  -> unit kg: 1
+data a: 10 eur
+data b: 5 kg
+rule heavier: a > b
+"#,
+        "Cannot compare",
+    );
+}
+
+#[test]
+fn measure_siblings_add_generalizes_to_family_root() {
+    let mut engine = Engine::new();
+    let code = r#"
+spec cash
+data money: measure
+  -> unit eur: 1
+data deposit: money -> maximum 1000 eur
+data fee: money -> minimum 1 eur
+data d: deposit
+data f: fee
+rule total: d + f
+"#;
+    engine
+        .load([(lemma::SourceType::Volatile, code.to_string())])
+        .expect("spec must load");
+    let mut inputs = IndexMap::new();
+    inputs.insert("d".to_string(), "100 eur".into());
+    inputs.insert("f".to_string(), "5 eur".into());
+    let response = engine
+        .evaluate(None, "cash", None, inputs, None, true)
+        .expect("evaluate");
+    let rr = response.results.get("total").expect("total");
+    assert_eq!(
+        rr.rule_type.as_str(),
+        "money",
+        "deposit + fee must generalize to family root money, got {}",
+        rr.rule_type
+    );
+}

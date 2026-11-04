@@ -9,7 +9,6 @@ Easy to understand: books returned late incur fees.
 uses lemma units
 
 data money: measure
-  -> decimals 2
   -> unit eur: 1.00
   -> minimum 0 eur
 

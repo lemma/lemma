@@ -33,13 +33,11 @@ uses lemma units
 data amount: units.mass
 data money: measure
   -> unit eur: 1.00
-  -> decimals 2
 data labor_cost: measure
   -> unit eur_per_hour: eur/hour
   -> suggest 25 eur_per_hour
 data product_cost: measure
   -> unit eur_per_kg: eur/kilogram
-  -> decimals 2
   -> suggest 4 eur_per_kg
 data throughput: measure
   -> unit kg_per_hour: kilogram/hour
@@ -64,13 +62,11 @@ data amount: units.mass
 data money: measure
   -> unit eur: 1.00
   -> unit inr: 0.0092
-  -> decimals 2
 data labor_cost: measure
   -> unit eur_per_hour: eur/hour
   -> suggest 25 eur_per_hour
 data product_cost: measure
   -> unit eur_per_kg: eur/kilogram
-  -> decimals 2
   -> suggest 4 eur_per_kg
 data throughput: measure
   -> unit kg_per_hour: kilogram/hour

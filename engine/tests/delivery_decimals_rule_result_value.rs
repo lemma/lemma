@@ -4,7 +4,7 @@ use rust_decimal::Decimal;
 use std::str::FromStr;
 
 #[test]
-fn delivery_cost_converts_unit_with_show_decimals() {
+fn delivery_cost_converts_unit_without_rounding() {
     let code = r#"
 spec delivery 2026-01-01
 
@@ -13,7 +13,6 @@ data distance: measure
   -> unit kilometer: 1000
 
 data money: measure
-  -> decimals 2
   -> unit eur: 1.00
   -> unit usd: 0.84
 
@@ -70,6 +69,6 @@ rule delivery_cost: 0.26 eur_per_km * distance
     );
     assert_eq!(
         measure.get("usd").copied(),
-        Some(Decimal::from_str("3.71").expect("3.71"))
+        Some(Decimal::from_str("3.714285714285714285714285714").expect("3.12 / 0.84"))
     );
 }

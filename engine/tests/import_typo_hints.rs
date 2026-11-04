@@ -42,7 +42,7 @@ rule total: p.doubled
         .as_deref()
         .expect("veto reason");
     assert!(
-        reason.contains("Required data") && reason.contains("Did you mean 'amountt'"),
+        reason.contains("Required data 'p.amount'") && reason.contains("Did you mean 'p.amountt'"),
         "got: {reason}"
     );
 }

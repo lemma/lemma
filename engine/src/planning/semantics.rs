@@ -8,7 +8,7 @@
 use crate::parsing::arena::{ExprId, ExprKind, ExprTree};
 pub use crate::parsing::ast::{
     ArithmeticComputation, ComparisonComputation, MathematicalComputation, NegationType,
-    RangeBound, VetoExpression,
+    RangeBound, RoundingMode, VetoExpression,
 };
 pub use crate::parsing::source::Source;
 
@@ -42,12 +42,14 @@ pub fn mirrored_comparison(op: ComparisonComputation) -> ComparisonComputation {
 
 // Internal-only parsing imports (used only within this module for value/type resolution).
 use crate::computation::rational::{checked_div, rational_new, RationalInteger};
+use crate::computation::OperationResult;
 use crate::parsing::ast::Constraint;
 use crate::parsing::ast::{
     BooleanValue, CalendarPeriodUnit, ChainStep, CommandArg, ConversionTarget, DateCalendarKind,
-    DateRelativeKind, DateTimeValue, PrimitiveKind, TimeValue, TimezoneValue,
+    DateRelativeKind, DateTimeValue, LogicalConnective, PrimitiveKind, TimeValue, TimezoneValue,
     TypeConstraintCommand,
 };
+use crate::planning::normalize::NormalFormId;
 use crate::planning::unit_index::UnitIndex;
 use crate::Error;
 use indexmap::IndexMap;
@@ -85,6 +87,25 @@ pub fn combine_decompositions(
         }
         if *entry == 0 {
             result.remove(dim);
+        }
+    }
+    Some(result)
+}
+
+/// Scale every exponent in `base` by `exponent`. Zero cancels to an empty vector.
+/// `None` when a product overflows `i32` or exceeds [`crate::limits::MAX_UNIT_EXPONENT`].
+pub fn scale_decomposition(base: &BaseMeasureVector, exponent: i32) -> Option<BaseMeasureVector> {
+    if exponent == 0 {
+        return Some(BaseMeasureVector::new());
+    }
+    let mut result = BaseMeasureVector::new();
+    for (dimension, &power) in base {
+        let scaled = power.checked_mul(exponent)?;
+        if scaled.unsigned_abs() > crate::limits::MAX_UNIT_EXPONENT.unsigned_abs() {
+            return None;
+        }
+        if scaled != 0 {
+            result.insert(dimension.clone(), scaled);
         }
     }
     Some(result)
@@ -516,7 +537,7 @@ pub fn base_measure_vector_as_signature(decomposition: &BaseMeasureVector) -> Ve
 }
 
 /// One base axis of a measure decomposition.
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Dimension {
     Duration,
     Calendar,
@@ -568,8 +589,7 @@ fn measure_units_without_effective(units: &MeasureUnits) -> MeasureUnits {
     )
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum MeasureTrait {
     Duration,
     Calendar,
@@ -596,7 +616,43 @@ pub fn negate_signature(signature: &[(String, i32)]) -> Vec<(String, i32)> {
     signature.iter().map(|(n, e)| (n.clone(), -*e)).collect()
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+/// Allowed values of a type, plus at most one rule whose list is added to that set.
+/// Empty values and no rule means the type is not constrained by a set. A spec list
+/// has no values: its set is the rule's list.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
+pub(crate) struct TypeOptions {
+    pub values: Vec<OptionValue>,
+    pub rule: Option<String>,
+}
+
+/// One inline option: canonical value and the written unit, when the literal named one.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub(crate) struct OptionValue {
+    pub value: BoundValueKind,
+}
+
+pub(crate) const SPEC_LIST_HAS_NO_OPTIONS: &str =
+    "`-> option` and `-> options` do not apply to a list of spec instances";
+
+/// Dot-separated field key for a spec member read (`path` hops, then `name`).
+pub(crate) fn spec_member_input_key(path: &[String], name: &str) -> String {
+    let mut key = String::new();
+    for segment in path {
+        key.push_str(segment);
+        key.push('.');
+    }
+    key.push_str(name);
+    key
+}
+
+impl TypeOptions {
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.values.is_empty() && self.rule.is_none()
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum TypeSpecification {
     Boolean {
         help: String,
@@ -604,7 +660,6 @@ pub enum TypeSpecification {
     Measure {
         minimum: Option<(RationalInteger, String)>,
         maximum: Option<(RationalInteger, String)>,
-        decimals: Option<u8>,
         units: MeasureUnits,
         traits: Vec<MeasureTrait>,
         /// Common dimensional decomposition vector shared by all units in this measure.
@@ -632,7 +687,6 @@ pub enum TypeSpecification {
     Ratio {
         minimum: Option<RationalInteger>,
         maximum: Option<RationalInteger>,
-        decimals: Option<u8>,
         units: RatioUnits,
         /// Written unit for this ratio value (`25%`, `as percent`). Schema types use `None`.
         unit: Option<String>,
@@ -648,7 +702,6 @@ pub enum TypeSpecification {
     },
     Text {
         length: Option<usize>,
-        options: Vec<String>,
         help: String,
     },
     Date {
@@ -692,39 +745,45 @@ pub enum TypeSpecification {
     /// Must never appear in a successfully validated graph or execution plan.
     Undetermined,
     /// A spec instance. Identity is repository, spec name, and the resolved
-    /// temporal row (`effective`). Appended so postcard discriminants of earlier
+    /// temporal row (`effective`). Appended so discriminants of earlier
     /// variants stay stable.
     Spec {
         spec: SpecIdentity,
     },
     /// A list of rows of `element`, keyed by row number or named fields.
     List {
-        #[serde(with = "crate::snapshot::shared::arc")]
         element: Arc<LemmaType>,
         key: ListKey,
+        help: String,
     },
 }
 
-/// How a list addresses its rows.
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub enum ListKey {
-    Numbered,
-    Fields(Vec<String>),
+/// One field in a list's row key: display name and resolved template data path.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct KeyField {
+    pub name: String,
+    pub path: DataPath,
 }
 
-/// Resolved spec a value or rule result refers to.
-///
-/// `effective` is the resolved row's `effective_from`, not the run instant.
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-pub struct SpecIdentity {
+/// How a list addresses its rows.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum ListKey {
+    Numbered,
+    Fields(Vec<KeyField>),
+}
+
+/// One loaded spec version: its repository, name and `effective_from`. Types are declared
+/// per version, whatever slice of it a plan covers.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub(crate) struct SpecVersionKey {
     pub repository: Option<String>,
     pub spec: String,
     pub effective: crate::parsing::ast::EffectiveDate,
 }
 
-impl SpecIdentity {
+impl SpecVersionKey {
     #[must_use]
-    pub fn of(
+    pub(crate) fn of(
         repository: &crate::parsing::ast::LemmaRepository,
         spec: &crate::parsing::ast::LemmaSpec,
     ) -> Self {
@@ -736,6 +795,44 @@ impl SpecIdentity {
     }
 }
 
+/// Resolved spec a value or rule result refers to: one temporal slice of one version.
+///
+/// `effective` is the resolved row's `effective_from`, not the run instant. `slice` is
+/// the start of the slice of that version the plan covers: the greatest of the version's
+/// breakpoints ([`crate::planning::discovery::plan_breakpoints`]) at or before the
+/// instant the spec was resolved at. Inside one slice every unpinned import of the
+/// version resolves to the same version, so one slice is one plan.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct SpecIdentity {
+    pub repository: Option<String>,
+    pub spec: String,
+    pub effective: crate::parsing::ast::EffectiveDate,
+    pub slice: crate::parsing::ast::EffectiveDate,
+}
+
+impl SpecIdentity {
+    #[must_use]
+    pub(crate) fn of(
+        repository: &crate::parsing::ast::LemmaRepository,
+        spec: &crate::parsing::ast::LemmaSpec,
+        slice: crate::parsing::ast::EffectiveDate,
+    ) -> Self {
+        assert!(
+            slice >= spec.effective_from,
+            "BUG: slice {slice:?} of spec '{}' starts before its version",
+            spec.name
+        );
+        Self {
+            repository: repository.name.clone(),
+            spec: spec.name.clone(),
+            effective: spec.effective_from.clone(),
+            slice,
+        }
+    }
+}
+
+/// `[<repo> ]<spec>[ <date>][ slice <date>]`: the slice is written when it starts after
+/// the version.
 impl fmt::Display for SpecIdentity {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         if let Some(repository) = &self.repository {
@@ -744,6 +841,12 @@ impl fmt::Display for SpecIdentity {
         write!(f, "{}", self.spec)?;
         if let crate::parsing::ast::EffectiveDate::DateTimeValue(at) = &self.effective {
             write!(f, " {at}")?;
+        }
+        if self.slice != self.effective {
+            let crate::parsing::ast::EffectiveDate::DateTimeValue(at) = &self.slice else {
+                unreachable!("BUG: a slice after its version's start is a date");
+            };
+            write!(f, " slice {at}")?;
         }
         Ok(())
     }
@@ -770,15 +873,21 @@ impl std::fmt::Display for TypeSpecification {
             Self::List {
                 element,
                 key: ListKey::Numbered,
+                ..
             } => write!(f, "{} list", element.specifications),
             Self::List {
                 element,
                 key: ListKey::Fields(fields),
+                ..
             } => write!(
                 f,
                 "{} list key {}",
                 element.specifications,
-                fields.join(", ")
+                fields
+                    .iter()
+                    .map(|field| field.name.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
             ),
         }
     }
@@ -801,7 +910,13 @@ impl TypeSpecification {
             | Self::RatioRange { help, .. }
             | Self::MeasureRange { help, .. } => help.as_str(),
             Self::Veto { .. } | Self::Undetermined | Self::Spec { .. } => "",
-            Self::List { element, .. } => element.specifications.help(),
+            Self::List { element, help, .. } => {
+                if help.is_empty() {
+                    element.specifications.help()
+                } else {
+                    help.as_str()
+                }
+            }
         }
     }
 
@@ -811,7 +926,6 @@ impl TypeSpecification {
             Self::Measure {
                 minimum,
                 maximum,
-                decimals,
                 units,
                 traits,
                 decomposition,
@@ -820,7 +934,6 @@ impl TypeSpecification {
             } => Self::Measure {
                 minimum: minimum.clone(),
                 maximum: maximum.clone(),
-                decimals: *decimals,
                 units: measure_units_without_effective(units),
                 traits: traits.clone(),
                 decomposition: decomposition
@@ -848,9 +961,10 @@ impl TypeSpecification {
                     .map(base_measure_vector_without_effective),
                 help: help.clone(),
             },
-            Self::List { element, key } => Self::List {
+            Self::List { element, key, help } => Self::List {
                 element: Arc::new(element.with_families_without_effective()),
                 key: key.clone(),
+                help: help.clone(),
             },
             other => other.clone(),
         }
@@ -866,7 +980,6 @@ impl TypeSpecification {
                 Self::Measure {
                     minimum: a_min,
                     maximum: a_max,
-                    decimals: a_dec,
                     units: a_units,
                     traits: a_traits,
                     decomposition: a_decomp,
@@ -876,7 +989,6 @@ impl TypeSpecification {
                 Self::Measure {
                     minimum: b_min,
                     maximum: b_max,
-                    decimals: b_dec,
                     units: b_units,
                     traits: b_traits,
                     decomposition: b_decomp,
@@ -886,7 +998,6 @@ impl TypeSpecification {
             ) => {
                 a_min == b_min
                     && a_max == b_max
-                    && a_dec == b_dec
                     && a_units == b_units
                     && a_traits == b_traits
                     && a_decomp == b_decomp
@@ -896,7 +1007,6 @@ impl TypeSpecification {
                 Self::Ratio {
                     minimum: a_min,
                     maximum: a_max,
-                    decimals: a_dec,
                     units: a_units,
                     help: a_help,
                     unit: _,
@@ -904,18 +1014,11 @@ impl TypeSpecification {
                 Self::Ratio {
                     minimum: b_min,
                     maximum: b_max,
-                    decimals: b_dec,
                     units: b_units,
                     help: b_help,
                     unit: _,
                 },
-            ) => {
-                a_min == b_min
-                    && a_max == b_max
-                    && a_dec == b_dec
-                    && a_units == b_units
-                    && a_help == b_help
-            }
+            ) => a_min == b_min && a_max == b_max && a_units == b_units && a_help == b_help,
             _ => self == other,
         }
     }
@@ -1048,6 +1151,40 @@ fn measure_suggestion_wrong_shape_error(type_name: &str, traits: &[MeasureTrait]
     )
 }
 
+/// Names a data command reports in its errors: the type the command applies to,
+/// and the data being declared.
+#[derive(Clone, Copy, Debug)]
+pub struct ConstraintNames<'a> {
+    pub type_name: &'a str,
+    pub data_name: &'a str,
+}
+
+fn decimals_depend_on_the_unit_error(
+    kind: &str,
+    names: ConstraintNames<'_>,
+    args: &[CommandArg],
+    first_unit: Option<&str>,
+) -> Result<String, String> {
+    let ConstraintNames {
+        type_name,
+        data_name,
+    } = names;
+    let places = decimal_to_u8(require_decimal_literal(args, "decimals")?, "decimals")?;
+    let step = match places {
+        0 => "1".to_string(),
+        _ => format!("0.{}1", "0".repeat(usize::from(places) - 1)),
+    };
+    let advice = match first_unit {
+        Some(unit) => {
+            format!("Round in a rule instead, for example '{data_name} -> round {step} {unit}'.")
+        }
+        None => format!(
+            "Round in a rule instead, for example '{data_name} -> round' followed by a step of {step} in one of the type's units."
+        ),
+    };
+    Ok(format!("'decimals' is not valid on {kind} type '{type_name}': precision depends on the unit. {advice}"))
+}
+
 fn reject_calendar_for_suggestion(
     value: &crate::literals::Value,
     type_name: &str,
@@ -1137,8 +1274,6 @@ fn range_endpoints_compatible(left: &LemmaType, right: &LemmaType) -> bool {
         (TypeSpecification::Number { .. }, TypeSpecification::Number { .. }) => true,
         (TypeSpecification::Measure { .. }, TypeSpecification::Measure { .. }) => {
             left.same_measure_family(right)
-                || left.compatible_with_anonymous_measure(right)
-                || right.compatible_with_anonymous_measure(left)
         }
         (TypeSpecification::Ratio { .. }, TypeSpecification::Ratio { .. }) => true,
         _ => false,
@@ -1672,20 +1807,447 @@ fn sync_ratio_suggestion_units(units: &mut RatioUnits, default: &ValueKind) -> R
 /// Both `option red` (bare identifier, parsed as `Label`) and `option "red"`
 /// (quoted text literal) are valid lemma syntax for option enumeration; the
 /// grammar accepts either form. All other variants are rejected.
-fn option_name(arg: &CommandArg, cmd: &str) -> Result<String, String> {
-    match arg {
-        CommandArg::Literal(crate::literals::Value::Text(s)) => Ok(s.clone()),
-        CommandArg::Label(name) => Ok(name.clone()),
-        CommandArg::Literal(other) => Err(format!(
-            "{} requires a text literal or identifier, got {}",
-            cmd,
-            value_kind_name(other)
-        )),
-        CommandArg::UnitExpr(_) => Err(format!(
-            "{} requires a text literal or identifier, got a unit expression",
-            cmd
+pub(crate) fn apply_option_constraint(
+    lemma_type: &mut LemmaType,
+    command: TypeConstraintCommand,
+    args: &[CommandArg],
+    resolve_unit: Option<&UnitTokenResolver<'_>>,
+    spec: &crate::parsing::ast::LemmaSpec,
+) -> Result<(), String> {
+    let mut hops = 0;
+    {
+        let mut probe = &*lemma_type;
+        while let TypeSpecification::List { element, .. } = &probe.specifications {
+            hops += 1;
+            probe = element.as_ref();
+        }
+    }
+    let mut current = lemma_type;
+    for _ in 0..hops {
+        let TypeSpecification::List { element, .. } = &mut current.specifications else {
+            unreachable!("BUG: option forwarding counted a list");
+        };
+        current = Arc::make_mut(element);
+    }
+    apply_options_command(current, command, args, resolve_unit, spec)
+}
+
+/// `-> with` / `-> suggest` naming one `uses` instance of a spec type.
+pub(crate) fn apply_spec_member_command(
+    lemma_type: &LemmaType,
+    command: TypeConstraintCommand,
+    args: &[CommandArg],
+    spec: &crate::parsing::ast::LemmaSpec,
+    target: &mut Option<RawSuggestion>,
+) -> Result<(), String> {
+    let label = match args {
+        [CommandArg::Label(name)] => name,
+        _ => return Err(format!("{command} on a spec takes one instance name")),
+    };
+    let option = spec_alias_option(
+        lemma_type,
+        uses_alias(spec, label)
+            .ok_or_else(|| format!("'{label}' is not an instance of this spec"))?,
+        label,
+    )?;
+    *target = Some(RawSuggestion::Value(option.value.value));
+    Ok(())
+}
+
+/// One `-> with` line appends rows on a list. A spec element names a `uses` instance.
+pub(crate) fn apply_list_with_rows(
+    lemma_type: &mut LemmaType,
+    names: ConstraintNames<'_>,
+    args: &[CommandArg],
+    declared_value: &mut Option<RawSuggestion>,
+    resolve_unit: Option<&UnitTokenResolver<'_>>,
+    spec: &crate::parsing::ast::LemmaSpec,
+) -> Result<(), String> {
+    let mut rows = match declared_value.take() {
+        Some(RawSuggestion::List(existing)) => existing,
+        None => Vec::new(),
+        Some(other) => {
+            unreachable!("BUG: list declared value must be RawSuggestion::List, got {other:?}")
+        }
+    };
+    let TypeSpecification::List { element, .. } = &mut lemma_type.specifications else {
+        unreachable!("BUG: apply_list_with_rows on a non-list type");
+    };
+    for arg in args {
+        rows.push(list_with_row(
+            Arc::make_mut(element),
+            names,
+            arg,
+            resolve_unit,
+            spec,
+        )?);
+    }
+    *declared_value = Some(RawSuggestion::List(rows));
+    Ok(())
+}
+
+fn list_with_row(
+    element: &mut LemmaType,
+    names: ConstraintNames<'_>,
+    arg: &CommandArg,
+    resolve_unit: Option<&UnitTokenResolver<'_>>,
+    spec: &crate::parsing::ast::LemmaSpec,
+) -> Result<RawSuggestion, String> {
+    let mut hops = 0;
+    {
+        let mut probe = &*element;
+        while let TypeSpecification::List { element, .. } = &probe.specifications {
+            hops += 1;
+            probe = element.as_ref();
+        }
+    }
+    let mut current = element;
+    for _ in 0..hops {
+        let TypeSpecification::List { element, .. } = &mut current.specifications else {
+            unreachable!("BUG: list -> with counted a list");
+        };
+        current = Arc::make_mut(element);
+    }
+    let mut row_value = None;
+    if matches!(current.specifications, TypeSpecification::Spec { .. }) {
+        apply_spec_member_command(
+            current,
+            TypeConstraintCommand::With,
+            std::slice::from_ref(arg),
+            spec,
+            &mut row_value,
+        )?;
+    } else {
+        let mut unused_suggestion = None;
+        current.apply_constraint(
+            names,
+            TypeConstraintCommand::With,
+            std::slice::from_ref(arg),
+            &mut unused_suggestion,
+            &mut row_value,
+            resolve_unit,
+        )?;
+    }
+    let mut value = row_value.expect("BUG: -> with on a list row must produce a value");
+    for _ in 0..hops {
+        value = RawSuggestion::List(vec![value]);
+    }
+    Ok(value)
+}
+
+fn apply_options_command(
+    lemma_type: &mut LemmaType,
+    command: TypeConstraintCommand,
+    args: &[CommandArg],
+    resolve_unit: Option<&UnitTokenResolver<'_>>,
+    spec: &crate::parsing::ast::LemmaSpec,
+) -> Result<(), String> {
+    if command == TypeConstraintCommand::Option && args.len() != 1 {
+        return Err("option takes exactly one argument".to_string());
+    }
+    if args.is_empty() {
+        return Err("options takes at least one value".to_string());
+    }
+    let mut literals: Vec<OptionValue> = Vec::new();
+    let mut names: Vec<String> = Vec::new();
+    for arg in args {
+        match arg {
+            CommandArg::Literal(value) => {
+                literals.push(OptionValue {
+                    value: option_bound_from_literal(value, lemma_type, resolve_unit)?,
+                });
+            }
+            CommandArg::Label(name) => names.push(name.clone()),
+            CommandArg::UnitExpr(_) => {
+                return Err(format!(
+                    "{command} requires a value of this type, got a unit expression"
+                ));
+            }
+        }
+    }
+    if !literals.is_empty() && !names.is_empty() {
+        return Err(format!(
+            "{command} mixes values and a rule. Write the values, or name one rule."
+        ));
+    }
+    if matches!(lemma_type.specifications, TypeSpecification::Spec { .. }) {
+        return apply_spec_list_options(lemma_type, command, args, spec);
+    }
+    if !names.is_empty() {
+        return apply_option_names(lemma_type, &names, spec);
+    }
+    append_option_literals(lemma_type, literals)?;
+    Ok(())
+}
+
+fn option_bound_from_literal(
+    value: &crate::literals::Value,
+    lemma_type: &LemmaType,
+    resolve_unit: Option<&UnitTokenResolver<'_>>,
+) -> Result<BoundValueKind, String> {
+    let kind = parser_value_to_value_kind(value, &lemma_type.specifications, resolve_unit)?;
+    let token = match value {
+        crate::literals::Value::NumberWithUnit(_, unit) => Some(unit.as_str()),
+        crate::literals::Value::Range(left, right) => match (left.as_ref(), right.as_ref()) {
+            (
+                crate::literals::Value::NumberWithUnit(_, left_unit),
+                crate::literals::Value::NumberWithUnit(_, right_unit),
+            ) if left_unit == right_unit => Some(left_unit.as_str()),
+            _ => None,
+        },
+        _ => None,
+    };
+    let unit = match token {
+        Some(token) => Some(Arc::<str>::from(resolve_endpoint_unit_token(
+            token,
+            &lemma_type.specifications,
+            resolve_unit,
+        )?)),
+        None => None,
+    };
+    Ok(BoundValueKind { value: kind, unit })
+}
+
+fn apply_spec_list_options(
+    _lemma_type: &mut LemmaType,
+    _command: TypeConstraintCommand,
+    _args: &[CommandArg],
+    _spec: &crate::parsing::ast::LemmaSpec,
+) -> Result<(), String> {
+    Err(SPEC_LIST_HAS_NO_OPTIONS.to_string())
+}
+
+enum OptionName {
+    Text(OptionValue),
+    Instance(OptionValue),
+    Rule,
+}
+
+fn apply_option_names(
+    lemma_type: &mut LemmaType,
+    names: &[String],
+    spec: &crate::parsing::ast::LemmaSpec,
+) -> Result<(), String> {
+    let mut meanings = Vec::with_capacity(names.len());
+    for name in names {
+        meanings.push(option_name_meaning(lemma_type, spec, name)?);
+    }
+    let rule_count = meanings
+        .iter()
+        .filter(|meaning| matches!(meaning, OptionName::Rule))
+        .count();
+    if rule_count > 0 {
+        if names.len() != 1 || rule_count != 1 {
+            return Err(
+                "options names one rule, or lists values. A rule is not mixed with values."
+                    .to_string(),
+            );
+        }
+        if let Some(existing) = &lemma_type.options.rule {
+            return Err(format!(
+                "`-> options` already names rule '{existing}', not '{}'",
+                names[0]
+            ));
+        }
+        lemma_type.options.rule = Some(names[0].clone());
+        return Ok(());
+    }
+    let mut literals = Vec::with_capacity(meanings.len());
+    for meaning in meanings {
+        match meaning {
+            OptionName::Text(value) | OptionName::Instance(value) => literals.push(value),
+            OptionName::Rule => unreachable!("BUG: rule meanings are returned above"),
+        }
+    }
+    reject_duplicate_options(lemma_type, &literals)?;
+    append_option_literals(lemma_type, literals)?;
+    Ok(())
+}
+
+/// One grammatical name has one meaning. Two meanings is an error; zero is an error.
+fn option_name_meaning(
+    lemma_type: &LemmaType,
+    spec: &crate::parsing::ast::LemmaSpec,
+    name: &str,
+) -> Result<OptionName, String> {
+    let mut found: Vec<OptionName> = Vec::new();
+    if matches!(lemma_type.specifications, TypeSpecification::Text { .. }) {
+        found.push(OptionName::Text(OptionValue {
+            value: BoundValueKind::unbound(ValueKind::Text(Arc::from(name))),
+        }));
+    }
+    if let Some(data) = uses_alias(spec, name) {
+        if let Ok(instance) = spec_alias_option(lemma_type, data, name) {
+            found.push(OptionName::Instance(instance));
+        }
+    }
+    if spec.rules.iter().any(|rule| rule.name == name) {
+        found.push(OptionName::Rule);
+    }
+    match found.len() {
+        1 => Ok(found.pop().expect("BUG: one option meaning")),
+        0 => Err(format!("'{name}' is not a value of this type or a rule")),
+        _ => Err(format!(
+            "'{name}' is more than one of a text option, an instance, and a rule"
         )),
     }
+}
+
+fn uses_alias<'a>(
+    spec: &'a crate::parsing::ast::LemmaSpec,
+    name: &str,
+) -> Option<&'a crate::parsing::ast::LemmaData> {
+    spec.data.iter().find(|data| {
+        data.reference.name == name
+            && matches!(data.value, crate::parsing::ast::DataValue::Import { .. })
+    })
+}
+
+fn spec_alias_option(
+    lemma_type: &LemmaType,
+    data: &crate::parsing::ast::LemmaData,
+    name: &str,
+) -> Result<OptionValue, String> {
+    let TypeSpecification::Spec { spec } = &lemma_type.specifications else {
+        return Err(format!("'{name}' is not a value of this type or a rule"));
+    };
+    let crate::parsing::ast::DataValue::Import { spec_ref, .. } = &data.value else {
+        unreachable!("BUG: uses_alias returns an import");
+    };
+    if spec_ref.name != spec.spec {
+        return Err(format!(
+            "'{name}' is an instance of '{}', not '{}'",
+            spec_ref.name, spec.spec
+        ));
+    }
+    unreachable!(
+        "BUG: `uses` alias `{name}` named on a spec type: a spec type is only a list element, `-> options` on it names a rule, and the parser reads `-> with {name}` on a list as an instance-list row"
+    )
+}
+
+fn append_option_literals(
+    lemma_type: &mut LemmaType,
+    incoming: Vec<OptionValue>,
+) -> Result<(), String> {
+    for option in incoming {
+        if lemma_type
+            .options
+            .values
+            .iter()
+            .any(|existing| existing.value == option.value)
+        {
+            return Err(format!(
+                "duplicate option '{}'",
+                lemma_type.display_bound(&option.value)
+            ));
+        }
+        lemma_type.options.values.push(option);
+    }
+    Ok(())
+}
+
+fn static_option_match(options: &TypeOptions, value: &ValueKind) -> bool {
+    options
+        .values
+        .iter()
+        .any(|option| option_values_match(&option.value.value, value))
+}
+
+pub(crate) fn disallowed_message(
+    lemma_type: &LemmaType,
+    options: &TypeOptions,
+    value: &ValueKind,
+    rule_rows: Option<&ListValue>,
+) -> String {
+    let mut shown = options
+        .values
+        .iter()
+        .map(|option| lemma_type.display_bound(&option.value))
+        .collect::<Vec<_>>()
+        .join(", ");
+    if let Some(rows) = rule_rows {
+        let rule_shown = rows
+            .iter()
+            .map(|row| row.value.to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+        if !shown.is_empty() && !rule_shown.is_empty() {
+            shown.push_str(", ");
+        }
+        shown.push_str(&rule_shown);
+    }
+    format!("'{value}' is not one of the allowed options: {shown}.")
+}
+
+/// Equality for option matching of scalar and list-of-scalar values. Spec values never
+/// appear: a list of spec instances takes no options ([`SPEC_LIST_HAS_NO_OPTIONS`]).
+fn option_values_match(option: &ValueKind, value: &ValueKind) -> bool {
+    let mut values: Vec<(ValueKind, ValueKind)> = vec![(option.clone(), value.clone())];
+    while let Some((left, right)) = values.pop() {
+        match (left, right) {
+            (ValueKind::Spec(_), _) | (_, ValueKind::Spec(_)) => {
+                unreachable!(
+                    "BUG: option matching saw a spec value; {}",
+                    SPEC_LIST_HAS_NO_OPTIONS
+                );
+            }
+            (ValueKind::List(left), ValueKind::List(right)) => {
+                if left.len() != right.len() {
+                    return false;
+                }
+                for (a, b) in left.iter().zip(right.iter()) {
+                    if a.lemma_type != b.lemma_type {
+                        return false;
+                    }
+                    values.push((a.into_owned().value, b.into_owned().value));
+                }
+            }
+            (left, right) => {
+                if left != right {
+                    return false;
+                }
+            }
+        }
+    }
+    true
+}
+
+pub(crate) fn option_detail_line(lemma_type: &LemmaType) -> Option<String> {
+    let options = &lemma_type.options;
+    let mut parts = Vec::new();
+    if !options.values.is_empty() {
+        parts.push(
+            options
+                .values
+                .iter()
+                .map(|option| lemma_type.display_bound(&option.value))
+                .collect::<Vec<_>>()
+                .join(", "),
+        );
+    }
+    if let Some(name) = &options.rule {
+        parts.push(name.clone());
+    }
+    if parts.is_empty() {
+        None
+    } else {
+        Some(format!("options: {}", parts.join(", ")))
+    }
+}
+
+fn reject_duplicate_options(lemma_type: &LemmaType, values: &[OptionValue]) -> Result<(), String> {
+    for (index, option) in values.iter().enumerate() {
+        if values[..index]
+            .iter()
+            .any(|earlier| earlier.value == option.value)
+        {
+            return Err(format!(
+                "duplicate option '{}'",
+                lemma_type.display_bound(&option.value)
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn label_name(arg: &CommandArg, cmd: &str) -> Result<String, String> {
@@ -1807,7 +2369,6 @@ impl TypeSpecification {
         TypeSpecification::Measure {
             minimum: None,
             maximum: None,
-            decimals: None,
             units: MeasureUnits::new(),
             traits: Vec::new(),
             decomposition: None,
@@ -1836,7 +2397,6 @@ impl TypeSpecification {
         TypeSpecification::Ratio {
             minimum: None,
             maximum: None,
-            decimals: None,
             units: RatioUnits(vec![
                 RatioUnit {
                     name: "percent".to_string(),
@@ -1873,7 +2433,6 @@ impl TypeSpecification {
     pub fn text() -> Self {
         TypeSpecification::Text {
             length: None,
-            options: vec![],
             help: default_help_for_primitive(PrimitiveKind::Text).to_string(),
         }
     }
@@ -1942,7 +2501,6 @@ impl TypeSpecification {
             } => Some(TypeSpecification::Measure {
                 minimum: lower.clone(),
                 maximum: upper.clone(),
-                decimals: None,
                 units: units.clone(),
                 traits: Vec::new(),
                 decomposition: decomposition.clone(),
@@ -1967,7 +2525,6 @@ impl TypeSpecification {
             } => Some(TypeSpecification::Ratio {
                 minimum: lower.clone(),
                 maximum: upper.clone(),
-                decimals: None,
                 units: units.clone(),
                 unit: None,
                 help: String::new(),
@@ -2094,13 +2651,14 @@ impl TypeSpecification {
     /// callers convert via [`bound_value_kind_from_raw_suggestion`].
     pub fn apply_constraint(
         &mut self,
-        type_name: &str,
+        names: ConstraintNames<'_>,
         command: TypeConstraintCommand,
         args: &[CommandArg],
         declared_suggestion: &mut Option<RawSuggestion>,
         declared_value: &mut Option<RawSuggestion>,
         resolve_unit: Option<&UnitTokenResolver<'_>>,
     ) -> Result<(), String> {
+        let type_name = names.type_name;
         if command == TypeConstraintCommand::With
             && args.len() > 1
             && !matches!(self, TypeSpecification::List { .. })
@@ -2151,7 +2709,6 @@ impl TypeSpecification {
                 }
             },
             TypeSpecification::Measure {
-                decimals,
                 minimum,
                 maximum,
                 units,
@@ -2160,8 +2717,12 @@ impl TypeSpecification {
                 ..
             } => match command {
                 TypeConstraintCommand::Decimals => {
-                    let d = require_decimal_literal(args, "decimals")?;
-                    *decimals = Some(decimal_to_u8(d, "decimals")?);
+                    return Err(decimals_depend_on_the_unit_error(
+                        "measure",
+                        names,
+                        args,
+                        units.0.first().map(|unit| unit.name.as_str()),
+                    )?);
                 }
                 TypeConstraintCommand::Unit => {
                     let (unit_name, value, derived_measure_factors) = match args {
@@ -2264,7 +2825,7 @@ impl TypeSpecification {
                 }
                 _ => {
                     return Err(format!(
-                        "Invalid command '{}' for measure type. Valid commands: unit, trait, minimum, maximum, decimals, help, suggest, with",
+                        "Invalid command '{}' for measure type. Valid commands: unit, trait, minimum, maximum, help, suggest, with",
                         command
                     ));
                 }
@@ -2385,7 +2946,6 @@ impl TypeSpecification {
                 }
             },
             TypeSpecification::Ratio {
-                decimals,
                 minimum,
                 maximum,
                 units,
@@ -2393,8 +2953,12 @@ impl TypeSpecification {
                 help,
             } => match command {
                 TypeConstraintCommand::Decimals => {
-                    let d = require_decimal_literal(args, "decimals")?;
-                    *decimals = Some(decimal_to_u8(d, "decimals")?);
+                    return Err(decimals_depend_on_the_unit_error(
+                        "ratio",
+                        names,
+                        args,
+                        units.0.first().map(|unit| unit.name.as_str()),
+                    )?);
                 }
                 TypeConstraintCommand::Unit => {
                     let (unit_name, value_dec) = match args {
@@ -2469,7 +3033,6 @@ impl TypeSpecification {
                     match lit {
                         crate::literals::Value::NumberWithUnit(_, unit_name) => {
                             let element_spec = TypeSpecification::Ratio {
-                                decimals: *decimals,
                                 minimum: minimum.clone(),
                                 maximum: maximum.clone(),
                                 units: units.clone(),
@@ -2493,7 +3056,7 @@ impl TypeSpecification {
                 }
                 _ => {
                     return Err(format!(
-                        "Invalid command '{}' for ratio type. Valid commands: unit, minimum, maximum, decimals, help, suggest, with",
+                        "Invalid command '{}' for ratio type. Valid commands: unit, minimum, maximum, help, suggest, with",
                         command
                     ));
                 }
@@ -2576,24 +3139,7 @@ impl TypeSpecification {
                     ));
                 }
             },
-            TypeSpecification::Text {
-                length,
-                options,
-                help,
-            } => match command {
-                TypeConstraintCommand::Option => {
-                    if args.len() != 1 {
-                        return Err("option takes exactly one argument".to_string());
-                    }
-                    options.push(option_name(&args[0], "option")?);
-                }
-                TypeConstraintCommand::Options => {
-                    let mut collected = Vec::with_capacity(args.len());
-                    for arg in args {
-                        collected.push(option_name(arg, "options")?);
-                    }
-                    *options = collected;
-                }
+            TypeSpecification::Text { length, help } => match command {
                 TypeConstraintCommand::Length => {
                     let d = require_decimal_literal(args, "length")?;
                     *length = Some(decimal_to_usize(d, "length")?);
@@ -2616,7 +3162,8 @@ impl TypeSpecification {
                     )?;
                     match lit {
                         crate::literals::Value::Text(s) => {
-                            *target = Some(RawSuggestion::Value(ValueKind::Text(s.clone())));
+                            *target =
+                                Some(RawSuggestion::Value(ValueKind::Text(Arc::from(s.as_str()))));
                         }
                         _ => {
                             return Err(
@@ -2628,7 +3175,7 @@ impl TypeSpecification {
                 }
                 _ => {
                     return Err(format!(
-                        "Invalid command '{}' for text type. Valid commands: options, length, help, suggest, with",
+                        "Invalid command '{}' for text type. Valid commands: length, help, suggest, with",
                         command
                     ));
                 }
@@ -2940,43 +3487,28 @@ impl TypeSpecification {
                     "Invalid command '{command}' for spec type. A spec instance has no data constraints"
                 ));
             }
-            TypeSpecification::List { element, .. } => match command {
+            TypeSpecification::List { element, help, .. } => match command {
                 TypeConstraintCommand::Help => {
-                    let mut unused_suggestion = None;
-                    let mut unused_value = None;
-                    Arc::make_mut(element).specifications.apply_constraint(
-                        type_name,
-                        command,
-                        args,
-                        &mut unused_suggestion,
-                        &mut unused_value,
-                        resolve_unit,
-                    )?;
-                }
-                TypeConstraintCommand::With => {
-                    let mut rows = match declared_value.take() {
-                        Some(RawSuggestion::List(existing)) => existing,
-                        None => Vec::new(),
-                        Some(other) => unreachable!(
-                            "BUG: list declared value must be RawSuggestion::List, got {other:?}"
-                        ),
-                    };
-                    for arg in args {
-                        let mut row_value = None;
+                    if matches!(element.specifications, TypeSpecification::Spec { .. }) {
+                        apply_type_help_command(help, args)?;
+                    } else {
                         let mut unused_suggestion = None;
+                        let mut unused_value = None;
                         Arc::make_mut(element).specifications.apply_constraint(
-                            type_name,
-                            TypeConstraintCommand::With,
-                            std::slice::from_ref(arg),
+                            names,
+                            command,
+                            args,
                             &mut unused_suggestion,
-                            &mut row_value,
+                            &mut unused_value,
                             resolve_unit,
                         )?;
-                        rows.push(
-                            row_value.expect("BUG: -> with on a list row must produce a value"),
-                        );
                     }
-                    *declared_value = Some(RawSuggestion::List(rows));
+                }
+                TypeConstraintCommand::With => {
+                    return Err(
+                        "BUG: list -> with is applied before TypeSpecification::apply_constraint"
+                            .to_string(),
+                    );
                 }
                 other => {
                     return Err(format!(
@@ -3168,8 +3700,7 @@ fn parse_scalar_value_from_string(
 // Semantic value types (no parser dependency - used by evaluation, inversion, etc.)
 // -----------------------------------------------------------------------------
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum SemanticCalendarUnit {
     Month,
     Year,
@@ -3220,14 +3751,13 @@ pub fn semantic_calendar_unit_from_measure_type(lemma_type: &LemmaType) -> Seman
 }
 
 /// Target type for `as` casts (semantic; used by evaluation/computation).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SemanticConversionTarget {
     Type(PrimitiveKind),
     /// `number as eur` — construct, convert, relabel, or range-span into `unit_name`.
     Unit {
         unit_name: String,
         /// Measure/ratio type resolved in the spec where the conversion was written.
-        #[serde(with = "crate::snapshot::shared::arc")]
         owning_type: Arc<LemmaType>,
     },
 }
@@ -3430,7 +3960,7 @@ impl FromStr for SemanticDateTime {
 /// Default captured during type constraint application, before measure unit factors are final.
 /// Converted into [`ValueKind`] after `resolve_measure_decompositions` (or immediately for
 /// reference-local defaults, which run after that pass).
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum RawSuggestion {
     Value(ValueKind),
     /// Measure suggest/fill: magnitude in the written unit (canonicalized later).
@@ -3453,7 +3983,7 @@ pub enum RawSuggestion {
 /// display stamps it so the one-liner matches the written unit, not the type's first unit.
 /// Shared via [`Arc`] so value-table clones bump a refcount instead of allocating.
 /// For ranges this stays `None`; each endpoint carries its own unit on its type.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct BoundValueKind {
     pub value: ValueKind,
     pub unit: Option<Arc<str>>,
@@ -3549,12 +4079,12 @@ pub fn bound_value_kind_from_raw_suggestion(
                     .len()
                     .checked_sub(rows)
                     .expect("BUG: list rows missing from bound stack");
-                let converted: Vec<TypedLiteral> = bounds
+                let converted: Arc<[TypedLiteral]> = bounds
                     .split_off(start)
                     .iter()
                     .map(|bound| typed_literal_from_bound(bound, element))
                     .collect();
-                bounds.push(BoundValueKind::unbound(ValueKind::List(converted)));
+                bounds.push(BoundValueKind::unbound(ValueKind::List(converted.into())));
             }
         }
     }
@@ -3656,7 +4186,7 @@ pub fn typed_literal_from_bound(
 /// `DataDefinition`. The [`ValueKind::Range`] arm is the exception — each
 /// endpoint keeps a [`TypedLiteral`] so a mixed-unit range (`10 eur...20 usd`)
 /// retains both written units.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum ValueKind {
     Number(RationalInteger),
     /// Measure: magnitude in canonical (base-unit) space.
@@ -3665,7 +4195,7 @@ pub enum ValueKind {
     /// the stored magnitude; API unit maps divide back. Unit/signature identity
     /// comes from the node/`DataDefinition` type via [`LemmaType::measure_runtime_signature`].
     Measure(RationalInteger),
-    Text(String),
+    Text(Arc<str>),
     Date(SemanticDateTime),
     Time(SemanticTime),
     Boolean(bool),
@@ -3676,7 +4206,196 @@ pub enum ValueKind {
     /// A spec instance: a `uses` path in the consumer plan, or one row of an instance list.
     Spec(SpecValue),
     /// Ordered rows of one type. Each row keeps its own type (written unit for measures).
-    List(Vec<TypedLiteral>),
+    List(ListValue),
+}
+
+/// Items of a list value, with the key index of a keyed list that carries one.
+/// Equality, hashing and serialization are over the items only.
+#[derive(Debug, Clone)]
+pub struct ListValue {
+    items: ListItems,
+    index: Option<Arc<crate::planning::instance_list::KeyIndex>>,
+}
+
+/// The rows of a store as one list reads them.
+pub(crate) struct StoredRows<'l> {
+    pub rows: &'l [Arc<RowInstance>],
+    pub owner: Option<&'l InstanceKey>,
+}
+
+#[derive(Debug, Clone)]
+enum ListItems {
+    Values(Arc<[TypedLiteral]>),
+    /// The rows of a store as one list reads them: each item is the row owned by
+    /// `owner`, of type `row_type`.
+    Rows {
+        store: Arc<crate::planning::instance_list::RowStore>,
+        owner: Option<InstanceKey>,
+        row_type: Arc<LemmaType>,
+    },
+}
+
+impl ListValue {
+    /// A list holding `items`, without an index.
+    fn held(items: Arc<[TypedLiteral]>) -> Self {
+        Self {
+            items: ListItems::Values(items),
+            index: None,
+        }
+    }
+
+    pub(crate) fn indexed(
+        items: Arc<[TypedLiteral]>,
+        index: Arc<crate::planning::instance_list::KeyIndex>,
+    ) -> Self {
+        Self {
+            items: ListItems::Values(items),
+            index: Some(index),
+        }
+    }
+
+    /// The rows of `store` read by `owner`, indexed by the store's index.
+    pub(crate) fn stored_rows(
+        store: &Arc<crate::planning::instance_list::RowStore>,
+        owner: Option<InstanceKey>,
+        row_type: Arc<LemmaType>,
+    ) -> Self {
+        Self {
+            index: store.index.clone(),
+            items: ListItems::Rows {
+                store: Arc::clone(store),
+                owner,
+                row_type,
+            },
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        match &self.items {
+            ListItems::Values(items) => items.len(),
+            ListItems::Rows { store, .. } => store.rows.len(),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    pub fn get(&self, position: usize) -> Option<std::borrow::Cow<'_, TypedLiteral>> {
+        match &self.items {
+            ListItems::Values(items) => items.get(position).map(std::borrow::Cow::Borrowed),
+            ListItems::Rows {
+                store,
+                owner,
+                row_type,
+            } => store.rows.get(position).map(|row| {
+                std::borrow::Cow::Owned(TypedLiteral {
+                    value: ValueKind::Spec(SpecValue::Row(InstanceKey::new(
+                        Arc::clone(row),
+                        owner.clone(),
+                    ))),
+                    lemma_type: Arc::clone(row_type),
+                })
+            }),
+        }
+    }
+
+    pub fn first(&self) -> Option<std::borrow::Cow<'_, TypedLiteral>> {
+        self.get(0)
+    }
+
+    pub fn last(&self) -> Option<std::borrow::Cow<'_, TypedLiteral>> {
+        self.len().checked_sub(1).and_then(|last| self.get(last))
+    }
+
+    pub fn iter(
+        &self,
+    ) -> impl DoubleEndedIterator<Item = std::borrow::Cow<'_, TypedLiteral>> + ExactSizeIterator
+    {
+        (0..self.len()).map(|position| {
+            self.get(position)
+                .expect("BUG: list position below the list length")
+        })
+    }
+
+    /// The items of a list that holds them: every list but one reading a row store.
+    pub(crate) fn values(&self) -> &[TypedLiteral] {
+        match &self.items {
+            ListItems::Values(items) => items,
+            ListItems::Rows { .. } => panic!("BUG: held items read from a list of stored rows"),
+        }
+    }
+
+    /// The rows of the store this list reads, when it reads one.
+    pub(crate) fn stored(&self) -> Option<StoredRows<'_>> {
+        match &self.items {
+            ListItems::Values(_) => None,
+            ListItems::Rows { store, owner, .. } => Some(StoredRows {
+                rows: &store.rows,
+                owner: owner.as_ref(),
+            }),
+        }
+    }
+
+    /// The items as owned values.
+    pub fn to_vec(&self) -> Vec<TypedLiteral> {
+        self.iter().map(std::borrow::Cow::into_owned).collect()
+    }
+
+    pub(crate) fn index(&self) -> Option<&Arc<crate::planning::instance_list::KeyIndex>> {
+        self.index.as_ref()
+    }
+
+    /// The same items without an index.
+    pub(crate) fn unindexed(&self) -> Self {
+        Self {
+            items: self.items.clone(),
+            index: None,
+        }
+    }
+
+    /// The same items with `index`.
+    pub(crate) fn with_index(&self, index: Arc<crate::planning::instance_list::KeyIndex>) -> Self {
+        Self {
+            items: self.items.clone(),
+            index: Some(index),
+        }
+    }
+}
+
+impl From<Arc<[TypedLiteral]>> for ListValue {
+    fn from(items: Arc<[TypedLiteral]>) -> Self {
+        Self::held(items)
+    }
+}
+
+impl From<Vec<TypedLiteral>> for ListValue {
+    fn from(items: Vec<TypedLiteral>) -> Self {
+        Self::held(Arc::from(items))
+    }
+}
+
+impl FromIterator<TypedLiteral> for ListValue {
+    fn from_iter<I: IntoIterator<Item = TypedLiteral>>(iter: I) -> Self {
+        Self::held(iter.into_iter().collect())
+    }
+}
+
+impl PartialEq for ListValue {
+    fn eq(&self, other: &Self) -> bool {
+        self.len() == other.len() && self.iter().eq(other.iter())
+    }
+}
+
+impl Eq for ListValue {}
+
+impl Hash for ListValue {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.len().hash(state);
+        for item in self.iter() {
+            item.hash(state);
+        }
+    }
 }
 
 impl ValueKind {
@@ -3712,16 +4431,7 @@ impl ValueKind {
                 left.value.structural_byte_size() + 3 + right.value.structural_byte_size()
             }
             ValueKind::Spec(SpecValue::Fixed(instance)) => instance.structural_byte_size(),
-            ValueKind::Spec(SpecValue::Row(row)) => row
-                .bindings
-                .values()
-                .map(|binding| match binding {
-                    crate::computation::OperationResult::Value(bound) => {
-                        bound.value.structural_byte_size()
-                    }
-                    crate::computation::OperationResult::Veto(_) => 0,
-                })
-                .sum(),
+            ValueKind::Spec(SpecValue::Row(InstanceKey { row, .. })) => row.structural_byte_size(),
             ValueKind::List(rows) => rows
                 .iter()
                 .map(|row| row.value.structural_byte_size())
@@ -3751,7 +4461,9 @@ impl fmt::Display for ValueKind {
             ValueKind::Measure(rational) => {
                 write!(f, "{}", format_rational_magnitude_for_display(rational))
             }
-            ValueKind::Text(s) => write!(f, "{}", crate::parsing::ast::Value::Text(s.clone())),
+            ValueKind::Text(s) => {
+                write!(f, "{}", crate::parsing::ast::Value::Text(s.to_string()))
+            }
             ValueKind::Ratio(rational) => {
                 write!(f, "{}", format_rational_magnitude_for_display(rational))
             }
@@ -3793,25 +4505,64 @@ impl fmt::Display for ValueKind {
 
 /// A single segment in a resolved path traversal
 ///
-/// Used in both DataPath and RulePath for cross-spec traversal.
-/// Each segment contains a `uses` alias, the resolved target repository name
-/// (`repository`; `None` = unnamed workspace), and the resolved target spec
-/// name (`spec`).
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+/// Used in both DataPath and RulePath for cross-spec traversal. Each segment is
+/// one spec instance of the consumer plan: a `uses` import (`uses`, `row: None`)
+/// or row `row` of the instance list `uses` written in the spec (`row: Some(n)`,
+/// 1-based). `repository` is the resolved target repository name (`None` = unnamed
+/// workspace) and `spec` the resolved target spec name.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct PathSegment {
-    /// The `uses` alias for this hop (binding key component).
-    pub uses: String,
+    /// The `uses` alias, or the instance list name when `row` is set.
+    pub uses: Arc<str>,
+    /// Row number (1-based) of list `uses` when this hop is a row written in the spec.
+    pub row: Option<usize>,
     /// Target repository name from `Arc<LemmaRepository>.name` at resolve.
-    /// `None` is the unnamed workspace. Always encoded for postcard (no skip).
-    pub repository: Option<String>,
+    /// `None` is the unnamed workspace.
+    pub repository: Option<Arc<str>>,
     /// The spec this hop resolves to (resolved during planning)
-    pub spec: String,
+    pub spec: Arc<str>,
 }
 
-/// One spec instance in a consumer plan: the `uses` hops that name it.
-///
-/// `basic` is one segment. A nested instance is the outer hops plus its own.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+impl PathSegment {
+    /// `uses` import hop of `identity` named `alias`.
+    pub(crate) fn import(alias: &str, identity: &SpecIdentity) -> Self {
+        Self {
+            uses: Arc::from(alias),
+            row: None,
+            repository: identity.repository.as_deref().map(Arc::from),
+            spec: Arc::from(identity.spec.as_str()),
+        }
+    }
+
+    /// Hop of row `number` (1-based) of instance list whose name and identity strings
+    /// are already shared as `Arc<str>`: every row of one list reuses the same three
+    /// allocations, so building a row's hop is refcount bumps, not fresh allocations.
+    pub(crate) fn list_row_shared(
+        list: &Arc<str>,
+        number: usize,
+        spec: &Arc<str>,
+        repository: Option<&Arc<str>>,
+    ) -> Self {
+        Self {
+            uses: Arc::clone(list),
+            row: Some(number),
+            repository: repository.map(Arc::clone),
+            spec: Arc::clone(spec),
+        }
+    }
+
+    /// Dotted input-key form of this hop: `ada`, or `staff.2` for a row.
+    pub fn input_key(&self) -> String {
+        match self.row {
+            Some(number) => format!("{}.{number}", self.uses),
+            None => self.uses.to_string(),
+        }
+    }
+}
+
+/// The hops that name a spec instance, relative to the plan holding it: `uses` hops
+/// (`rack.low`), or a list hop with its row number (`staff.2`).
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct SpecInstance {
     pub prefix: Vec<PathSegment>,
 }
@@ -3823,7 +4574,8 @@ impl SpecInstance {
             .map(|segment| {
                 segment.uses.len()
                     + segment.spec.len()
-                    + segment.repository.as_ref().map_or(0, String::len)
+                    + segment.repository.as_deref().map_or(0, str::len)
+                    + segment.row.map_or(0, |_| std::mem::size_of::<usize>())
             })
             .sum()
     }
@@ -3835,7 +4587,7 @@ impl fmt::Display for SpecInstance {
             if index > 0 {
                 write!(f, ".")?;
             }
-            write!(f, "{}", segment.uses)?;
+            write!(f, "{}", segment.input_key())?;
         }
         Ok(())
     }
@@ -3843,62 +4595,402 @@ impl fmt::Display for SpecInstance {
 
 /// Value of a spec-typed expression.
 ///
-/// `Fixed` is a `uses` instance in the consumer plan. `Row` is one row of an
-/// instance list; it never appears in a plan, only in a request's value table.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+/// `Row` is a row instance as read (see [`InstanceKey`]); a `uses` import is the row of
+/// its alias, read by the instance that declares it. Evaluation produces only `Row`.
+/// `Fixed` is a spec instance named by its hops, rebuilt from a [`SpecResult`] by
+/// [`RuleResultValue::to_literal`].
+///
+/// [`SpecResult`]: crate::result_value::SpecResult
+/// [`RuleResultValue::to_literal`]: crate::result_value::RuleResultValue::to_literal
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum SpecValue {
     Fixed(SpecInstance),
-    #[serde(skip)]
-    Row(Arc<RowInstance>),
+    Row(InstanceKey),
 }
 
 impl fmt::Display for SpecValue {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             SpecValue::Fixed(instance) => write!(f, "{instance}"),
-            SpecValue::Row(row) => write!(f, "{}", row.origin),
+            SpecValue::Row(key) => write!(f, "{key}"),
         }
     }
 }
 
-/// One row of an instance list: its row spec, where it came from, and its bound fields.
-///
-/// `bindings` are keyed by data paths of the row spec's template plan. A field
-/// without a binding reads the template's own default or is missing.
-///
-/// Hashed by value (including nested self-list rows in bindings). Lookup and
-/// Dropping a key walks its nested bindings to their depth, which
-/// [`crate::limits::ResourceLimits::max_list_depth`] bounds before evaluation (default 32). Keying by `Arc` pointer identity would
-/// be cheaper but only safe while every read shares the same `Arc`.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RowInstance {
-    pub identity: SpecIdentity,
-    pub origin: RowOrigin,
-    /// Declaration / caller / `-> with` field order (not `DataPath` sort).
-    pub bindings: IndexMap<DataPath, crate::computation::OperationResult>,
+/// One row as read in an evaluation request, and the identity of its context: the row
+/// `Arc` and the owning instance whose context read it (`None` for the root scope).
+/// The bindings of the row resolve in the owner's context.
+#[derive(Debug, Clone)]
+pub struct InstanceKey {
+    pub row: Arc<RowInstance>,
+    pub owner: Option<Box<InstanceKey>>,
 }
 
-impl std::hash::Hash for RowInstance {
+impl InstanceKey {
+    pub fn new(row: Arc<RowInstance>, owner: Option<InstanceKey>) -> Self {
+        Self {
+            row,
+            owner: owner.map(Box::new),
+        }
+    }
+
+    pub fn owner(&self) -> Option<&InstanceKey> {
+        self.owner.as_deref()
+    }
+
+    /// The context a binding written `hops` instances above this row resolves in:
+    /// the owner for `0`, the owner's owner for `1`, and so on.
+    pub(crate) fn scope(&self, hops: u32) -> Option<&InstanceKey> {
+        let mut scope = self.owner();
+        for _ in 0..hops {
+            scope = scope
+                .expect("BUG: a binding hops above the root scope")
+                .owner();
+        }
+        scope
+    }
+
+    /// This key read inside `owner`: its outermost row, owned by the root scope here,
+    /// is owned by `owner` instead.
+    pub(crate) fn under(&self, owner: &InstanceKey) -> InstanceKey {
+        let mut rows: Vec<&Arc<RowInstance>> = Vec::new();
+        let mut key = Some(self);
+        while let Some(current) = key {
+            rows.push(&current.row);
+            key = current.owner();
+        }
+        let mut rebased = owner.clone();
+        for row in rows.into_iter().rev() {
+            rebased = InstanceKey::new(Arc::clone(row), Some(rebased));
+        }
+        rebased
+    }
+
+    /// Origins naming this instance, innermost first, up to the first that is absolute.
+    fn naming_origins(&self) -> Vec<&RowOrigin> {
+        let mut origins = Vec::new();
+        let mut key = Some(self);
+        while let Some(current) = key {
+            origins.push(&current.row.origin);
+            if matches!(current.row.origin, RowOrigin::Numbered { .. }) {
+                break;
+            }
+            key = current.owner();
+        }
+        origins
+    }
+
+    /// Data path of this instance in the run data that wrote its nearest run-data row
+    /// (`i`, `i.staff.2`, `items.2.j`; `lines.1.i` for a row of a run-data row's list);
+    /// `None` when it is or sits under an inline row, which has no path.
+    pub fn path(&self) -> Option<String> {
+        let origins = self.naming_origins();
+        if origins.iter().any(|origin| origin.is_inline()) {
+            return None;
+        }
+        Some(
+            origins
+                .iter()
+                .rev()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join("."),
+        )
+    }
+
+    /// This instance named from `row`, one of its owners (`holder.items.1`); `None` when
+    /// `row` does not hold it.
+    pub(crate) fn label_under(&self, row: &InstanceKey) -> Option<String> {
+        let mut below: Vec<&RowOrigin> = Vec::new();
+        let mut key = self;
+        while key != row {
+            below.push(&key.row.origin);
+            key = key.owner()?;
+        }
+        Some(
+            below
+                .iter()
+                .rev()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join("."),
+        )
+    }
+
+    /// The rows-table row this instance publishes under: itself or the nearest owner that
+    /// is a run-data or appended row. With the label of this instance: its path, or under
+    /// an appended row its path from that row (`item`).
+    pub(crate) fn table_row(&self) -> (&InstanceKey, Option<String>) {
+        let mut key = self;
+        loop {
+            match &key.row.origin {
+                RowOrigin::Numbered { .. } => return (key, self.path()),
+                RowOrigin::Inline { .. } if key == self => return (key, None),
+                RowOrigin::Inline { .. } => return (key, self.label_under(key)),
+                RowOrigin::Import { .. } | RowOrigin::Written { .. } => {
+                    key = key
+                        .owner()
+                        .expect("BUG: an instance off the rows table published as a table row");
+                }
+            }
+        }
+    }
+
+    /// Evaluation-data key of field `key` of this instance from the request's plan;
+    /// `None` when it has no path.
+    pub(crate) fn field_key(&self, key: &str) -> Option<String> {
+        self.request_path().map(|path| format!("{path}.{key}"))
+    }
+
+    /// [`Self::path`] from the request's plan: a run-data row of a run-data row's list
+    /// is named under that row (`shipments.1.lines.1.i`).
+    fn request_path(&self) -> Option<String> {
+        let origins = self.naming_origins();
+        if origins.iter().any(|origin| origin.is_inline()) {
+            return None;
+        }
+        Some(
+            origins
+                .iter()
+                .rev()
+                .map(|origin| match origin {
+                    RowOrigin::Numbered {
+                        under: Some(under), ..
+                    } => format!("{under}.{origin}"),
+                    origin => origin.to_string(),
+                })
+                .collect::<Vec<_>>()
+                .join("."),
+        )
+    }
+
+    /// Hops naming this instance from the root plan, when every hop is a `uses` import or a
+    /// row written in a spec.
+    pub(crate) fn segments(&self) -> Option<Vec<PathSegment>> {
+        let mut parts: Vec<Vec<PathSegment>> = Vec::new();
+        let mut key = Some(self);
+        while let Some(current) = key {
+            match &current.row.origin {
+                RowOrigin::Import { alias } => {
+                    parts.push(vec![PathSegment::import(alias, &current.row.identity)])
+                }
+                RowOrigin::Written { instance, .. } => parts.push(instance.prefix.clone()),
+                RowOrigin::Numbered { .. } | RowOrigin::Inline { .. } => return None,
+            }
+            key = current.owner();
+        }
+        Some(parts.into_iter().rev().flatten().collect())
+    }
+
+    /// Hops of the `uses` imports this instance is reached through from the nearest row
+    /// (or the root) above it, outermost first: empty for a row itself.
+    pub(crate) fn import_hops(&self) -> Vec<PathSegment> {
+        let mut hops = Vec::new();
+        let mut key = Some(self);
+        while let Some(current) = key {
+            let RowOrigin::Import { alias } = &current.row.origin else {
+                break;
+            };
+            hops.push(PathSegment::import(alias, &current.row.identity));
+            key = current.owner();
+        }
+        hops.reverse();
+        hops
+    }
+
+    /// Whether this instance and every owner above it is a `uses` import or a row written
+    /// in a spec.
+    pub(crate) fn is_planned(&self) -> bool {
+        let mut key = Some(self);
+        while let Some(current) = key {
+            if !matches!(
+                current.row.origin,
+                RowOrigin::Import { .. } | RowOrigin::Written { .. }
+            ) {
+                return false;
+            }
+            key = current.owner();
+        }
+        true
+    }
+}
+
+impl fmt::Display for InstanceKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        for (index, origin) in self.naming_origins().iter().rev().enumerate() {
+            if index > 0 {
+                write!(f, ".")?;
+            }
+            write!(f, "{origin}")?;
+        }
+        Ok(())
+    }
+}
+
+impl PartialEq for InstanceKey {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.row, &other.row) && self.owner == other.owner
+    }
+}
+
+impl Eq for InstanceKey {}
+
+impl std::hash::Hash for InstanceKey {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        self.identity.hash(state);
-        self.origin.hash(state);
-        self.bindings.len().hash(state);
-        let mut entries: Vec<_> = self.bindings.iter().collect();
-        entries.sort_by(|(a, _), (b, _)| a.cmp(b));
-        for (path, result) in entries {
-            path.hash(state);
-            result.hash(state);
-        }
+        (Arc::as_ptr(&self.row) as usize).hash(state);
+        self.owner.hash(state);
     }
 }
 
-/// Where a row of an instance list came from. Names missing fields and explanations.
+/// A field of a [`RowInstance`].
+///
+/// `hops` on a reference or rows binding names the context it was written in: `0` is the
+/// instance that holds the row (the row key's owner), `1` the one above it, and so on.
+/// A consumer writing `-> with j.x: v` on `uses i` writes `x` of `i`'s nested `j` row
+/// one hop above the instance (`i`) that holds `j`.
+#[derive(Debug, Clone)]
+pub enum RowBinding {
+    Bound(OperationResult),
+    /// Sealed spec-written reference. Not yet forced: resolution happens when a read of
+    /// the row touches the field, so lists holding rule-bound rows can be read
+    /// (`-> count`) without evaluating rules the read never reaches.
+    Deferred {
+        target: ReferenceTarget,
+        hops: u32,
+    },
+    /// Rows of a list field written with the row (`-> with ada` copying a `uses`
+    /// instance whose list field is bound). Read as a list whose rows are owned by
+    /// the context `hops` names.
+    Rows {
+        rows: Vec<Arc<RowInstance>>,
+        row_type: Arc<LemmaType>,
+        hops: u32,
+    },
+    /// A nested `uses` slot whose fields a consumer wrote (`-> with j.x: v`): the nested
+    /// import row with those fields bound. Read as that row owned by the holding instance.
+    Instance(Arc<RowInstance>),
+}
+
+impl RowBinding {
+    /// Whether this binding is `other` copied: the same value, target, or rows.
+    pub(crate) fn is_copy_of(&self, other: &RowBinding) -> bool {
+        match (self, other) {
+            (RowBinding::Bound(a), RowBinding::Bound(b)) => a == b,
+            (
+                RowBinding::Deferred { target, hops },
+                RowBinding::Deferred {
+                    target: other_target,
+                    hops: other_hops,
+                },
+            ) => target == other_target && hops == other_hops,
+            (
+                RowBinding::Rows { rows, hops, .. },
+                RowBinding::Rows {
+                    rows: other_rows,
+                    hops: other_hops,
+                    ..
+                },
+            ) => {
+                hops == other_hops
+                    && rows.len() == other_rows.len()
+                    && rows
+                        .iter()
+                        .zip(other_rows)
+                        .all(|(row, other)| Arc::ptr_eq(row, other))
+            }
+            (RowBinding::Instance(row), RowBinding::Instance(other)) => Arc::ptr_eq(row, other),
+            _ => false,
+        }
+    }
+
+    /// Value of a [`Self::Rows`] binding whose rows are owned by `owner`.
+    pub(crate) fn rows_value(
+        rows: &[Arc<RowInstance>],
+        row_type: &Arc<LemmaType>,
+        owner: Option<&InstanceKey>,
+    ) -> OperationResult {
+        OperationResult::from_literal(LiteralValue {
+            value: ValueKind::List(
+                rows.iter()
+                    .map(|row| TypedLiteral {
+                        value: ValueKind::Spec(SpecValue::Row(InstanceKey::new(
+                            Arc::clone(row),
+                            owner.cloned(),
+                        ))),
+                        lemma_type: Arc::clone(row_type),
+                    })
+                    .collect(),
+            ),
+        })
+    }
+}
+
+/// A row instance: its spec, where it came from, and its bound fields.
+///
+/// `bindings` are positional over the row spec's template plan `data` slots (`index = template.data.get_index_of`).
+/// A slot that is `None` reads the template's own default or is missing.
+#[derive(Debug, Clone)]
+pub struct RowInstance {
+    pub identity: Arc<SpecIdentity>,
+    pub origin: RowOrigin,
+    pub bindings: Box<[Option<RowBinding>]>,
+}
+
+impl RowInstance {
+    pub fn get_binding(
+        &self,
+        template: &crate::planning::execution_plan::ExecutionPlan,
+        path: &DataPath,
+    ) -> Option<&RowBinding> {
+        let index = template.data.get_index_of(path)?;
+        self.bindings.get(index)?.as_ref()
+    }
+
+    /// Upper-bound byte size of the row's bound fields; see [`ValueKind::structural_byte_size`].
+    pub fn structural_byte_size(&self) -> usize {
+        let mut size = 0;
+        let mut pending: Vec<&RowInstance> = vec![self];
+        while let Some(row) = pending.pop() {
+            for binding in row.bindings.iter().flatten() {
+                match binding {
+                    RowBinding::Bound(OperationResult::Value(bound)) => {
+                        size += bound.value.structural_byte_size();
+                    }
+                    RowBinding::Rows { rows, .. } => pending.extend(rows.iter().map(Arc::as_ref)),
+                    RowBinding::Instance(row) => pending.push(row),
+                    RowBinding::Bound(OperationResult::Veto(_)) | RowBinding::Deferred { .. } => {}
+                }
+            }
+        }
+        size
+    }
+}
+
+/// Where a row instance came from. Names missing fields and explanations.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum RowOrigin {
-    /// Row `number` (1-based) of list `list`: a source row or a run-data row.
-    Numbered { list: String, number: usize },
-    /// Row appended by an expression `-> with` as row `number` (1-based) of the result.
-    Appended { number: usize },
+    /// Row `number` (1-based) of list `list`: a run-data row. `under` is the
+    /// evaluation-data key of the run-data row whose list it is (`items.1`); `None` for
+    /// a list of the request's plan.
+    Numbered {
+        list: String,
+        number: usize,
+        under: Option<Arc<str>>,
+    },
+    /// A row written in the spec at `source`, read through the row spec's template
+    /// plan. The instance names it relative to the plan holding its list (`staff.2`).
+    Written {
+        instance: SpecInstance,
+        source: Source,
+    },
+    /// The row of `uses alias`, named relative to the plan declaring it.
+    Import { alias: Arc<str> },
+    /// Row written inline by the `-> with field: value` command at cell `node`, as row
+    /// `position` (1-based) of its result. Its written fields are values of the plan
+    /// that holds the command and are read as that plan planned them; the row spec's
+    /// rules run over them in the row's context. Every field a read names is set:
+    /// planning rejects reads of unset fields.
+    Inline { node: NormalFormId, position: usize },
 }
 
 /// 1-based numbered origin of a list row (`items.2`).
@@ -3913,13 +5005,40 @@ pub fn row_field_input_key(list_key: &str, number: usize, field_key: &str) -> St
     format!("{}.{field_key}", numbered_row_origin(list_key, number))
 }
 
+impl RowOrigin {
+    /// Row number (1-based) of a list row, and whether it was appended inline.
+    pub(crate) fn list_position(&self) -> (usize, bool) {
+        match self {
+            RowOrigin::Numbered { number, .. } => (*number, false),
+            RowOrigin::Written { instance, .. } => (
+                instance
+                    .prefix
+                    .last()
+                    .and_then(|last| last.row)
+                    .expect("BUG: written row origin without a row hop"),
+                false,
+            ),
+            RowOrigin::Inline { position, .. } => (*position, true),
+            RowOrigin::Import { alias } => {
+                unreachable!("BUG: the row of `uses {alias}` is not a list row")
+            }
+        }
+    }
+
+    pub(crate) fn is_inline(&self) -> bool {
+        matches!(self, RowOrigin::Inline { .. })
+    }
+}
+
 impl fmt::Display for RowOrigin {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            RowOrigin::Numbered { list, number } => {
+            RowOrigin::Numbered { list, number, .. } => {
                 write!(f, "{}", numbered_row_origin(list, *number))
             }
-            RowOrigin::Appended { number } => write!(f, "appended row {number}"),
+            RowOrigin::Written { instance, .. } => write!(f, "{instance}"),
+            RowOrigin::Import { alias } => write!(f, "{alias}"),
+            RowOrigin::Inline { position, .. } => write!(f, "appended row {position}"),
         }
     }
 }
@@ -3927,23 +5046,26 @@ impl fmt::Display for RowOrigin {
 /// One evaluated instance-list row as a typed literal.
 #[must_use]
 pub fn row_literal(
-    identity: SpecIdentity,
+    identity: Arc<SpecIdentity>,
     origin: RowOrigin,
-    bindings: IndexMap<DataPath, crate::computation::OperationResult>,
+    bindings: Vec<Option<RowBinding>>,
     lemma_type: Arc<LemmaType>,
 ) -> TypedLiteral {
     TypedLiteral {
-        value: ValueKind::Spec(SpecValue::Row(Arc::new(RowInstance {
-            identity,
-            origin,
-            bindings,
-        }))),
+        value: ValueKind::Spec(SpecValue::Row(InstanceKey::new(
+            Arc::new(RowInstance {
+                identity,
+                origin,
+                bindings: bindings.into(),
+            }),
+            None,
+        ))),
         lemma_type,
     }
 }
 
 /// Field of a row read through the row spec's template plan.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum RowEnd {
     Data(DataPath),
     Rule(RulePath),
@@ -3958,29 +5080,10 @@ impl fmt::Display for RowEnd {
     }
 }
 
-/// Where a field read on one candidate instance lands.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum SpecMemberEnd {
-    Rule(RulePath),
-    Data(DataPath),
-    /// The field is a nested `uses`. The value is that instance.
-    Instance {
-        instance: SpecInstance,
-        identity: SpecIdentity,
-    },
-}
-
-/// One candidate instance of a [`ExpressionKind::SpecMember`], with the field it reads.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SpecMemberTarget {
-    pub instance: SpecInstance,
-    pub end: SpecMemberEnd,
-}
-
 /// Resolved path to a data (created during planning from AST DataReference)
 ///
 /// Represents a fully resolved path through specs to reach a datum.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct DataPath {
     /// Path segments (each is a cross-spec step)
     pub segments: Vec<PathSegment>,
@@ -4002,26 +5105,15 @@ impl DataPath {
         }
     }
 
-    /// Alias hops then the data name: the segments of [`Self::input_key`].
-    pub fn input_key_segments(&self) -> impl Iterator<Item = &str> {
-        self.segments
-            .iter()
-            .map(|segment| segment.uses.as_str())
-            .chain(std::iter::once(self.data.as_str()))
-    }
-
-    /// Dot-separated key used for matching user-provided data values (e.g. `"order.payment_method"`).
-    /// Same string as [`Display`]: alias hops only, no repository or spec names.
+    /// Dot-separated key used for matching user-provided data values (e.g. `"order.payment_method"`,
+    /// `"staff.2.salary"`). Same string as [`Display`]: hops only, no repository or spec names.
     pub fn input_key(&self) -> String {
-        let mut segments = self.input_key_segments();
-        let mut s = segments
-            .next()
-            .expect("BUG: DataPath always has a data name segment")
-            .to_string();
-        for segment in segments {
+        let mut s = String::new();
+        for segment in &self.segments {
+            s.push_str(&segment.input_key());
             s.push('.');
-            s.push_str(segment);
         }
+        s.push_str(&self.data);
         s
     }
 }
@@ -4029,7 +5121,7 @@ impl DataPath {
 /// Resolved path to a rule (created during planning from a rule reference).
 ///
 /// Represents a fully resolved path through specs to reach a rule.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct RulePath {
     /// Path segments (each is a cross-spec step)
     pub segments: Vec<PathSegment>,
@@ -4051,7 +5143,7 @@ impl RulePath {
         }
         let mut s = String::new();
         for segment in &self.segments {
-            s.push_str(&segment.uses);
+            s.push_str(&segment.input_key());
             s.push('.');
         }
         s.push_str(&self.rule);
@@ -4074,8 +5166,7 @@ impl RulePath {
 pub type Expression = ExprTree<ExpressionKind>;
 
 /// Resolved expression kind (only resolved variants, no unresolved references)
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, PartialEq)]
 pub enum ExpressionKind {
     /// Resolved literal with type (boxed to keep enum small)
     Literal(Box<TypedLiteral>),
@@ -4083,8 +5174,8 @@ pub enum ExpressionKind {
     DataPath(DataPath),
     /// Resolved rule path
     RulePath(RulePath),
-    /// `first and steps[0].operand and ...`, operands in source order.
-    LogicalAnd {
+    Logical {
+        connective: LogicalConnective,
         first: ExprId,
         steps: Vec<ChainStep<()>>,
     },
@@ -4097,6 +5188,12 @@ pub enum ExpressionKind {
     UnitConversion(ExprId, SemanticConversionTarget),
     LogicalNegation(ExprId, NegationType),
     MathematicalComputation(MathematicalComputation, ExprId),
+    /// `operand -> round` or `operand -> round step`.
+    StepRounding {
+        operand: ExprId,
+        mode: RoundingMode,
+        step: Option<ExprId>,
+    },
     Veto(VetoExpression),
     /// The `now` keyword — resolved at evaluation to the effective datetime.
     Now,
@@ -4114,26 +5211,35 @@ pub enum ExpressionKind {
     /// Field of a spec value: `top_bracket.tax`, `top_bracket.finance.fee`, or
     /// `(staff -> first).bonus`.
     ///
-    /// `targets` is filled after candidate `uses` instances of `base` are known. Each
-    /// target is one fixed instance the base can yield. A base that yields list rows
-    /// reads the field through the row spec's template plan instead.
+    /// Every instance the base yields is a row of its spec, so the field is read through
+    /// that spec's template plan. A `uses` alias base is its import slot.
     SpecMember {
         base: ExprId,
         path: Vec<String>,
         name: String,
-        targets: Vec<SpecMemberTarget>,
     },
     /// Field of the current row of the list command at `level` (0 = outermost).
+    ///
+    /// `end` is the field on the row spec's own plan: every row reads it through its
+    /// row template.
     RowField {
         level: u32,
         identity: SpecIdentity,
         end: RowEnd,
+        /// Written list qualifier (`componenten` in `componenten.is_grondstof`), when the
+        /// source used a qualified row-field reference. `None` for bare unambiguous refs.
+        qualifier: Option<Vec<String>>,
+    },
+    /// Current value row. `list` is a type-only reference to the earlier list expression.
+    RowValue {
+        level: u32,
+        list: ExprId,
     },
     /// Unless structure: (condition, result) pairs in source order; last true condition wins.
     /// First arm is the default (condition is always-true literal).
     Piecewise(Vec<(ExprId, ExprId)>),
-    /// `row_level` is set when the list holds instance rows: arguments read the
-    /// current row through [`Self::RowField`] at that level.
+    /// `row_level` is set when arguments read the current list row at that
+    /// level, through [`Self::RowValue`] or [`Self::RowField`].
     ListCommand {
         list: ExprId,
         op: ListOp,
@@ -4142,7 +5248,7 @@ pub enum ExpressionKind {
 }
 
 /// Planned postfix list command.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum ListOp {
     Find {
         keys: Vec<ExprId>,
@@ -4156,11 +5262,7 @@ pub enum ListOp {
     },
     Predicate {
         kind: ListPredKind,
-        op: crate::parsing::ast::RowCondition,
-        right: ExprId,
-    },
-    InstancePredicate {
-        kind: ListPredKind,
+        form: crate::parsing::ast::ListPredicateForm,
         expr: ExprId,
     },
     Sort {
@@ -4173,13 +5275,18 @@ pub enum ListOp {
     With {
         rows: Vec<ExprId>,
     },
-    /// Append one instance row; each field is a row-spec data path and its value.
+    /// Append one row of spec `identity`; each field is a row-spec data path and its value.
     WithRow {
+        identity: SpecIdentity,
         fields: Vec<(DataPath, ExprId)>,
+    },
+    /// Declare field key(s) on a Spec-element list; lives on the list type, eval no-op.
+    Key {
+        fields: Vec<DataPath>,
     },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ListReduce {
     Sum,
     Avg,
@@ -4200,7 +5307,7 @@ impl ListReduce {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ListPredKind {
     Any,
     All,
@@ -4225,8 +5332,9 @@ impl ExprKind for ExpressionKind {
             | ExpressionKind::RulePath(_)
             | ExpressionKind::Veto(_)
             | ExpressionKind::Now
-            | ExpressionKind::RowField { .. } => {}
-            ExpressionKind::LogicalAnd { first, steps } => {
+            | ExpressionKind::RowField { .. }
+            | ExpressionKind::RowValue { .. } => {}
+            ExpressionKind::Logical { first, steps, .. } => {
                 f(*first);
                 steps.iter().for_each(|step| f(step.operand));
             }
@@ -4239,6 +5347,12 @@ impl ExprKind for ExpressionKind {
             | ExpressionKind::RangeContainment(left, right) => {
                 f(*left);
                 f(*right);
+            }
+            ExpressionKind::StepRounding { operand, step, .. } => {
+                f(*operand);
+                if let Some(step) = step {
+                    f(*step);
+                }
             }
             ExpressionKind::UnitConversion(inner, _)
             | ExpressionKind::LogicalNegation(inner, _)
@@ -4267,8 +5381,9 @@ impl ExprKind for ExpressionKind {
             | ExpressionKind::RulePath(_)
             | ExpressionKind::Veto(_)
             | ExpressionKind::Now
-            | ExpressionKind::RowField { .. } => Vec::new(),
-            ExpressionKind::LogicalAnd { first, steps } => std::iter::once(first)
+            | ExpressionKind::RowField { .. }
+            | ExpressionKind::RowValue { .. } => Vec::new(),
+            ExpressionKind::Logical { first, steps, .. } => std::iter::once(first)
                 .chain(steps.iter_mut().map(|step| &mut step.operand))
                 .collect(),
             ExpressionKind::Arithmetic { first, steps } => std::iter::once(first)
@@ -4277,6 +5392,13 @@ impl ExprKind for ExpressionKind {
             ExpressionKind::Comparison(left, _, right)
             | ExpressionKind::RangeLiteral(left, right)
             | ExpressionKind::RangeContainment(left, right) => vec![left, right],
+            ExpressionKind::StepRounding { operand, step, .. } => {
+                let mut children = vec![operand];
+                if let Some(step) = step {
+                    children.push(step);
+                }
+                children
+            }
             ExpressionKind::UnitConversion(inner, _)
             | ExpressionKind::LogicalNegation(inner, _)
             | ExpressionKind::MathematicalComputation(_, inner)
@@ -4302,31 +5424,29 @@ impl ExprKind for ExpressionKind {
 impl ListOp {
     fn for_each_child(&self, mut f: impl FnMut(ExprId)) {
         match self {
-            ListOp::First | ListOp::Last | ListOp::Count => {}
+            ListOp::First | ListOp::Last | ListOp::Count | ListOp::Key { .. } => {}
             ListOp::Find { keys } => keys.iter().copied().for_each(f),
             ListOp::Reduce { argument, .. } | ListOp::Sort { argument, .. } => {
                 argument.iter().copied().for_each(f)
             }
-            ListOp::Predicate { right, .. } => f(*right),
-            ListOp::InstancePredicate { expr, .. } => f(*expr),
+            ListOp::Predicate { expr, .. } => f(*expr),
             ListOp::Top { n } => f(*n),
             ListOp::With { rows } => rows.iter().copied().for_each(f),
-            ListOp::WithRow { fields } => fields.iter().for_each(|(_, value)| f(*value)),
+            ListOp::WithRow { fields, .. } => fields.iter().for_each(|(_, value)| f(*value)),
         }
     }
 
     fn children_mut(&mut self) -> Vec<&mut ExprId> {
         match self {
-            ListOp::First | ListOp::Last | ListOp::Count => Vec::new(),
+            ListOp::First | ListOp::Last | ListOp::Count | ListOp::Key { .. } => Vec::new(),
             ListOp::Find { keys } => keys.iter_mut().collect(),
             ListOp::Reduce { argument, .. } | ListOp::Sort { argument, .. } => {
                 argument.iter_mut().collect()
             }
-            ListOp::Predicate { right, .. } => vec![right],
-            ListOp::InstancePredicate { expr, .. } => vec![expr],
+            ListOp::Predicate { expr, .. } => vec![expr],
             ListOp::Top { n } => vec![n],
             ListOp::With { rows } => rows.iter_mut().collect(),
-            ListOp::WithRow { fields } => fields.iter_mut().map(|(_, value)| value).collect(),
+            ListOp::WithRow { fields, .. } => fields.iter_mut().map(|(_, value)| value).collect(),
         }
     }
 }
@@ -4336,7 +5456,7 @@ impl ListOp {
 // -----------------------------------------------------------------------------
 
 /// Where the custom extension chain is rooted: same spec as this type, or imported from another resolved spec.
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum TypeDefiningSpec {
     /// Parent type is defined in the same spec as this type.
     Local,
@@ -4350,7 +5470,7 @@ pub enum TypeDefiningSpec {
 /// of `pricing` declare different `pricing <date>.money` families; values from different
 /// versions do not mix. Interface drift across unpinned versions compares structure with
 /// [`LemmaType::same_interface`], which ignores the family's effective date.
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
 pub struct TypeFamily {
     pub repository: Option<String>,
     pub spec: String,
@@ -4360,7 +5480,7 @@ pub struct TypeFamily {
 
 impl TypeFamily {
     #[must_use]
-    pub fn declared_in(spec: &SpecIdentity, name: &str) -> Self {
+    pub(crate) fn declared_in(spec: &SpecVersionKey, name: &str) -> Self {
         Self {
             repository: spec.repository.clone(),
             spec: spec.spec.clone(),
@@ -4371,7 +5491,7 @@ impl TypeFamily {
 
     /// Whether `spec` (this exact version) declares this family's root.
     #[must_use]
-    pub fn is_declared_in(&self, spec: &SpecIdentity) -> bool {
+    pub(crate) fn is_declared_in(&self, spec: &SpecVersionKey) -> bool {
         self.repository == spec.repository
             && self.spec == spec.spec
             && self.effective == spec.effective
@@ -4404,7 +5524,7 @@ impl fmt::Display for TypeFamily {
 }
 
 /// What this type extends (primitive built-in or custom type by name).
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug)]
 pub enum TypeExtends {
     /// Extends a primitive built-in type (number, boolean, text, etc.)
     Primitive,
@@ -4501,7 +5621,7 @@ impl TypeExtends {
 ///
 /// Contains a type specification and optional name. Created during planning
 /// from TypeSpecification in the AST.
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct LemmaType {
     /// Optional type name (e.g., "age", "temperature")
     pub name: Option<String>,
@@ -4509,6 +5629,7 @@ pub struct LemmaType {
     pub specifications: TypeSpecification,
     /// What this type extends (primitive or custom from a spec)
     pub extends: TypeExtends,
+    pub(crate) options: TypeOptions,
 }
 
 impl LemmaType {
@@ -4526,12 +5647,12 @@ impl LemmaType {
             name,
             specifications,
             extends,
+            options,
         } = self;
         let specifications = match specifications {
             TypeSpecification::Measure {
                 minimum,
                 maximum,
-                decimals,
                 units,
                 traits,
                 decomposition,
@@ -4542,7 +5663,6 @@ impl LemmaType {
                 TypeSpecification::Measure {
                     minimum,
                     maximum,
-                    decimals,
                     units,
                     traits,
                     decomposition,
@@ -4556,6 +5676,7 @@ impl LemmaType {
             name,
             specifications,
             extends,
+            options,
         }
     }
 
@@ -4565,6 +5686,7 @@ impl LemmaType {
             name: Some(name),
             specifications,
             extends,
+            options: TypeOptions::default(),
         }
     }
 
@@ -4574,6 +5696,7 @@ impl LemmaType {
             name: None,
             specifications,
             extends,
+            options: TypeOptions::default(),
         }
     }
 
@@ -4583,6 +5706,136 @@ impl LemmaType {
             name: None,
             specifications,
             extends: TypeExtends::Primitive,
+            options: TypeOptions::default(),
+        }
+    }
+
+    /// Apply one data command that does not need the surrounding spec.
+    /// `-> option`, `-> options`, and a spec `-> with` / `-> suggest` are applied
+    /// by the caller, which already holds the spec.
+    pub fn apply_constraint(
+        &mut self,
+        names: ConstraintNames<'_>,
+        command: TypeConstraintCommand,
+        args: &[CommandArg],
+        declared_suggestion: &mut Option<RawSuggestion>,
+        declared_value: &mut Option<RawSuggestion>,
+        resolve_unit: Option<&UnitTokenResolver<'_>>,
+    ) -> Result<(), String> {
+        self.specifications.apply_constraint(
+            names,
+            command,
+            args,
+            declared_suggestion,
+            declared_value,
+            resolve_unit,
+        )
+    }
+
+    /// Value is outside an inline option set. A rule is checked at evaluation, with the static rows.
+    pub(crate) fn reject_disallowed(&self, value: &ValueKind) -> Result<(), String> {
+        let options = self.options_for_check();
+        if options.rule.is_some() || options.values.is_empty() {
+            return Ok(());
+        }
+        if static_option_match(&options, value) {
+            return Ok(());
+        }
+        Err(disallowed_message(self, &options, value, None))
+    }
+
+    /// Rule whose list is added to the allowed set, on this type or on a list's element.
+    #[must_use]
+    pub(crate) fn options_rule(&self) -> Option<&str> {
+        if let Some(name) = &self.options.rule {
+            return Some(name.as_str());
+        }
+        if let TypeSpecification::List { element, .. } = &self.specifications {
+            if let Some(name) = &element.options.rule {
+                return Some(name.as_str());
+            }
+        }
+        None
+    }
+
+    /// Evaluation re-checks a rule. A fixed `values` set was already accepted when the
+    /// value was bound.
+    #[must_use]
+    pub(crate) fn needs_runtime_option_check(&self) -> bool {
+        self.options_rule().is_some()
+    }
+
+    /// Static option displays. A rule that adds rows on a run is not included.
+    #[must_use]
+    pub fn static_options(&self) -> Vec<String> {
+        let options = self.options_for_check();
+        options
+            .values
+            .iter()
+            .map(|option| self.display_bound(&option.value))
+            .collect()
+    }
+
+    pub(crate) fn display_bound(&self, bound: &BoundValueKind) -> String {
+        typed_literal_from_bound(bound, &Arc::new(self.clone())).display_value()
+    }
+
+    /// Borrow the set that applies. Clone only when a list and its element both carry options.
+    pub(crate) fn options_for_check(&self) -> std::borrow::Cow<'_, TypeOptions> {
+        match &self.specifications {
+            TypeSpecification::List { element, .. }
+                if !self.options.is_empty() && !element.options.is_empty() =>
+            {
+                let mut options = self.options.clone();
+                options
+                    .values
+                    .extend(element.options.values.iter().cloned());
+                if options.rule.is_none() {
+                    options.rule.clone_from(&element.options.rule);
+                }
+                std::borrow::Cow::Owned(options)
+            }
+            TypeSpecification::List { element, .. } if !element.options.is_empty() => {
+                std::borrow::Cow::Borrowed(&element.options)
+            }
+            _ => std::borrow::Cow::Borrowed(&self.options),
+        }
+    }
+
+    /// `None` when `value` is in the static set or in `rule_rows`.
+    pub(crate) fn explain_disallowed(
+        &self,
+        value: &ValueKind,
+        rule_rows: Option<&ListValue>,
+    ) -> Option<String> {
+        let options = self.options_for_check();
+        let allowed = |candidate: &ValueKind| {
+            if static_option_match(&options, candidate) {
+                return true;
+            }
+            if let Some(rows) = rule_rows {
+                return rows
+                    .iter()
+                    .any(|option| option_values_match(&option.value, candidate));
+            }
+            options.is_empty()
+        };
+        match (&self.specifications, value) {
+            (TypeSpecification::List { .. }, ValueKind::List(rows)) => {
+                for row in rows.iter() {
+                    if !allowed(&row.value) {
+                        return Some(disallowed_message(self, &options, &row.value, rule_rows));
+                    }
+                }
+                None
+            }
+            _ => {
+                if allowed(value) {
+                    None
+                } else {
+                    Some(disallowed_message(self, &options, value, rule_rows))
+                }
+            }
         }
     }
 
@@ -4791,8 +6044,10 @@ impl LemmaType {
             specifications: TypeSpecification::List {
                 element,
                 key: ListKey::Numbered,
+                help: String::new(),
             },
             extends: TypeExtends::Primitive,
+            options: TypeOptions::default(),
         }
     }
 
@@ -4889,16 +6144,22 @@ impl LemmaType {
         self.ratio_family().map(|family| family.name.as_str())
     }
 
-    /// Same base kind and, for measures / measure ranges, the same dimensions:
+    /// Same base kind and, for measures / measure ranges, the same named family:
     /// the relation under which two types describe the same values. Names and
-    /// constraints may differ. RatioRange stays base-kind only (endpoint policy).
+    /// constraints may differ. Ratio and RatioRange stay base-kind only.
     #[must_use]
     pub(crate) fn same_value_type(&self, other: &LemmaType) -> bool {
         if !self.has_same_base_type(other) {
             return false;
         }
         if self.is_measure() {
-            return self.measure_type_decomposition() == other.measure_type_decomposition();
+            return match (self.measure_family(), other.measure_family()) {
+                (Some(_), Some(_)) => self.same_measure_family(other),
+                (None, None) => {
+                    self.measure_type_decomposition() == other.measure_type_decomposition()
+                }
+                _ => false,
+            };
         }
         if let (
             TypeSpecification::Spec { spec: self_spec },
@@ -4911,40 +6172,169 @@ impl LemmaType {
             TypeSpecification::List {
                 element: self_element,
                 key: self_key,
+                ..
             },
             TypeSpecification::List {
                 element: other_element,
                 key: other_key,
+                ..
             },
         ) = (&self.specifications, &other.specifications)
         {
             return self_key == other_key && self_element.same_value_type(other_element);
         }
         if self.is_measure_range() {
-            let self_element = self
-                .specifications
-                .element_from_range()
-                .expect("BUG: MeasureRange always defines element_from_range");
-            let other_element = other
-                .specifications
-                .element_from_range()
-                .expect("BUG: MeasureRange always defines element_from_range");
-            match (&self_element, &other_element) {
-                (
-                    TypeSpecification::Measure {
-                        decomposition: self_decomp,
-                        ..
-                    },
-                    TypeSpecification::Measure {
-                        decomposition: other_decomp,
-                        ..
-                    },
-                ) => self_decomp == other_decomp,
-                _ => unreachable!("BUG: element_from_range of MeasureRange yields Measure"),
+            match (self.family(), other.family()) {
+                (Some(self_family), Some(other_family)) => self_family == other_family,
+                (None, None) => {
+                    let self_element = self
+                        .specifications
+                        .element_from_range()
+                        .expect("BUG: MeasureRange always defines element_from_range");
+                    let other_element = other
+                        .specifications
+                        .element_from_range()
+                        .expect("BUG: MeasureRange always defines element_from_range");
+                    match (&self_element, &other_element) {
+                        (
+                            TypeSpecification::Measure {
+                                decomposition: self_decomp,
+                                ..
+                            },
+                            TypeSpecification::Measure {
+                                decomposition: other_decomp,
+                                ..
+                            },
+                        ) => self_decomp == other_decomp,
+                        _ => unreachable!("BUG: element_from_range of MeasureRange yields Measure"),
+                    }
+                }
+                _ => false,
             }
         } else {
             true
         }
+    }
+
+    /// Clear slot bounds, help, and written unit so a computed/generalized type
+    /// does not carry either operand's constraints.
+    #[must_use]
+    pub(crate) fn without_slot_bounds(&self) -> Self {
+        let mut cleared = self.clone();
+        match &mut cleared.specifications {
+            TypeSpecification::Measure {
+                minimum,
+                maximum,
+                unit,
+                help,
+                ..
+            } => {
+                *minimum = None;
+                *maximum = None;
+                *unit = None;
+                *help = String::new();
+            }
+            TypeSpecification::Ratio {
+                minimum,
+                maximum,
+                unit,
+                help,
+                ..
+            } => {
+                *minimum = None;
+                *maximum = None;
+                *unit = None;
+                *help = String::new();
+            }
+            TypeSpecification::Number {
+                minimum,
+                maximum,
+                help,
+                ..
+            } => {
+                *minimum = None;
+                *maximum = None;
+                *help = String::new();
+            }
+            TypeSpecification::Date {
+                minimum,
+                maximum,
+                help,
+                ..
+            } => {
+                *minimum = None;
+                *maximum = None;
+                *help = String::new();
+            }
+            TypeSpecification::Time {
+                minimum,
+                maximum,
+                help,
+                ..
+            } => {
+                *minimum = None;
+                *maximum = None;
+                *help = String::new();
+            }
+            TypeSpecification::MeasureRange {
+                minimum,
+                maximum,
+                help,
+                ..
+            } => {
+                *minimum = None;
+                *maximum = None;
+                *help = String::new();
+            }
+            TypeSpecification::DateRange {
+                minimum,
+                maximum,
+                help,
+                ..
+            } => {
+                *minimum = None;
+                *maximum = None;
+                *help = String::new();
+            }
+            TypeSpecification::TimeRange {
+                minimum,
+                maximum,
+                help,
+                ..
+            } => {
+                *minimum = None;
+                *maximum = None;
+                *help = String::new();
+            }
+            TypeSpecification::NumberRange {
+                minimum,
+                maximum,
+                help,
+                ..
+            } => {
+                *minimum = None;
+                *maximum = None;
+                *help = String::new();
+            }
+            TypeSpecification::RatioRange {
+                minimum,
+                maximum,
+                help,
+                ..
+            } => {
+                *minimum = None;
+                *maximum = None;
+                *help = String::new();
+            }
+            TypeSpecification::Boolean { help, .. } | TypeSpecification::Text { help, .. } => {
+                *help = String::new();
+            }
+            TypeSpecification::Veto { .. }
+            | TypeSpecification::Undetermined
+            | TypeSpecification::Spec { .. }
+            | TypeSpecification::List { .. } => {}
+        }
+        cleared
     }
 
     /// Returns true if both types are measure and belong to the same named measure family.
@@ -4974,6 +6364,7 @@ impl LemmaType {
             name: self.name.clone(),
             specifications: self.specifications.with_families_without_effective(),
             extends: self.extends.with_families_without_effective(),
+            options: self.options.clone(),
         }
     }
 
@@ -5005,27 +6396,25 @@ impl LemmaType {
         Self::primitive(TypeSpecification::Undetermined)
     }
 
-    /// Decimal places for display (Number, Measure, and Ratio). Used by formatters.
-    /// Ratio: optional, no default; when None display is normalized (no trailing zeros).
+    /// Input scale on a number declaration. Rejects a supplied value with more
+    /// fractional digits. Not applied when a result is published.
     pub fn decimal_places(&self) -> Option<u8> {
         match &self.specifications {
             TypeSpecification::Number { decimals, .. } => *decimals,
-            TypeSpecification::Measure { decimals, .. } => *decimals,
-            TypeSpecification::Ratio { decimals, .. } => *decimals,
             _ => None,
         }
     }
 
     /// Convert a rational magnitude to an API [`Decimal`] (28-scale boundary).
     ///
-    /// Applies this type's `decimal_places` when set. Returns [`NumericFailure::Overflow`]
-    /// when |magnitude| > Decimal::MAX (callers map this to a decimal-limit Veto).
+    /// Returns [`NumericFailure::Overflow`] when |magnitude| > Decimal::MAX
+    /// (callers map this to a decimal-limit Veto). Does not apply `decimals`.
     pub fn try_rational_as_decimal(
         &self,
         magnitude: &crate::computation::rational::RationalInteger,
     ) -> Result<rust_decimal::Decimal, crate::computation::rational::NumericFailure> {
         let decimal = magnitude.try_to_decimal()?;
-        Ok(format_decimal_for_api(decimal, self.decimal_places()))
+        Ok(format_decimal_for_api(decimal))
     }
 
     /// Convert a canonical measure magnitude in the named declared unit to an API [`Decimal`].
@@ -5195,7 +6584,6 @@ impl LemmaType {
             specifications: TypeSpecification::Measure {
                 minimum: None,
                 maximum: None,
-                decimals: None,
                 units: crate::literals::MeasureUnits::new(),
                 traits: Vec::new(),
                 decomposition: Some(decomposition),
@@ -5203,6 +6591,7 @@ impl LemmaType {
                 help: String::new(),
             },
             extends: TypeExtends::Primitive,
+            options: TypeOptions::default(),
         }
     }
 
@@ -5450,16 +6839,12 @@ pub(crate) fn ratio_element_type_for_api(lemma_type: &LemmaType) -> LemmaType {
         TypeSpecification::RatioRange { .. } => {
             let element = range_element_type_specification(&lemma_type.specifications)
                 .expect("BUG: ratio range type must have ratio element specification");
-            let TypeSpecification::Ratio {
-                units, decimals, ..
-            } = element
-            else {
+            let TypeSpecification::Ratio { units, .. } = element else {
                 panic!("BUG: ratio range element spec must be Ratio");
             };
             LemmaType::primitive(TypeSpecification::Ratio {
                 minimum: None,
                 maximum: None,
-                decimals,
                 units,
                 unit: None,
                 help: String::new(),
@@ -5481,7 +6866,7 @@ pub(crate) enum LiteralUnitMapFailure {
 
 /// Runtime literal payload. Type lives on `NormalForm.result_type` / `DataDefinition` /
 /// explicit computation parameters — not on the value.
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct LiteralValue {
     pub value: ValueKind,
 }
@@ -5505,10 +6890,9 @@ impl LiteralValue {
 /// Used by `ExpressionKind::Literal` and coerce/typing paths. Runtime
 /// `OperationResult` / value-table slots store bare [`LiteralValue`]; the type
 /// is on the node (`NormalForm.result_type`) or data definition.
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct TypedLiteral {
     pub value: ValueKind,
-    #[serde(with = "crate::snapshot::shared::arc")]
     pub lemma_type: Arc<LemmaType>,
 }
 
@@ -5539,9 +6923,9 @@ impl From<&TypedLiteral> for LiteralValue {
 }
 
 impl LiteralValue {
-    pub fn text(s: String) -> Self {
+    pub fn text(s: impl Into<Arc<str>>) -> Self {
         Self {
-            value: ValueKind::Text(s),
+            value: ValueKind::Text(s.into()),
         }
     }
 
@@ -5612,6 +6996,7 @@ impl LiteralValue {
             ValueKind::Range(left, right) => {
                 format!("{}...{}", left.display_value(), right.display_value())
             }
+            ValueKind::List(rows) if rows.is_empty() => String::new(),
             ValueKind::List(rows) => rows
                 .iter()
                 .map(|row| row.display_value())
@@ -5632,6 +7017,7 @@ impl LiteralValue {
             ValueKind::Range(left, right) => {
                 format!("{}...{}", left.display_value(), right.display_value())
             }
+            ValueKind::List(rows) if rows.is_empty() => lemma_type.specifications.to_string(),
             ValueKind::List(rows) => rows
                 .iter()
                 .map(|row| row.display_value())
@@ -5782,16 +7168,16 @@ impl LiteralValue {
 }
 
 impl TypedLiteral {
-    pub fn text(s: String) -> Self {
+    pub fn text(s: impl Into<Arc<str>>) -> Self {
         Self {
-            value: ValueKind::Text(s),
+            value: ValueKind::Text(s.into()),
             lemma_type: primitive_text_arc().clone(),
         }
     }
 
-    pub fn text_with_type(s: String, lemma_type: Arc<LemmaType>) -> Self {
+    pub fn text_with_type(s: impl Into<Arc<str>>, lemma_type: Arc<LemmaType>) -> Self {
         Self {
-            value: ValueKind::Text(s),
+            value: ValueKind::Text(s.into()),
             lemma_type,
         }
     }
@@ -6001,44 +7387,41 @@ impl fmt::Display for TypedLiteral {
 
 /// What a [`DataDefinition::Reference`] copies its value from: either another data path
 /// or a rule whose result becomes this data's value.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum ReferenceTarget {
     Data(DataPath),
     Rule(RulePath),
 }
 
-/// One site binding on a named `uses` import (`-> with` or path-fill).
-///
-/// Keys live on [`DataDefinition::Import::overlay`] as paths local to the imported
-/// spec. Literals are defaults (run data may override). References copy from another
-/// data or rule by default; run data for the nested LHS may override that link.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub enum ImportOverlay {
-    Literal(BoundValueKind),
-    Reference {
-        target: ReferenceTarget,
-        constraints: Option<Vec<Constraint>>,
-    },
-}
-
 /// Where a [`DataDefinition::Reference`] chain ends. Computed once per slice in
 /// [`crate::planning::graph::Graph::validate`] after `compute_data_reference_order`
 /// rejected cycles.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum ReferenceEnd {
     Promptable(DataPath),
     Rule(RulePath),
-    Import,
+}
+
+/// Who wrote a data slot's definition.
+///
+/// A slot declared by its own spec is a default: evaluation data may replace it. A
+/// slot bound by a consumer (`uses x -> with field: value`, a path fill, or a row
+/// field written in a data list) is final: supplying it at evaluate is a request
+/// [`crate::Error`], and it is not a promptable input.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DataOrigin {
+    Declared,
+    Bound,
 }
 
 /// Resolved data value for the execution plan: aligned with [`DataValue`] but with source per variant.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug)]
 pub enum DataDefinition {
-    /// Value-holding data: current literal (spec or `with` binding).
+    /// Value-holding data: current literal (spec default or `with` binding).
     Value {
         value: LiteralValue,
-        #[serde(with = "crate::snapshot::shared::arc")]
         resolved_type: Arc<LemmaType>,
+        origin: DataOrigin,
         source: Source,
     },
     /// Type-only data: type known, value to be supplied (e.g. via run data).
@@ -6047,30 +7430,26 @@ pub enum DataDefinition {
     /// uses it instead of re-deriving suggestions from [`TypeSpecification`].
     /// The evaluator never commits a suggestion — unbound stays MissingData.
     TypeDeclaration {
-        #[serde(with = "crate::snapshot::shared::arc")]
         resolved_type: Arc<LemmaType>,
         declared_suggestion: Option<BoundValueKind>,
         declared_value: Option<BoundValueKind>,
         source: Source,
     },
-    /// Import (`uses`): alias for another spec.
-    ///
-    /// The imported body is the [`crate::planning::execution_plan::ExecutionPlan`]
-    /// template keyed by [`Self::Import::identity`] (same store as instance-list
-    /// row templates). Site `-> with` / path-fill bindings live in [`Self::Import::overlay`]
-    /// (keys local to the imported spec); they never rewrite the shared template.
+    /// Import (`uses`): a spec instance named `alias` in this plan, a row over the
+    /// imported spec's template plan. Its bindings are the `-> with` / path-fill fields
+    /// the declaring spec wrote; the imported data and rules are read through the
+    /// template in the instance's context.
     Import {
-        identity: SpecIdentity,
-        /// Local data paths on the imported spec → site binding.
-        overlay: IndexMap<DataPath, ImportOverlay>,
+        row: Arc<RowInstance>,
         source: Source,
     },
-    /// Instance list (`uses x: spec list`). `resolved_type` is the list type.
-    /// Rows live in [`crate::planning::execution_plan::ExecutionPlan::instance_lists`];
-    /// evaluation builds the list value from them unless run data replaces it.
+    /// Instance list (`data x: spec list`). `resolved_type` is the list type.
+    /// Rows written in the spec are instances of this plan under the list path
+    /// ([`crate::planning::execution_plan::ExecutionPlan::instance_lists`]);
+    /// evaluation lists them unless run data replaces the list.
     InstanceList {
-        #[serde(with = "crate::snapshot::shared::arc")]
         resolved_type: Arc<LemmaType>,
+        origin: DataOrigin,
         source: Source,
     },
     /// Value-copy reference to another data or a rule result.
@@ -6096,20 +7475,30 @@ pub enum DataDefinition {
     ///
     /// The reference itself is evaluated by copying the target's value (data path)
     /// or the target rule's result in topological order. Evaluate data for this
-    /// path binds via `resolved_type` like a type declaration. (Import overlay
-    /// references are the live value-copy wires; see [`ImportOverlay::Reference`].)
+    /// path binds via `resolved_type` like a type declaration.
     Reference {
         target: ReferenceTarget,
-        #[serde(with = "crate::snapshot::shared::arc")]
         resolved_type: Arc<LemmaType>,
         local_constraints: Option<Vec<Constraint>>,
         local_suggestion: Option<BoundValueKind>,
         local_value: Option<BoundValueKind>,
+        origin: DataOrigin,
         source: Source,
     },
 }
 
 impl DataDefinition {
+    /// Whether a consumer bound this slot (`uses -> with`, path fill, or a row field
+    /// written in a data list). Bound slots take no evaluation data.
+    pub fn is_bound(&self) -> bool {
+        match self {
+            DataDefinition::Value { origin, .. }
+            | DataDefinition::InstanceList { origin, .. }
+            | DataDefinition::Reference { origin, .. } => *origin == DataOrigin::Bound,
+            DataDefinition::TypeDeclaration { .. } | DataDefinition::Import { .. } => false,
+        }
+    }
+
     /// Declared lemma type for value, type-declaration, and reference data; `None` for imports.
     pub fn lemma_type(&self) -> Option<&LemmaType> {
         self.resolved_type_arc().map(|arc| arc.as_ref())
@@ -6371,7 +7760,9 @@ fn parser_scalar_to_value_kind(
         (Value::Number(n), TypeSpecification::Number { .. }) => {
             Ok(ValueKind::Number(lift_parser_decimal(*n)?))
         }
-        (Value::Text(s), TypeSpecification::Text { .. }) => Ok(ValueKind::Text(s.clone())),
+        (Value::Text(s), TypeSpecification::Text { .. }) => {
+            Ok(ValueKind::Text(Arc::from(s.as_str())))
+        }
         (Value::Boolean(b), TypeSpecification::Boolean { .. }) => Ok(ValueKind::Boolean(b.into())),
         (Value::Date(dt), TypeSpecification::Date { .. }) => {
             Ok(ValueKind::Date(date_time_to_semantic(dt)))
@@ -6420,7 +7811,7 @@ pub fn value_to_semantic(value: &crate::parsing::ast::Value) -> Result<ValueKind
     use crate::parsing::ast::Value;
     Ok(match value {
         Value::Number(n) => ValueKind::Number(lift_parser_decimal(*n)?),
-        Value::Text(s) => ValueKind::Text(s.clone()),
+        Value::Text(s) => ValueKind::Text(Arc::from(s.as_str())),
         Value::Boolean(b) => ValueKind::Boolean(bool::from(*b)),
         Value::Date(dt) => ValueKind::Date(date_time_to_semantic(dt)),
         Value::Time(t) => ValueKind::Time(time_to_semantic(t)),
@@ -6619,9 +8010,10 @@ pub fn type_spec_for_primitive(kind: PrimitiveKind) -> TypeSpecification {
 
 impl fmt::Display for PathSegment {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let hop = self.input_key();
         match &self.repository {
-            Some(repository) => write!(f, "{} → {} {}", self.uses, repository, self.spec),
-            None => write!(f, "{} → {}", self.uses, self.spec),
+            Some(repository) => write!(f, "{hop} → {} {}", repository, self.spec),
+            None => write!(f, "{hop} → {}", self.spec),
         }
     }
 }
@@ -6644,47 +8036,24 @@ impl fmt::Display for LemmaType {
     }
 }
 
-pub(crate) fn format_decimal_for_api(
-    decimal: rust_decimal::Decimal,
-    decimal_places: Option<u8>,
-) -> rust_decimal::Decimal {
-    match decimal_places {
-        Some(decimal_places) => {
-            let places = u32::from(decimal_places);
-            let mut rounded = decimal.round_dp(places);
-            rounded.rescale(places);
-            rounded
-        }
-        None => {
-            let normalized = decimal.normalize();
-            if normalized.fract().is_zero() {
-                normalized.trunc()
-            } else {
-                normalized
-            }
-        }
+pub(crate) fn format_decimal_for_api(decimal: rust_decimal::Decimal) -> rust_decimal::Decimal {
+    let normalized = decimal.normalize();
+    if normalized.fract().is_zero() {
+        normalized.trunc()
+    } else {
+        normalized
     }
 }
 
-fn format_decimal_for_human_display(
-    decimal: rust_decimal::Decimal,
-    decimal_places: Option<u8>,
-) -> String {
-    match decimal_places {
-        Some(decimal_places) => {
-            let rounded = decimal.round_dp(u32::from(decimal_places));
-            format!("{:.prec$}", rounded, prec = decimal_places as usize)
-        }
-        None => decimal.normalize().to_string(),
-    }
+fn format_decimal_for_human_display(decimal: rust_decimal::Decimal) -> String {
+    decimal.normalize().to_string()
 }
 
 fn format_rational_for_human_display(
     magnitude: &crate::computation::rational::RationalInteger,
-    decimal_places: Option<u8>,
 ) -> String {
     match magnitude.try_to_decimal() {
-        Ok(decimal) => format_decimal_for_human_display(decimal, decimal_places),
+        Ok(decimal) => format_decimal_for_human_display(decimal),
         Err(crate::computation::rational::NumericFailure::Overflow) => magnitude.display_str(),
         Err(_) => magnitude.display_str(),
     }
@@ -6696,8 +8065,6 @@ fn format_measure_canonical_for_display(
     signature: &[(String, i32)],
 ) -> String {
     use crate::computation::rational::checked_div;
-
-    let decimals = lemma_type.decimal_places();
 
     if let TypeSpecification::Measure { units, .. } = &lemma_type.specifications {
         if !units.is_empty() {
@@ -6719,8 +8086,7 @@ fn format_measure_canonical_for_display(
             };
             let in_unit = checked_div(canonical, &unit.factor)
                 .expect("BUG: de-canonicalization for measure display must not fail");
-            let formatted = format_rational_for_human_display(&in_unit, decimals);
-            return format!("{} {}", formatted, unit.name);
+            return format_number_with_unit_for_display(&in_unit, &unit.name);
         }
     }
 
@@ -6729,7 +8095,7 @@ fn format_measure_canonical_for_display(
         [(name, 1)] => name.clone(),
         _ => format_signature_operator_style(signature),
     };
-    let formatted = format_rational_for_human_display(canonical, decimals);
+    let formatted = format_rational_for_human_display(canonical);
     if unit_label.is_empty() {
         formatted
     } else {
@@ -6797,6 +8163,53 @@ pub(crate) mod tests {
     use crate::parsing::ast::{BooleanValue, DateTimeValue, PrimitiveKind, TimeValue};
     use rust_decimal::Decimal;
     use std::str::FromStr;
+
+    fn meter_axis(exponent: i32) -> BaseMeasureVector {
+        [(Dimension::Family(test_type_family("meter")), exponent)]
+            .into_iter()
+            .collect()
+    }
+
+    #[test]
+    fn scale_decomposition_exponent_one_is_identity() {
+        let base = meter_axis(1);
+        assert_eq!(scale_decomposition(&base, 1), Some(base));
+    }
+
+    #[test]
+    fn scale_decomposition_squares_meter() {
+        assert_eq!(scale_decomposition(&meter_axis(1), 2), Some(meter_axis(2)));
+    }
+
+    #[test]
+    fn scale_decomposition_zero_is_empty() {
+        assert_eq!(
+            scale_decomposition(&meter_axis(1), 0),
+            Some(BaseMeasureVector::new())
+        );
+    }
+
+    #[test]
+    fn scale_decomposition_negative_inverts_meter() {
+        assert_eq!(
+            scale_decomposition(&meter_axis(1), -1),
+            Some(meter_axis(-1))
+        );
+    }
+
+    #[test]
+    fn scale_decomposition_at_exponent_cap() {
+        assert_eq!(
+            scale_decomposition(&meter_axis(32), 2),
+            Some(meter_axis(64))
+        );
+    }
+
+    #[test]
+    fn scale_decomposition_past_exponent_cap_is_none() {
+        assert_eq!(scale_decomposition(&meter_axis(1), 65), None);
+        assert_eq!(scale_decomposition(&meter_axis(32), 3), None);
+    }
 
     #[must_use]
     pub(crate) fn test_type_family(name: &str) -> TypeFamily {
@@ -6873,21 +8286,46 @@ pub(crate) mod tests {
     #[test]
     fn data_path_and_rule_path_display_are_input_key() {
         let implicit = PathSegment {
-            uses: "bag".to_string(),
+            uses: Arc::from("bag"),
+            row: None,
             repository: None,
-            spec: "bag".to_string(),
+            spec: Arc::from("bag"),
         };
         let explicit = PathSegment {
-            uses: "bag".to_string(),
+            uses: Arc::from("bag"),
+            row: None,
             repository: None,
-            spec: "nut_bag".to_string(),
+            spec: Arc::from("nut_bag"),
         };
         let named_repo = PathSegment {
-            uses: "calc".to_string(),
-            repository: Some("alpha".to_string()),
-            spec: "pricing".to_string(),
+            uses: Arc::from("calc"),
+            row: None,
+            repository: Some(Arc::from("alpha")),
+            spec: Arc::from("pricing"),
+        };
+        let row = PathSegment {
+            uses: Arc::from("staff"),
+            row: Some(2),
+            repository: None,
+            spec: Arc::from("employee"),
         };
 
+        assert_eq!(
+            DataPath::new(vec![row.clone()], "salary".to_string()).to_string(),
+            "staff.2.salary"
+        );
+        assert_eq!(
+            RulePath::new(vec![row.clone()], "double".to_string()).to_string(),
+            "staff.2.double"
+        );
+        assert_eq!(row.to_string(), "staff.2 → employee");
+        assert_eq!(
+            SpecInstance {
+                prefix: vec![implicit.clone(), row]
+            }
+            .to_string(),
+            "bag.staff.2"
+        );
         assert_eq!(
             DataPath::new(vec![implicit.clone()], "weight".to_string()).to_string(),
             "bag.weight"
@@ -6915,18 +8353,20 @@ pub(crate) mod tests {
 
         assert_eq!(
             PathSegment {
-                uses: "bag".to_string(),
+                uses: Arc::from("bag"),
+                row: None,
                 repository: None,
-                spec: "nut_bag".to_string(),
+                spec: Arc::from("nut_bag"),
             }
             .to_string(),
             "bag → nut_bag"
         );
         assert_eq!(
             PathSegment {
-                uses: "calc".to_string(),
-                repository: Some("alpha".to_string()),
-                spec: "pricing".to_string(),
+                uses: Arc::from("calc"),
+                row: None,
+                repository: Some(Arc::from("alpha")),
+                spec: Arc::from("pricing"),
             }
             .to_string(),
             "calc → alpha pricing"
@@ -7049,7 +8489,6 @@ pub(crate) mod tests {
             TypeSpecification::Measure {
                 minimum: None,
                 maximum: None,
-                decimals: None,
                 units: MeasureUnits::from(vec![MeasureUnit {
                     name: "second".to_string(),
                     factor: crate::computation::rational::rational_one(),
@@ -7092,6 +8531,26 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn empty_list_display_value_with_type_is_type_spec() {
+        let element = Arc::new(LemmaType::new(
+            "item".to_string(),
+            TypeSpecification::Spec {
+                spec: SpecIdentity {
+                    repository: None,
+                    spec: "item".to_string(),
+                    effective: crate::parsing::ast::EffectiveDate::Origin,
+                    slice: crate::parsing::ast::EffectiveDate::Origin,
+                },
+            },
+            TypeExtends::Primitive,
+        ));
+        let list_ty = LemmaType::list_of(element);
+        let empty = LiteralValue::new(ValueKind::List(Vec::new().into()));
+        assert_eq!(empty.display_value_with_type(&list_ty), "item list");
+        assert_eq!(empty.display_value(), "");
+    }
+
+    #[test]
     fn test_literal_value_display_value() {
         let ten = rational_new(10, 1);
 
@@ -7127,13 +8586,12 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn test_measure_display_respects_type_decimals() {
+    fn test_measure_display_trims_trailing_zeros() {
         let money_type = LemmaType {
             name: Some("money".to_string()),
             specifications: TypeSpecification::Measure {
                 minimum: None,
                 maximum: None,
-                decimals: Some(2),
                 units: MeasureUnits::from(vec![MeasureUnit {
                     name: "eur".to_string(),
                     factor: crate::computation::rational::rational_one(),
@@ -7149,24 +8607,24 @@ pub(crate) mod tests {
                 help: String::new(),
             },
             extends: TypeExtends::Primitive,
+            options: TypeOptions::default(),
         };
         let money_type = Arc::new(money_type);
         let val =
             LiteralValue::measure(decimal_to_rational(Decimal::from_str("1.8").unwrap()).unwrap());
-        assert_eq!(val.display_value_with_type(money_type.as_ref()), "1.80 eur");
+        assert_eq!(val.display_value_with_type(money_type.as_ref()), "1.8 eur");
         let more_precision = LiteralValue::measure(
             decimal_to_rational(Decimal::from_str("1.80000").unwrap()).unwrap(),
         );
         assert_eq!(
             more_precision.display_value_with_type(money_type.as_ref()),
-            "1.80 eur"
+            "1.8 eur"
         );
-        let measure_no_decimals = Arc::new(LemmaType {
+        let count_type = Arc::new(LemmaType {
             name: Some("count".to_string()),
             specifications: TypeSpecification::Measure {
                 minimum: None,
                 maximum: None,
-                decimals: None,
                 units: MeasureUnits::from(vec![MeasureUnit {
                     name: "items".to_string(),
                     factor: crate::computation::rational::rational_one(),
@@ -7182,12 +8640,13 @@ pub(crate) mod tests {
                 help: String::new(),
             },
             extends: TypeExtends::Primitive,
+            options: TypeOptions::default(),
         });
         let val_any = LiteralValue::measure(
             decimal_to_rational(Decimal::from_str("42.50").unwrap()).unwrap(),
         );
         assert_eq!(
-            val_any.display_value_with_type(measure_no_decimals.as_ref()),
+            val_any.display_value_with_type(count_type.as_ref()),
             "42.5 items"
         );
     }
@@ -7321,6 +8780,44 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn same_value_type_distinct_families_same_decomposition_are_not_same() {
+        let decomp: BaseMeasureVector = [
+            (Dimension::Family(test_type_family("length")), 1i32),
+            (Dimension::Family(test_type_family("elapsed")), -1i32),
+        ]
+        .into_iter()
+        .collect();
+        let speed_spec = |name: &str, family: &str| {
+            let mut spec = TypeSpecification::measure();
+            if let TypeSpecification::Measure {
+                decomposition,
+                help,
+                ..
+            } = &mut spec
+            {
+                *decomposition = Some(decomp.clone());
+                *help = String::new();
+            }
+            LemmaType::new(
+                name.to_string(),
+                spec,
+                TypeExtends::custom_local("measure".to_string(), test_type_family(family)),
+            )
+        };
+        let speed_a = speed_spec("speed_a", "speed_a");
+        let speed_b = speed_spec("speed_b", "speed_b");
+        assert_eq!(
+            speed_a.measure_type_decomposition(),
+            speed_b.measure_type_decomposition()
+        );
+        assert!(!speed_a.same_measure_family(&speed_b));
+        assert!(
+            !speed_a.same_value_type(&speed_b),
+            "same decomposition alone must not make distinct measure families same_value_type"
+        );
+    }
+
+    #[test]
     fn test_measure_family_name_non_measure_returns_none() {
         let number_spec = TypeSpecification::number();
         let number_type = LemmaType::new("amount".to_string(), number_spec, TypeExtends::Primitive);
@@ -7391,7 +8888,10 @@ pub(crate) mod tests {
         let mut default = None;
         let err = specs
             .apply_constraint(
-                "notes",
+                ConstraintNames {
+                    type_name: "notes",
+                    data_name: "notes",
+                },
                 TypeConstraintCommand::Suggest,
                 &[month_suggestion_arg()],
                 &mut default,
@@ -7408,7 +8908,10 @@ pub(crate) mod tests {
         let mut specs = TypeSpecification::measure();
         specs
             .apply_constraint(
-                "duration",
+                ConstraintNames {
+                    type_name: "duration",
+                    data_name: "duration",
+                },
                 TypeConstraintCommand::Unit,
                 &unit_factor_arg("second", 1),
                 &mut None,
@@ -7418,7 +8921,10 @@ pub(crate) mod tests {
             .unwrap();
         specs
             .apply_constraint(
-                "duration",
+                ConstraintNames {
+                    type_name: "duration",
+                    data_name: "duration",
+                },
                 TypeConstraintCommand::Unit,
                 &unit_factor_arg("week", 604_800),
                 &mut None,
@@ -7428,7 +8934,10 @@ pub(crate) mod tests {
             .unwrap();
         specs
             .apply_constraint(
-                "duration",
+                ConstraintNames {
+                    type_name: "duration",
+                    data_name: "duration",
+                },
                 TypeConstraintCommand::Trait,
                 &[CommandArg::Label("duration".to_string())],
                 &mut None,
@@ -7439,7 +8948,10 @@ pub(crate) mod tests {
         let mut default = None;
         let err = specs
             .apply_constraint(
-                "duration",
+                ConstraintNames {
+                    type_name: "duration",
+                    data_name: "duration",
+                },
                 TypeConstraintCommand::Suggest,
                 &[month_suggestion_arg()],
                 &mut default,
@@ -7457,7 +8969,10 @@ pub(crate) mod tests {
         let mut specs = TypeSpecification::measure();
         specs
             .apply_constraint(
-                "duration",
+                ConstraintNames {
+                    type_name: "duration",
+                    data_name: "duration",
+                },
                 TypeConstraintCommand::Unit,
                 &unit_factor_arg("second", 1),
                 &mut None,
@@ -7467,7 +8982,10 @@ pub(crate) mod tests {
             .unwrap();
         specs
             .apply_constraint(
-                "duration",
+                ConstraintNames {
+                    type_name: "duration",
+                    data_name: "duration",
+                },
                 TypeConstraintCommand::Unit,
                 &unit_factor_arg("week", 604_800),
                 &mut None,
@@ -7477,7 +8995,10 @@ pub(crate) mod tests {
             .unwrap();
         specs
             .apply_constraint(
-                "duration",
+                ConstraintNames {
+                    type_name: "duration",
+                    data_name: "duration",
+                },
                 TypeConstraintCommand::Trait,
                 &[CommandArg::Label("duration".to_string())],
                 &mut None,
@@ -7488,7 +9009,10 @@ pub(crate) mod tests {
         let mut default = None;
         specs
             .apply_constraint(
-                "duration",
+                ConstraintNames {
+                    type_name: "duration",
+                    data_name: "duration",
+                },
                 TypeConstraintCommand::Suggest,
                 &[CommandArg::Literal(crate::literals::Value::NumberWithUnit(
                     Decimal::from(4),
@@ -7513,7 +9037,10 @@ pub(crate) mod tests {
         let mut specs = TypeSpecification::measure();
         specs
             .apply_constraint(
-                "duration",
+                ConstraintNames {
+                    type_name: "duration",
+                    data_name: "duration",
+                },
                 TypeConstraintCommand::Unit,
                 &unit_factor_arg("second", 1),
                 &mut None,
@@ -7523,7 +9050,10 @@ pub(crate) mod tests {
             .unwrap();
         specs
             .apply_constraint(
-                "duration",
+                ConstraintNames {
+                    type_name: "duration",
+                    data_name: "duration",
+                },
                 TypeConstraintCommand::Trait,
                 &[CommandArg::Label("duration".to_string())],
                 &mut None,
@@ -7534,7 +9064,10 @@ pub(crate) mod tests {
         let mut default = None;
         let err = specs
             .apply_constraint(
-                "duration",
+                ConstraintNames {
+                    type_name: "duration",
+                    data_name: "duration",
+                },
                 TypeConstraintCommand::Suggest,
                 &[CommandArg::Literal(crate::literals::Value::NumberWithUnit(
                     Decimal::ONE,
@@ -7556,7 +9089,6 @@ pub(crate) mod tests {
             TypeSpecification::Measure {
                 minimum: None,
                 maximum: None,
-                decimals: None,
                 units: MeasureUnits::from(vec![
                     MeasureUnit {
                         name: "eur".to_string(),
@@ -7737,7 +9269,6 @@ pub(crate) mod tests {
             TypeSpecification::Measure {
                 minimum: None,
                 maximum: None,
-                decimals: None,
                 units: MeasureUnits::from(vec![
                     MeasureUnit {
                         name: "month".to_string(),
@@ -7795,7 +9326,6 @@ pub(crate) mod tests {
             TypeSpecification::Measure {
                 minimum: None,
                 maximum: None,
-                decimals: Some(2),
                 units: MeasureUnits::from(vec![
                     MeasureUnit {
                         name: "eur".to_string(),
@@ -7841,7 +9371,6 @@ pub(crate) mod tests {
         TypeSpecification::Measure {
             minimum: None,
             maximum: None,
-            decimals: None,
             units,
             traits: Vec::new(),
             decomposition: None,
@@ -7897,7 +9426,10 @@ pub(crate) mod tests {
         let mut specs = TypeSpecification::measure();
         specs
             .apply_constraint(
-                "money",
+                ConstraintNames {
+                    type_name: "money",
+                    data_name: "money",
+                },
                 TypeConstraintCommand::Unit,
                 &unit_factor_arg("eur", 1),
                 &mut None,
@@ -7907,7 +9439,10 @@ pub(crate) mod tests {
             .expect("seed eur");
         let err = specs
             .apply_constraint(
-                "money",
+                ConstraintNames {
+                    type_name: "money",
+                    data_name: "money",
+                },
                 TypeConstraintCommand::Unit,
                 &[
                     CommandArg::Label("eur".to_string()),
@@ -7930,7 +9465,10 @@ pub(crate) mod tests {
         let mut specs = TypeSpecification::measure();
         specs
             .apply_constraint(
-                "money",
+                ConstraintNames {
+                    type_name: "money",
+                    data_name: "money",
+                },
                 TypeConstraintCommand::Unit,
                 &unit_factor_arg("eur", 1),
                 &mut None,
@@ -7940,7 +9478,10 @@ pub(crate) mod tests {
             .expect("seed eur");
         specs
             .apply_constraint(
-                "money",
+                ConstraintNames {
+                    type_name: "money",
+                    data_name: "money",
+                },
                 TypeConstraintCommand::Unit,
                 &unit_factor_arg("usd", 1),
                 &mut None,
@@ -7959,7 +9500,10 @@ pub(crate) mod tests {
         let mut specs = TypeSpecification::measure();
         specs
             .apply_constraint(
-                "money",
+                ConstraintNames {
+                    type_name: "money",
+                    data_name: "money",
+                },
                 TypeConstraintCommand::Unit,
                 &unit_factor_arg("eur", 1),
                 &mut None,
@@ -7969,7 +9513,10 @@ pub(crate) mod tests {
             .expect("seed eur");
         specs
             .apply_constraint(
-                "money",
+                ConstraintNames {
+                    type_name: "money",
+                    data_name: "money",
+                },
                 TypeConstraintCommand::Unit,
                 &unit_factor_arg("eur", 1),
                 &mut None,
@@ -8042,7 +9589,8 @@ pub(crate) mod tests {
             spec: SpecIdentity {
                 repository: None,
                 spec: name.to_string(),
-                effective,
+                effective: effective.clone(),
+                slice: effective,
             },
         })
     }
@@ -8065,10 +9613,16 @@ pub(crate) mod tests {
         let tax = spec_type("tax_bracket", origin.clone());
         let tax_again = spec_type("tax_bracket", origin.clone());
         let other = spec_type("menu_item", origin);
-        let tax_dated = spec_type("tax_bracket", dated);
+        let tax_dated = spec_type("tax_bracket", dated.clone());
         assert!(tax.same_value_type(&tax_again));
         assert!(!tax.same_value_type(&other));
         assert!(!tax.same_value_type(&tax_dated));
+        let mut tax_later_slice = tax.clone();
+        match &mut tax_later_slice.specifications {
+            TypeSpecification::Spec { spec } => spec.slice = dated,
+            other => panic!("expected Spec, got {other:?}"),
+        }
+        assert!(!tax.same_value_type(&tax_later_slice));
         let mut other_repo = tax.clone();
         match &mut other_repo.specifications {
             TypeSpecification::Spec { spec } => spec.repository = Some("@jack/finance".to_string()),
@@ -8084,20 +9638,35 @@ pub(crate) mod tests {
             repository: None,
             spec: "tax_bracket".to_string(),
             effective: EffectiveDate::Origin,
+            slice: EffectiveDate::Origin,
         };
         assert_eq!(workspace.to_string(), "tax_bracket");
+        let start =
+            EffectiveDate::DateTimeValue(DateTimeValue::from_str("2026-01-01").expect("date"));
         let dated = SpecIdentity {
             repository: Some("@jack/finance".to_string()),
             spec: "tax_bracket".to_string(),
-            effective: EffectiveDate::DateTimeValue(
-                DateTimeValue::from_str("2026-01-01").expect("date"),
-            ),
+            effective: start.clone(),
+            slice: start,
         };
         assert_eq!(
             dated.to_string(),
             format!(
                 "@jack/finance tax_bracket {}",
                 DateTimeValue::from_str("2026-01-01").expect("date")
+            )
+        );
+        let later_slice = SpecIdentity {
+            slice: EffectiveDate::DateTimeValue(
+                DateTimeValue::from_str("2026-07-01").expect("date"),
+            ),
+            ..workspace
+        };
+        assert_eq!(
+            later_slice.to_string(),
+            format!(
+                "tax_bracket slice {}",
+                DateTimeValue::from_str("2026-07-01").expect("date")
             )
         );
     }
@@ -8132,11 +9701,18 @@ pub(crate) mod tests {
     #[test]
     fn piecewise_type_keeps_spec_identity() {
         use crate::parsing::ast::EffectiveDate;
+        use crate::planning::typing::{piecewise_type, MeasureScope};
+        use crate::planning::unit_index::UnitIndex;
         let tax = Arc::new(spec_type("tax_bracket", EffectiveDate::Origin));
-        let picked = crate::planning::typing::piecewise_type([
-            Arc::new(LemmaType::veto_type()),
-            Arc::clone(&tax),
-        ]);
+        let unit_index = UnitIndex::new();
+        let signature_index = crate::computation::arithmetic::SignatureIndex::new();
+        let named_types = IndexMap::new();
+        let scope = MeasureScope {
+            unit_index: &unit_index,
+            signature_index: &signature_index,
+            named_types: &named_types,
+        };
+        let picked = piecewise_type([Arc::new(LemmaType::veto_type()), Arc::clone(&tax)], &scope);
         assert!(picked.same_value_type(&tax));
     }
 }

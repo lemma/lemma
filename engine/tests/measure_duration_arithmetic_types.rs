@@ -189,21 +189,54 @@ rule result: a * b"#,
 // ═══════════════════════════════════════════════════════════════════
 
 #[test]
-fn number_divide_duration_returns_number_not_duration() {
-    let engine = load_ok(
+fn number_divide_duration_rejected_when_inverse_unresolved() {
+    let err = load_err(
         r#"spec t
-uses lemma units
+data elapsed: measure
+  -> unit hour: 3600
+  -> unit second: 1
 data n: 10
 data d: 5 hour
 rule result: n / d"#,
     );
-    let val = eval(&engine, "t", "result", IndexMap::new());
-    assert_eq!(val, "2", "10 / 5 hour = 2, got: {}", val);
     assert!(
-        !val.to_lowercase().contains("hour"),
-        "number / duration should be dimensionless, got: {}",
-        val
+        err.to_lowercase().contains("anonymous")
+            || err.to_lowercase().contains("unresolved")
+            || err.to_lowercase().contains("named"),
+        "number / duration with no inverse type in scope must be rejected, got: {err}"
     );
+}
+
+#[test]
+fn number_divide_duration_promotes_to_frequency_when_in_scope() {
+    let engine = load_ok(
+        r#"spec t
+uses lemma units
+data n: 10
+data d: 5 second
+rule result: n / d"#,
+    );
+    let val = eval(&engine, "t", "result", IndexMap::new());
+    assert!(
+        val.contains('2') && val.to_lowercase().contains("hertz"),
+        "10 / 5 second must promote to frequency (2 hertz), got: {val}"
+    );
+}
+
+#[test]
+fn number_divide_measure_cancels_when_multiplied_by_measure() {
+    let engine = load_ok(
+        r#"spec t
+data elapsed: measure
+  -> unit hour: 3600
+  -> unit second: 1
+data n: 10
+data d: 5 hour
+data e: 2 hour
+rule result: (n / d) * e"#,
+    );
+    let val = eval(&engine, "t", "result", IndexMap::new());
+    assert_eq!(val, "4", "(10 / 5 hour) * 2 hour = 4, got: {}", val);
 }
 
 #[test]
@@ -247,20 +280,17 @@ rule result: d / n"#,
 }
 
 #[test]
-fn duration_modulo_number_returns_duration() {
-    let engine = load_ok(
+fn duration_modulo_number_rejected_by_planner() {
+    let err = load_err(
         r#"spec t
 uses lemma units
 data d: 7 hour
 data n: 3
 rule result: d mod n"#,
     );
-    let val = eval(&engine, "t", "result", IndexMap::new());
-    assert!(val.contains("1"), "7 hour mod 3 = 1 hour, got: {}", val);
     assert!(
-        val.to_lowercase().contains("hour"),
-        "duration mod number should stay duration, got: {}",
-        val
+        err.to_lowercase().contains("modulo") || err.to_lowercase().contains("as number"),
+        "duration mod number must be rejected at plan time, got: {err}"
     );
 }
 
@@ -279,7 +309,8 @@ data r: 50%
 rule result: a ^ r"#,
     );
     assert!(
-        err.contains("fractional or variable exponent")
+        err.contains("as number")
+            || err.contains("Cannot raise")
             || err.contains("Cannot apply")
             || err.contains("ratio"),
         "Measure ^ Ratio should be rejected at plan time, got: {err}"
@@ -297,7 +328,7 @@ data r: 25%
 rule result: a mod r"#,
     );
     assert!(
-        err.contains("modulo") && err.to_lowercase().contains("ratio"),
+        err.to_lowercase().contains("modulo"),
         "Measure mod Ratio should be rejected at plan time, got: {err}"
     );
 }
@@ -355,4 +386,14 @@ rule result: r as number"#,
     );
     let val = eval(&engine, "t", "result", IndexMap::new());
     assert_eq!(val, "0.25", "25% as number = 0.25, got: {}", val);
+}
+
+#[test]
+fn half_percent_as_number_is_five_thousandths() {
+    let engine = load_ok(
+        r#"spec t
+rule result: 0.5% as number"#,
+    );
+    let val = eval(&engine, "t", "result", IndexMap::new());
+    assert_eq!(val, "0.005", "0.5% as number = 0.005, got: {}", val);
 }

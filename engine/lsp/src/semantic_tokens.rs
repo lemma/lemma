@@ -51,16 +51,33 @@ enum HeaderState {
     Repo,
     /// After `spec`: consume opaque spec name / uses targets.
     Spec,
-    /// After `data`: consume field-path tokens until Colon.
+    /// After `data` or `-> with`: consume field-path tokens until Colon.
     Data,
-    /// After `data … :` — type annotation + constraint arrows.
+    /// After `data name:` when the body starts as a type (`employee list`, `money range`).
+    TypeAnn,
+    /// Constraint arguments, literal data values, and `-> with` field values.
     DataBody,
-    /// After `->` inside data body — recognize constraint keywords.
+    /// After `->` inside a data declaration — recognize the command word.
     DataBodyAfterArrow,
+    /// After `-> key`: comma-separated field paths.
+    KeyFields,
+    /// After `-> with ada, grace`: each name is a reference.
+    WithNames,
     /// After `rule`: consume the single rule-name token then `RuleColon`.
     Rule,
     /// After rule name: expect Colon as IDX_PUNCTUATION, then body.
     RuleColon,
+}
+
+/// Shape of the current `-> with` / `-> key` row. `Data` and `DataBody` stay the
+/// path and value states; this flag says when a comma starts another field.
+#[derive(Clone, Copy, PartialEq)]
+enum RowMode {
+    None,
+    /// Just saw `with`. The next tokens choose field pairs, values, or names.
+    WithUndecided,
+    /// `-> with path: value, path: value`.
+    WithFields,
 }
 
 /// Returns true for type keyword tokens.
@@ -83,8 +100,10 @@ fn type_in_body(kind: &TokenKind) -> Option<u32> {
         // Control / flow surface — subdued but distinct
         TokenKind::Unless
         | TokenKind::Then
+        | TokenKind::That
         | TokenKind::Not
         | TokenKind::And
+        | TokenKind::Or
         | TokenKind::In
         | TokenKind::Veto
         | TokenKind::Now
@@ -183,20 +202,69 @@ fn is_name_token(kind: &TokenKind) -> bool {
     matches!(kind, TokenKind::Identifier) || is_type_keyword(kind)
 }
 
+fn is_data_region_control(kind: &TokenKind) -> bool {
+    type_in_body(kind) == Some(IDX_CONTROL)
+}
+
+/// True when the next token can open a parent type (`number`, `employee`, `menu.drink`).
+fn next_starts_type(lexer: &mut Lexer) -> bool {
+    match lexer.peek() {
+        Ok(tok) => {
+            is_type_keyword(&tok.kind) || can_be_label(&tok.kind) || tok.kind == TokenKind::List
+        }
+        Err(_) => false,
+    }
+}
+
+/// Tokens after the current label are `(. label)* :`.
+/// The current token is already consumed.
+fn rest_is_path_then_colon(lexer: &mut Lexer) -> bool {
+    let saved = lexer.checkpoint();
+    let found = scan_rest_path_then_colon(lexer);
+    lexer.restore(saved);
+    found
+}
+
+fn scan_rest_path_then_colon(lexer: &mut Lexer) -> bool {
+    loop {
+        let tok = match lexer.next_token() {
+            Ok(tok) => tok,
+            Err(_) => return false,
+        };
+        match tok.kind {
+            TokenKind::Colon => return true,
+            TokenKind::Dot => {
+                let next = match lexer.next_token() {
+                    Ok(tok) => tok,
+                    Err(_) => return false,
+                };
+                if !can_be_label(&next.kind) {
+                    return false;
+                }
+            }
+            _ => return false,
+        }
+    }
+}
+
 /// Produce LSP delta-encoded semantic tokens for `text` using a stateful
 /// single-pass scan over the lexer token stream.
 ///
 /// Declaration headers (`repo`, `spec`, `data`, `with`, `rule`, `uses`, `meta`) emit
 /// declarationKeyword followed by names (spec/data/rule) or body tokens (uses/meta).
-/// `dataBody` covers the data block after the colon, with type keywords and constraint
-/// words highlighted separately. Rule bodies use reference, value, operator, keyword,
-/// and control buckets.
+/// After `data name:`, a type annotation (`employee list`, `money range`, `menu.drink`)
+/// is reference and keyword until the first `->`. `-> key` paths are properties.
+/// `-> with` is field pairs, a value row, or named instances. Constraint arguments
+/// (`-> unit`, `-> option`) stay `dataBody`. Rule bodies use reference, value, operator,
+/// keyword, and control buckets.
 pub fn tokenize(text: &str) -> Vec<SemanticToken> {
     let mut lexer = Lexer::new(text, &lemma::SourceType::Volatile);
     let mut tokens = Vec::new();
     let mut prev_line: u32 = 0;
     let mut prev_col: u32 = 0;
     let mut state = HeaderState::None;
+    let mut row_mode = RowMode::None;
+    let mut type_started = false;
     let mut prev_token_kind: Option<TokenKind> = None;
     let mut uses_import = false;
     let mut uses_alias = false;
@@ -227,6 +295,8 @@ pub fn tokenize(text: &str) -> Vec<SemanticToken> {
         let token_info: Option<(u32, u32)> = match tok.kind {
             TokenKind::Spec => {
                 state = HeaderState::Spec;
+                row_mode = RowMode::None;
+                type_started = false;
                 uses_import = false;
                 uses_alias = false;
                 expect_opaque_name = true;
@@ -234,21 +304,29 @@ pub fn tokenize(text: &str) -> Vec<SemanticToken> {
             }
             TokenKind::Data => {
                 state = HeaderState::Data;
+                row_mode = RowMode::None;
+                type_started = false;
                 expect_opaque_name = false;
                 Some((IDX_DECLARATION, 0))
             }
             TokenKind::With => {
                 state = HeaderState::Data;
+                row_mode = RowMode::WithUndecided;
+                type_started = false;
                 expect_opaque_name = false;
                 Some((IDX_DECLARATION, 0))
             }
             TokenKind::Rule => {
                 state = HeaderState::Rule;
+                row_mode = RowMode::None;
+                type_started = false;
                 expect_opaque_name = false;
                 Some((IDX_DECLARATION, 0))
             }
             TokenKind::Uses => {
                 state = HeaderState::Spec;
+                row_mode = RowMode::None;
+                type_started = false;
                 uses_import = true;
                 uses_alias = match lexer.peek() {
                     Ok(first) if can_be_label(&first.kind) => {
@@ -262,6 +340,8 @@ pub fn tokenize(text: &str) -> Vec<SemanticToken> {
             }
             TokenKind::Meta => {
                 state = HeaderState::None;
+                row_mode = RowMode::None;
+                type_started = false;
                 expect_opaque_name = false;
                 Some((IDX_DECLARATION, 0))
             }
@@ -308,17 +388,71 @@ pub fn tokenize(text: &str) -> Vec<SemanticToken> {
                 },
 
                 HeaderState::Data => match tok.kind {
+                    TokenKind::Identifier if row_mode == RowMode::WithUndecided => {
+                        if rest_is_path_then_colon(&mut lexer) {
+                            row_mode = RowMode::WithFields;
+                            Some((IDX_PROPERTY, 0))
+                        } else {
+                            row_mode = RowMode::None;
+                            state = HeaderState::WithNames;
+                            Some((IDX_REFERENCE, 0))
+                        }
+                    }
                     TokenKind::Identifier => Some((IDX_PROPERTY, 0)),
                     TokenKind::Dot => None,
                     TokenKind::Colon => {
-                        state = HeaderState::DataBody;
+                        if row_mode == RowMode::WithUndecided || row_mode == RowMode::WithFields {
+                            row_mode = RowMode::WithFields;
+                            state = HeaderState::DataBody;
+                        } else if next_starts_type(&mut lexer) {
+                            type_started = false;
+                            state = HeaderState::TypeAnn;
+                        } else {
+                            state = HeaderState::DataBody;
+                        }
                         Some((IDX_PUNCTUATION, 0))
                     }
+                    _ if is_data_region_control(&tok.kind) => {
+                        row_mode = RowMode::None;
+                        state = HeaderState::None;
+                        Some((IDX_CONTROL, 0))
+                    }
                     _ => {
+                        if row_mode == RowMode::WithUndecided {
+                            row_mode = RowMode::None;
+                        }
                         state = HeaderState::DataBody;
                         Some((IDX_DATA_BODY, 0))
                     }
                 },
+
+                HeaderState::TypeAnn => {
+                    if tok.kind == TokenKind::Commentary {
+                        Some((IDX_COMMENT, 0))
+                    } else if is_type_keyword(&tok.kind) || tok.kind == TokenKind::List {
+                        type_started = true;
+                        Some((IDX_KEYWORD, 0))
+                    } else if tok.kind == TokenKind::Identifier
+                        && type_started
+                        && tok.text.of(text).eq_ignore_ascii_case("range")
+                    {
+                        Some((IDX_KEYWORD, 0))
+                    } else if matches!(tok.kind, TokenKind::Identifier | TokenKind::LogicalName) {
+                        type_started = true;
+                        Some((IDX_REFERENCE, 0))
+                    } else if tok.kind == TokenKind::Dot {
+                        Some((IDX_REFERENCE, 0))
+                    } else if tok.kind == TokenKind::Arrow {
+                        state = HeaderState::DataBodyAfterArrow;
+                        Some((IDX_OPERATOR, 0))
+                    } else if is_data_region_control(&tok.kind) {
+                        row_mode = RowMode::None;
+                        state = HeaderState::None;
+                        Some((IDX_CONTROL, 0))
+                    } else {
+                        Some((IDX_DATA_BODY, 0))
+                    }
+                }
 
                 HeaderState::DataBody => {
                     if tok.kind == TokenKind::Commentary {
@@ -326,115 +460,91 @@ pub fn tokenize(text: &str) -> Vec<SemanticToken> {
                     } else if is_type_keyword(&tok.kind) {
                         Some((IDX_KEYWORD, 0))
                     } else if tok.kind == TokenKind::Arrow {
+                        row_mode = RowMode::None;
                         state = HeaderState::DataBodyAfterArrow;
                         Some((IDX_OPERATOR, 0))
-                    } else if type_in_body(&tok.kind) == Some(IDX_CONTROL)
-                        || matches!(
-                            tok.kind,
-                            TokenKind::Spec
-                                | TokenKind::Data
-                                | TokenKind::With
-                                | TokenKind::Rule
-                                | TokenKind::Uses
-                                | TokenKind::Meta
-                        )
-                    {
+                    } else if row_mode == RowMode::WithFields && tok.kind == TokenKind::Comma {
+                        state = HeaderState::Data;
+                        Some((IDX_PUNCTUATION, 0))
+                    } else if is_data_region_control(&tok.kind) {
+                        row_mode = RowMode::None;
                         state = HeaderState::None;
-                        if matches!(
-                            tok.kind,
-                            TokenKind::Spec | TokenKind::Data | TokenKind::With | TokenKind::Rule
-                        ) {
-                            match tok.kind {
-                                TokenKind::Spec => {
-                                    state = HeaderState::Spec;
-                                    Some((IDX_DECLARATION, 0))
-                                }
-                                TokenKind::Data => {
-                                    state = HeaderState::Data;
-                                    Some((IDX_DECLARATION, 0))
-                                }
-                                TokenKind::With => {
-                                    state = HeaderState::Data;
-                                    Some((IDX_DECLARATION, 0))
-                                }
-                                TokenKind::Rule => {
-                                    state = HeaderState::Rule;
-                                    Some((IDX_DECLARATION, 0))
-                                }
-                                _ => unreachable!("BUG: matched declaration but not in match arm"),
-                            }
-                        } else if matches!(tok.kind, TokenKind::Uses | TokenKind::Meta) {
-                            Some((IDX_DECLARATION, 0))
-                        } else {
-                            Some((IDX_CONTROL, 0))
-                        }
+                        Some((IDX_CONTROL, 0))
                     } else {
                         Some((IDX_DATA_BODY, 0))
                     }
                 }
 
                 HeaderState::DataBodyAfterArrow => {
-                    state = HeaderState::DataBody;
-                    if tok.kind == TokenKind::Identifier {
-                        if lemma::try_parse_type_constraint_command(&tok.text).is_some() {
-                            Some((IDX_KEYWORD, 0))
-                        } else {
-                            Some((IDX_DATA_BODY, 0))
-                        }
+                    if tok.kind == TokenKind::Key {
+                        row_mode = RowMode::None;
+                        state = HeaderState::KeyFields;
+                        Some((IDX_KEYWORD, 0))
+                    } else if tok.kind == TokenKind::Identifier
+                        && lemma::try_parse_type_constraint_command(tok.text.of(text)).is_some()
+                    {
+                        row_mode = RowMode::None;
+                        state = HeaderState::DataBody;
+                        Some((IDX_KEYWORD, 0))
                     } else if matches!(tok.kind, TokenKind::Lower | TokenKind::Upper) {
                         // Lexer keywords, not Identifier — still TypeConstraintCommand spellings.
+                        row_mode = RowMode::None;
+                        state = HeaderState::DataBody;
                         Some((IDX_KEYWORD, 0))
                     } else if tok.kind == TokenKind::Commentary {
                         Some((IDX_COMMENT, 0))
                     } else if is_type_keyword(&tok.kind) {
+                        row_mode = RowMode::None;
+                        state = HeaderState::DataBody;
                         Some((IDX_KEYWORD, 0))
                     } else if tok.kind == TokenKind::Arrow {
                         state = HeaderState::DataBodyAfterArrow;
                         Some((IDX_OPERATOR, 0))
-                    } else if type_in_body(&tok.kind) == Some(IDX_CONTROL)
-                        || matches!(
-                            tok.kind,
-                            TokenKind::Spec
-                                | TokenKind::Data
-                                | TokenKind::With
-                                | TokenKind::Rule
-                                | TokenKind::Uses
-                                | TokenKind::Meta
-                        )
-                    {
+                    } else if is_data_region_control(&tok.kind) {
+                        row_mode = RowMode::None;
                         state = HeaderState::None;
-                        if matches!(
-                            tok.kind,
-                            TokenKind::Spec | TokenKind::Data | TokenKind::With | TokenKind::Rule
-                        ) {
-                            match tok.kind {
-                                TokenKind::Spec => {
-                                    state = HeaderState::Spec;
-                                    Some((IDX_DECLARATION, 0))
-                                }
-                                TokenKind::Data => {
-                                    state = HeaderState::Data;
-                                    Some((IDX_DECLARATION, 0))
-                                }
-                                TokenKind::With => {
-                                    state = HeaderState::Data;
-                                    Some((IDX_DECLARATION, 0))
-                                }
-                                TokenKind::Rule => {
-                                    state = HeaderState::Rule;
-                                    Some((IDX_DECLARATION, 0))
-                                }
-                                _ => unreachable!("BUG: matched declaration but not in match arm"),
-                            }
-                        } else if matches!(tok.kind, TokenKind::Uses | TokenKind::Meta) {
-                            Some((IDX_DECLARATION, 0))
-                        } else {
-                            Some((IDX_CONTROL, 0))
-                        }
+                        Some((IDX_CONTROL, 0))
                     } else {
+                        row_mode = RowMode::None;
+                        state = HeaderState::DataBody;
                         Some((IDX_DATA_BODY, 0))
                     }
                 }
+
+                HeaderState::KeyFields => match tok.kind {
+                    TokenKind::Identifier => Some((IDX_PROPERTY, 0)),
+                    TokenKind::Dot => None,
+                    TokenKind::Comma => Some((IDX_PUNCTUATION, 0)),
+                    TokenKind::Arrow => {
+                        state = HeaderState::DataBodyAfterArrow;
+                        Some((IDX_OPERATOR, 0))
+                    }
+                    TokenKind::Commentary => Some((IDX_COMMENT, 0)),
+                    _ if is_data_region_control(&tok.kind) => {
+                        state = HeaderState::None;
+                        Some((IDX_CONTROL, 0))
+                    }
+                    _ => Some((IDX_DATA_BODY, 0)),
+                },
+
+                HeaderState::WithNames => match tok.kind {
+                    TokenKind::Identifier => Some((IDX_REFERENCE, 0)),
+                    TokenKind::Dot => Some((IDX_REFERENCE, 0)),
+                    TokenKind::Comma => Some((IDX_PUNCTUATION, 0)),
+                    TokenKind::Arrow => {
+                        state = HeaderState::DataBodyAfterArrow;
+                        Some((IDX_OPERATOR, 0))
+                    }
+                    TokenKind::Commentary => Some((IDX_COMMENT, 0)),
+                    _ if is_data_region_control(&tok.kind) => {
+                        state = HeaderState::None;
+                        Some((IDX_CONTROL, 0))
+                    }
+                    _ => {
+                        state = HeaderState::DataBody;
+                        Some((IDX_DATA_BODY, 0))
+                    }
+                },
 
                 HeaderState::Rule => {
                     if is_name_token(&tok.kind) {
@@ -485,17 +595,17 @@ pub fn tokenize(text: &str) -> Vec<SemanticToken> {
         // Commentary and string-literal token text excludes delimiters but the
         // span covers them. Reconstruct the full visual text so lengths match
         // the highlighted range.
-        let full_delimited;
+        let full_delimited: String;
         let display_text = match tok.kind {
             TokenKind::Commentary => {
-                full_delimited = format!("\"\"\"{}\"\"\"", tok.text);
-                &full_delimited
+                full_delimited = format!("\"\"\"{}\"\"\"", tok.text.of(text));
+                full_delimited.as_str()
             }
             TokenKind::StringLit => {
-                full_delimited = format!("\"{}\"", tok.text);
-                &full_delimited
+                full_delimited = format!("\"{}\"", tok.text.of(text));
+                full_delimited.as_str()
             }
-            _ => &tok.text,
+            _ => tok.text.of(text),
         };
 
         prev_token_kind = Some(tok.kind);
@@ -1025,6 +1135,251 @@ mod tests {
                 IDX_OPERATOR,
                 IDX_KEYWORD,
                 IDX_DATA_BODY,
+            ]
+        );
+    }
+
+    #[test]
+    fn data_type_names_list_and_range() {
+        assert_eq!(
+            token_types("data staff: employee list"),
+            vec![
+                IDX_DECLARATION,
+                IDX_PROPERTY,
+                IDX_PUNCTUATION,
+                IDX_REFERENCE,
+                IDX_KEYWORD,
+            ]
+        );
+        assert_eq!(
+            token_types("data ordered: menu_item.drink"),
+            vec![
+                IDX_DECLARATION,
+                IDX_PROPERTY,
+                IDX_PUNCTUATION,
+                IDX_REFERENCE,
+                IDX_REFERENCE,
+                IDX_REFERENCE,
+            ]
+        );
+        assert_eq!(
+            token_types("data band: money range"),
+            vec![
+                IDX_DECLARATION,
+                IDX_PROPERTY,
+                IDX_PUNCTUATION,
+                IDX_REFERENCE,
+                IDX_KEYWORD,
+            ]
+        );
+        assert_eq!(
+            token_types("data fares: money list"),
+            vec![
+                IDX_DECLARATION,
+                IDX_PROPERTY,
+                IDX_PUNCTUATION,
+                IDX_REFERENCE,
+                IDX_KEYWORD,
+            ]
+        );
+    }
+
+    #[test]
+    fn range_in_rule_body_stays_reference() {
+        assert_eq!(
+            token_types("rule span: range"),
+            vec![
+                IDX_DECLARATION,
+                IDX_FUNCTION,
+                IDX_PUNCTUATION,
+                IDX_REFERENCE,
+            ]
+        );
+    }
+
+    #[test]
+    fn instance_list_key_fields_are_properties() {
+        assert_eq!(
+            token_types("data rates: rate list\n  -> key band, price"),
+            vec![
+                IDX_DECLARATION,
+                IDX_PROPERTY,
+                IDX_PUNCTUATION,
+                IDX_REFERENCE, // rate
+                IDX_KEYWORD,   // list
+                IDX_OPERATOR,
+                IDX_KEYWORD, // key
+                IDX_PROPERTY,
+                IDX_PUNCTUATION,
+                IDX_PROPERTY,
+            ]
+        );
+    }
+
+    #[test]
+    fn multiline_with_row_colors_every_field() {
+        let text = "\
+data rijen: schaal list
+  -> with
+    bijlage: \"VI\",
+    schaal: \"G\",
+    jaren: 16,
+    bedrag: 9.76 eur
+  -> with bijlage: \"VI\", schaal: \"H\"";
+        assert_eq!(
+            token_types(text),
+            vec![
+                IDX_DECLARATION,
+                IDX_PROPERTY,
+                IDX_PUNCTUATION,
+                IDX_REFERENCE, // schaal
+                IDX_KEYWORD,   // list
+                IDX_OPERATOR,
+                IDX_DECLARATION, // with
+                IDX_PROPERTY,    // bijlage
+                IDX_PUNCTUATION,
+                IDX_DATA_BODY,   // "VI"
+                IDX_PUNCTUATION, // ,
+                IDX_PROPERTY,    // schaal
+                IDX_PUNCTUATION,
+                IDX_DATA_BODY, // "G"
+                IDX_PUNCTUATION,
+                IDX_PROPERTY, // jaren
+                IDX_PUNCTUATION,
+                IDX_DATA_BODY, // 16
+                IDX_PUNCTUATION,
+                IDX_PROPERTY, // bedrag
+                IDX_PUNCTUATION,
+                IDX_DATA_BODY, // 9.76
+                IDX_DATA_BODY, // eur
+                IDX_OPERATOR,
+                IDX_DECLARATION, // with
+                IDX_PROPERTY,    // bijlage
+                IDX_PUNCTUATION,
+                IDX_DATA_BODY, // "VI"
+                IDX_PUNCTUATION,
+                IDX_PROPERTY, // schaal
+                IDX_PUNCTUATION,
+                IDX_DATA_BODY, // "H"
+            ]
+        );
+    }
+
+    #[test]
+    fn dotted_with_field_pairs() {
+        assert_eq!(
+            token_types(
+                "data rows: item list\n  -> with item.price: 2.50 eur, item.name: \"latte\""
+            ),
+            vec![
+                IDX_DECLARATION,
+                IDX_PROPERTY,
+                IDX_PUNCTUATION,
+                IDX_REFERENCE, // item
+                IDX_KEYWORD,   // list
+                IDX_OPERATOR,
+                IDX_DECLARATION, // with
+                IDX_PROPERTY,    // product
+                IDX_PROPERTY,    // price (dot is transparent)
+                IDX_PUNCTUATION,
+                IDX_DATA_BODY, // 2.50
+                IDX_DATA_BODY, // eur
+                IDX_PUNCTUATION,
+                IDX_PROPERTY, // product
+                IDX_PROPERTY, // name
+                IDX_PUNCTUATION,
+                IDX_DATA_BODY, // "latte"
+            ]
+        );
+    }
+
+    #[test]
+    fn value_list_with_row_stays_data_body() {
+        assert_eq!(
+            token_types("data fares: money list\n  -> with 89 eur, 120 eur"),
+            vec![
+                IDX_DECLARATION,
+                IDX_PROPERTY,
+                IDX_PUNCTUATION,
+                IDX_REFERENCE,
+                IDX_KEYWORD,
+                IDX_OPERATOR,
+                IDX_DECLARATION,
+                IDX_DATA_BODY, // 89
+                IDX_DATA_BODY, // eur
+                IDX_DATA_BODY, // ,
+                IDX_DATA_BODY, // 120
+                IDX_DATA_BODY, // eur
+            ]
+        );
+        assert_eq!(
+            token_types("data qty: number -> with 50"),
+            vec![
+                IDX_DECLARATION,
+                IDX_PROPERTY,
+                IDX_PUNCTUATION,
+                IDX_KEYWORD,
+                IDX_OPERATOR,
+                IDX_DECLARATION,
+                IDX_DATA_BODY,
+            ]
+        );
+    }
+
+    #[test]
+    fn named_instance_with_row_is_reference() {
+        assert_eq!(
+            token_types("data staff: employee list\n  -> with ada, grace"),
+            vec![
+                IDX_DECLARATION,
+                IDX_PROPERTY,
+                IDX_PUNCTUATION,
+                IDX_REFERENCE, // employee
+                IDX_KEYWORD,   // list
+                IDX_OPERATOR,
+                IDX_DECLARATION, // with
+                IDX_REFERENCE,   // ada
+                IDX_PUNCTUATION,
+                IDX_REFERENCE, // grace
+            ]
+        );
+    }
+
+    #[test]
+    fn rule_list_query_stays_keyword() {
+        assert_eq!(
+            token_types("rule total: rows -> sum"),
+            vec![
+                IDX_DECLARATION,
+                IDX_FUNCTION,
+                IDX_PUNCTUATION,
+                IDX_REFERENCE,
+                IDX_OPERATOR,
+                IDX_KEYWORD,
+            ]
+        );
+    }
+
+    #[test]
+    fn sealed_catalog_with_row_colors_fields() {
+        assert_eq!(
+            token_types("rule catalog: employee list\n  -> with name: \"Ada\", salary: 9000 eur"),
+            vec![
+                IDX_DECLARATION,
+                IDX_FUNCTION,
+                IDX_PUNCTUATION,
+                IDX_REFERENCE, // employee
+                IDX_KEYWORD,   // list
+                IDX_OPERATOR,
+                IDX_DECLARATION, // with
+                IDX_PROPERTY,    // name
+                IDX_PUNCTUATION,
+                IDX_DATA_BODY, // "Ada"
+                IDX_PUNCTUATION,
+                IDX_PROPERTY, // salary
+                IDX_PUNCTUATION,
+                IDX_DATA_BODY, // 9000
+                IDX_DATA_BODY, // eur
             ]
         );
     }

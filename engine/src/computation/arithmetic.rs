@@ -2,18 +2,59 @@
 
 use crate::computation::operation_result::{OperationResult, VetoType};
 use crate::computation::rational::{
-    checked_div, checked_mul, rational_operation, rational_operation_with_fallback, NumericFailure,
-    NumericOperation, RationalInteger,
+    rational_operation, rational_operation_with_fallback, NumericFailure, NumericOperation,
+    RationalInteger,
 };
 use crate::planning::semantics::{
-    ArithmeticComputation, BoundValueKind, LemmaType, LiteralValue, TypedLiteral, ValueKind,
+    ArithmeticComputation, BoundValueKind, LemmaType, LiteralValue, TypeFamily, TypedLiteral,
+    ValueKind,
 };
 use indexmap::IndexMap;
+use serde::Serialize;
 use std::sync::Arc;
 
-/// Reverse index mapping a canonical-form unit signature `Vec<(unit_name, exponent)>`
-/// to the unit (by name) and its owning measure type. Built during planning.
-pub type SignatureIndex = IndexMap<Vec<(String, i32)>, (String, Arc<LemmaType>)>;
+/// One resolved unit in a signature: declared name, owning family, exponent.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize)]
+pub struct SignatureFactor {
+    pub name: String,
+    pub family: TypeFamily,
+    pub exponent: i32,
+}
+
+/// Reverse index mapping a resolved unit signature to the unit (by name) and its owning measure type.
+pub type SignatureIndex = IndexMap<Vec<SignatureFactor>, (String, Arc<LemmaType>)>;
+
+/// Find the one indexed unit whose factor names and exponents match `names`.
+/// Two families with the same names are not one unit.
+pub(crate) fn find_by_names<'a>(
+    index: &'a SignatureIndex,
+    names: &[(String, i32)],
+) -> Option<&'a (String, Arc<LemmaType>)> {
+    let mut matched = None;
+    for (factors, value) in index.iter() {
+        if factors.len() != names.len() {
+            continue;
+        }
+        let mut left: Vec<(&str, i32)> = factors
+            .iter()
+            .map(|factor| (factor.name.as_str(), factor.exponent))
+            .collect();
+        let mut right: Vec<(&str, i32)> = names
+            .iter()
+            .map(|(name, exponent)| (name.as_str(), *exponent))
+            .collect();
+        left.sort();
+        right.sort();
+        if left != right {
+            continue;
+        }
+        if matched.is_some() {
+            return None;
+        }
+        matched = Some(value);
+    }
+    matched
+}
 
 struct CalendarRangeShiftIndexes<'a> {
     signature_index: &'a SignatureIndex,
@@ -391,26 +432,34 @@ pub(crate) fn scalar_arithmetic(
             right_type,
         ),
 
-        // Number op Ratio → Number (multiply is symmetric; divide/power/modulo preserve order)
-        (ValueKind::Number(n), ValueKind::Ratio(r)) => match number_ratio_arithmetic(n, op, r) {
-            Ok(rational) => OperationResult::from_literal(LiteralValue::number(rational)),
-            Err(failure) => OperationResult::Veto(VetoType::computation(failure.message())),
-        },
+        // Number op Ratio → Number (multiply is symmetric; divide/power preserve order)
+        (ValueKind::Number(n), ValueKind::Ratio(r)) => {
+            if matches!(op, ArithmeticComputation::Modulo) {
+                unreachable!("BUG: number modulo ratio is rejected during planning");
+            }
+            match number_ratio_arithmetic(n, op, r) {
+                Ok(rational) => OperationResult::from_literal(LiteralValue::number(rational)),
+                Err(failure) => OperationResult::Veto(VetoType::computation(failure.message())),
+            }
+        }
         // Ratio op Number → result type depends on operator
         (ValueKind::Ratio(r), ValueKind::Number(n)) => match op {
             ArithmeticComputation::Multiply => match number_ratio_arithmetic(r, op, n) {
                 Ok(rational) => OperationResult::from_literal(LiteralValue::number(rational)),
                 Err(failure) => OperationResult::Veto(VetoType::computation(failure.message())),
             },
-            ArithmeticComputation::Divide
-            | ArithmeticComputation::Power
-            | ArithmeticComputation::Modulo => match number_ratio_arithmetic(r, op, n) {
-                Ok(rational) => OperationResult::from_bound(BoundValueKind {
-                    value: ValueKind::Ratio(rational),
-                    unit: left.unit.clone(),
-                }),
-                Err(failure) => OperationResult::Veto(VetoType::computation(failure.message())),
-            },
+            ArithmeticComputation::Modulo => {
+                unreachable!("BUG: ratio modulo number is rejected during planning");
+            }
+            ArithmeticComputation::Divide | ArithmeticComputation::Power => {
+                match number_ratio_arithmetic(r, op, n) {
+                    Ok(rational) => OperationResult::from_bound(BoundValueKind {
+                        value: ValueKind::Ratio(rational),
+                        unit: left.unit.clone(),
+                    }),
+                    Err(failure) => OperationResult::Veto(VetoType::computation(failure.message())),
+                }
+            }
             _ => unreachable!(
                 "BUG: ratio {:?} number; add/subtract rejected during planning",
                 op
@@ -418,16 +467,21 @@ pub(crate) fn scalar_arithmetic(
         },
 
         // Ratio op Ratio → Ratio
-        (ValueKind::Ratio(l), ValueKind::Ratio(r)) => match number_arithmetic(l, op, r) {
-            Ok(rational) => OperationResult::from_bound(BoundValueKind {
-                value: ValueKind::Ratio(rational),
-                unit: BoundValueKind::agree_or_left_binding(
-                    left.unit.as_ref(),
-                    right.unit.as_ref(),
-                ),
-            }),
-            Err(failure) => OperationResult::Veto(VetoType::computation(failure.message())),
-        },
+        (ValueKind::Ratio(l), ValueKind::Ratio(r)) => {
+            if matches!(op, ArithmeticComputation::Modulo) {
+                unreachable!("BUG: ratio modulo ratio is rejected during planning");
+            }
+            match number_arithmetic(l, op, r) {
+                Ok(rational) => OperationResult::from_bound(BoundValueKind {
+                    value: ValueKind::Ratio(rational),
+                    unit: BoundValueKind::agree_or_left_binding(
+                        left.unit.as_ref(),
+                        right.unit.as_ref(),
+                    ),
+                }),
+                Err(failure) => OperationResult::Veto(VetoType::computation(failure.message())),
+            }
+        }
         // Measure operations with Measure
         (ValueKind::Measure(l_val), ValueKind::Measure(r_val)) => {
             if left_type.is_calendar_like() != right_type.is_calendar_like() {
@@ -654,46 +708,42 @@ pub(crate) fn scalar_arithmetic(
             ),
         },
 
-        // Measure op Number → Measure (preserves unit)
-        (ValueKind::Measure(measure_val), ValueKind::Number(n)) => {
-            let rational = if matches!(
-                op,
-                ArithmeticComputation::Modulo | ArithmeticComputation::Power
-            ) {
-                let left_sig = left_type.measure_runtime_signature();
-                let (unit_name, exponent) = left_sig
-                    .first()
-                    .expect("BUG: measure modulo number requires single-term signature");
-                if *exponent != 1 {
+        // Measure op Number. Multiply and divide keep the operand unit. Power scales
+        // the composition, so the magnitude is unbound and the stamped type names the unit.
+        // Exponent 0 is the number 1. Modulo of a measure is a planning error.
+        (ValueKind::Measure(measure_val), ValueKind::Number(n)) => match op {
+            ArithmeticComputation::Multiply
+            | ArithmeticComputation::Divide
+            | ArithmeticComputation::Add
+            | ArithmeticComputation::Subtract => match number_arithmetic(measure_val, op, n) {
+                Ok(rational) => OperationResult::from_bound(BoundValueKind {
+                    value: ValueKind::Measure(rational),
+                    unit: left.unit.clone(),
+                }),
+                Err(failure) => OperationResult::Veto(VetoType::computation(failure.message())),
+            },
+            ArithmeticComputation::Power => {
+                if !n.is_integer() {
                     unreachable!(
-                        "BUG: measure modulo number with compound signature; planning must reject"
+                        "BUG: measure power with a non-integer exponent is rejected during planning"
                     );
                 }
-                let factor = left_type.measure_unit_factor(unit_name);
-                let in_unit = checked_div(measure_val, factor)
-                    .expect("BUG: measure de-canonicalization for modulo must not fail");
-                let modded = match number_arithmetic(&in_unit, op, n) {
-                    Ok(value) => value,
-                    Err(failure) => {
-                        return OperationResult::Veto(VetoType::computation(failure.message()))
-                    }
-                };
-                checked_mul(&modded, factor)
-                    .expect("BUG: measure re-canonicalization after modulo must not fail")
-            } else {
                 match number_arithmetic(measure_val, op, n) {
-                    Ok(value) => value,
-                    Err(failure) => {
-                        return OperationResult::Veto(VetoType::computation(failure.message()))
+                    Ok(rational) if n.numer_is_zero() => {
+                        OperationResult::from_literal(LiteralValue::number(rational))
                     }
+                    Ok(rational) => OperationResult::from_bound(BoundValueKind::unbound(
+                        ValueKind::Measure(rational),
+                    )),
+                    Err(failure) => OperationResult::Veto(VetoType::computation(failure.message())),
                 }
-            };
-            OperationResult::from_bound(BoundValueKind {
-                value: ValueKind::Measure(rational),
-                unit: left.unit.clone(),
-            })
-        }
-        // Number op Measure → Measure for multiply; for divide, negate signature if anonymous measure.
+            }
+            ArithmeticComputation::Modulo => {
+                unreachable!("BUG: measure modulo number is rejected during planning")
+            }
+        },
+        // Number op Measure → Measure for multiply; for divide, keep inverse dimensions
+        // as an unbound measure until a later cancel or signature hit.
         (ValueKind::Number(n), ValueKind::Measure(measure_val)) => match op {
             ArithmeticComputation::Multiply => match number_arithmetic(n, op, measure_val) {
                 Ok(rational) => OperationResult::from_bound(BoundValueKind {
@@ -703,28 +753,6 @@ pub(crate) fn scalar_arithmetic(
                 Err(failure) => OperationResult::Veto(VetoType::computation(failure.message())),
             },
             ArithmeticComputation::Divide => {
-                if right_type.is_duration_like_measure() || right_type.is_calendar_like() {
-                    let right_sig = right_type.measure_runtime_signature();
-                    let (unit_name, exponent) = right_sig.first().expect(
-                        "BUG: number divide duration-like measure requires single-term signature",
-                    );
-                    if *exponent != 1 {
-                        unreachable!(
-                            "BUG: number divide duration-like measure with compound signature; planning must reject"
-                        );
-                    }
-                    let factor = right_type.measure_unit_factor(unit_name);
-                    let in_unit = checked_div(measure_val, factor)
-                        .expect("BUG: measure de-canonicalization for divide must not fail");
-                    return match number_arithmetic(n, op, &in_unit) {
-                        Ok(rational) => {
-                            OperationResult::from_literal(LiteralValue::number(rational))
-                        }
-                        Err(failure) => {
-                            OperationResult::Veto(VetoType::computation(failure.message()))
-                        }
-                    };
-                }
                 let measure_decomp = right_type
                     .measure_type_decomposition()
                     .expect("BUG: decomposition must be resolved after planning");
@@ -744,7 +772,7 @@ pub(crate) fn scalar_arithmetic(
                     match number_arithmetic(n, op, measure_val) {
                         Ok(rational) => {
                             if let Some((unit_name, owning_type)) =
-                                signature_index.get(&negated_signature)
+                                find_by_names(signature_index, &negated_signature)
                             {
                                 let target_factor =
                                     owning_type.measure_unit_factor(unit_name).clone();
@@ -760,7 +788,9 @@ pub(crate) fn scalar_arithmetic(
                                     )),
                                 }
                             } else {
-                                OperationResult::from_literal(LiteralValue::number(rational))
+                                OperationResult::from_bound(BoundValueKind::unbound(
+                                    ValueKind::Measure(rational),
+                                ))
                             }
                         }
                         Err(failure) => {
@@ -769,25 +799,15 @@ pub(crate) fn scalar_arithmetic(
                     }
                 }
             }
-            ArithmeticComputation::Modulo => {
-                let right_sig = right_type.measure_runtime_signature();
-                let (unit_name, exponent) = right_sig
-                    .first()
-                    .expect("BUG: number modulo measure requires single-term signature");
-                if *exponent != 1 {
-                    unreachable!(
-                        "BUG: number modulo measure with compound signature; planning must reject"
-                    );
-                }
-                let factor = right_type.measure_unit_factor(unit_name);
-                let in_unit = checked_div(measure_val, factor)
-                    .expect("BUG: measure de-canonicalization for modulo must not fail");
-                number_op_on_stored_rationals(n, op, &in_unit)
+            ArithmeticComputation::Modulo
+            | ArithmeticComputation::Add
+            | ArithmeticComputation::Subtract
+            | ArithmeticComputation::Power => {
+                unreachable!(
+                    "BUG: Number {:?} Measure should be rejected during planning",
+                    op
+                )
             }
-            _ => unreachable!(
-                "BUG: Number {:?} Measure should be rejected during planning",
-                op
-            ),
         },
         _ => unreachable!(
             "BUG: arithmetic {:?} for {:?} and {:?}; planning should have rejected this",

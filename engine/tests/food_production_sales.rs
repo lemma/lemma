@@ -94,8 +94,6 @@ uses lemma units
 
 data money: measure
   -> unit eur: 1.00
-  -> decimals 2
-
 data unit_price: measure
   -> unit eur_per_kg: eur/kilogram
 
@@ -127,7 +125,7 @@ rule batch_ingredient_cost: flour_cost + sugar_cost
 
     // flour_cost = 2.4 kg * 0.75 eur/kg = 1.80 eur
     let fc = display(&resp, "flour_cost");
-    assert_eq!(fc, "1.80 eur", "flour cost for 2.4kg");
+    assert_eq!(fc, "1.8 eur", "flour cost for 2.4kg");
 
     // sugar_cost = 800 g * 0.95 eur/kg = 0.76 eur (cross-unit mass multiply)
     let sc = display(&resp, "sugar_cost");
@@ -161,7 +159,7 @@ data reject_rate: 5%
 data cookies_per_box: 12
 
 rule good_cookies: batch_size - reject_rate * batch_size
-rule full_boxes: floor(good_cookies / cookies_per_box)
+rule full_boxes: good_cookies / cookies_per_box -> floor
 rule leftover_cookies: good_cookies mod cookies_per_box
 "#
             .to_string(),
@@ -468,8 +466,6 @@ data money: measure
   -> unit eur: 1.00
   -> unit usd: 0.91
   -> unit gbp: 1.17
-  -> decimals 2
-
 data base_price: 24.50 eur
 
 rule price_usd: base_price as usd
@@ -542,7 +538,7 @@ uses r: recipe
 
 data customer_order_quantity: number -> minimum 1
 
-rule batches_needed: ceil(customer_order_quantity / r.net_yield)
+rule batches_needed: customer_order_quantity / r.net_yield -> ceil
 rule total_production: batches_needed * r.yield_per_batch
 rule expected_waste: total_production * r.reject_rate
 "#
@@ -679,7 +675,7 @@ data max_boxes_per_pallet: 24
 data max_pallet_weight: 500 kilogram
 data pallets_per_truck: 26
 
-rule boxes_by_weight: floor((max_pallet_weight as kilogram as number) / (box_weight as kilogram as number))
+rule boxes_by_weight: (max_pallet_weight as kilogram as number) / (box_weight as kilogram as number) -> floor
 rule boxes_by_count: max_boxes_per_pallet
 
 rule weight_is_limiting: boxes_by_weight < boxes_by_count

@@ -35,7 +35,6 @@ spec shipping
 data money: measure
   -> unit eur: 1.00
   -> unit usd: 0.91
-  -> decimals 2
   -> minimum 0 eur
 
 data weight: measure
@@ -61,7 +60,7 @@ rule total_cost:
 Three building blocks appear here:
 
 - `spec` names the Rule set.
-- `data` defines inputs with types and constraints (`-> unit`, `-> decimals`, `-> minimum`).
+- `data` defines inputs with types and constraints (`-> unit`, `-> minimum`).
 - `rule` computes values; `unless` clauses add conditional logic (the last matching condition wins).
 
 There is no inline comment syntax. The only in-source documentation is a commentary block: triple-quoted `"""..."""` placed immediately after the Spec line. The syntax relies on keywords instead of colons or brackets. Indentation is for readability only; newlines are optional. Apply the standard format with:
@@ -100,7 +99,7 @@ Output:
 ┌───────────────┬───────────┐
 │ base_shipping ┆ 15.99 eur │
 ├───────────────┼───────────┤
-│ express_fee   ┆ 0.00 eur  │
+│ express_fee   ┆ 0 eur     │
 ├───────────────┼───────────┤
 │ total_cost    ┆ 15.99 eur │
 └───────────────┴───────────┘

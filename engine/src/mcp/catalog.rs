@@ -48,7 +48,7 @@ fn evaluate_input_schema() -> serde_json::Value {
             },
             "data": {
                 "type": "object",
-                "description": "Optional input bindings. Strings, booleans, single-unit maps ({\"eur\": \"84\"}), arrays. A list (Show type kind `list`) is one array that replaces all its rows: items of a value list are literals ([\"89 eur\", \"120 eur\"]), rows of an instance list are objects keyed by the row spec's data names ([{\"price\": \"2\", \"qty\": \"3\"}]), a nested list inside a row is again an array. A missing row field such as `lines.2.qty` is bound by sending the whole `lines` array again, never as a dotted key. JSON numbers are rejected; pass decimals as strings. Partial is fine.",
+                "description": "Optional input bindings. Strings, booleans, single-unit maps ({\"eur\": \"84\"}), arrays. A list (Show type kind `list`) accepts a whole-array replace: items of a value list are literals ([\"89 eur\", \"120 eur\"]), rows of an instance list are objects keyed by the row spec's data names ([{\"price\": \"2\", \"qty\": \"3\"}]), a nested list inside a row is again an array. Unbound row fields may also be supplied as dotted keys matching ask keys (`lines.2.qty`). Sending both the whole list and a dotted key for the same list in one request is an error. JSON numbers are rejected; pass decimals as strings. Partial is fine.",
                 "additionalProperties": true
             },
             "effective": {

@@ -4,13 +4,16 @@ use lemma_lsp::semantic_tokens::TOKEN_TYPES;
 
 const EXPECTED_TOKEN_COUNT: usize = 13;
 
+fn repo_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("BUG: xtask directory has no parent")
+        .to_path_buf()
+}
+
 #[test]
 fn monaco_js_token_types_sync() {
-    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let monaco_path = manifest_dir
-        .parent()
-        .unwrap()
-        .join("packages/npm/monaco.js");
+    let monaco_path = repo_root().join("engine/packages/npm/monaco.js");
 
     let monaco_content = std::fs::read_to_string(&monaco_path)
         .unwrap_or_else(|e| panic!("Failed to read monaco.js at {:?}: {}", monaco_path, e));
@@ -90,8 +93,7 @@ fn monaco_js_token_types_sync() {
 
 #[test]
 fn vscode_package_json_sync() {
-    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let package_json_path = manifest_dir.join("editors/vscode/package.json");
+    let package_json_path = repo_root().join("engine/lsp/editors/vscode/package.json");
 
     let package_json_content = std::fs::read_to_string(&package_json_path).unwrap_or_else(|e| {
         panic!(

@@ -10,7 +10,7 @@ nav_order: 60
 ## Install
 
 ```bash
-dotnet add package Lemmabase.Lemma.Engine --version 0.10.2
+dotnet add package Lemmabase.Lemma.Engine --version 0.10.3
 ```
 
 ## Usage
@@ -60,24 +60,15 @@ engine.Load(new Dictionary<string, string> { [result.Id] = result.Source });
 |--------|-------------|
 | `Engine.Create` / `Create(limits)` | Create engine (optional sparse limits builder) |
 | `Engine.Limits` | Current resource limits |
-| `Engine.Snapshot` / `FromSnapshot` | Opaque bytes of parsed specs + plans + limits |
 | `Engine.Load` | Load sources: string, label map, or `FileInfo` |
 | `Engine.Install` | Download a repository from LemmaBase; does not load and does not write `lemma_deps/` |
 | `Engine.List` | List loaded specs |
 | `Engine.Source` | Formatted Lemma source |
-| `Engine.Show` | Declared data catalog + rule graph (nested types stay as `JsonElement`) |
+| `Engine.Show` | Draft 2020-12 JSON Schema for the evaluation data (`Json`), read into `Data` (`properties`), `Required`, `Rows` (`$defs`), `RowFieldNeededByRules`, `Types` and `Rules`; Lemma types, values and expressions stay as `JsonElement` |
 | `Engine.Run` | Evaluate via `RunRequest` (`WithData`, `WithRules`, `WithExplain`, …). Rejects `float`/`double`. |
 | `Engine.Remove` / `Update` | Temporal remove / atomic upsert |
 | `Engine.Quality` | Structural quality recommendations (advisory) |
 | `Engine.Format` | Format Lemma source (static; not `Lemma.Format` to avoid CS0542) |
-
-Persist and restore without re-parsing:
-
-```csharp
-byte[] bytes = engine.Snapshot();
-File.WriteAllBytes("engine.lems", bytes);
-using var restored = Engine.FromSnapshot(File.ReadAllBytes("engine.lems"));
-```
 
 ## Failure modes
 

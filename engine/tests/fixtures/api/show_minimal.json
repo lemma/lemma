@@ -71,7 +71,6 @@
       "kind": "measure",
       "minimum": null,
       "maximum": null,
-      "decimals": null,
       "units": [
         {
           "name": "eur",

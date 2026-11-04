@@ -367,41 +367,6 @@ fn lemma_limits<'a>(
 }
 
 #[rustler::nif]
-fn lemma_snapshot<'a>(
-    env: Env<'a>,
-    resource: ResourceArc<LemmaEngineResource>,
-) -> NifResult<Term<'a>> {
-    let engine = resource.0.lock().map_err(|_| poisoned_engine_lock())?;
-    match engine.snapshot() {
-        Ok(bytes) => {
-            let mut owned = OwnedBinary::new(bytes.len())
-                .ok_or_else(|| rustler::Error::RaiseTerm(Box::new("out of memory".to_string())))?;
-            owned.as_mut_slice().copy_from_slice(&bytes);
-            let binary = rustler::Binary::from_owned(owned, env);
-            Ok((rustler::Atom::from_str(env, "ok")?, binary).encode(env))
-        }
-        Err(err) => {
-            let term = encode_error(env, &err)?;
-            Ok((rustler::Atom::from_str(env, "error")?, term).encode(env))
-        }
-    }
-}
-
-#[rustler::nif]
-fn lemma_from_snapshot<'a>(env: Env<'a>, bytes: Binary) -> NifResult<Term<'a>> {
-    match Engine::from_snapshot(bytes.as_slice()) {
-        Ok(engine) => {
-            let resource = ResourceArc::new(LemmaEngineResource(Mutex::new(engine)));
-            Ok((rustler::Atom::from_str(env, "ok")?, resource).encode(env))
-        }
-        Err(err) => {
-            let term = encode_error(env, &err)?;
-            Ok((rustler::Atom::from_str(env, "error")?, term).encode(env))
-        }
-    }
-}
-
-#[rustler::nif]
 fn lemma_quality<'a>(
     env: Env<'a>,
     resource: ResourceArc<LemmaEngineResource>,

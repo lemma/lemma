@@ -7,13 +7,14 @@ use std::sync::Arc;
 /// All spec versions sharing a (repository, name) identity, keyed by effective_from.
 ///
 /// The owning [`LemmaRepository`] is held by `Arc` so the set carries repository identity as
-/// a real memory reference instead of relying on string parsing.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+/// a real memory reference instead of relying on string parsing. Every spec version is an
+/// `Arc` so plans of a version share its allocation; a version replaced by an equal spec
+/// keeps its `Arc`, so an unchanged version is the same pointer across replans.
+#[derive(Debug, Clone)]
 pub struct LemmaSpecSet {
-    #[serde(with = "crate::snapshot::shared::arc")]
     pub repository: Arc<LemmaRepository>,
     pub name: String,
-    specs: BTreeMap<EffectiveDate, LemmaSpec>,
+    specs: BTreeMap<EffectiveDate, Arc<LemmaSpec>>,
 }
 
 impl LemmaSpecSet {
@@ -35,11 +36,30 @@ impl LemmaSpecSet {
     #[must_use]
     pub fn get_exact(&self, effective_from: Option<&DateTimeValue>) -> Option<&LemmaSpec> {
         let key = EffectiveDate::from_option(effective_from.cloned());
-        self.specs.get(&key)
+        self.specs.get(&key).map(AsRef::as_ref)
+    }
+
+    /// The owning `Arc` of `spec`, a version in this set.
+    pub(crate) fn spec_arc(&self, spec: &LemmaSpec) -> &Arc<LemmaSpec> {
+        self.specs
+            .get(&spec.effective_from)
+            .expect("BUG: spec_arc called with a spec not in its spec set")
     }
 
     /// Insert a spec. Returns `false` if the same `effective_from` already exists.
     pub fn insert(&mut self, spec: LemmaSpec) -> bool {
+        self.insert_replacing(spec, None)
+    }
+
+    /// Insert a spec that replaces a version taken out of this set. When the new spec
+    /// equals the replaced version, the version keeps that `Arc`, so plans built from
+    /// the replaced version keep sharing it instead of holding a stale copy.
+    /// Returns `false` if the same `effective_from` already exists.
+    pub(crate) fn insert_replacing(
+        &mut self,
+        spec: LemmaSpec,
+        replaced: Option<Arc<LemmaSpec>>,
+    ) -> bool {
         assert_eq!(
             spec.name, self.name,
             "BUG: spec name mismatch in LemmaSpecSet::insert"
@@ -48,18 +68,42 @@ impl LemmaSpecSet {
         if self.specs.contains_key(&key) {
             return false;
         }
-        self.specs.insert(key, spec);
+        let spec_arc = match replaced {
+            Some(replaced) if *replaced == spec => replaced,
+            Some(_) | None => Arc::new(spec),
+        };
+        self.specs.insert(key, spec_arc);
         true
+    }
+
+    /// Insert a version that is already an `Arc`, keeping its allocation (rollback of
+    /// [`Self::take`]). Returns `false` if the same `effective_from` already exists.
+    pub(crate) fn insert_owned(&mut self, spec: Arc<LemmaSpec>) -> bool {
+        assert_eq!(
+            spec.name, self.name,
+            "BUG: spec name mismatch in LemmaSpecSet::insert"
+        );
+        self.specs
+            .insert(spec.effective_from.clone(), spec)
+            .is_none()
     }
 
     /// Remove by `effective_from` key. Returns whether a row was removed.
     pub fn remove(&mut self, effective_from: Option<&DateTimeValue>) -> bool {
+        self.take(effective_from).is_some()
+    }
+
+    /// Remove by `effective_from` key, returning the removed spec `Arc`.
+    pub(crate) fn take(
+        &mut self,
+        effective_from: Option<&DateTimeValue>,
+    ) -> Option<Arc<LemmaSpec>> {
         let key = EffectiveDate::from_option(effective_from.cloned());
-        self.specs.remove(&key).is_some()
+        self.specs.remove(&key)
     }
 
     pub fn iter_specs(&self) -> impl Iterator<Item = &LemmaSpec> + '_ {
-        self.specs.values()
+        self.specs.values().map(AsRef::as_ref)
     }
 
     /// Every spec paired with its half-open `[effective_from, effective_to)` range.
@@ -87,7 +131,7 @@ impl LemmaSpecSet {
         self.specs
             .range(..=effective.clone())
             .next_back()
-            .map(|(_, spec)| spec)
+            .map(|(_, spec)| spec.as_ref())
     }
 
     /// Returns the effective range `[from, to)` for a spec in this set.

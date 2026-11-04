@@ -165,6 +165,8 @@ fn analyze_data(
         base,
         constraints,
         value: _,
+
+        list: None,
     } = &data.value
     else {
         return;
@@ -234,7 +236,7 @@ fn analyze_data(
     if is_primitive_text(base.as_ref()) && !has_option {
         out.push(Recommendation {
             message: format!(
-                "`{name}` accepts any text. Adding `-> option` values allows forms and APIs to offer choices."
+                "`{name}` accepts any text. Adding `-> option` values allows forms and APIs to offer options."
             ),
             repository,
             spec: spec.name.clone(),
@@ -397,7 +399,12 @@ fn walk_expr_for_ambiguous_and(
 ) {
     let mut pending = vec![expr];
     while let Some(node) = pending.pop() {
-        if let ExpressionKind::LogicalAnd { first, steps } = node.kind() {
+        if let ExpressionKind::Logical {
+            connective: crate::parsing::ast::LogicalConnective::And,
+            first,
+            steps,
+        } = node.kind()
+        {
             let first_step = steps
                 .first()
                 .expect("BUG: logical and chain must have at least one step");
@@ -744,7 +751,7 @@ rule ok: status is "active"
             .find(|r| r.message.contains("accepts any text") && r.message.contains("status"))
             .expect("text without options");
         assert!(
-            hit.message.contains("offer choices"),
+            hit.message.contains("offer options"),
             "got: {}",
             hit.message
         );

@@ -75,14 +75,12 @@ fn qualified_data_import_pins_to_referenced_version() {
 spec finance
 data money: measure
  -> unit eur: 1.00
- -> decimals 2
 data base_price: 50.00 eur
 
 spec finance 2025-07-01
 data money: measure
  -> unit eur: 1.00
  -> unit usd: 0.91
- -> decimals 2
 data base_price: 75.00 eur
 "#
             .to_string(),
@@ -112,7 +110,7 @@ rule doubled: price * 2
             vec![("price", "10.00 eur")],
         ),
         "doubled",
-        "20.00 eur",
+        "20 eur",
     );
 
     // Even after the boundary, the pin keeps us on v1 — still eur only.
@@ -124,7 +122,7 @@ rule doubled: price * 2
             vec![("price", "10.00 eur")],
         ),
         "doubled",
-        "20.00 eur",
+        "20 eur",
     );
 }
 
@@ -144,15 +142,11 @@ fn qualified_data_import_rejects_unit_from_later_version() {
 spec finance
 data money: measure
  -> unit eur: 1.00
- -> decimals 2
-
 spec finance 2025-07-01
 data money: measure
  -> unit eur: 1.00
- -> unit usd: 0.91
- -> decimals 2
-"#
-            .to_string(),
+ -> unit usd: 0.91"#
+                .to_string(),
         )])
         .unwrap();
 
@@ -179,7 +173,7 @@ rule doubled: price * 2
             vec![("price", "10.00 eur")],
         ),
         "doubled",
-        "20.00 eur",
+        "20 eur",
     );
 
     // usd must veto: pin locks to finance v1 which only has eur
@@ -216,15 +210,11 @@ fn unranged_spec_with_type_only_dep_rejects_incompatible_interface() {
 spec units
 data weight: measure
  -> unit kg: 1.00
- -> decimals 1
-
 spec units 2025-06-01
 data weight: measure
  -> unit kg: 1.00
- -> unit lb: 2.205
- -> decimals 1
-"#
-            .to_string(),
+ -> unit lb: 2.205"#
+                .to_string(),
         )])
         .unwrap();
 
@@ -275,14 +265,12 @@ fn mixed_spec_ref_and_data_import_to_same_dep() {
 spec finance
 data money: measure
  -> unit eur: 1.00
- -> decimals 2
 data base_price: 50.00 eur
 
 spec finance 2025-07-01
 data money: measure
  -> unit eur: 1.00
  -> unit usd: 0.91
- -> decimals 2
 data base_price: 75.00 eur
 "#
             .to_string(),
@@ -320,7 +308,7 @@ rule total: ref.base_price + price
             vec![("price", "10.00 eur")],
         ),
         "total",
-        "60.00 eur",
+        "60 eur",
     );
 
     // After boundary: finance v2, base_price=75, eur+usd available
@@ -332,12 +320,12 @@ rule total: ref.base_price + price
             vec![("price", "10.00 eur")],
         ),
         "total",
-        "85.00 eur",
+        "85 eur",
     );
 
     // After boundary: usd must be available from the qualified `f.money` type.
     // unit usd 0.91: 1 USD = 0.91 EUR; 10 USD => 9.10 EUR.
-    // 75.00 + 9.10 = 84.10 eur.
+    // 75 + 9.1 = 84.1 eur.
     assert_rule_value(
         &eval_with(
             &engine,
@@ -346,7 +334,7 @@ rule total: ref.base_price + price
             vec![("price", "10.00 usd")],
         ),
         "total",
-        "84.10 eur",
+        "84.1 eur",
     );
 }
 
@@ -365,14 +353,12 @@ fn inline_data_import_rejects_incompatible_unpinned_dep() {
 spec finance
 data money: measure
  -> unit eur: 1.00
- -> decimals 2
 data base_price: 50.00 eur
 
 spec finance 2025-07-01
 data money: measure
  -> unit eur: 1.00
  -> unit usd: 0.91
- -> decimals 2
 data base_price: 75.00 eur
 "#
             .to_string(),
@@ -420,14 +406,12 @@ fn data_import_with_effective_datetime_pins_version() {
 spec finance
 data money: measure
  -> unit eur: 1.00
- -> decimals 2
 data base_price: 50.00 eur
 
 spec finance 2025-07-01
 data money: measure
  -> unit eur: 1.00
  -> unit usd: 0.91
- -> decimals 2
 data base_price: 75.00 eur
 "#
             .to_string(),
@@ -460,7 +444,7 @@ rule doubled: price * 2
             vec![("price", "10.00 eur")],
         ),
         "doubled",
-        "20.00 eur",
+        "20 eur",
     );
 }
 
@@ -481,15 +465,11 @@ fn qualified_pin_must_not_leak_later_version_types() {
 spec finance
 data money: measure
  -> unit eur: 1.00
- -> decimals 2
-
 spec finance 2025-07-01
 data money: measure
  -> unit eur: 1.00
- -> unit usd: 0.91
- -> decimals 2
-"#
-            .to_string(),
+ -> unit usd: 0.91"#
+                .to_string(),
         )])
         .unwrap();
 

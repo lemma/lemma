@@ -29,7 +29,6 @@ final class Native {
 
   static native long createWithLimits(String limitsJson);
 
-  static native long fromSnapshot(byte[] bytes);
 
   static native void destroy(long handle);
 
@@ -83,7 +82,6 @@ final class Native {
 
   static native String limits(long handle);
 
-  static native byte[] snapshot(long handle);
 
   static native String quality(long handle);
 

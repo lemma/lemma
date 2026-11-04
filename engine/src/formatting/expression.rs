@@ -11,7 +11,7 @@
 
 use crate::parsing::ast::{
     ArithmeticComputation, CalendarPeriodUnit, ComparisonComputation, DateCalendarKind,
-    DateRelativeKind, RowCondition,
+    DateRelativeKind, LogicalConnective,
 };
 use std::fmt::{self, Write};
 
@@ -29,8 +29,11 @@ pub(crate) enum SyntaxView<'a, N: SyntaxNode<'a>> {
         atom: N::Atom,
         starts_with_sign: bool,
     },
-    /// `a and b and c`: operands joined by `and`.
-    Conjunction(Vec<N>),
+    ImplicitRowValue,
+    Logical {
+        connective: LogicalConnective,
+        operands: Vec<N>,
+    },
     /// Chain `a op1 b op2 c` on one precedence level. `ops[i]` joins
     /// `operands[i]` and `operands[i + 1]`; `level` gives the precedence and associativity.
     Chain {
@@ -72,18 +75,21 @@ pub(crate) enum CommandView<'a, N: SyntaxNode<'a>> {
     Last,
     Count,
     Reduce(&'static str, Option<N>),
-    Predicate(&'static str, PredicateView<'a, N>),
+    Predicate(&'static str, PredicateView<N>),
     Sort {
         descending: bool,
         argument: Option<N>,
     },
     Top(N),
     With(Vec<(Option<N::Atom>, N)>),
+    Key(Vec<N::Atom>),
+    /// `round`, or `round 0.05 eur` / `floor 1 kilogram` with a step.
+    Step(&'static str, Option<N>),
 }
 
 /// `where` / `any` / `all` argument.
-pub(crate) enum PredicateView<'a, N> {
-    Value { op: &'a RowCondition, right: N },
+pub(crate) enum PredicateView<N> {
+    Value(N),
     Instance(N),
 }
 
@@ -110,11 +116,11 @@ pub enum Associativity {
 /// Precedence for an arithmetic operator. Must match [`expression_precedence`].
 pub fn arithmetic_precedence(op: &ArithmeticComputation) -> u8 {
     match op {
-        ArithmeticComputation::Add | ArithmeticComputation::Subtract => 5,
+        ArithmeticComputation::Add | ArithmeticComputation::Subtract => 6,
         ArithmeticComputation::Multiply
         | ArithmeticComputation::Divide
-        | ArithmeticComputation::Modulo => 6,
-        ArithmeticComputation::Power => 7,
+        | ArithmeticComputation::Modulo => 7,
+        ArithmeticComputation::Power => 8,
     }
 }
 
@@ -158,7 +164,8 @@ fn operand_needs_parentheses(
 /// `...` binds tighter than prefix operators, so `lower 5...10` is `lower` of the
 /// range and prints without parentheses. A prefix that is itself a range endpoint
 /// prints in parentheses: `(lower start)...(upper start)`.
-/// Prefix operators bind tighter than `as` and arithmetic.
+/// Prefix operators bind tighter than `as` and arithmetic. `->` binds below arithmetic
+/// and above comparison, so `a + b -> sum` applies `sum` to `a + b`.
 /// Parser climb in [`crate::parsing::parser::Parser`] must match this table.
 fn expression_precedence<'a, N: SyntaxNode<'a>>(node: N) -> u8 {
     view_precedence(&node.view())
@@ -166,25 +173,34 @@ fn expression_precedence<'a, N: SyntaxNode<'a>>(node: N) -> u8 {
 
 fn view_precedence<'a, N: SyntaxNode<'a>>(view: &SyntaxView<'a, N>) -> u8 {
     match view {
-        SyntaxView::Conjunction(_) => 2,
+        SyntaxView::Logical { connective, .. } => match connective {
+            LogicalConnective::And => 2,
+            LogicalConnective::Or => 1,
+        },
         SyntaxView::Not(_) | SyntaxView::IsNotVeto(_) | SyntaxView::Negate(_) => 3,
         SyntaxView::Comparison(..)
         | SyntaxView::IsVeto(_)
         | SyntaxView::RangeContainment(..)
         | SyntaxView::DateRelative(..)
         | SyntaxView::DateCalendar(..) => 4,
+        SyntaxView::ListCommand { .. } => PIPE_PRECEDENCE,
         SyntaxView::Chain { level, .. } => arithmetic_precedence(level),
         SyntaxView::Reciprocal(_) => arithmetic_precedence(&ArithmeticComputation::Multiply),
-        SyntaxView::UnitConversion(..) => 8,
-        SyntaxView::Prefix(..) => 9,
+        SyntaxView::UnitConversion(..) => 9,
+        SyntaxView::Prefix(..) => 10,
         SyntaxView::RangeLiteral(..)
         | SyntaxView::PastFutureRange(..)
         | SyntaxView::Atom { .. }
         | SyntaxView::Member { .. }
-        | SyntaxView::Piecewise(_) => 10,
-        SyntaxView::ListCommand { .. } => 11,
+        | SyntaxView::Piecewise(_) => OPERAND_PRECEDENCE,
+        SyntaxView::ImplicitRowValue => {
+            panic!("BUG: implicit row value rendered outside a predicate comparison")
+        }
     }
 }
+
+const PIPE_PRECEDENCE: u8 = 5;
+const OPERAND_PRECEDENCE: u8 = 11;
 
 /// One operand that may stand as a bare command argument (`sum bonus`, `top 3`).
 /// A leading sign is excluded: after a command, `-` is the binary operator.
@@ -206,33 +222,27 @@ fn starts_with_sign<'a, N: SyntaxNode<'a>>(mut node: N) -> bool {
 
 /// One operand on either side of a bare condition's comparison.
 fn is_comparison_operand<'a, N: SyntaxNode<'a>>(node: N) -> bool {
-    expression_precedence(node) == 10
-}
-
-/// The list before `->` stands bare only as one primary; `->` binds tighter than a range's `...`.
-fn is_command_list_operand<'a, N: SyntaxNode<'a>>(list: N) -> bool {
-    match list.view() {
-        SyntaxView::ListCommand { .. } => true,
-        SyntaxView::RangeLiteral(..) | SyntaxView::PastFutureRange(..) => false,
-        _ => is_bare_argument(list),
-    }
+    expression_precedence(node) == OPERAND_PRECEDENCE
 }
 
 /// Operand a prefix operator (`floor`, `lower`, `not`) takes without parentheses:
-/// one operand, a `->` chain, or another bare prefix operator (`floor abs x`).
+/// one operand, or another bare prefix operator (`floor abs x`).
 fn is_prefix_bare_operand<'a, N: SyntaxNode<'a>>(mut operand: N) -> bool {
     loop {
         match operand.view() {
-            SyntaxView::ListCommand { .. } => return true,
             SyntaxView::Prefix(_, inner) => operand = inner,
             _ => return is_bare_argument(operand),
         }
     }
 }
 
-fn is_bare_predicate<'a, N: SyntaxNode<'a>>(form: &PredicateView<'a, N>) -> bool {
+fn is_bare_predicate<'a, N: SyntaxNode<'a>>(form: &PredicateView<N>) -> bool {
     match form {
-        PredicateView::Value { right, .. } => is_comparison_operand(*right),
+        PredicateView::Value(expr) => matches!(
+            expr.view(),
+            SyntaxView::Comparison(left, _, _) | SyntaxView::RangeContainment(left, _)
+                if matches!(left.view(), SyntaxView::ImplicitRowValue)
+        ),
         PredicateView::Instance(expr) => match expr.view() {
             SyntaxView::Comparison(left, _, right) | SyntaxView::RangeContainment(left, right) => {
                 is_bare_argument(left) && is_comparison_operand(right)
@@ -250,10 +260,13 @@ fn command_ends_with_bare_argument<'a, N: SyntaxNode<'a>>(command: &CommandView<
         CommandView::Reduce(_, argument) => argument.is_some_and(is_bare_argument),
         CommandView::Predicate(_, form) => is_bare_predicate(form),
         CommandView::Top(n) => is_bare_argument(*n),
+        CommandView::Step(_, step) => step.is_some_and(is_bare_argument),
         CommandView::With(_) => true,
-        CommandView::First | CommandView::Last | CommandView::Count | CommandView::Sort { .. } => {
-            false
-        }
+        CommandView::First
+        | CommandView::Last
+        | CommandView::Count
+        | CommandView::Sort { .. }
+        | CommandView::Key(_) => false,
     }
 }
 
@@ -265,7 +278,7 @@ enum TailStep<N> {
 
 /// True when the printed expression ends in a bare argument, so an operator after it
 /// would be a parse Error. Such an operand prints its tail in call form (`{:#}`):
-/// `staff -> sum(bonus) * 2`, `floor(x) + 1`.
+/// `staff -> sum(bonus) * 2`, `abs(x) + 1`.
 fn ends_with_bare_argument<'a, N: SyntaxNode<'a>>(mut node: N) -> bool {
     loop {
         let view = node.view();
@@ -295,7 +308,7 @@ fn ends_with_bare_argument<'a, N: SyntaxNode<'a>>(mut node: N) -> bool {
                 my_prec,
                 Some(arithmetic_associativity(level)),
             ),
-            SyntaxView::Conjunction(operands) => right_spine(
+            SyntaxView::Logical { operands, .. } => right_spine(
                 *operands
                     .last()
                     .expect("BUG: conjunction must have operands"),
@@ -316,6 +329,7 @@ fn ends_with_bare_argument<'a, N: SyntaxNode<'a>>(mut node: N) -> bool {
                 TailStep::Decided(is_prefix_bare_operand(operand))
             }
             SyntaxView::Atom { .. }
+            | SyntaxView::ImplicitRowValue
             | SyntaxView::UnitConversion(..)
             | SyntaxView::IsVeto(_)
             | SyntaxView::IsNotVeto(_)
@@ -521,6 +535,9 @@ fn node_pieces<'a, N: SyntaxNode<'a>>(
     let mut out = Vec::new();
     match view {
         SyntaxView::Atom { atom, .. } => out.push(Piece::Atom(atom)),
+        SyntaxView::ImplicitRowValue => {
+            panic!("BUG: implicit row value rendered outside a predicate comparison")
+        }
         SyntaxView::Chain {
             level,
             operands,
@@ -544,7 +561,13 @@ fn node_pieces<'a, N: SyntaxNode<'a>>(
             }
         }
         SyntaxView::Comparison(left, op, right) => {
-            out.extend(comparison_pieces(left, Piece::Shown(op), right));
+            if matches!(left.view(), SyntaxView::ImplicitRowValue) {
+                out.push(Piece::Shown(op));
+                out.push(Piece::Text(" "));
+                binary_operand(&mut out, right, my_prec, OperandSide::Right, None);
+            } else {
+                out.extend(comparison_pieces(left, Piece::Shown(op), right));
+            }
         }
         SyntaxView::UnitConversion(value, target) => {
             binary_operand(&mut out, value, my_prec, OperandSide::Left, None);
@@ -562,14 +585,18 @@ fn node_pieces<'a, N: SyntaxNode<'a>>(
             binary_operand(&mut out, operand, my_prec, OperandSide::Left, None);
             out.push(Piece::Text(" is veto"));
         }
-        SyntaxView::Conjunction(operands) => {
+        SyntaxView::Logical {
+            connective,
+            operands,
+        } => {
             let assoc = Some(Associativity::Left);
             for (i, operand) in operands.into_iter().enumerate() {
                 let side = if i == 0 {
                     OperandSide::Left
                 } else {
                     out.push(separator(line_break));
-                    out.push(Piece::Text("and "));
+                    out.push(Piece::Text(connective.keyword()));
+                    out.push(Piece::Text(" "));
                     OperandSide::Right
                 };
                 binary_operand(&mut out, operand, my_prec, side, assoc);
@@ -603,18 +630,22 @@ fn node_pieces<'a, N: SyntaxNode<'a>>(
             unary_operand(&mut out, offset, my_prec, None, alternate);
         }
         SyntaxView::RangeContainment(value, range) => {
-            binary_operand(&mut out, value, my_prec, OperandSide::Left, None);
-            out.push(Piece::Text(" in "));
+            if matches!(value.view(), SyntaxView::ImplicitRowValue) {
+                out.push(Piece::Text("in "));
+            } else {
+                binary_operand(&mut out, value, my_prec, OperandSide::Left, None);
+                out.push(Piece::Text(" in "));
+            }
             binary_operand(&mut out, range, my_prec, OperandSide::Right, None);
         }
         SyntaxView::ListCommand { list, command } => {
-            if is_command_list_operand(list) {
+            if expression_precedence(list) < my_prec {
+                push_parenthesized(&mut out, list);
+            } else {
                 out.push(Piece::Node {
                     node: list,
                     alternate: false,
                 });
-            } else {
-                push_parenthesized(&mut out, list);
             }
             out.push(Piece::Text(" -> "));
             out.extend(command_pieces(&command, alternate));
@@ -757,6 +788,12 @@ fn command_pieces<'a, N: SyntaxNode<'a>>(
             out.push(Piece::Text("top"));
             command_argument(&mut out, *n, alternate);
         }
+        CommandView::Step(name, step) => {
+            out.push(Piece::Text(name));
+            if let Some(step) = step {
+                command_argument(&mut out, *step, alternate);
+            }
+        }
         CommandView::With(rows) => {
             out.push(Piece::Text(if alternate { "with(" } else { "with " }));
             for (i, (label, value)) in rows.iter().enumerate() {
@@ -776,31 +813,22 @@ fn command_pieces<'a, N: SyntaxNode<'a>>(
                 out.push(Piece::Text(")"));
             }
         }
+        CommandView::Key(fields) => {
+            out.push(Piece::Text("key "));
+            for (i, field) in fields.iter().enumerate() {
+                if i > 0 {
+                    out.push(Piece::Text(", "));
+                }
+                out.push(Piece::Atom(field.clone()));
+            }
+        }
     }
     out
 }
 
-fn predicate_pieces<'a, N: SyntaxNode<'a>>(form: &PredicateView<'a, N>) -> Vec<Piece<'a, N>> {
+fn predicate_pieces<'a, N: SyntaxNode<'a>>(form: &PredicateView<N>) -> Vec<Piece<'a, N>> {
     match form {
-        PredicateView::Value { op, right } => {
-            let mut out = vec![Piece::Shown(*op)];
-            if expression_precedence(*right) < arithmetic_precedence(&ArithmeticComputation::Add) {
-                out.push(Piece::Text(" ("));
-                out.push(Piece::Node {
-                    node: *right,
-                    alternate: false,
-                });
-                out.push(Piece::Text(")"));
-            } else {
-                out.push(Piece::Text(" "));
-                out.push(Piece::Node {
-                    node: *right,
-                    alternate: false,
-                });
-            }
-            out
-        }
-        PredicateView::Instance(expr) => vec![Piece::Node {
+        PredicateView::Value(expr) | PredicateView::Instance(expr) => vec![Piece::Node {
             node: *expr,
             alternate: false,
         }],
@@ -835,7 +863,7 @@ mod tests {
         Nary(ArithmeticComputation, Vec<Tree>),
         Negate(Box<Tree>),
         Reciprocal(Box<Tree>),
-        Floor(Box<Tree>),
+        Abs(Box<Tree>),
         And(Vec<Tree>),
     }
 
@@ -855,8 +883,11 @@ mod tests {
                 },
                 Tree::Negate(operand) => SyntaxView::Negate(operand),
                 Tree::Reciprocal(operand) => SyntaxView::Reciprocal(operand),
-                Tree::Floor(operand) => SyntaxView::Prefix(&"floor", operand),
-                Tree::And(operands) => SyntaxView::Conjunction(operands.iter().collect()),
+                Tree::Abs(operand) => SyntaxView::Prefix(&"abs", operand),
+                Tree::And(operands) => SyntaxView::Logical {
+                    connective: LogicalConnective::And,
+                    operands: operands.iter().collect(),
+                },
             }
         }
     }
@@ -915,10 +946,10 @@ mod tests {
 
     #[test]
     fn nary_operand_ending_in_bare_argument_uses_call_form() {
-        let last = sum(vec![name("a"), Tree::Floor(Box::new(name("x")))]);
-        assert_eq!(print(&last), "a + floor(x)");
-        let first = sum(vec![Tree::Floor(Box::new(name("x"))), name("a")]);
-        assert_eq!(print(&first), "floor(x) + a");
+        let last = sum(vec![name("a"), Tree::Abs(Box::new(name("x")))]);
+        assert_eq!(print(&last), "a + abs(x)");
+        let first = sum(vec![Tree::Abs(Box::new(name("x"))), name("a")]);
+        assert_eq!(print(&first), "abs(x) + a");
     }
 
     #[test]

@@ -164,7 +164,6 @@ fn same_version_via_two_pins_shares_family() {
 spec pricing 2024-01-01
 data money: measure
   -> unit eur: 1
-  -> decimals 2
 
 spec report
 uses a: pricing 2024-03-01
@@ -182,7 +181,7 @@ rule total: x + y
             vec![("x", "10 eur"), ("y", "5 eur")],
         ),
         "total",
-        "15.00 eur",
+        "15 eur",
     );
 }
 
@@ -194,12 +193,10 @@ fn unpinned_identical_versions_no_false_drift() {
 spec pricing 2024-01-01
 data money: measure
   -> unit eur: 1
-  -> decimals 2
 
 spec pricing 2025-01-01
 data money: measure
   -> unit eur: 1
-  -> decimals 2
 
 spec report 2024-01-01
 uses p: pricing
@@ -210,12 +207,12 @@ rule doubled: x * 2
     assert_rule(
         &eval_at(&engine, "report", &date(2024, 6, 1), vec![("x", "10 eur")]),
         "doubled",
-        "20.00 eur",
+        "20 eur",
     );
     assert_rule(
         &eval_at(&engine, "report", &date(2025, 6, 1), vec![("x", "10 eur")]),
         "doubled",
-        "20.00 eur",
+        "20 eur",
     );
 }
 

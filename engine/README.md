@@ -22,7 +22,7 @@ Add the crate:
 
 ```toml
 [dependencies]
-lemma-engine = "0.10.2"
+lemma-engine = "0.10.3"
 ```
 
 ### Minimal example
@@ -176,7 +176,6 @@ Public `load` rejects `SourceType::Dependency("lemma")`: that id is reserved for
 | `evaluate(repository, spec, effective, data, rules, explain)` | Evaluate; each `RuleResult` may include `missing_data`; `explanation` when `explain` is true ([schema](schemas/api.v1.json)) |
 | `update(repository, code, source_type)` | Replace identities present in `code` in one planning pass |
 | `remove(repository, spec, effective)` | Remove a temporal spec slice |
-| `snapshot()` / `from_snapshot(bytes)` | Persist / restore parsed specs + plans + limits (no re-plan); see [Rust tools](../cli/documentation/tools/rust.md#binary-snapshot) |
 | `limits()` | Resource limits |
 
 Free function: `lemma::resolve_effective`.
@@ -246,7 +245,7 @@ Build: `node build.js` (from `engine/packages/npm/`). See [packages/npm/README.m
 <dependency>
   <groupId>com.lemmabase</groupId>
   <artifactId>lemma-engine</artifactId>
-  <version>0.10.2</version>
+  <version>0.10.3</version>
 </dependency>
 ```
 
@@ -255,7 +254,7 @@ Build/test: `cargo build -p lemma_jni` then `./mvnw verify` under `engine/packag
 ### C# / .NET
 
 ```bash
-dotnet add package Lemmabase.Lemma.Engine --version 0.10.2
+dotnet add package Lemmabase.Lemma.Engine --version 0.10.3
 ```
 
 Build/test: `cargo run -p xtask -- nuget-natives` then `dotnet test` under `engine/packages/nuget/` (also via `cargo precommit`). See [packages/nuget/Lemmabase.Lemma.Engine/README.md](packages/nuget/Lemmabase.Lemma.Engine/README.md).

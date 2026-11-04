@@ -184,7 +184,7 @@ rule r: person
 }
 
 #[test]
-fn uses_wire_to_rule_is_evaluate_key() {
+fn uses_wire_to_rule_is_sealed_request_error() {
     let code = r#"
 spec source_spec
 data x: number
@@ -211,14 +211,18 @@ rule r: i.slot
     data.insert("i.slot".to_string(), "10".into());
 
     let now = DateTimeValue::now();
-    let resp = engine
+    let err = engine
         .evaluate(None, "outer", Some(&now), data, None, false)
-        .expect("uses wire to a rule is an evaluate key");
-    assert_eq!(rule_value(&resp, "r"), "10");
+        .expect_err("sealed uses wire is a request error");
+    let text = err.to_string();
+    assert!(
+        text.contains("slot") || matches!(err, lemma::Error::Request { .. }),
+        "expected request Error for sealed i.slot, got: {text}"
+    );
 }
 
 #[test]
-fn uses_wire_to_rule_supply_does_not_emit_bound_to_cannot_be_supplied() {
+fn uses_wire_to_rule_without_override_uses_wire() {
     let code = r#"
 spec source_spec
 data x: number
@@ -229,6 +233,7 @@ data slot: number
 
 spec outer
 uses src: source_spec
+  -> with x: 5
 uses i: inner
   -> with slot: src.computed
 rule r: i.slot
@@ -241,21 +246,11 @@ rule r: i.slot
         )])
         .expect("loads");
 
-    let mut data = IndexMap::new();
-    data.insert("i.slot".to_string(), "10".into());
-
     let now = DateTimeValue::now();
-    match engine.evaluate(None, "outer", Some(&now), data, None, false) {
-        Ok(_) => {}
-        Err(err) => {
-            let text = err.to_string();
-            assert!(
-                !text.contains("cannot be supplied"),
-                "uses wire to a rule must not emit seal error; got: {text}"
-            );
-            panic!("unexpected evaluate Err: {text}");
-        }
-    }
+    let resp = engine
+        .evaluate(None, "outer", Some(&now), IndexMap::new(), None, false)
+        .expect("wire evaluates");
+    assert_eq!(rule_value(&resp, "r"), "10");
 }
 
 #[test]
@@ -472,7 +467,7 @@ rule r: x
 }
 
 #[test]
-fn override_on_reference_replaces_and_wins_over_target() {
+fn override_on_sealed_uses_literal_is_request_error() {
     let code = r#"
 spec inner
 data v: number -> suggest 1
@@ -490,14 +485,22 @@ rule r: i.v
         )])
         .unwrap();
 
+    let now = DateTimeValue::now();
+    let without = engine
+        .evaluate(None, "outer", Some(&now), IndexMap::new(), None, false)
+        .expect("evaluates");
+    assert_eq!(rule_value(&without, "r"), "42");
+
     let mut data = IndexMap::new();
     data.insert("i.v".to_string(), "500".into());
-
-    let now = DateTimeValue::now();
-    let resp = engine
+    let err = engine
         .evaluate(None, "outer", Some(&now), data, None, false)
-        .expect("evaluates");
-    assert_eq!(rule_value(&resp, "r"), "500");
+        .expect_err("sealed uses literal is a request error");
+    let text = err.to_string();
+    assert!(
+        text.contains("v") || matches!(err, lemma::Error::Request { .. }),
+        "expected request Error, got: {text}"
+    );
 }
 
 fn load(code: &str) -> Engine {
@@ -511,24 +514,23 @@ fn load(code: &str) -> Engine {
     engine
 }
 
-fn assert_overlay_override_wins(
-    engine: &Engine,
-    spec: &str,
-    key: &str,
-    value: &str,
-    expected: &str,
-) {
+fn assert_overlay_override_is_request_error(engine: &Engine, spec: &str, key: &str, value: &str) {
     let mut data = IndexMap::new();
     data.insert(key.to_string(), value.into());
     let now = DateTimeValue::now();
-    let resp = engine
+    let err = engine
         .evaluate(None, spec, Some(&now), data, None, false)
-        .expect("evaluate override of reference -> with must succeed");
-    assert_eq!(rule_value(&resp, "r"), expected);
+        .expect_err("sealed uses binding is a request error");
+    let text = err.to_string();
+    assert!(
+        text.contains(key.split('.').next_back().unwrap_or(key))
+            || matches!(err, lemma::Error::Request { .. }),
+        "expected request Error for sealed `{key}`, got: {text}"
+    );
 }
 
 #[test]
-fn evaluate_data_overrides_slot_bound_to_data() {
+fn evaluate_data_cannot_override_slot_bound_to_data() {
     let engine = load(
         r#"
 spec inner
@@ -541,11 +543,11 @@ uses i: inner
 rule r: i.n
 "#,
     );
-    assert_overlay_override_wins(&engine, "outer", "i.n", "4", "4");
+    assert_overlay_override_is_request_error(&engine, "outer", "i.n", "4");
 }
 
 #[test]
-fn evaluate_data_overrides_wired_slot_alone_without_wire_source() {
+fn evaluate_data_cannot_override_wired_slot_alone() {
     let engine = load(
         r#"
 spec inner
@@ -558,11 +560,11 @@ uses i: inner
 rule r: i.n
 "#,
     );
-    assert_overlay_override_wins(&engine, "outer", "i.n", "10", "10");
+    assert_overlay_override_is_request_error(&engine, "outer", "i.n", "10");
 }
 
 #[test]
-fn evaluate_data_override_wins_over_wire_source_when_both_supplied() {
+fn evaluate_data_wire_source_wins_sealed_lhs_is_request_error() {
     let engine = load(
         r#"
 spec inner
@@ -579,10 +581,14 @@ rule r: i.n
     data.insert("i.v".to_string(), "3".into());
     data.insert("i.n".to_string(), "10".into());
     let now = DateTimeValue::now();
-    let resp = engine
+    let err = engine
         .evaluate(None, "outer", Some(&now), data, None, false)
-        .expect("evaluates");
-    assert_eq!(rule_value(&resp, "r"), "10");
+        .expect_err("sealed i.n is a request error");
+    let text = err.to_string();
+    assert!(
+        text.contains("n") || matches!(err, lemma::Error::Request { .. }),
+        "expected request Error, got: {text}"
+    );
 }
 
 #[test]
@@ -610,7 +616,7 @@ rule r: i.n
 }
 
 #[test]
-fn evaluate_data_overrides_slot_bound_to_rule() {
+fn evaluate_data_cannot_override_slot_bound_to_rule() {
     let engine = load(
         r#"
 spec source_spec
@@ -627,11 +633,11 @@ uses i: inner
 rule r: i.slot
 "#,
     );
-    assert_overlay_override_wins(&engine, "outer", "i.slot", "10", "10");
+    assert_overlay_override_is_request_error(&engine, "outer", "i.slot", "10");
 }
 
 #[test]
-fn evaluate_data_overrides_row_field_bound_in_row_spec() {
+fn evaluate_data_cannot_override_row_field_bound_in_row_spec() {
     let engine = load(
         r#"
 spec rate
@@ -645,7 +651,8 @@ uses r: rate
 rule total: r.amount
 
 spec order
-uses lines: line list
+uses line
+data lines: line list
 rule all_totals: lines -> sum total
 "#,
     );
@@ -658,8 +665,12 @@ rule all_totals: lines -> sum total
         EvaluateDataValue::List(vec![EvaluateDataValue::Map(row)]),
     );
     let now = DateTimeValue::now();
-    let resp = engine
+    let err = engine
         .evaluate(None, "order", Some(&now), data, None, false)
-        .expect("row field override of reference -> with must succeed");
-    assert_eq!(rule_value(&resp, "all_totals"), "9");
+        .expect_err("sealed row uses binding is a request error");
+    let text = err.to_string();
+    assert!(
+        text.contains("amount") || matches!(err, lemma::Error::Request { .. }),
+        "expected request Error, got: {text}"
+    );
 }

@@ -8,8 +8,6 @@ Elixir/Erlang bindings via Rustler NIFs. Public API lives in `lib/lemma.ex`; NIF
 |-----|--------|---------|
 | `lemma_new` | `Lemma.new/1` | Create engine (optional limits map) |
 | `lemma_limits` | `Lemma.limits/1` | Current resource limits |
-| `lemma_snapshot` | `Lemma.snapshot/1` | Opaque engine snapshot bytes |
-| `lemma_from_snapshot` | `Lemma.from_snapshot/1` | Restore engine from snapshot bytes |
 | `lemma_quality` | `Lemma.quality/1` | Structural quality recommendations |
 | `lemma_load` | `Lemma.load/2` | Binary (volatile) or map/list (labeled) sources |
 | `lemma_install_start` / `lemma_install_respond` | `Lemma.install/2-3` | Download LemmaBase repository (`source` + `id`); host transport; no load |

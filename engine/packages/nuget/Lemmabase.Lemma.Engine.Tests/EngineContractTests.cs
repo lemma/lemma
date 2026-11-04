@@ -63,38 +63,6 @@ public sealed class EngineContractTests
     }
 
     [Fact]
-    public void SnapshotRoundTripRestoresListAndRun()
-    {
-        using var source = Engine.Create();
-        source.Load(
-            """
-            spec snap_demo
-            data x: number
-            rule y: x + 1
-            """
-        );
-        var bytes = source.Snapshot();
-        Assert.NotEmpty(bytes);
-        using var restored = Engine.FromSnapshot(bytes);
-        Assert.Equal(
-            source.List().Select(r => r.Repository).ToArray(),
-            restored.List().Select(r => r.Repository).ToArray()
-        );
-        var runSource = source.Run(
-            RunRequest.Of("snap_demo").WithData(new Dictionary<string, object?> { ["x"] = "41" })
-        );
-        var runRestored = restored.Run(
-            RunRequest.Of("snap_demo").WithData(new Dictionary<string, object?> { ["x"] = "41" })
-        );
-        var ySource = Assert.IsType<RuleResult.Number>(runSource.Results["y"]);
-        var yRestored = Assert.IsType<RuleResult.Number>(runRestored.Results["y"]);
-        Assert.Equal(ySource.NumberValue, yRestored.NumberValue);
-
-        bytes[0] = 0x58;
-        Assert.Throws<LemmaException>(() => Engine.FromSnapshot(bytes));
-    }
-
-    [Fact]
     public void LimitsBuilderAppliesSparseOverrides()
     {
         using var engine = Engine.Create(ResourceLimits.CreateBuilder().MaxSources(12));

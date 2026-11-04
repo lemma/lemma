@@ -50,7 +50,6 @@ fn test_literal_value_to_primitive_type() {
         TypeSpecification::Measure {
             minimum: None,
             maximum: None,
-            decimals: None,
             units: MeasureUnits::from(vec![MeasureUnit {
                 name: "second".to_string(),
                 factor: crate::computation::rational::rational_one(),
@@ -263,7 +262,6 @@ fn test_literal_value_display_value() {
         TypeSpecification::Measure {
             minimum: None,
             maximum: None,
-            decimals: None,
             units: MeasureUnits::from(vec![MeasureUnit {
                 name: "hour".to_string(),
                 factor: crate::computation::rational::decimal_to_rational(Decimal::from(3600))
@@ -352,13 +350,6 @@ fn test_timezone_value() {
 
     let tz_utc = TimezoneValue { offset_minutes: 0 };
     assert_eq!(format!("{}", tz_utc), "Z");
-}
-
-#[test]
-fn test_negation_types() {
-    let json = serde_json::to_string(&NegationType::Not).expect("serialize NegationType");
-    let decoded: NegationType = serde_json::from_str(&json).expect("deserialize NegationType");
-    assert_eq!(decoded, NegationType::Not);
 }
 
 #[test]

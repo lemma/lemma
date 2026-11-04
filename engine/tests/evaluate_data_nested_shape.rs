@@ -67,7 +67,7 @@ fn nested_multi_unit_map_item_is_request_error() {
     assert_request_error_on_fares(evaluate_fares(vec![EvaluateDataValue::Map(map)]));
 }
 
-const ORDER_SPEC: &str = "spec line\ndata money: measure\n  -> unit eur: 1.00\ndata prices: money list\ndata qty: number\n\nspec order\nuses lines: line list\n";
+const ORDER_SPEC: &str = "spec line\ndata money: measure\n  -> unit eur: 1.00\ndata prices: money list\ndata qty: number\n\nspec order\nuses line\ndata lines: line list\n";
 
 #[test]
 fn nested_item_in_instance_list_row_is_request_error() {

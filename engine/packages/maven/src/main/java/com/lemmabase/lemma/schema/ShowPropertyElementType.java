@@ -82,7 +82,6 @@ public sealed interface ShowPropertyElementType
    *
    * @param minimum minimum
    * @param maximum maximum
-   * @param decimals decimals
    * @param units units
    * @param traits traits
    * @param decomposition decomposition
@@ -91,7 +90,6 @@ public sealed interface ShowPropertyElementType
   record Measure(
       LemmaType.@Nullable NamedBound minimum,
       LemmaType.@Nullable NamedBound maximum,
-      @Nullable Integer decimals,
       List<LemmaType.MeasureUnit> units,
       List<String> traits,
       @Nullable Map<String, Integer> decomposition,
@@ -115,8 +113,6 @@ public sealed interface ShowPropertyElementType
       boolean minimumSeen = false;
       LemmaType.NamedBound maximum = null;
       boolean maximumSeen = false;
-      Integer decimals = null;
-      boolean decimalsSeen = false;
       List<LemmaType.MeasureUnit> units = null;
       List<String> traits = null;
       Map<String, Integer> decomposition = null;
@@ -134,10 +130,6 @@ public sealed interface ShowPropertyElementType
           case "maximum" -> {
             maximumSeen = true;
             maximum = LemmaType.NamedBound.readNullable(p);
-          }
-          case "decimals" -> {
-            decimalsSeen = true;
-            decimals = JsonReading.readInt(p);
           }
           case "units" -> units = JsonReading.readList(p, LemmaType.MeasureUnit::read);
           case "traits" -> traits = JsonReading.readList(p, JsonReading::readString);
@@ -158,9 +150,6 @@ public sealed interface ShowPropertyElementType
       if (!maximumSeen) {
         JsonReading.missingRequired("maximum", "ShowPropertyElementType.Measure");
       }
-      if (!decimalsSeen) {
-        JsonReading.missingRequired("decimals", "ShowPropertyElementType.Measure");
-      }
       if (units == null) {
         JsonReading.missingRequired("units", "ShowPropertyElementType.Measure");
       }
@@ -170,7 +159,7 @@ public sealed interface ShowPropertyElementType
       if (!decompositionSeen) {
         JsonReading.missingRequired("decomposition", "ShowPropertyElementType.Measure");
       }
-      return new Measure(minimum, maximum, decimals, units, traits, decomposition, unit);
+      return new Measure(minimum, maximum, units, traits, decomposition, unit);
     }
   }
 
@@ -320,14 +309,12 @@ public sealed interface ShowPropertyElementType
    *
    * @param minimum minimum
    * @param maximum maximum
-   * @param decimals decimals
    * @param units units
    * @param unit written unit when describing a value, or null
    */
   record Ratio(
       @Nullable BigDecimal minimum,
       @Nullable BigDecimal maximum,
-      @Nullable Integer decimals,
       List<LemmaType.RatioUnit> units,
       @Nullable String unit)
       implements ShowPropertyElementType {
@@ -349,8 +336,6 @@ public sealed interface ShowPropertyElementType
       boolean minimumSeen = false;
       BigDecimal maximum = null;
       boolean maximumSeen = false;
-      Integer decimals = null;
-      boolean decimalsSeen = false;
       List<LemmaType.RatioUnit> units = null;
       String unit = null;
       while (p.nextToken() != JsonToken.END_OBJECT) {
@@ -366,10 +351,6 @@ public sealed interface ShowPropertyElementType
             maximumSeen = true;
             maximum = readNullableDecimal(p);
           }
-          case "decimals" -> {
-            decimalsSeen = true;
-            decimals = JsonReading.readInt(p);
-          }
           case "units" -> units = JsonReading.readList(p, LemmaType.RatioUnit::read);
           case "unit" -> unit = JsonReading.readString(p);
           default -> JsonReading.unknownField(field, "ShowPropertyElementType.Ratio");
@@ -381,13 +362,10 @@ public sealed interface ShowPropertyElementType
       if (!maximumSeen) {
         JsonReading.missingRequired("maximum", "ShowPropertyElementType.Ratio");
       }
-      if (!decimalsSeen) {
-        JsonReading.missingRequired("decimals", "ShowPropertyElementType.Ratio");
-      }
       if (units == null) {
         JsonReading.missingRequired("units", "ShowPropertyElementType.Ratio");
       }
-      return new Ratio(minimum, maximum, decimals, units, unit);
+      return new Ratio(minimum, maximum, units, unit);
     }
   }
 

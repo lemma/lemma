@@ -251,14 +251,6 @@ impl NativeEngine {
         }))
     }
 
-    #[uniffi::constructor]
-    pub fn from_snapshot(bytes: Vec<u8>) -> Result<Arc<Self>, LemmaFfiError> {
-        let engine = Engine::from_snapshot(&bytes).map_err(single_error)?;
-        Ok(Arc::new(Self {
-            inner: Mutex::new(engine),
-        }))
-    }
-
     pub fn load(&self, code: String) -> Result<(), LemmaFfiError> {
         let mut engine = lock_engine(&self.inner)?;
         engine
@@ -394,11 +386,6 @@ impl NativeEngine {
         let engine = lock_engine(&self.inner)?;
         serde_json::to_string(engine.limits())
             .map_err(|e| bug(format!("BUG: limits serialization failed: {e}")))
-    }
-
-    pub fn snapshot(&self) -> Result<Vec<u8>, LemmaFfiError> {
-        let engine = lock_engine(&self.inner)?;
-        engine.snapshot().map_err(single_error)
     }
 
     pub fn quality(&self) -> Result<String, LemmaFfiError> {

@@ -2,6 +2,41 @@
 
 Releases cover the Lemma engine, `lemma` CLI, OpenAPI crate, LSP, SDKs and VS Code extension. They all follow the same version everywhere. The release version is `[workspace.package] version` in the root `Cargo.toml`. Git tags follow `lemma-v{version}` (for example `lemma-v0.8.20`); releases before the rename used `cli-v{version}`. Draft notes for the next version quickly by running `cargo changelog` to print `git diff` / `git log` since the latest release tag (`xtask` `versions-diff`). Tip: feed that into an LLM to create a summary for this changelog.
 
+## [0.10.3] - 2026-11-04
+
+Lists are `data`, `uses` bindings are sealed, `or` joins `and`, `->` binds below arithmetic, and measures round to a step.
+
+### Added
+
+- **`or` operator**: binds looser than `and`; a `true` operand decides wherever it appears. Works in call-form predicates: `fares -> where(> 5 or is 3)`.
+- **Rounding**: `x -> round` rounds a number to an integer; `price -> round 0.05 eur`, `duration -> ceil 15 minute` and `x -> floor 0.01` round to a step. The step is a positive literal of the same kind, the result has the step's unit, and an exact half goes away from zero.
+- **Options on any type**: `-> option` / `-> options` constrain measures, numbers, ratios, booleans, dates and list elements, or name a list-valued rule. Results carry `missing_data_options`.
+- **Sealed list slots from aliases**: `uses mix: node -> with children: pinda, walnoot`.
+- **Dotted list patches** in evaluate data: `{"staff.2.salary": "8000 eur"}`.
+- **Show**: `x-lemma-row-field-needed-by-rules` names the row fields that parent rules need.
+
+### Changed
+
+- **[breaking] Instance lists are `data`**: `uses employee` then `data staff: employee list`. A sealed catalog is a list-valued rule.
+- **[breaking] `uses -> with` is sealed**: evaluate data for those slots is a request error.
+- **[breaking] `->` binds below `+ - * / mod ^ as`** and above comparisons, `in`, `not`, `and`, `or`. Write `own_cost + (parts -> sum cost)`.
+- **[breaking] Prefix `round`, `floor`, `ceil` are removed**: write `x -> round`, or `x -> round 0.05 eur` for a measure or ratio. An exact half goes away from zero.
+- **[breaking] `decimals` is number only.** Results no longer pad zeros: `0 eur`, not `0.00 eur`.
+- **[breaking] `mod` takes numbers only.**
+- **[breaking] `or` and `that` are reserved names.**
+- **Quantity powers land on a declared unit**: `2 meter ^ 2` is `4 square_meter`.
+- **Large list workspaces are faster**: the enterprise logistics benchmark loads in 1.6 s (was 2.7 s) and evaluates in 9 ms (was 666 ms).
+
+### Removed
+
+- **[breaking] Engine binary snapshots**: `snapshot` / `from_snapshot` in Rust, npm, Maven, Hex and NuGet. Load sources instead.
+
+### Fixed
+
+- `--explain` no longer panics on a named import whose list reduces over a row rule.
+- Self-list rollups, row-bound `uses` values and cross-scope row field reads no longer panic or report false cycles.
+- The interactive ratio prompt requires a unit.
+
 ## [0.10.2] - 2026-10-15
 
 Compound unit planning: same-family scale units and imported compound units of measure.

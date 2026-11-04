@@ -1,14 +1,14 @@
 use crate::computation::{OperationResult, VetoType};
+use crate::parsing::ast::{ascii_lowercase_logical_name, canonical_logical_name, Value};
 use crate::planning::execution_plan::{validate_value_against_type, ExecutionPlan};
 use crate::planning::instance_list::{
-    key_conflict, row_end, row_end_type, template_default, typed_from_bound, InstanceListSource,
-    KeyedRow,
+    default_of, row_end_type, typed_from_bound, InstanceListSource, KeyIndex,
 };
-use crate::planning::normalize::lookup_data_definition;
 use crate::planning::semantics::{
-    parse_value_from_string, parser_value_to_value_kind, row_literal, DataDefinition, DataPath,
-    LemmaType, ListKey, LiteralValue, RowEnd, RowOrigin, Source, TypeSpecification, TypedLiteral,
-    UnitTokenResolver, ValueKind,
+    parse_value_from_string, parser_value_to_value_kind, row_literal, BoundValueKind,
+    DataDefinition, DataPath, InstanceKey, KeyField, LemmaType, ListKey, ListValue, LiteralValue,
+    RowBinding, RowEnd, RowOrigin, Source, SpecIdentity, SpecValue, TypeSpecification,
+    TypedLiteral, UnitTokenResolver, ValueKind,
 };
 use crate::planning::unit_index::UnitIndex;
 use crate::Error;
@@ -370,7 +370,7 @@ fn reject_case_insensitive_duplicates<'a>(
 ) -> Result<(), Error> {
     let mut seen = HashSet::new();
     for key in keys {
-        let canonical = crate::parsing::ast::ascii_lowercase_logical_name(key.to_string());
+        let canonical = ascii_lowercase_logical_name(key.to_string());
         if !seen.insert(canonical.clone()) {
             return Err(Error::request(
                 describe(&canonical),
@@ -460,7 +460,7 @@ pub fn parse_data_value(
                             .pop()
                             .expect("BUG: list parse frame stack empty on completion");
                         ParseStep::Deliver(TypedLiteral {
-                            value: ValueKind::List(frame.converted),
+                            value: ValueKind::List(frame.converted.into()),
                             lemma_type: frame.lemma_type,
                         })
                     }
@@ -571,7 +571,7 @@ fn parse_literal(
 
 /// Read a parsed Lemma literal as a value of `lemma_type`, keeping the written unit.
 pub(crate) fn typed_literal_from_parsed(
-    parsed: &crate::parsing::ast::Value,
+    parsed: &Value,
     lemma_type: &Arc<LemmaType>,
     unit_index: &UnitIndex,
     named_types: &IndexMap<String, Arc<LemmaType>>,
@@ -611,7 +611,7 @@ fn typed_literal_with_binding_unit(
     }
 }
 
-fn binding_unit_from_parser_value(value: &crate::parsing::ast::Value) -> Option<String> {
+fn binding_unit_from_parser_value(value: &Value) -> Option<String> {
     use crate::parsing::ast::Value;
     match value {
         Value::NumberWithUnit(_, unit) => Some(unit.clone()),
@@ -733,6 +733,47 @@ fn item_path_message(frames: &[ShapeFrame<'_>], message: String) -> String {
     format!("list item {}: {message}", positions.join(", item "))
 }
 
+/// Run-data values for fields rows leave unset, by the row as evaluation reads it and
+/// its template slot. Fields a row seals are rejected at resolve.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct RowOverrides {
+    pub(crate) fields: IndexMap<InstanceKey, IndexMap<usize, OperationResult>>,
+    /// Stored lists, by owning row and list path, with a key field set by run data:
+    /// their store index does not hold the run-data keys.
+    pub(crate) keyed_lists: HashSet<(Option<InstanceKey>, DataPath)>,
+}
+
+impl RowOverrides {
+    fn extend(&mut self, other: RowOverrides) {
+        for (key, fields) in other.fields {
+            self.fields.entry(key).or_default().extend(fields);
+        }
+        self.keyed_lists.extend(other.keyed_lists);
+    }
+
+    /// These overrides, read on the rows of a level that is itself the row `owner`.
+    fn under(self, owner: &InstanceKey) -> RowOverrides {
+        RowOverrides {
+            fields: self
+                .fields
+                .into_iter()
+                .map(|(key, fields)| (key.under(owner), fields))
+                .collect(),
+            keyed_lists: self
+                .keyed_lists
+                .into_iter()
+                .map(|(list_owner, path)| {
+                    let list_owner = match list_owner {
+                        Some(key) => key.under(owner),
+                        None => owner.clone(),
+                    };
+                    (Some(list_owner), path)
+                })
+                .collect(),
+        }
+    }
+}
+
 /// User-provided data values resolved against a plan's type declarations.
 ///
 /// Lightweight and cheap to construct — no plan cloning required. The
@@ -740,8 +781,12 @@ fn item_path_message(frames: &[ShapeFrame<'_>], message: String) -> String {
 /// to evaluation and show paths.
 #[derive(Debug, Clone, Default)]
 pub struct EvaluateData {
-    /// Caller bindings: successful literals or Veto (bad override) per Data.
-    pub bindings: IndexMap<DataPath, OperationResult>,
+    /// Caller bindings by plan data slot, in caller order: successful literals or Veto
+    /// (bad override) per Data.
+    pub bindings: IndexMap<usize, OperationResult>,
+    /// Caller-supplied fields of rows the plan holds: `uses` rows (`i.x`, `i.j.x`) and
+    /// spec-written list rows (`staff.1.salary`, `i.staff.2.x`).
+    pub(crate) row_overrides: RowOverrides,
     /// Input keys that did not match any plan Data (including Import aliases).
     pub ignored_unknown: Vec<String>,
 }
@@ -766,11 +811,14 @@ impl EvaluateData {
         limits: &ResourceLimits,
         level: ListLevel,
     ) -> Result<Self, Error> {
+        if level == ListLevel::Top {
+            reject_whole_list_with_row_keys(plan, &raw_values)?;
+        }
         match run_resolve(ResolveFrame::Level(LevelFrame::new(
-            plan, raw_values, limits, level,
+            plan, None, raw_values, limits, level,
         )))? {
             ResolveOutput::Level(evaluate_data) => Ok(evaluate_data),
-            ResolveOutput::Binding(_) => {
+            ResolveOutput::Binding(..) => {
                 panic!("BUG: root level frame returned a list binding")
             }
         }
@@ -779,7 +827,8 @@ impl EvaluateData {
 
 enum ResolveOutput {
     Level(EvaluateData),
-    Binding(OperationResult),
+    /// A list value, with the run-data fields its rows' nested rows take.
+    Binding(OperationResult, RowOverrides),
 }
 
 enum ResolveStep<'a> {
@@ -823,17 +872,28 @@ fn run_resolve(root: ResolveFrame<'_>) -> Result<ResolveOutput, Error> {
 /// until its rows are resolved.
 struct LevelFrame<'a> {
     plan: &'a ExecutionPlan,
+    /// Evaluation-data key of the run-data row this level writes (`items.1`); `None`
+    /// for the request's plan.
+    row_key: Option<Arc<str>>,
     limits: &'a ResourceLimits,
     level: ListLevel,
     entries: indexmap::map::IntoIter<String, EvaluateDataValue>,
     seen_canonical: HashSet<String>,
     evaluate_data: EvaluateData,
-    awaiting: Option<&'a DataPath>,
+    awaiting: Option<AwaitBinding>,
+}
+
+/// Where a suspended level frame puts the binding a nested list frame returns:
+/// a plan data slot, or one field of a row the plan holds.
+enum AwaitBinding {
+    Data { slot: usize },
+    RowField { key: InstanceKey, slot: usize },
 }
 
 impl<'a> LevelFrame<'a> {
     fn new(
         plan: &'a ExecutionPlan,
+        row_key: Option<Arc<str>>,
         raw_values: IndexMap<String, EvaluateDataValue>,
         limits: &'a ResourceLimits,
         level: ListLevel,
@@ -841,6 +901,7 @@ impl<'a> LevelFrame<'a> {
         let capacity = raw_values.len();
         Self {
             plan,
+            row_key,
             limits,
             level,
             entries: raw_values.into_iter(),
@@ -856,8 +917,24 @@ impl<'a> LevelFrame<'a> {
     fn resume(&mut self, input: Option<ResolveOutput>) -> Result<ResolveStep<'a>, Error> {
         match (self.awaiting.take(), input) {
             (None, None) => {}
-            (Some(path), Some(ResolveOutput::Binding(binding))) => {
-                self.evaluate_data.bindings.insert(path.clone(), binding);
+            (
+                Some(AwaitBinding::Data { slot }),
+                Some(ResolveOutput::Binding(binding, overrides)),
+            ) => {
+                self.evaluate_data.bindings.insert(slot, binding);
+                self.evaluate_data.row_overrides.extend(overrides);
+            }
+            (
+                Some(AwaitBinding::RowField { key, slot }),
+                Some(ResolveOutput::Binding(binding, overrides)),
+            ) => {
+                self.evaluate_data
+                    .row_overrides
+                    .fields
+                    .entry(key)
+                    .or_default()
+                    .insert(slot, binding);
+                self.evaluate_data.row_overrides.extend(overrides);
             }
             _ => panic!("BUG: level frame resumed with an unexpected output"),
         }
@@ -872,7 +949,7 @@ impl<'a> LevelFrame<'a> {
         let seen_canonical = &mut self.seen_canonical;
 
         for (name, raw_value) in self.entries.by_ref() {
-            let canonical = crate::parsing::ast::canonical_logical_name(&name);
+            let canonical = canonical_logical_name(&name);
             if seen_canonical.contains(canonical.as_ref()) {
                 let canonical = canonical.into_owned();
                 return Err(Error::request(
@@ -883,20 +960,96 @@ impl<'a> LevelFrame<'a> {
             }
             seen_canonical.insert(canonical.to_string());
 
-            let Some((data_path, data_definition)) = resolve_evaluate_data_target(plan, &canonical)
+            let Some((slot, data_path, data_definition)) =
+                resolve_evaluate_data_target(plan, &canonical)
             else {
-                if let Some(list) = instance_list_of_row_key(plan, &canonical) {
+                let row_field = match resolve_row_field_key(plan, &canonical) {
+                    RowKeyLookup::Field(row_field) => row_field,
+                    RowKeyLookup::Unknown => {
+                        evaluate_data.ignored_unknown.push(name);
+                        continue;
+                    }
+                    RowKeyLookup::Invalid(error) => return Err(error.with_related_data(name)),
+                };
+                if matches!(row_field.definition, DataDefinition::Import { .. }) {
+                    if matches!(
+                        raw_value,
+                        EvaluateDataValue::Map(_) | EvaluateDataValue::List(_)
+                    ) {
+                        return Err(Error::request(
+                            format!(
+                                "data '{name}': '{name}' is a uses alias; objects and arrays are not a nesting level"
+                            ),
+                            Some(format!("bind fields with dotted keys, e.g. '{name}.<field>'")),
+                        )
+                        .with_related_data(name));
+                    }
+                    evaluate_data.ignored_unknown.push(name);
+                    continue;
+                }
+                if row_field.sealed {
                     return Err(Error::request(
                         format!(
-                            "data '{name}': rows of list '{list}' are supplied as one array under '{list}'"
+                            "data '{name}' is sealed by `uses -> with` and cannot be supplied at evaluate"
                         ),
-                        Some(format!("pass the whole list as '{list}'")),
+                        Some("remove this key, or change the `uses` binding if the value should be caller-owned data"),
                     )
                     .with_related_data(name));
                 }
-                evaluate_data.ignored_unknown.push(name);
+                if let Some(list) = row_field.keyed_list {
+                    evaluate_data.row_overrides.keyed_lists.insert(list);
+                }
+                if matches!(row_field.definition, DataDefinition::InstanceList { .. }) {
+                    self.awaiting = Some(AwaitBinding::RowField {
+                        key: row_field.key,
+                        slot: row_field.slot,
+                    });
+                    return Ok(ResolveStep::Call(ResolveFrame::List(ListFrame {
+                        plan: row_field.template,
+                        path: row_field.field,
+                        list_key: canonical.into_owned(),
+                        under: self.row_key.clone(),
+                        name,
+                        overrides: RowOverrides::default(),
+                        limits,
+                        level,
+                        raw_value: Some(raw_value),
+                        rows: None,
+                    })));
+                }
+                let type_arc = Arc::clone(
+                    row_field
+                        .definition
+                        .resolved_type_arc()
+                        .expect("BUG: scalar row field is typed template data"),
+                );
+                let binding = resolve_scalar_binding(
+                    plan,
+                    &name,
+                    &canonical,
+                    &raw_value,
+                    &type_arc,
+                    row_field.definition.source(),
+                    limits,
+                )?;
+                evaluate_data
+                    .row_overrides
+                    .fields
+                    .entry(row_field.key)
+                    .or_default()
+                    .insert(row_field.slot, binding);
                 continue;
             };
+
+            if data_definition.is_bound() {
+                return Err(Error::request(
+                    format!(
+                        "data '{name}' is sealed by `uses -> with` and cannot be supplied at evaluate"
+                    ),
+                    Some("remove this key, or change the `uses` binding if the value should be caller-owned data"),
+                )
+                .with_related_data(name));
+            }
 
             let data_source = data_definition.source();
             let type_arc = match data_definition {
@@ -920,117 +1073,32 @@ impl<'a> LevelFrame<'a> {
                     continue;
                 }
                 DataDefinition::InstanceList { .. } => {
-                    self.awaiting = Some(data_path);
-                    return Ok(ResolveStep::Call(ResolveFrame::List(ListFrame::new(
-                        plan, data_path, name, raw_value, limits, level,
-                    ))));
+                    self.awaiting = Some(AwaitBinding::Data { slot });
+                    return Ok(ResolveStep::Call(ResolveFrame::List(ListFrame {
+                        plan,
+                        path: data_path,
+                        list_key: data_path.input_key(),
+                        under: self.row_key.clone(),
+                        name,
+                        overrides: RowOverrides::default(),
+                        limits,
+                        level,
+                        raw_value: Some(raw_value),
+                        rows: None,
+                    })));
                 }
             };
 
-            let input_key = canonical;
-
-            if raw_value.is_empty() && type_arc.empty_runtime_input_vetoes() {
-                evaluate_data.bindings.insert(
-                    data_path.clone(),
-                    OperationResult::Veto(VetoType::computation(format!(
-                        "Data {} cannot be empty.",
-                        type_arc.label_for_data_input(&input_key)
-                    ))),
-                );
-                continue;
-            }
-
-            if let Some(message) = evaluate_data_shape_error(&raw_value, &type_arc) {
-                return Err(Error::request(
-                    format!("data '{name}': {message}"),
-                    Some(format!("fix the overlay for '{name}'")),
-                )
-                .with_related_data(name));
-            }
-
-            let typed = match parse_data_value(
+            let binding = resolve_scalar_binding(
+                plan,
+                &name,
+                &canonical,
                 &raw_value,
                 &type_arc,
                 data_source,
-                plan.expression_unit_index(),
-                &plan.resolved_types.resolved,
-            ) {
-                Ok(value) => value,
-                Err(error) => {
-                    evaluate_data.bindings.insert(
-                        data_path.clone(),
-                        OperationResult::Veto(VetoType::computation(
-                            type_arc.data_veto_message(&input_key, error.message()),
-                        )),
-                    );
-                    continue;
-                }
-            };
-
-            if let ValueKind::List(rows) = &typed.value {
-                if rows.len() > limits.max_list_rows {
-                    return Err(Error::request(
-                        format!(
-                            "data '{name}' has {} rows, over max_list_rows {}",
-                            rows.len(),
-                            limits.max_list_rows
-                        ),
-                        Some("reduce the list size or raise max_list_rows".to_string()),
-                    )
-                    .with_related_data(name));
-                }
-            }
-
-            let literal_value = LiteralValue {
-                value: typed.value.clone(),
-            };
-            let oversize = match &typed.value {
-                ValueKind::List(items) => items
-                    .iter()
-                    .position(|item| item.byte_size() > limits.max_data_value_bytes)
-                    .map(|index| {
-                        format!(
-                            "Data {} list item {} exceeds the size limit.",
-                            type_arc.label_for_data_input(&input_key),
-                            index + 1
-                        )
-                    }),
-                _ => (literal_value.byte_size() > limits.max_data_value_bytes).then(|| {
-                    format!(
-                        "Data {} exceeds the size limit.",
-                        type_arc.label_for_data_input(&input_key)
-                    )
-                }),
-            };
-            if let Some(reason) = oversize {
-                evaluate_data.bindings.insert(
-                    data_path.clone(),
-                    OperationResult::Veto(VetoType::computation(reason)),
-                );
-                continue;
-            }
-
-            if let Err(message) = validate_value_against_type(
-                typed.lemma_type.as_ref(),
-                &literal_value,
-                plan.expression_unit_index(),
-            ) {
-                evaluate_data.bindings.insert(
-                    data_path.clone(),
-                    OperationResult::Veto(VetoType::computation(
-                        type_arc.data_veto_message(&input_key, &message),
-                    )),
-                );
-                continue;
-            }
-
-            evaluate_data.bindings.insert(
-                data_path.clone(),
-                OperationResult::from_bound(crate::planning::semantics::BoundValueKind {
-                    value: typed.value.clone(),
-                    unit: typed.lemma_type.unit().map(std::sync::Arc::from),
-                }),
-            );
+                limits,
+            )?;
+            evaluate_data.bindings.insert(slot, binding);
         }
 
         Ok(ResolveStep::Return(ResolveOutput::Level(std::mem::take(
@@ -1039,24 +1107,354 @@ impl<'a> LevelFrame<'a> {
     }
 }
 
-/// Local plan.data path, or a named-`uses` member leaf matched by `input_key`.
+/// One caller value against its slot type: parse, size-check and validate it. The
+/// result to bind — the parsed value or a veto for a bad overlay; structural
+/// failures (shape, too many rows) are request errors.
+fn resolve_scalar_binding(
+    plan: &ExecutionPlan,
+    name: &str,
+    input_key: &str,
+    raw_value: &EvaluateDataValue,
+    type_arc: &Arc<LemmaType>,
+    data_source: &Source,
+    limits: &ResourceLimits,
+) -> Result<OperationResult, Error> {
+    if raw_value.is_empty() && type_arc.empty_runtime_input_vetoes() {
+        return Ok(OperationResult::Veto(VetoType::computation(format!(
+            "Data {} cannot be empty.",
+            type_arc.label_for_data_input(input_key)
+        ))));
+    }
+
+    if let Some(message) = evaluate_data_shape_error(raw_value, type_arc) {
+        return Err(Error::request(
+            format!("data '{name}': {message}"),
+            Some(format!("fix the overlay for '{name}'")),
+        )
+        .with_related_data(name));
+    }
+
+    let typed = match parse_data_value(
+        raw_value,
+        type_arc,
+        data_source,
+        plan.expression_unit_index(),
+        &plan.resolved_types.resolved,
+    ) {
+        Ok(value) => value,
+        Err(error) => {
+            return Ok(OperationResult::Veto(VetoType::computation(
+                type_arc.data_veto_message(input_key, error.message()),
+            )));
+        }
+    };
+
+    if let ValueKind::List(rows) = &typed.value {
+        if rows.len() > limits.max_list_rows {
+            return Err(Error::request(
+                format!(
+                    "data '{name}' has {} rows, over max_list_rows {}",
+                    rows.len(),
+                    limits.max_list_rows
+                ),
+                Some("reduce the list size or raise max_list_rows".to_string()),
+            )
+            .with_related_data(name));
+        }
+    }
+
+    let literal_value = LiteralValue {
+        value: typed.value.clone(),
+    };
+    let oversize = match &typed.value {
+        ValueKind::List(items) => items
+            .iter()
+            .position(|item| item.byte_size() > limits.max_data_value_bytes)
+            .map(|index| {
+                format!(
+                    "Data {} list item {} exceeds the size limit.",
+                    type_arc.label_for_data_input(input_key),
+                    index + 1
+                )
+            }),
+        _ => (literal_value.byte_size() > limits.max_data_value_bytes).then(|| {
+            format!(
+                "Data {} exceeds the size limit.",
+                type_arc.label_for_data_input(input_key)
+            )
+        }),
+    };
+    if let Some(reason) = oversize {
+        return Ok(OperationResult::Veto(VetoType::computation(reason)));
+    }
+
+    if let Err(message) = validate_value_against_type(
+        typed.lemma_type.as_ref(),
+        &literal_value,
+        plan.expression_unit_index(),
+    ) {
+        return Ok(OperationResult::Veto(VetoType::computation(
+            type_arc.data_veto_message(input_key, &message),
+        )));
+    }
+
+    Ok(OperationResult::from_bound(BoundValueKind {
+        value: typed.value.clone(),
+        unit: typed.lemma_type.unit().map(std::sync::Arc::from),
+    }))
+}
+
+/// Plan data slot and path matched by `input_key`: local data or data of a flattened
+/// import. Fields of spec-written rows (`staff.1.salary`) are not plan data; they
+/// resolve through [`resolve_row_field_key`].
 fn resolve_evaluate_data_target<'a>(
     plan: &'a ExecutionPlan,
     key: &str,
-) -> Option<(&'a DataPath, &'a DataDefinition)> {
+) -> Option<(usize, &'a DataPath, &'a DataDefinition)> {
     let path = plan.input_key_index.get(key)?;
-    let definition = lookup_data_definition(&plan.data, &plan.row_templates, path)
+    let (slot, path, definition) = plan
+        .data
+        .get_full(path)
         .unwrap_or_else(|| panic!("BUG: indexed input '{key}' has no data definition"));
-    Some((path, definition))
+    Some((slot, path, definition))
 }
 
-/// Instance list whose rows `key` addresses one field of (`staff.2.salary`).
-fn instance_list_of_row_key(plan: &ExecutionPlan, key: &str) -> Option<String> {
+/// A stored list as a row reads it: the row holding it (`None` for the plan) and its path.
+type ListAddress = (Option<InstanceKey>, DataPath);
+
+/// A dotted key naming one field of a row the plan holds: a field of a `uses` row
+/// (`i.x`, `i.j.x`) or of a spec-written list row (`staff.2.salary`, `i.staff.1.x`).
+struct RowFieldKey<'a> {
+    /// The row as evaluation reads it.
+    key: InstanceKey,
+    template: &'a ExecutionPlan,
+    slot: usize,
+    field: &'a DataPath,
+    definition: &'a DataDefinition,
+    /// The row binds the field itself.
+    sealed: bool,
+    /// The stored list whose index the field overrides: set when the row is a stored
+    /// row and the field is one of its list's key fields.
+    keyed_list: Option<ListAddress>,
+    /// Every list the key steps through a row of, with its dotted key.
+    lists: Vec<(ListAddress, String)>,
+}
+
+enum RowKeyLookup<'a> {
+    Field(RowFieldKey<'a>),
+    /// No row field of the plan: an ignorable key.
+    Unknown,
+    /// A key under a list that names no row or field of it: the caller addressed a row
+    /// that is not there, or a field those rows do not have.
+    Invalid(Error),
+}
+
+/// `i.j.x`, `staff.2.salary`, `i.staff.1.x` → the field of the row the key names,
+/// stepping through `uses` slots and the rows of stored lists from the plan.
+fn resolve_row_field_key<'a>(plan: &'a ExecutionPlan, key: &str) -> RowKeyLookup<'a> {
     let parts: Vec<&str> = key.split('.').collect();
-    plan.instance_lists.keys().find_map(|path| {
-        let list_parts: Vec<&str> = path.input_key_segments().collect();
-        (parts.starts_with(&list_parts) && parts.len() > list_parts.len()).then(|| path.input_key())
-    })
+    let mut template = plan;
+    let mut holder: Option<InstanceKey> = None;
+    let mut keyed: Option<(ListAddress, &'a ListKey)> = None;
+    let mut lists: Vec<(ListAddress, String)> = Vec::new();
+    let mut index = 0;
+    loop {
+        let Some(path) = template.input_key_index.get(parts[index]) else {
+            return unknown_under_list(key, &lists);
+        };
+        let (slot, _, definition) = template
+            .data
+            .get_full(path)
+            .expect("BUG: indexed input key has a data definition");
+        let row = holder.as_ref().map(|key| key.row.as_ref());
+        if index + 1 == parts.len() {
+            if matches!(definition, DataDefinition::Import { .. }) && !lists.is_empty() {
+                return unknown_under_list(key, &lists);
+            }
+            let Some(key) = holder else {
+                return RowKeyLookup::Unknown;
+            };
+            let keyed_list = keyed.and_then(|(list, list_key)| match list_key {
+                ListKey::Fields(fields) => fields
+                    .iter()
+                    .any(|field| field.path == *path)
+                    .then_some(list),
+                ListKey::Numbered => None,
+            });
+            return RowKeyLookup::Field(RowFieldKey {
+                sealed: key.row.bindings[slot].is_some(),
+                key,
+                template,
+                slot,
+                field: path,
+                definition,
+                keyed_list,
+                lists,
+            });
+        }
+        match definition {
+            DataDefinition::Import { .. } => {
+                let import = Arc::clone(template.import_row(row, path));
+                template = template.row_template(&import.identity);
+                holder = Some(InstanceKey::new(import, holder));
+                keyed = None;
+                index += 1;
+            }
+            DataDefinition::InstanceList { .. } => {
+                let list_key = parts[..=index].join(".");
+                let source = template
+                    .instance_lists
+                    .get(path)
+                    .unwrap_or_else(|| panic!("BUG: instance list '{list_key}' has no source"));
+                let (rows, owner) = match row.and_then(|row| row.bindings[slot].as_ref()) {
+                    None => (source.store.rows.as_slice(), holder.clone()),
+                    Some(RowBinding::Rows { rows, hops, .. }) => {
+                        let holder = holder.as_ref().expect("BUG: a bound list is a row field");
+                        (rows.as_slice(), holder.scope(*hops).cloned())
+                    }
+                    Some(
+                        RowBinding::Bound(_)
+                        | RowBinding::Deferred { .. }
+                        | RowBinding::Instance(_),
+                    ) => {
+                        return RowKeyLookup::Invalid(Error::request(
+                            format!(
+                                "data '{key}' is sealed by `uses -> with` and cannot be supplied at evaluate"
+                            ),
+                            Some(format!(
+                                "'{list_key}' is bound by `uses -> with`; its rows take no run data"
+                            )),
+                        ));
+                    }
+                };
+                let rest = &parts[index + 1..];
+                let number = match rest.first().map(|row| row.parse::<usize>()) {
+                    Some(Ok(number)) if rest.len() > 1 => number,
+                    _ => {
+                        return RowKeyLookup::Invalid(no_list_data(
+                            key,
+                            &list_key,
+                            format!("fields of a row of '{list_key}' are keyed '{list_key}.<row>.<field>'"),
+                        ));
+                    }
+                };
+                if number == 0 || number > rows.len() {
+                    return RowKeyLookup::Invalid(no_list_data(
+                        key,
+                        &list_key,
+                        format!(
+                            "'{list_key}' has {} spec-written row(s); rows are numbered from 1",
+                            rows.len()
+                        ),
+                    ));
+                }
+                let list = (owner.clone(), path.clone());
+                lists.push((list.clone(), list_key));
+                keyed = match row.and_then(|row| row.bindings[slot].as_ref()) {
+                    None => Some((list, &source.key)),
+                    Some(_) => None,
+                };
+                let listed = Arc::clone(&rows[number - 1]);
+                template = template.row_template(&listed.identity);
+                holder = Some(InstanceKey::new(listed, owner));
+                index += 2;
+            }
+            DataDefinition::Value { .. }
+            | DataDefinition::TypeDeclaration { .. }
+            | DataDefinition::Reference { .. } => {
+                return unknown_under_list(key, &lists);
+            }
+        }
+    }
+}
+
+/// Template, definition, instance and field path of a `uses` instance field a dotted
+/// run-data key names (`i.x`, `i.j.x`); `None` for any other key.
+pub(crate) fn row_field_definition<'a>(
+    plan: &'a ExecutionPlan,
+    key: &str,
+) -> Option<(
+    &'a ExecutionPlan,
+    &'a DataDefinition,
+    InstanceKey,
+    &'a DataPath,
+)> {
+    match resolve_row_field_key(plan, key) {
+        RowKeyLookup::Field(row_field) if row_field.lists.is_empty() => Some((
+            row_field.template,
+            row_field.definition,
+            row_field.key,
+            row_field.field,
+        )),
+        RowKeyLookup::Field(_) => None,
+        RowKeyLookup::Unknown | RowKeyLookup::Invalid(_) => None,
+    }
+}
+
+/// A key that names nothing past its last list row (`items.1.bonus`): a request error
+/// under a list, an ignorable key otherwise.
+fn unknown_under_list<'a>(key: &str, lists: &[(ListAddress, String)]) -> RowKeyLookup<'a> {
+    match lists.last() {
+        Some((_, list_key)) => {
+            let field = key[list_key.len() + 1..]
+                .split_once('.')
+                .map_or("", |(_, field)| field);
+            RowKeyLookup::Invalid(no_list_data(
+                key,
+                list_key,
+                format!("rows of '{list_key}' have no field '{field}'"),
+            ))
+        }
+        None => RowKeyLookup::Unknown,
+    }
+}
+
+fn no_list_data(key: &str, list_key: &str, hint: String) -> Error {
+    Error::request(
+        format!("data '{key}' names no data of '{list_key}'"),
+        Some(hint),
+    )
+}
+
+/// A request that replaces a list as a whole and also supplies a field of one of its
+/// spec-written rows is contradictory: the whole list has no such row.
+fn reject_whole_list_with_row_keys(
+    plan: &ExecutionPlan,
+    raw_values: &IndexMap<String, EvaluateDataValue>,
+) -> Result<(), Error> {
+    let mut whole_lists: HashSet<ListAddress> = HashSet::new();
+    let mut row_fields: Vec<(&String, Vec<(ListAddress, String)>)> = Vec::new();
+    for name in raw_values.keys() {
+        let canonical = canonical_logical_name(name);
+        if let Some((_, path, definition)) = resolve_evaluate_data_target(plan, &canonical) {
+            if matches!(definition, DataDefinition::InstanceList { .. }) {
+                whole_lists.insert((None, path.clone()));
+            }
+            continue;
+        }
+        if let RowKeyLookup::Field(row_field) = resolve_row_field_key(plan, &canonical) {
+            if matches!(row_field.definition, DataDefinition::InstanceList { .. }) {
+                whole_lists.insert((Some(row_field.key.clone()), row_field.field.clone()));
+            }
+            row_fields.push((name, row_field.lists));
+        }
+    }
+    for (name, lists) in row_fields {
+        for (list, list_key) in lists {
+            if whole_lists.contains(&list) {
+                return Err(Error::request(
+                    format!(
+                        "data '{list_key}': cannot supply both the whole list and dotted row keys such as '{name}'"
+                    ),
+                    Some(format!(
+                        "pass either '{list_key}' as an array, or only dotted keys under '{list_key}'"
+                    )),
+                )
+                .with_related_data(list_key));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Whether a run-data list value is a top-level one, whose whole row tree is checked
@@ -1093,15 +1491,14 @@ fn check_list_tree(
             continue;
         };
         for (field, value) in fields {
-            let canonical = crate::parsing::ast::ascii_lowercase_logical_name(field.clone());
-            let Some(source) = row_template
-                .input_key_index
-                .get(canonical.as_str())
-                .and_then(|path| row_template.instance_lists.get(path))
-            else {
+            let EvaluateDataValue::List(rows) = value else {
                 continue;
             };
-            let EvaluateDataValue::List(rows) = value else {
+            let Some(source) = row_template
+                .input_key_index
+                .get(canonical_logical_name(field).as_ref())
+                .and_then(|path| row_template.instance_lists.get(path))
+            else {
                 continue;
             };
             let nested = row_template.row_template(&source.identity);
@@ -1117,17 +1514,20 @@ fn check_list_tree(
     Ok(())
 }
 
-/// Rows of instance list `path` from run data: one object per row, resolved against
-/// the row spec's template. Unknown fields, a missing key field, or a non-object row
-/// is a request Error; a vetoed field, a duplicate key or overlapping key ranges veto
-/// the whole list.
 /// Frame of one instance list entry: validates the list, then resolves each row through
 /// a level frame of the row template. A vetoed field, duplicate key or overlapping key
 /// range resolves the list to a veto.
 struct ListFrame<'a> {
     plan: &'a ExecutionPlan,
     path: &'a DataPath,
+    /// Dotted key of the list from the plan of its level, naming its rows.
+    list_key: String,
+    /// Evaluation-data key of the run-data row holding the list; `None` for a list of
+    /// the request's plan.
+    under: Option<Arc<str>>,
     name: String,
+    /// Run-data fields of the rows' nested rows, keyed under the rows.
+    overrides: RowOverrides,
     limits: &'a ResourceLimits,
     level: ListLevel,
     raw_value: Option<EvaluateDataValue>,
@@ -1136,12 +1536,22 @@ struct ListFrame<'a> {
 
 struct ListRows<'a> {
     source: &'a InstanceListSource,
+    /// Row spec identity, shared by the rows.
+    identity: Arc<SpecIdentity>,
     template: &'a ExecutionPlan,
     row_type: Arc<LemmaType>,
     raw_rows: std::vec::IntoIter<EvaluateDataValue>,
     number: usize,
     literals: Vec<TypedLiteral>,
-    keyed: Vec<KeyedRow>,
+    /// Template data slot and type of each key field, in key order.
+    key_slots: Box<[KeySlot<'a>]>,
+    keyed: Vec<Vec<TypedLiteral>>,
+}
+
+struct KeySlot<'a> {
+    field: &'a KeyField,
+    slot: usize,
+    field_type: Arc<LemmaType>,
 }
 
 fn request_error(name: &str, message: String) -> Error {
@@ -1149,25 +1559,6 @@ fn request_error(name: &str, message: String) -> Error {
 }
 
 impl<'a> ListFrame<'a> {
-    fn new(
-        plan: &'a ExecutionPlan,
-        path: &'a DataPath,
-        name: String,
-        raw_value: EvaluateDataValue,
-        limits: &'a ResourceLimits,
-        level: ListLevel,
-    ) -> Self {
-        Self {
-            plan,
-            path,
-            name,
-            limits,
-            level,
-            raw_value: Some(raw_value),
-            rows: None,
-        }
-    }
-
     fn resume(&mut self, input: Option<ResolveOutput>) -> Result<ResolveStep<'a>, Error> {
         match self.rows.take() {
             None => {
@@ -1187,7 +1578,10 @@ impl<'a> ListFrame<'a> {
                     panic!("BUG: list frame resumed without a row result");
                 };
                 match self.finish_row(&mut rows, row_data)? {
-                    Some(veto) => Ok(ResolveStep::Return(ResolveOutput::Binding(veto))),
+                    Some(veto) => Ok(ResolveStep::Return(ResolveOutput::Binding(
+                        veto,
+                        RowOverrides::default(),
+                    ))),
                     None => self.next_row(rows),
                 }
             }
@@ -1227,11 +1621,27 @@ impl<'a> ListFrame<'a> {
         let row_type = Arc::new(LemmaType::primitive(TypeSpecification::Spec {
             spec: source.identity.clone(),
         }));
+        let key_slots = match &source.key {
+            ListKey::Fields(key_fields) => key_fields
+                .iter()
+                .map(|field| KeySlot {
+                    field,
+                    slot: template
+                        .data
+                        .get_index_of(&field.path)
+                        .expect("BUG: key field is template data"),
+                    field_type: row_end_type(template, &RowEnd::Data(field.path.clone())),
+                })
+                .collect(),
+            ListKey::Numbered => Box::default(),
+        };
         Ok(ListRows {
             source,
+            identity: Arc::new(source.identity.clone()),
             template,
             row_type,
             literals: Vec::with_capacity(raw_rows.len()),
+            key_slots,
             keyed: Vec::new(),
             number: 0,
             raw_rows: raw_rows.into_iter(),
@@ -1242,6 +1652,7 @@ impl<'a> ListFrame<'a> {
         let Some(raw_row) = rows.raw_rows.next() else {
             return Ok(ResolveStep::Return(ResolveOutput::Binding(
                 self.finish_list(rows),
+                std::mem::take(&mut self.overrides),
             )));
         };
         rows.number += 1;
@@ -1252,9 +1663,15 @@ impl<'a> ListFrame<'a> {
             ));
         };
         let template = rows.template;
+        let origin = crate::planning::semantics::numbered_row_origin(&self.list_key, rows.number);
+        let row_key: Arc<str> = match &self.under {
+            Some(under) => Arc::from(format!("{under}.{origin}")),
+            None => Arc::from(origin),
+        };
         self.rows = Some(rows);
         Ok(ResolveStep::Call(ResolveFrame::Level(LevelFrame::new(
             template,
+            Some(row_key),
             fields,
             self.limits,
             ListLevel::Nested,
@@ -1263,71 +1680,112 @@ impl<'a> ListFrame<'a> {
 
     /// Adds the resolved row `rows.number`. `Some` is a veto of the whole list.
     fn finish_row(
-        &self,
+        &mut self,
         rows: &mut ListRows<'a>,
         row_data: EvaluateData,
     ) -> Result<Option<OperationResult>, Error> {
         let number = rows.number;
         let name = self.name.as_str();
-        let mut bindings = IndexMap::new();
-        for (field, binding) in row_data.bindings {
+        let mut bindings: Vec<Option<RowBinding>> = vec![None; rows.template.data.len()];
+        if let Some(veto) = row_data
+            .row_overrides
+            .fields
+            .values()
+            .flat_map(IndexMap::values)
+            .find_map(|binding| match binding {
+                OperationResult::Veto(veto) => Some(veto),
+                OperationResult::Value(_) => None,
+            })
+        {
+            return Ok(Some(OperationResult::Veto(VetoType::computation(format!(
+                "In {name} row {number}: {veto}"
+            )))));
+        }
+        for (slot, binding) in row_data.bindings {
             if let OperationResult::Veto(veto) = &binding {
                 return Ok(Some(OperationResult::Veto(VetoType::computation(format!(
                     "In {name} row {number}: {veto}"
                 )))));
             }
-            bindings.insert(field, binding);
+            bindings[slot] = Some(RowBinding::Bound(binding));
         }
-        if let ListKey::Fields(key_fields) = &rows.source.key {
-            let mut values = Vec::with_capacity(key_fields.len());
-            for field in key_fields {
-                let key_path = match row_end(rows.template, field) {
-                    Some(RowEnd::Data(key_path)) => key_path,
-                    other => panic!("BUG: key field `{field}` is not row data: {other:?}"),
-                };
-                let field_type = row_end_type(rows.template, &RowEnd::Data(key_path.clone()));
-                let value = match bindings.get(&key_path) {
-                    Some(OperationResult::Value(bound)) => typed_from_bound(bound, &field_type),
-                    Some(OperationResult::Veto(_)) => {
+        if let ListKey::Fields(_) = &rows.source.key {
+            let mut values = Vec::with_capacity(rows.key_slots.len());
+            for KeySlot {
+                field: key_field,
+                slot,
+                field_type,
+            } in &rows.key_slots
+            {
+                let key_path = &key_field.path;
+                let value = match bindings.get(*slot).and_then(Option::as_ref) {
+                    Some(RowBinding::Bound(OperationResult::Value(bound))) => {
+                        typed_from_bound(bound, field_type)
+                    }
+                    Some(RowBinding::Bound(OperationResult::Veto(_))) => {
                         unreachable!("BUG: vetoed row binding returned above")
                     }
-                    None => template_default(rows.template, &key_path).ok_or_else(|| {
+                    Some(
+                        RowBinding::Deferred { .. }
+                        | RowBinding::Rows { .. }
+                        | RowBinding::Instance(_),
+                    ) => {
+                        unreachable!("BUG: evaluation data rows bind resolved values")
+                    }
+                    None => default_of(&rows.template.data, key_path).ok_or_else(|| {
                         request_error(
                             name,
-                            format!("row {number} has no value for key field '{field}'"),
+                            format!(
+                                "row {number} has no value for key field '{}'",
+                                key_field.name
+                            ),
                         )
                     })?,
                 };
                 values.push(value);
             }
-            rows.keyed.push(KeyedRow {
-                label: format!("row {number}"),
-                values,
-            });
+            rows.keyed.push(values);
         }
-        rows.literals.push(row_literal(
-            rows.source.identity.clone(),
+        let literal = row_literal(
+            Arc::clone(&rows.identity),
             RowOrigin::Numbered {
-                list: self.path.input_key(),
+                list: self.list_key.clone(),
                 number,
+                under: self.under.clone(),
             },
             bindings,
             Arc::clone(&rows.row_type),
-        ));
+        );
+        let ValueKind::Spec(SpecValue::Row(key)) = &literal.value else {
+            unreachable!("BUG: a row literal is a row value");
+        };
+        self.overrides.extend(row_data.row_overrides.under(key));
+        rows.literals.push(literal);
         Ok(None)
     }
 
     fn finish_list(&self, rows: ListRows<'a>) -> OperationResult {
-        if let ListKey::Fields(key_fields) = &rows.source.key {
-            if let Some(conflict) = key_conflict(key_fields, &rows.keyed) {
-                return OperationResult::Veto(VetoType::computation(format!(
-                    "{}: {conflict}",
-                    self.name
-                )));
+        let literals: Arc<[TypedLiteral]> = rows.literals.into();
+        let list = match &rows.source.key {
+            ListKey::Fields(key_fields) => {
+                let field_names: Vec<String> = key_fields
+                    .iter()
+                    .map(|key_field| key_field.name.clone())
+                    .collect();
+                match KeyIndex::build_numbered(field_names, &rows.keyed) {
+                    Ok(index) => ListValue::indexed(literals, Arc::new(index)),
+                    Err(conflict) => {
+                        return OperationResult::Veto(VetoType::computation(format!(
+                            "{}: {conflict}",
+                            self.name
+                        )));
+                    }
+                }
             }
-        }
+            ListKey::Numbered => ListValue::from(literals),
+        };
         OperationResult::from_literal(LiteralValue {
-            value: ValueKind::List(rows.literals),
+            value: ValueKind::List(list),
         })
     }
 }
@@ -1359,7 +1817,6 @@ mod tests {
             TypeSpecification::Measure {
                 minimum: None,
                 maximum: None,
-                decimals: None,
                 units: MeasureUnits::from(vec![
                     MeasureUnit {
                         name: "kilogram".to_string(),
@@ -1395,7 +1852,6 @@ mod tests {
             TypeSpecification::Ratio {
                 minimum: None,
                 maximum: None,
-                decimals: None,
                 units: RatioUnits::from(vec![
                     RatioUnit {
                         name: "percent".to_string(),
@@ -1511,7 +1967,6 @@ mod tests {
             &unit_map("eur", "84"),
             &LemmaType::primitive(TypeSpecification::Text {
                 length: None,
-                options: Vec::new(),
                 help: String::new(),
             }),
         )
@@ -1574,7 +2029,6 @@ mod tests {
         let text_list =
             LemmaType::list_of(Arc::new(LemmaType::primitive(TypeSpecification::Text {
                 length: None,
-                options: Vec::new(),
                 help: String::new(),
             })));
         let message = evaluate_data_shape_error(
@@ -1833,7 +2287,8 @@ data score: number
   -> minimum 0
 
 spec roster
-uses people: person list
+uses person
+data people: person list
 rule n: people -> count
 "#,
         )

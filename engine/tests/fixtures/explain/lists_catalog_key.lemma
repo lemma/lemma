@@ -1,0 +1,14 @@
+spec row
+
+data name: text
+data score: number
+
+
+spec catalog
+
+uses row
+
+rule items:
+  row list
+  -> key name
+  -> with name: "Ada", score: 10

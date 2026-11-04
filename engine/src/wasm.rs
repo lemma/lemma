@@ -45,15 +45,6 @@ impl WasmEngine {
         })
     }
 
-    /// Restore an engine from [`Engine::snapshot`] bytes.
-    #[wasm_bindgen(js_name = fromSnapshot)]
-    pub fn from_snapshot(bytes: &[u8]) -> Result<WasmEngine, JsValue> {
-        console_error_panic_hook::set_once();
-        Ok(WasmEngine {
-            engine: Engine::from_snapshot(bytes).map_err(|e| error_to_js(&e))?,
-        })
-    }
-
     /// Load Lemma source(s).
     ///
     /// - string → one volatile source in the default repository
@@ -218,12 +209,6 @@ impl WasmEngine {
     #[wasm_bindgen(js_name = limits)]
     pub fn limits_wasm(&self) -> Result<JsValue, JsValue> {
         serialize_engine_json(self.engine.limits())
-    }
-
-    /// Persist parsed specs + plans + limits as opaque bytes (see [`Engine::snapshot`]).
-    #[wasm_bindgen(js_name = snapshot)]
-    pub fn snapshot_wasm(&self) -> Result<Vec<u8>, JsValue> {
-        self.engine.snapshot().map_err(|e| error_to_js(&e))
     }
 
     /// Returns formatted source string on success; throws with error message on failure.

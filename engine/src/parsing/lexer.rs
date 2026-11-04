@@ -3,7 +3,7 @@ use crate::parsing::ast::{BooleanValue, PrimitiveKind, Span};
 use crate::parsing::source::Source;
 use std::sync::Arc;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TokenKind {
     // Keywords
     Spec,
@@ -12,8 +12,10 @@ pub enum TokenKind {
     Rule,
     Unless,
     Then,
+    That,
     Not,
     And,
+    Or,
     In,
     As,
     Uses,
@@ -132,8 +134,10 @@ impl std::fmt::Display for TokenKind {
             TokenKind::Rule => write!(f, "'rule'"),
             TokenKind::Unless => write!(f, "'unless'"),
             TokenKind::Then => write!(f, "'then'"),
+            TokenKind::That => write!(f, "'that'"),
             TokenKind::Not => write!(f, "'not'"),
             TokenKind::And => write!(f, "'and'"),
+            TokenKind::Or => write!(f, "'or'"),
             TokenKind::In => write!(f, "'in'"),
             TokenKind::As => write!(f, "'as'"),
             TokenKind::Uses => write!(f, "'uses'"),
@@ -218,11 +222,35 @@ impl std::fmt::Display for TokenKind {
     }
 }
 
-#[derive(Debug, Clone)]
+/// Byte range of a token's content in the source. For `StringLit` this excludes
+/// the quotes (the span covers them); for `Commentary` it is the content between
+/// the triple quotes; for every other kind it equals the span.
+#[derive(Debug, Clone, Copy)]
+pub struct TokenText {
+    pub start: usize,
+    pub end: usize,
+}
+
+impl TokenText {
+    /// The content of this range in `source`.
+    pub fn of(self, source: &str) -> &str {
+        &source[self.start..self.end]
+    }
+
+    pub fn len(&self) -> usize {
+        self.end - self.start
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.end == self.start
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
 pub struct Token {
     pub kind: TokenKind,
     pub span: Span,
-    pub text: String,
+    pub text: TokenText,
 }
 
 impl Token {
@@ -235,14 +263,16 @@ impl Token {
                 line,
                 col,
             },
-            text: String::new(),
+            text: TokenText {
+                start: offset,
+                end: offset,
+            },
         }
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Copy)]
 pub struct LexerCheckpoint {
-    pos: usize,
     line: usize,
     col: usize,
     byte_offset: usize,
@@ -250,11 +280,7 @@ pub struct LexerCheckpoint {
     peeked2: Option<Token>,
 }
 
-// todo: find out why derive Clone is necessary
-#[derive(Clone)]
 pub struct Lexer {
-    source: Vec<char>,
-    pos: usize,
     line: usize,
     col: usize,
     byte_offset: usize,
@@ -265,16 +291,16 @@ pub struct Lexer {
 }
 
 impl Lexer {
-    pub fn new(input: &str, source_type: &crate::parsing::source::SourceType) -> Self {
-        let source_text: Arc<str> = Arc::from(input);
+    pub fn new(
+        input: impl Into<Arc<str>>,
+        source_type: &crate::parsing::source::SourceType,
+    ) -> Self {
         Lexer {
-            source: input.chars().collect(),
-            pos: 0,
             line: 1,
             col: 1,
             byte_offset: 0,
             source_type: source_type.clone(),
-            source_text,
+            source_text: input.into(),
             peeked: None,
             peeked2: None,
         }
@@ -330,13 +356,6 @@ impl Lexer {
     }
 
     fn rewind_to(&mut self, byte_offset: usize, line: usize, col: usize) {
-        let mut pos = 0;
-        let mut bytes = 0;
-        while bytes < byte_offset && pos < self.source.len() {
-            bytes += self.source[pos].len_utf8();
-            pos += 1;
-        }
-        self.pos = pos;
         self.byte_offset = byte_offset;
         self.line = line;
         self.col = col;
@@ -345,17 +364,15 @@ impl Lexer {
     /// Saved lexer position for speculative parsing.
     pub fn checkpoint(&self) -> LexerCheckpoint {
         LexerCheckpoint {
-            pos: self.pos,
             line: self.line,
             col: self.col,
             byte_offset: self.byte_offset,
-            peeked: self.peeked.clone(),
-            peeked2: self.peeked2.clone(),
+            peeked: self.peeked,
+            peeked2: self.peeked2,
         }
     }
 
     pub fn restore(&mut self, checkpoint: LexerCheckpoint) {
-        self.pos = checkpoint.pos;
         self.line = checkpoint.line;
         self.col = checkpoint.col;
         self.byte_offset = checkpoint.byte_offset;
@@ -363,16 +380,22 @@ impl Lexer {
         self.peeked2 = checkpoint.peeked2;
     }
 
+    fn chars_from(&self, byte_offset: usize) -> std::str::Chars<'_> {
+        self.source_text[byte_offset..].chars()
+    }
+
     fn current_char(&self) -> Option<char> {
-        self.source.get(self.pos).copied()
+        self.chars_from(self.byte_offset).next()
     }
 
     fn peek_char(&self) -> Option<char> {
-        self.source.get(self.pos + 1).copied()
+        let mut chars = self.chars_from(self.byte_offset);
+        chars.next();
+        chars.next()
     }
 
     fn peek_char_at(&self, offset: usize) -> Option<char> {
-        self.source.get(self.pos + offset).copied()
+        self.chars_from(self.byte_offset).nth(offset)
     }
 
     fn advance(&mut self) {
@@ -384,7 +407,6 @@ impl Lexer {
             } else {
                 self.col += 1;
             }
-            self.pos += 1;
         }
     }
 
@@ -454,8 +476,11 @@ impl Lexer {
             let span = self.make_span(start_byte, start_line, start_col);
             return Ok(Token {
                 kind: TokenKind::Ellipsis,
+                text: TokenText {
+                    start: span.start,
+                    end: span.end,
+                },
                 span,
-                text: "...".to_string(),
             });
         }
 
@@ -463,8 +488,14 @@ impl Lexer {
         if let Some(kind) = self.single_char_token(ch) {
             self.advance();
             let span = self.make_span(start_byte, start_line, start_col);
-            let text = ch.to_string();
-            return Ok(Token { kind, span, text });
+            return Ok(Token {
+                kind,
+                text: TokenText {
+                    start: span.start,
+                    end: span.end,
+                },
+                span,
+            });
         }
 
         // Identifier or keyword
@@ -493,10 +524,8 @@ impl Lexer {
         start_line: usize,
         start_col: usize,
     ) -> Result<Token, Error> {
-        let mut text = String::new();
         let had_at = self.current_char() == Some('@');
         if had_at {
-            text.push('@');
             self.advance();
         }
         let Some(first) = self.current_char() else {
@@ -523,7 +552,6 @@ impl Lexer {
         }
         while let Some(ch) = self.current_char() {
             if Self::is_logical_name_char(ch) {
-                text.push(ch);
                 self.advance();
             } else {
                 break;
@@ -532,8 +560,11 @@ impl Lexer {
         let span = self.make_span(start_byte, start_line, start_col);
         Ok(Token {
             kind: TokenKind::LogicalName,
+            text: TokenText {
+                start: span.start,
+                end: span.end,
+            },
             span,
-            text,
         })
     }
 
@@ -557,20 +588,19 @@ impl Lexer {
                         span,
                     ));
                 }
-                Some('"')
-                    if self.source.get(self.pos + 1) == Some(&'"')
-                        && self.source.get(self.pos + 2) == Some(&'"') =>
-                {
+                Some('"') if self.peek_char() == Some('"') && self.peek_char_at(2) == Some('"') => {
                     let content_end = self.byte_offset;
                     self.advance(); // "
                     self.advance(); // "
                     self.advance(); // "
-                    let raw: String = self.source_text[content_start..content_end].to_string();
                     let span = self.make_span(start_byte, start_line, start_col);
                     return Ok(Token {
                         kind: TokenKind::Commentary,
+                        text: TokenText {
+                            start: content_start,
+                            end: content_end,
+                        },
                         span,
-                        text: raw,
                     });
                 }
                 Some(_) => {
@@ -587,30 +617,30 @@ impl Lexer {
         start_col: usize,
     ) -> Result<Token, Error> {
         self.advance(); // consume opening "
-        let mut content = String::new();
-        loop {
+        let content_start = self.byte_offset;
+        let content_end = loop {
             match self.current_char() {
                 None => {
                     let span = self.make_span(start_byte, start_line, start_col);
                     return Err(self.make_error("String starting here was never closed", span));
                 }
                 Some('"') => {
-                    self.advance(); // consume closing "
-                    break;
+                    break self.byte_offset;
                 }
-                Some(ch) => {
-                    content.push(ch);
+                Some(_) => {
                     self.advance();
                 }
             }
-        }
+        };
+        let content_length = self.source_text[content_start..content_end].len();
+        self.advance(); // consume closing "
         let span = self.make_span(start_byte, start_line, start_col);
-        if content.len() > crate::limits::MAX_TEXT_VALUE_LENGTH {
+        if content_length > crate::limits::MAX_TEXT_VALUE_LENGTH {
             return Err(self.make_error(
                 format!(
                     "Text literal exceeds maximum length of {} characters (found {})",
                     crate::limits::MAX_TEXT_VALUE_LENGTH,
-                    content.len()
+                    content_length
                 ),
                 span,
             ));
@@ -619,8 +649,11 @@ impl Lexer {
         // diagnostics point at the full literal; the parser must not strip again.
         Ok(Token {
             kind: TokenKind::StringLit,
+            text: TokenText {
+                start: content_start,
+                end: content_end,
+            },
             span,
-            text: content,
         })
     }
 
@@ -630,12 +663,9 @@ impl Lexer {
         start_line: usize,
         start_col: usize,
     ) -> Result<Token, Error> {
-        let mut text = String::new();
-
         // Integer part: digits with optional `_` separators
         while let Some(ch) = self.current_char() {
             if ch.is_ascii_digit() || ch == '_' {
-                text.push(ch);
                 self.advance();
             } else {
                 break;
@@ -647,11 +677,9 @@ impl Lexer {
             // Check if next char after dot is a digit (not a method call or dotted reference)
             if let Some(next) = self.peek_char() {
                 if next.is_ascii_digit() {
-                    text.push('.');
                     self.advance(); // consume .
                     while let Some(ch) = self.current_char() {
                         if ch.is_ascii_digit() {
-                            text.push(ch);
                             self.advance();
                         } else {
                             break;
@@ -664,9 +692,6 @@ impl Lexer {
         // Scientific notation: e or E followed by optional +/- and digits
         if let Some(ch) = self.current_char() {
             if ch == 'e' || ch == 'E' {
-                let mut sci_text = String::new();
-                sci_text.push(ch);
-                let save_pos = self.pos;
                 let save_byte = self.byte_offset;
                 let save_line = self.line;
                 let save_col = self.col;
@@ -674,7 +699,6 @@ impl Lexer {
 
                 if let Some(sign) = self.current_char() {
                     if sign == '+' || sign == '-' {
-                        sci_text.push(sign);
                         self.advance();
                     }
                 }
@@ -683,22 +707,18 @@ impl Lexer {
                     if d.is_ascii_digit() {
                         while let Some(ch) = self.current_char() {
                             if ch.is_ascii_digit() {
-                                sci_text.push(ch);
                                 self.advance();
                             } else {
                                 break;
                             }
                         }
-                        text.push_str(&sci_text);
                     } else {
                         // Not actually scientific notation, backtrack
-                        self.pos = save_pos;
                         self.byte_offset = save_byte;
                         self.line = save_line;
                         self.col = save_col;
                     }
                 } else {
-                    self.pos = save_pos;
                     self.byte_offset = save_byte;
                     self.line = save_line;
                     self.col = save_col;
@@ -709,8 +729,11 @@ impl Lexer {
         let span = self.make_span(start_byte, start_line, start_col);
         Ok(Token {
             kind: TokenKind::NumberLit,
+            text: TokenText {
+                start: span.start,
+                end: span.end,
+            },
             span,
-            text,
         })
     }
 
@@ -737,8 +760,14 @@ impl Lexer {
         self.advance();
         self.advance();
         let span = self.make_span(start_byte, start_line, start_col);
-        let text: String = self.source_text[span.start..span.end].to_string();
-        Some(Token { kind, span, text })
+        Some(Token {
+            kind,
+            text: TokenText {
+                start: span.start,
+                end: span.end,
+            },
+            span,
+        })
     }
 
     fn single_char_token(&self, ch: char) -> Option<TokenKind> {
@@ -761,19 +790,24 @@ impl Lexer {
     }
 
     fn scan_identifier(&mut self, start_byte: usize, start_line: usize, start_col: usize) -> Token {
-        let mut text = String::new();
         while let Some(ch) = self.current_char() {
             if ch.is_ascii_alphanumeric() || ch == '_' {
-                text.push(ch);
                 self.advance();
             } else {
                 break;
             }
         }
 
-        let kind = keyword_from_identifier(&text);
         let span = self.make_span(start_byte, start_line, start_col);
-        Token { kind, span, text }
+        let kind = keyword_from_identifier(&self.source_text[start_byte..self.byte_offset]);
+        Token {
+            kind,
+            text: TokenText {
+                start: span.start,
+                end: span.end,
+            },
+            span,
+        }
     }
 }
 
@@ -798,8 +832,10 @@ lemma_keywords! {
     ("rule", Rule),
     ("unless", Unless),
     ("then", Then),
+    ("that", That),
     ("not", Not),
     ("and", And),
+    ("or", Or),
     ("in", In),
     ("as", As),
     ("uses", Uses),
@@ -870,8 +906,10 @@ pub fn is_keyword(kind: &TokenKind) -> bool {
             | TokenKind::Rule
             | TokenKind::Unless
             | TokenKind::Then
+            | TokenKind::That
             | TokenKind::Not
             | TokenKind::And
+            | TokenKind::Or
             | TokenKind::In
             | TokenKind::As
             | TokenKind::Uses
@@ -983,10 +1021,12 @@ pub fn is_math_function(kind: &TokenKind) -> bool {
             | TokenKind::Log
             | TokenKind::Exp
             | TokenKind::Abs
-            | TokenKind::Floor
-            | TokenKind::Ceil
-            | TokenKind::Round
     )
+}
+
+/// Returns true if the token is a postfix rounding command written as a prefix by mistake.
+pub fn is_prefix_rounding(kind: &TokenKind) -> bool {
+    matches!(kind, TokenKind::Floor | TokenKind::Ceil | TokenKind::Round)
 }
 
 /// Returns true if the token kind can start the body of a spec
@@ -1033,8 +1073,8 @@ pub fn can_be_spec_name_spelling(name: &str) -> bool {
 
 /// `calendar` in `in calendar month` / `past calendar year` — not a type keyword.
 #[must_use]
-pub fn token_is_calendar_period_marker(tok: &Token) -> bool {
-    tok.kind == TokenKind::Identifier && tok.text == "calendar"
+pub fn token_is_calendar_period_marker(source: &str, tok: &Token) -> bool {
+    tok.kind == TokenKind::Identifier && tok.text.of(source) == "calendar"
 }
 
 #[cfg(test)]
@@ -1153,7 +1193,7 @@ mod tests {
     fn lex_string_literal() {
         let tokens = lex_all(r#""hello world""#).unwrap();
         assert_eq!(tokens[0].kind, TokenKind::StringLit);
-        assert_eq!(tokens[0].text, "hello world");
+        assert_eq!(tokens[0].text.of(r#""hello world""#), "hello world");
     }
 
     #[test]
@@ -1166,21 +1206,21 @@ mod tests {
     fn lex_number_with_decimal() {
         let tokens = lex_all("3.14").unwrap();
         assert_eq!(tokens[0].kind, TokenKind::NumberLit);
-        assert_eq!(tokens[0].text, "3.14");
+        assert_eq!(tokens[0].text.of("3.14"), "3.14");
     }
 
     #[test]
     fn lex_number_with_underscores() {
         let tokens = lex_all("1_000_000").unwrap();
         assert_eq!(tokens[0].kind, TokenKind::NumberLit);
-        assert_eq!(tokens[0].text, "1_000_000");
+        assert_eq!(tokens[0].text.of("1_000_000"), "1_000_000");
     }
 
     #[test]
     fn lex_scientific_notation() {
         let tokens = lex_all("1.5e+10").unwrap();
         assert_eq!(tokens[0].kind, TokenKind::NumberLit);
-        assert_eq!(tokens[0].text, "1.5e+10");
+        assert_eq!(tokens[0].text.of("1.5e+10"), "1.5e+10");
     }
 
     #[test]
@@ -1208,9 +1248,9 @@ mod tests {
     #[test]
     fn lex_keywords() {
         let kinds =
-            lex_kinds("spec data rule unless then not and in as uses meta veto now").unwrap();
+            lex_kinds("spec data rule unless then not and or in as uses meta veto now").unwrap();
         assert_eq!(
-            &kinds[..13],
+            &kinds[..14],
             &[
                 TokenKind::Spec,
                 TokenKind::Data,
@@ -1219,6 +1259,7 @@ mod tests {
                 TokenKind::Then,
                 TokenKind::Not,
                 TokenKind::And,
+                TokenKind::Or,
                 TokenKind::In,
                 TokenKind::As,
                 TokenKind::Uses,
@@ -1264,14 +1305,14 @@ mod tests {
     fn lex_commentary() {
         let tokens = lex_all(r#""""hello world""""#).unwrap();
         assert_eq!(tokens[0].kind, TokenKind::Commentary);
-        assert_eq!(tokens[0].text, "hello world");
+        assert_eq!(tokens[0].text.of(r#""""hello world""""#), "hello world");
     }
 
     #[test]
     fn lex_registry_logical_name() {
         let tokens = lex_all("@iso/countries").unwrap();
         assert_eq!(tokens[0].kind, TokenKind::LogicalName);
-        assert_eq!(tokens[0].text, "@iso/countries");
+        assert_eq!(tokens[0].text.of("@iso/countries"), "@iso/countries");
         assert_eq!(tokens[1].kind, TokenKind::Eof);
     }
 
@@ -1288,7 +1329,10 @@ mod tests {
         );
         let tok = lexer.next_logical_name().unwrap();
         assert_eq!(tok.kind, TokenKind::LogicalName);
-        assert_eq!(tok.text, "contracts/employment/jack");
+        assert_eq!(
+            tok.text.of("contracts/employment/jack"),
+            "contracts/employment/jack"
+        );
     }
 
     #[test]
@@ -1300,7 +1344,7 @@ mod tests {
         assert_eq!(lexer.peek().unwrap().kind, TokenKind::Identifier);
         let tok = lexer.next_logical_name().unwrap();
         assert_eq!(tok.kind, TokenKind::LogicalName);
-        assert_eq!(tok.text, "finance/units");
+        assert_eq!(tok.text.of("finance/units"), "finance/units");
     }
 
     #[test]
@@ -1358,7 +1402,10 @@ mod tests {
         assert_eq!(lexer.next_token().unwrap().kind, TokenKind::Spec);
         let name = lexer.next_logical_name().unwrap();
         assert_eq!(name.kind, TokenKind::LogicalName);
-        assert_eq!(name.text, "contracts/employment/jack");
+        assert_eq!(
+            name.text.of("spec contracts/employment/jack"),
+            "contracts/employment/jack"
+        );
     }
 
     #[test]
@@ -1366,9 +1413,9 @@ mod tests {
         // "42 eur" should be number then identifier, not scientific notation
         let tokens = lex_all("42 eur").unwrap();
         assert_eq!(tokens[0].kind, TokenKind::NumberLit);
-        assert_eq!(tokens[0].text, "42");
+        assert_eq!(tokens[0].text.of("42 eur"), "42");
         assert_eq!(tokens[1].kind, TokenKind::Identifier);
-        assert_eq!(tokens[1].text, "eur");
+        assert_eq!(tokens[1].text.of("42 eur"), "eur");
     }
 
     #[test]
@@ -1380,7 +1427,7 @@ mod tests {
     #[test]
     fn lex_peek_does_not_consume() {
         let mut lexer = Lexer::new("spec test", &crate::parsing::source::SourceType::Volatile);
-        let peeked_kind = lexer.peek().unwrap().kind.clone();
+        let peeked_kind = lexer.peek().unwrap().kind;
         assert_eq!(peeked_kind, TokenKind::Spec);
         let next = lexer.next_token().unwrap();
         assert_eq!(next.kind, TokenKind::Spec);

@@ -299,7 +299,7 @@ rule exactly_three: weight is 3 kilogram
 }
 
 // ===========================================================================
-// BUG HUNT 6: Money arithmetic with decimals
+// BUG HUNT 6: Money arithmetic with fractional amounts
 // Ensure no floating point issues with currency
 // ===========================================================================
 
@@ -313,7 +313,6 @@ fn hunt_money_precision() {
 spec money_test
 
 data money: measure
-  -> decimals 2
   -> unit eur: 1.00
 
 data price: money -> suggest 19.99 eur
@@ -328,17 +327,13 @@ rule ten_items: price * 10
         .unwrap();
 
     let resp = evaluate_spec(&engine, "money_test", &[("price", "19.99 eur")]);
-    // 19.99 * 21% = 4.1979 → displayed with 2 decimals? or full precision?
     let tax = rule_display(&resp, "tax_amount");
-    // Should be exact: 19.99 * 0.21 = 4.1979
-    assert_eq!(
-        tax, "4.20 eur",
-        "19.99 * 21% = 4.1979, rounded to 2dp = 4.20 eur"
-    );
+    // 19.99 * 21% = 4.1979. A rule result is not rounded.
+    assert_eq!(tax, "4.1979 eur", "19.99 * 21% = 4.1979 eur");
 
-    // 19.99 * 10 = 199.90
+    // 19.99 * 10 = 199.9
     let ten = rule_display(&resp, "ten_items");
-    assert_eq!(ten, "199.90 eur", "19.99 * 10 = 199.90 eur");
+    assert_eq!(ten, "199.9 eur", "19.99 * 10 = 199.9 eur");
 }
 
 // ===========================================================================

@@ -26,7 +26,7 @@ rule discount:
 
 If a VIP customer orders 75 items, they get 25% (last matching wins), not 20%.
 
-There is no `or` operator. Unless chains accommodate disjunctive logic. For boolean composition within a single condition, use `and` and `not`. `and` is order-independent: a `false` operand makes the condition `false` whatever the other operands are, including a missing or vetoed one.
+For boolean composition within a single condition, use `and`, `or`, and `not`. `or` binds looser than `and`. Both are order-independent for their absorbing operand: a `false` operand decides `and`, and a `true` operand decides `or`, whatever the other operands are, including a missing or vetoed one.
 
 ## Boolean literals
 

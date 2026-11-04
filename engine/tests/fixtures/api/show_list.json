@@ -111,7 +111,7 @@
         "kind": "text",
         "extends": {
           "kind": "custom",
-          "parent": "menu.drink",
+          "parent": "menu_item.drink",
           "family": "menu_item.drink",
           "defining_spec": {
             "kind": "import"
@@ -165,7 +165,6 @@
           "kind": "measure",
           "minimum": null,
           "maximum": null,
-          "decimals": null,
           "units": [
             {
               "name": "eur",
@@ -192,7 +191,7 @@
         "key": "numbered",
         "extends": {
           "kind": "custom",
-          "parent": "menu.price list",
+          "parent": "menu_item.price list",
           "family": "coffee_order.fares",
           "defining_spec": {
             "kind": "import"
@@ -247,11 +246,7 @@
             }
           },
           "x-lemma-path": [],
-          "x-lemma-needed-by-rules": [
-            "extended",
-            "selected",
-            "selected_price"
-          ]
+          "x-lemma-needed-by-rules": []
         },
         "price": {
           "oneOf": [
@@ -280,7 +275,6 @@
             "kind": "measure",
             "minimum": null,
             "maximum": null,
-            "decimals": null,
             "units": [
               {
                 "name": "eur",
@@ -313,16 +307,7 @@
             }
           },
           "x-lemma-path": [],
-          "x-lemma-needed-by-rules": [
-            "all_cheap",
-            "average",
-            "cheapest",
-            "highest",
-            "lowest",
-            "priciest",
-            "selected_price",
-            "total"
-          ]
+          "x-lemma-needed-by-rules": []
         },
         "size": {
           "type": "string",
@@ -344,17 +329,37 @@
             }
           },
           "x-lemma-path": [],
-          "x-lemma-needed-by-rules": [
-            "any_large",
-            "large",
-            "size_product"
-          ]
+          "x-lemma-needed-by-rules": []
         }
       },
       "required": [
         "drink",
         "price",
         "size"
+      ]
+    }
+  },
+  "x-lemma-row-field-needed-by-rules": {
+    "LemmaRow_menu__item": {
+      "drink": [
+        "extended",
+        "selected",
+        "selected_price"
+      ],
+      "price": [
+        "all_cheap",
+        "average",
+        "cheapest",
+        "highest",
+        "lowest",
+        "priciest",
+        "selected_price",
+        "total"
+      ],
+      "size": [
+        "any_large",
+        "large",
+        "size_product"
       ]
     }
   },
@@ -372,7 +377,7 @@
       "help": "A text value.",
       "extends": {
         "kind": "custom",
-        "parent": "menu.drink",
+        "parent": "menu_item.drink",
         "family": "menu_item.drink",
         "defining_spec": {
           "kind": "import"
@@ -386,7 +391,6 @@
         "kind": "measure",
         "minimum": null,
         "maximum": null,
-        "decimals": null,
         "units": [
           {
             "name": "eur",
@@ -414,7 +418,7 @@
       "key": "numbered",
       "extends": {
         "kind": "custom",
-        "parent": "menu.price list",
+        "parent": "menu_item.price list",
         "family": "coffee_order.fares",
         "defining_spec": {
           "kind": "import"
@@ -510,7 +514,6 @@
         "kind": "measure",
         "minimum": null,
         "maximum": null,
-        "decimals": null,
         "units": [
           {
             "name": "eur",
@@ -702,7 +705,6 @@
           "kind": "measure",
           "minimum": null,
           "maximum": null,
-          "decimals": null,
           "units": [
             {
               "name": "eur",
@@ -730,7 +732,7 @@
         "key": "numbered",
         "extends": {
           "kind": "custom",
-          "parent": "menu.price list",
+          "parent": "menu_item.price list",
           "family": "coffee_order.fares",
           "defining_spec": {
             "kind": "import"
@@ -775,7 +777,6 @@
         "kind": "measure",
         "minimum": null,
         "maximum": null,
-        "decimals": null,
         "units": [
           {
             "name": "eur",
@@ -883,7 +884,6 @@
         "kind": "measure",
         "minimum": null,
         "maximum": null,
-        "decimals": null,
         "units": [
           {
             "name": "eur",
@@ -945,7 +945,6 @@
           "kind": "measure",
           "minimum": null,
           "maximum": null,
-          "decimals": null,
           "units": [
             {
               "name": "eur",
@@ -973,7 +972,7 @@
         "key": "numbered",
         "extends": {
           "kind": "custom",
-          "parent": "menu.price list",
+          "parent": "menu_item.price list",
           "family": "coffee_order.fares",
           "defining_spec": {
             "kind": "import"
@@ -1105,7 +1104,6 @@
         "kind": "measure",
         "minimum": null,
         "maximum": null,
-        "decimals": null,
         "units": [
           {
             "name": "eur",
@@ -1247,7 +1245,6 @@
         "kind": "measure",
         "minimum": null,
         "maximum": null,
-        "decimals": null,
         "units": [
           {
             "name": "eur",

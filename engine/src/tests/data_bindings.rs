@@ -1,4 +1,4 @@
-use crate::parsing::ast::{DataValue, WithRhs};
+use crate::parsing::ast::{DataValue, UsesBindingRhs};
 
 use crate::parsing::parse;
 
@@ -58,7 +58,7 @@ uses base: base_contract"#;
         assert_eq!(bindings.len(), 2);
         assert_eq!(bindings[0].path.name, "start_date");
         match &bindings[0].rhs {
-            WithRhs::Literal(lit) => {
+            UsesBindingRhs::Literal(lit) => {
                 assert!(
                     matches!(lit, crate::parsing::ast::Value::Date(_)),
                     "Expected Date literal in binding"
@@ -68,7 +68,7 @@ uses base: base_contract"#;
         }
         assert_eq!(bindings[1].path.name, "employment_type");
         match &bindings[1].rhs {
-            WithRhs::Literal(crate::parsing::ast::Value::Text(s)) => {
+            UsesBindingRhs::Literal(crate::parsing::ast::Value::Text(s)) => {
                 assert_eq!(s, "contractor");
             }
             other => panic!("Expected text literal, got {:?}", other),
@@ -167,7 +167,7 @@ rule total: i.tax_rate"#;
         assert_eq!(bindings.len(), 1);
         assert_eq!(bindings[0].path.name, "tax_rate");
         match &bindings[0].rhs {
-            WithRhs::Literal(crate::parsing::ast::Value::Number(n)) => {
+            UsesBindingRhs::Literal(crate::parsing::ast::Value::Number(n)) => {
                 assert_eq!(*n, rust_decimal::Decimal::new(21, 2));
             }
             other => panic!("Expected numeric literal rhs, got {:?}", other),

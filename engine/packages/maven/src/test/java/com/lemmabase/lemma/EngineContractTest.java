@@ -53,7 +53,8 @@ final class EngineContractTest {
           rule cost: price * qty
 
           spec order
-          uses lines: line list
+          uses line
+          data lines: line list
           data discounts: number list
           rule total: lines -> sum cost
           rule priciest: lines -> sort cost desc -> first
@@ -86,6 +87,29 @@ final class EngineContractTest {
       RuleResult.ListResult all = (RuleResult.ListResult) response.results().get("all_lines");
       assertEquals(2, all.items().size());
       assertEquals(2, response.rows().size());
+    }
+  }
+
+  @Test
+  void showReadsRowFieldConsumers() {
+    try (Engine engine = Engine.create()) {
+      engine.load(
+          """
+          spec line
+          data qty: number
+          data label: text
+
+          spec order
+          uses line
+          data lines: line list
+          rule total: lines -> sum qty
+          """);
+      Show show = engine.show(null, "order", null);
+      assertEquals(1, show.rows().size());
+      String rowName = show.rows().keySet().iterator().next();
+      Map<String, List<String>> consumers = show.rowFieldNeededByRules().get(rowName);
+      assertEquals(List.of("total"), consumers.get("qty"));
+      assertFalse(consumers.containsKey("label"));
     }
   }
 
@@ -246,7 +270,7 @@ final class EngineContractTest {
   }
 
   @Test
-  void overridesRunDataForBoundSlot() {
+  void rejectsRunDataForSlotSealedByUses() {
     try (Engine engine = Engine.create()) {
       engine.load(
           """
@@ -259,10 +283,12 @@ final class EngineContractTest {
             -> with slot: base
           rule r: i.slot
           """);
-      Response response =
-          engine.evaluate(EvaluateRequest.of("outer").data(Map.of("i.slot", "5")));
-      assertEquals(
-          "5", ((RuleResult.Number) response.results().get("r")).number().toPlainString());
+      LemmaException thrown =
+          assertThrows(
+              LemmaException.class,
+              () -> engine.evaluate(EvaluateRequest.of("outer").data(Map.of("i.slot", "5"))));
+      assertEquals("request", thrown.errors().get(0).kind());
+      assertEquals("i.slot", thrown.errors().get(0).relatedData());
     }
   }
 
@@ -492,33 +518,6 @@ final class EngineContractTest {
             """);
     assertTrue(formatted.contains("spec demo"));
     assertTrue(formatted.contains("rule x"));
-  }
-
-  @Test
-  void snapshotRoundTripRestoresListAndRun() {
-    try (Engine source = Engine.create()) {
-      source.load(
-          """
-          spec snap_demo
-          data x: number
-          rule y: x + 1
-          """);
-      byte[] bytes = source.snapshot();
-      assertTrue(bytes.length > 0);
-      try (Engine restored = Engine.fromSnapshot(bytes)) {
-        assertEquals(source.specs(), restored.specs());
-        Response runSource =
-            source.evaluate(EvaluateRequest.of("snap_demo").data(Map.of("x", "41")));
-        Response runRestored =
-            restored.evaluate(EvaluateRequest.of("snap_demo").data(Map.of("x", "41")));
-        assertEquals(runSource.results().keySet(), runRestored.results().keySet());
-        assertEquals(
-            ((RuleResult.Number) runSource.results().get("y")).number(),
-            ((RuleResult.Number) runRestored.results().get("y")).number());
-      }
-      bytes[0] = 0x58;
-      assertThrows(LemmaException.class, () -> Engine.fromSnapshot(bytes));
-    }
   }
 
   @Test

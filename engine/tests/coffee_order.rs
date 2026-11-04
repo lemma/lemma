@@ -20,7 +20,6 @@ fn load_coffee_order() -> Engine {
 spec examples
 
 data money: measure
-  -> decimals 2
   -> unit eur: 1.00
   -> unit gbp: 1.17
   -> minimum 0 eur

@@ -1,11 +1,16 @@
 use crate::computation::{OperationResult, VetoType};
 use crate::evaluation::explanations::Explanation;
 
+use crate::error::Error;
+use crate::evaluation::evaluate_data::EvaluateDataValue;
+use crate::evaluation::rows::{row_result, take_row_context};
+use crate::evaluation::tree::ensure_rule_values;
+use crate::evaluation::EvaluationContext;
 use crate::parsing::ast::DateTimeValue;
 use crate::planning::execution_plan::ExecutionPlan;
 use crate::planning::semantics::{
-    DataDefinition, DataPath, LemmaType, LiteralValue, PathSegment, RowInstance, RulePath, Source,
-    SpecInstance, SpecValue, ValueKind,
+    DataDefinition, DataPath, InstanceKey, LemmaType, LiteralValue, ReferenceEnd, RulePath, Source,
+    SpecValue, ValueKind,
 };
 use crate::planning::unit_family::FamilyUnitCatalog;
 use crate::result_value::{
@@ -59,6 +64,10 @@ pub struct RuleResult {
     /// `needed_by_rules`). Ordered by evaluation / decision-tree preorder (first key =
     /// next fact the live tree needs); `Show.data` stays declaration order.
     missing_data: Vec<String>,
+    /// Closed options for keys in [`Self::missing_data`]. A key with no entry is not
+    /// constrained by a set. An empty list is a closed set with nothing valid.
+    /// Each value is what the next evaluate accepts.
+    missing_data_options: IndexMap<String, Vec<EvaluateDataValue>>,
 }
 
 impl RuleResult {
@@ -87,6 +96,28 @@ impl RuleResult {
     #[must_use]
     pub fn missing_data(&self) -> &[String] {
         &self.missing_data
+    }
+
+    /// Closed sets for this rule's missing inputs. Keys are a subset of [`Self::missing_data`].
+    #[must_use]
+    pub fn missing_data_options(&self) -> &IndexMap<String, Vec<EvaluateDataValue>> {
+        &self.missing_data_options
+    }
+
+    pub(crate) fn with_missing_data_options(
+        mut self,
+        missing_data_options: IndexMap<String, Vec<EvaluateDataValue>>,
+    ) -> Self {
+        for key in missing_data_options.keys() {
+            if !self.missing_data.iter().any(|listed| listed == key) {
+                panic!(
+                    "BUG: missing_data_options key '{key}' is not in missing_data {:?}",
+                    self.missing_data
+                );
+            }
+        }
+        self.missing_data_options = missing_data_options;
+        self
     }
 
     /// Build a [`RuleResult`] for API output from a rule evaluation result.
@@ -128,6 +159,7 @@ impl RuleResult {
                 rule_type_name,
                 explanation,
                 missing_data,
+                IndexMap::new(),
             ),
             OperationResult::Value(bound) => {
                 match rule_result_value_from_literal(&bound.to_literal(), rule_type, family_units) {
@@ -140,6 +172,7 @@ impl RuleResult {
                         result: Some(value),
                         explanation,
                         missing_data,
+                        missing_data_options: IndexMap::new(),
                     },
                     Err(failure) => vetoed_rule_result_for_rule_result_value_failure(
                         rule,
@@ -159,6 +192,7 @@ impl RuleResult {
         rule_type: String,
         explanation: Option<Explanation>,
         missing_data: Vec<String>,
+        missing_data_options: IndexMap<String, Vec<EvaluateDataValue>>,
     ) -> Self {
         Self {
             rule,
@@ -172,6 +206,7 @@ impl RuleResult {
             result: None,
             explanation,
             missing_data,
+            missing_data_options,
         }
     }
 
@@ -205,6 +240,7 @@ fn vetoed_rule_result_for_rule_result_value_failure(
         rule_type.name().to_string(),
         explanation,
         missing_data,
+        IndexMap::new(),
     )
 }
 
@@ -212,7 +248,7 @@ impl Response {
     /// Looks up a rule result by name.
     ///
     /// Returns an error if the rule is not found.
-    pub fn get(&self, rule_name: &str) -> Result<&RuleResult, crate::error::Error> {
+    pub fn get(&self, rule_name: &str) -> Result<&RuleResult, Error> {
         self.results
             .get(rule_name)
             .ok_or_else(|| crate::error::Error::rule_not_found(rule_name, None::<String>))
@@ -228,7 +264,7 @@ impl Response {
 /// rows, not with the number of paths that reach them.
 #[derive(Default)]
 pub(crate) struct RowTable {
-    index: HashMap<Arc<RowInstance>, usize>,
+    index: HashMap<InstanceKey, usize>,
     rows: Vec<Option<RowResult>>,
 }
 
@@ -242,15 +278,15 @@ impl RowTable {
     }
 }
 
-/// Fill every spec value inside `literal`'s API `value`: a fixed instance gets its data
-/// and rules inline, a list row a reference into `table`.
+/// Fill every spec value inside `literal`'s API `value`: a planned instance (a `uses`
+/// import or a row written in a spec, at any depth) gets its data and rules inline,
+/// any other row a reference into `table`.
 pub(crate) fn fill_spec_values(
     literal: &ValueKind,
     value: &mut RuleResultValue,
     plan: &ExecutionPlan,
-    ctx: &mut crate::evaluation::EvaluationContext,
+    ctx: &mut EvaluationContext,
     table: &mut RowTable,
-    stack: &mut Vec<SpecInstance>,
 ) {
     if matches!(
         literal,
@@ -266,34 +302,60 @@ pub(crate) fn fill_spec_values(
         return;
     }
     let mut walk = Walk {
+        root: plan,
         base: ctx,
         table,
-        row_contexts: Vec::new(),
-        ancestors: std::mem::take(stack),
+        scopes: Vec::new(),
+        ancestors: Vec::new(),
     };
-    let root = Frame::fill(plan, literal.clone(), std::mem::take(value));
+    let root = Frame::fill(literal.clone(), std::mem::take(value));
     *value = walk.run(root).into_value();
-    *stack = walk.ancestors;
 }
 
-/// Shared state of one fill walk. `base` is the caller's context; a row being walked
-/// runs in its own context on `row_contexts`, innermost last.
-struct Walk<'b> {
-    base: &'b mut crate::evaluation::EvaluationContext,
+/// Context of an instance whose members are being walked, over its template.
+struct Scope<'a> {
+    plan: &'a ExecutionPlan,
+    ctx: EvaluationContext,
+}
+
+/// Shared state of one fill walk. `root` is the plan being evaluated and `base` its
+/// context; `scopes` holds the instance contexts entered, innermost last, taken out of
+/// the context cache while their members are walked.
+struct Walk<'a, 'b> {
+    root: &'a ExecutionPlan,
+    base: &'b mut EvaluationContext,
     table: &'b mut RowTable,
-    row_contexts: Vec<crate::evaluation::EvaluationContext>,
-    ancestors: Vec<SpecInstance>,
+    scopes: Vec<Scope<'a>>,
+    ancestors: Vec<InstanceKey>,
 }
 
-impl Walk<'_> {
-    fn ctx(&mut self) -> &mut crate::evaluation::EvaluationContext {
-        match self.row_contexts.last_mut() {
-            Some(row_ctx) => row_ctx,
+impl<'a> Walk<'a, '_> {
+    fn ctx(&mut self) -> &mut EvaluationContext {
+        match self.scopes.last_mut() {
+            Some(scope) => &mut scope.ctx,
             None => &mut *self.base,
         }
     }
 
-    fn run<'a>(&mut self, root: Frame<'a>) -> Output {
+    /// Plan and context `key`'s context is built from: its owner's scope while the walk
+    /// is inside it, else the root, which finds a root-owned row's bindings in itself
+    /// and any other owner's context in the cache.
+    fn owner_scope(&mut self, key: &InstanceKey) -> (&'a ExecutionPlan, &mut EvaluationContext) {
+        let position = key.owner().and_then(|owner| {
+            self.scopes
+                .iter()
+                .rposition(|scope| scope.ctx.owner_row.as_ref() == Some(owner))
+        });
+        match position {
+            Some(position) => {
+                let scope = &mut self.scopes[position];
+                (scope.plan, &mut scope.ctx)
+            }
+            None => (self.root, &mut *self.base),
+        }
+    }
+
+    fn run(&mut self, root: Frame<'a>) -> Output {
         let mut frames = vec![root];
         let mut input = None;
         loop {
@@ -313,30 +375,20 @@ impl Walk<'_> {
 }
 
 enum Frame<'a> {
-    Fill(Box<FillFrame<'a>>),
-    Spec(SpecFrame<'a>),
-    Row(RowFrame<'a>),
+    Fill(Box<FillFrame>),
+    Instance(InstanceFrame),
     Members(Box<MembersFrame<'a>>),
 }
 
 impl<'a> Frame<'a> {
-    fn fill(plan: &'a ExecutionPlan, literal: ValueKind, value: RuleResultValue) -> Self {
-        Frame::Fill(Box::new(FillFrame::new(plan, literal, value)))
+    fn fill(literal: ValueKind, value: RuleResultValue) -> Self {
+        Frame::Fill(Box::new(FillFrame::new(literal, value)))
     }
 
-    fn members(
-        plan: &'a ExecutionPlan,
-        prefix: Vec<PathSegment>,
-        row: Option<Arc<RowInstance>>,
-    ) -> Self {
-        Frame::Members(Box::new(MembersFrame::new(plan, prefix, row)))
-    }
-
-    fn resume(&mut self, walk: &mut Walk<'_>, input: Option<Output>) -> Step<'a> {
+    fn resume(&mut self, walk: &mut Walk<'a, '_>, input: Option<Output>) -> Step<'a> {
         match self {
-            Frame::Fill(frame) => frame.resume(input),
-            Frame::Spec(frame) => frame.resume(walk, input),
-            Frame::Row(frame) => frame.resume(walk, input),
+            Frame::Fill(frame) => frame.resume(walk, input),
+            Frame::Instance(frame) => frame.resume(walk, input),
             Frame::Members(frame) => frame.resume(walk, input),
         }
     }
@@ -349,7 +401,7 @@ enum Step<'a> {
 
 enum Output {
     Value(Box<RuleResultValue>),
-    Spec(SpecResult),
+    Spec(Box<SpecResult>),
     Row(RowReference),
     Members(FilledMembers),
 }
@@ -364,7 +416,7 @@ impl Output {
 
     fn into_spec(self) -> SpecResult {
         match self {
-            Output::Spec(spec) => spec,
+            Output::Spec(spec) => *spec,
             _ => panic!("BUG: fill walk expected a spec output"),
         }
     }
@@ -391,31 +443,30 @@ fn child_output(input: Option<Output>) -> Output {
 enum FillState {
     Start(ValueKind),
     AwaitSpec,
-    AwaitRow,
+    /// The table row a value publishes under, labelled with the value's instance.
+    AwaitRow(Option<String>),
     Items(
         std::vec::IntoIter<(ValueKind, RuleResultValue)>,
         Vec<RuleResultValue>,
     ),
 }
 
-/// Fills one value: a fixed instance gets its data and rules inline, a list row a
+/// Fills one value: a planned instance gets its data and rules inline, any other row a
 /// reference into the table, a list fills each entry in order.
-struct FillFrame<'a> {
-    plan: &'a ExecutionPlan,
+struct FillFrame {
     value: RuleResultValue,
     state: Option<FillState>,
 }
 
-impl<'a> FillFrame<'a> {
-    fn new(plan: &'a ExecutionPlan, literal: ValueKind, value: RuleResultValue) -> Self {
+impl FillFrame {
+    fn new(literal: ValueKind, value: RuleResultValue) -> Self {
         Self {
-            plan,
             value,
             state: Some(FillState::Start(literal)),
         }
     }
 
-    fn resume(&mut self, input: Option<Output>) -> Step<'a> {
+    fn resume<'a>(&mut self, walk: &mut Walk<'a, '_>, input: Option<Output>) -> Step<'a> {
         match self
             .state
             .take()
@@ -426,14 +477,16 @@ impl<'a> FillFrame<'a> {
                     input.is_none(),
                     "BUG: fill frame started with a child output"
                 );
-                self.start(literal)
+                self.start(walk, literal)
             }
             FillState::AwaitSpec => {
                 self.value.spec = Some(Box::new(child_output(input).into_spec()));
                 self.finish()
             }
-            FillState::AwaitRow => {
-                self.value.row = Some(child_output(input).into_row());
+            FillState::AwaitRow(instance) => {
+                let mut reference = child_output(input).into_row();
+                reference.instance = instance;
+                self.value.row = Some(reference);
                 self.finish()
             }
             FillState::Items(items, mut filled) => {
@@ -443,25 +496,28 @@ impl<'a> FillFrame<'a> {
         }
     }
 
-    fn start(&mut self, literal: ValueKind) -> Step<'a> {
-        let plan = self.plan;
+    fn start<'a>(&mut self, walk: &mut Walk<'a, '_>, literal: ValueKind) -> Step<'a> {
         match literal {
-            ValueKind::Spec(SpecValue::Fixed(instance)) => {
-                assert!(
-                    self.value.spec.is_some(),
-                    "BUG: fixed spec value '{instance}' without spec arm"
-                );
-                self.state = Some(FillState::AwaitSpec);
-                Step::Call(Frame::Spec(SpecFrame::new(plan, instance)))
-            }
-            ValueKind::Spec(SpecValue::Row(row)) => {
-                assert!(
-                    self.value.row.is_none(),
-                    "BUG: row '{}' filled twice",
-                    row.origin
-                );
-                self.state = Some(FillState::AwaitRow);
-                Step::Call(Frame::Row(RowFrame::new(plan, row)))
+            ValueKind::Spec(SpecValue::Row(key)) => {
+                if key.is_planned() {
+                    assert!(
+                        self.value.spec.is_some(),
+                        "BUG: planned instance '{key}' without spec arm"
+                    );
+                    if walk.ancestors.contains(&key) {
+                        panic!("BUG: spec result walked instance '{key}' twice");
+                    }
+                    self.state = Some(FillState::AwaitSpec);
+                    return Step::Call(Frame::Instance(InstanceFrame::new(key, Publication::Spec)));
+                }
+                assert!(self.value.row.is_none(), "BUG: row '{key}' filled twice");
+                let (table, instance) = key.table_row();
+                let table = table.clone();
+                self.state = Some(FillState::AwaitRow(instance));
+                Step::Call(Frame::Instance(InstanceFrame::new(
+                    table,
+                    Publication::Table,
+                )))
             }
             ValueKind::List(rows) => {
                 let entries = self
@@ -475,8 +531,11 @@ impl<'a> FillFrame<'a> {
                     "BUG: list arm row count differs from the list value"
                 );
                 let filled = Vec::with_capacity(entries.len());
-                let items: Vec<(ValueKind, RuleResultValue)> =
-                    rows.into_iter().map(|row| row.value).zip(entries).collect();
+                let items: Vec<(ValueKind, RuleResultValue)> = rows
+                    .iter()
+                    .map(|row| row.value.clone())
+                    .zip(entries)
+                    .collect();
                 self.next_item(items.into_iter(), filled)
             }
             ValueKind::Number(_)
@@ -487,10 +546,13 @@ impl<'a> FillFrame<'a> {
             | ValueKind::Time(_)
             | ValueKind::Boolean(_)
             | ValueKind::Range(_, _) => self.finish(),
+            ValueKind::Spec(SpecValue::Fixed(_)) => {
+                unreachable!("BUG: evaluation produces only row spec values")
+            }
         }
     }
 
-    fn next_item(
+    fn next_item<'a>(
         &mut self,
         mut items: std::vec::IntoIter<(ValueKind, RuleResultValue)>,
         filled: Vec<RuleResultValue>,
@@ -498,7 +560,7 @@ impl<'a> FillFrame<'a> {
         match items.next() {
             Some((literal, entry)) => {
                 self.state = Some(FillState::Items(items, filled));
-                Step::Call(Frame::fill(self.plan, literal, entry))
+                Step::Call(Frame::fill(literal, entry))
             }
             None => {
                 self.value.list = Some(filled);
@@ -507,194 +569,195 @@ impl<'a> FillFrame<'a> {
         }
     }
 
-    fn finish(&mut self) -> Step<'a> {
+    fn finish<'a>(&mut self) -> Step<'a> {
         Step::Return(Output::Value(Box::new(std::mem::take(&mut self.value))))
     }
 }
 
-/// Data and rules of one spec instance: its ancestors entry is held for the walk of its
-/// members.
-struct SpecFrame<'a> {
-    plan: &'a ExecutionPlan,
-    instance: SpecInstance,
-    identity: Option<(Option<String>, String, String)>,
+/// Where a reached instance publishes.
+#[derive(Clone, Copy)]
+enum Publication {
+    /// A reference into the response rows table: rows supplied by evaluation data or
+    /// appended by a rule, and anything under them.
+    Table,
+    /// Inline as the `spec` arm: `uses` imports and rows written in a spec, at any depth.
+    Spec,
+    /// Only its rules, handed to the walk of the instance that holds it as `uses` slot.
+    Rules,
 }
 
-impl<'a> SpecFrame<'a> {
-    fn new(plan: &'a ExecutionPlan, instance: SpecInstance) -> Self {
-        Self {
-            plan,
-            instance,
-            identity: None,
-        }
-    }
-
-    fn resume(&mut self, walk: &mut Walk<'_>, input: Option<Output>) -> Step<'a> {
-        let plan = self.plan;
-        match input {
-            None => {
-                if walk.ancestors.iter().any(|seen| seen == &self.instance) {
-                    panic!("BUG: spec result walked instance '{}' twice", self.instance);
-                }
-                walk.ancestors.push(self.instance.clone());
-                self.identity = Some(instance_identity(plan, &self.instance));
-                Step::Call(Frame::members(plan, self.instance.prefix.clone(), None))
-            }
-            Some(output) => {
-                walk.ancestors.pop();
-                let (data, rules) = output.into_members();
-                let (repository, spec, effective) = self
-                    .identity
-                    .take()
-                    .expect("BUG: spec frame finished before it started");
-                Step::Return(Output::Spec(SpecResult {
-                    repository,
-                    spec,
-                    effective,
-                    instance: self.instance.to_string(),
-                    path: self
-                        .instance
-                        .prefix
-                        .iter()
-                        .map(crate::api::PathSegment::from)
-                        .collect(),
-                    data,
-                    rules,
-                }))
-            }
-        }
-    }
-}
-
-/// Reference to `row` in the table, filling the row through its template plan when
-/// first reached. The row's members walk in their own context and ancestor scope.
-struct RowFrame<'a> {
-    plan: &'a ExecutionPlan,
-    row: Arc<RowInstance>,
+/// Members of instance `key`, filled in its own context over its template plan. A
+/// table row is filled once and referenced by index everywhere else.
+struct InstanceFrame {
+    key: InstanceKey,
+    publication: Publication,
     index: usize,
-    saved_ancestors: Vec<SpecInstance>,
 }
 
-impl<'a> RowFrame<'a> {
-    fn new(plan: &'a ExecutionPlan, row: Arc<RowInstance>) -> Self {
+impl InstanceFrame {
+    fn new(key: InstanceKey, publication: Publication) -> Self {
         Self {
-            plan,
-            row,
+            key,
+            publication,
             index: 0,
-            saved_ancestors: Vec::new(),
         }
     }
 
-    fn resume(&mut self, walk: &mut Walk<'_>, input: Option<Output>) -> Step<'a> {
+    fn reference(&self, index: usize) -> RowReference {
+        RowReference {
+            repository: self.key.row.identity.repository.clone(),
+            spec: self.key.row.identity.spec.clone(),
+            effective: self.key.row.identity.effective.to_string(),
+            instance: self.key.path(),
+            index,
+        }
+    }
+
+    fn resume<'a>(&mut self, walk: &mut Walk<'a, '_>, input: Option<Output>) -> Step<'a> {
         match input {
             None => {
-                if let Some(index) = walk.table.index.get(&self.row).copied() {
-                    return Step::Return(Output::Row(row_reference(&self.row, index)));
+                match self.publication {
+                    Publication::Table => {
+                        if let Some(index) = walk.table.index.get(&self.key).copied() {
+                            return Step::Return(Output::Row(self.reference(index)));
+                        }
+                        let index = walk.table.rows.len();
+                        walk.table.index.insert(self.key.clone(), index);
+                        walk.table.rows.push(None);
+                        self.index = index;
+                    }
+                    Publication::Spec => walk.ancestors.push(self.key.clone()),
+                    Publication::Rules => {}
                 }
-                let index = walk.table.rows.len();
-                walk.table.index.insert(Arc::clone(&self.row), index);
-                walk.table.rows.push(None);
-                self.index = index;
-                let plan = self.plan;
-                let template = plan.row_template(&self.row.identity);
-                let row_ctx =
-                    crate::evaluation::rows::take_row_context(&self.row, template, walk.ctx());
-                walk.row_contexts.push(row_ctx);
-                self.saved_ancestors = std::mem::take(&mut walk.ancestors);
-                Step::Call(Frame::members(
+                let template = walk.root.row_template(&self.key.row.identity);
+                let (owner_plan, owner_ctx) = walk.owner_scope(&self.key);
+                let ctx = take_row_context(&self.key, owner_plan, template, owner_ctx);
+                walk.scopes.push(Scope {
+                    plan: template,
+                    ctx,
+                });
+                Step::Call(Frame::Members(Box::new(MembersFrame::new(
                     template,
-                    Vec::new(),
-                    Some(Arc::clone(&self.row)),
-                ))
+                    self.key.clone(),
+                    matches!(self.publication, Publication::Rules),
+                ))))
             }
             Some(output) => {
                 let (data, rules) = output.into_members();
-                walk.ancestors = std::mem::take(&mut self.saved_ancestors);
-                let row_ctx = walk
-                    .row_contexts
+                let scope = walk
+                    .scopes
                     .pop()
-                    .expect("BUG: row context stack empty when its row ends");
+                    .expect("BUG: instance scope ended before it was entered");
                 walk.ctx()
+                    .caches
                     .row_contexts
-                    .insert(Arc::clone(&self.row), row_ctx);
-                walk.table.rows[self.index] = Some(RowResult {
-                    repository: self.row.identity.repository.clone(),
-                    spec: self.row.identity.spec.clone(),
-                    effective: self.row.identity.effective.to_string(),
-                    data,
-                    rules,
-                });
-                Step::Return(Output::Row(row_reference(&self.row, self.index)))
+                    .borrow_mut()
+                    .insert(self.key.clone(), scope.ctx);
+                match self.publication {
+                    Publication::Table => {
+                        walk.table.rows[self.index] = Some(RowResult {
+                            repository: self.key.row.identity.repository.clone(),
+                            spec: self.key.row.identity.spec.clone(),
+                            effective: self.key.row.identity.effective.to_string(),
+                            data,
+                            rules,
+                        });
+                        Step::Return(Output::Row(self.reference(self.index)))
+                    }
+                    Publication::Spec => {
+                        let popped = walk.ancestors.pop();
+                        assert!(
+                            popped.as_ref() == Some(&self.key),
+                            "BUG: spec result of '{}' ended on another instance",
+                            self.key
+                        );
+                        let path = self.key.segments().unwrap_or_else(|| {
+                            panic!("BUG: planned instance '{}' has no hops", self.key)
+                        });
+                        Step::Return(Output::Spec(Box::new(SpecResult {
+                            repository: self.key.row.identity.repository.clone(),
+                            spec: self.key.row.identity.spec.clone(),
+                            effective: self.key.row.identity.effective.to_string(),
+                            instance: self.key.to_string(),
+                            path: path.iter().map(crate::api::PathSegment::from).collect(),
+                            data,
+                            rules,
+                        })))
+                    }
+                    Publication::Rules => Step::Return(Output::Members((data, rules))),
+                }
             }
         }
     }
 }
 
-fn row_reference(row: &RowInstance, index: usize) -> RowReference {
-    RowReference {
-        repository: row.identity.repository.clone(),
-        spec: row.identity.spec.clone(),
-        effective: row.identity.effective.to_string(),
-        instance: row.origin.to_string(),
-        index,
-    }
-}
-
-/// An entry whose value is being filled, with the key it is inserted under once filled.
+/// An entry whose value is being filled, with the key it is inserted under once filled,
+/// or the `uses` slot whose rules are being filled.
 enum Awaiting {
     Data(String, SpecRuleResult),
-    Rule(RulePath, SpecRuleResult),
+    Rule(String, SpecRuleResult),
+    Import(String),
 }
 
-/// Data then rules of `plan` under `prefix`, keyed relative to it. For a row, `plan` is
-/// its template and missing data is reported under the row's number.
+/// Data then rules of instance `row` over its template `plan`, then the rules of every
+/// `uses` instance under it, keyed by their alias hops (`sub.total`). Missing data is
+/// reported under the instance's path.
 struct MembersFrame<'a> {
     plan: &'a ExecutionPlan,
-    prefix: Vec<PathSegment>,
-    row: Option<Arc<RowInstance>>,
-    data_keys: std::vec::IntoIter<(DataPath, &'a DataDefinition)>,
-    rule_paths: std::vec::IntoIter<RulePath>,
+    row: InstanceKey,
+    data_keys: std::vec::IntoIter<(&'a DataPath, &'a DataDefinition)>,
+    rule_paths: std::vec::IntoIter<&'a RulePath>,
+    imports: std::vec::IntoIter<&'a DataPath>,
     data: IndexMap<String, SpecRuleResult>,
     rules: IndexMap<String, SpecRuleResult>,
     awaiting: Option<Awaiting>,
 }
 
 impl<'a> MembersFrame<'a> {
-    fn new(
-        plan: &'a ExecutionPlan,
-        prefix: Vec<PathSegment>,
-        row: Option<Arc<RowInstance>>,
-    ) -> Self {
-        let rule_paths: Vec<RulePath> = plan
-            .rules
-            .keys()
-            .filter(|path| path_under_prefix(&path.segments, &prefix))
-            .cloned()
+    fn new(plan: &'a ExecutionPlan, row: InstanceKey, rules_only: bool) -> Self {
+        let data_keys: Vec<(&'a DataPath, &'a DataDefinition)> = if rules_only {
+            Vec::new()
+        } else {
+            plan.input_slots().collect()
+        };
+        let imports: Vec<&'a DataPath> = plan
+            .data
+            .iter()
+            .filter(|(_, definition)| matches!(definition, DataDefinition::Import { .. }))
+            .map(|(path, _)| path)
             .collect();
         Self {
             plan,
-            // Named-`uses` fields live on templates; enumerate via nested_input_keys.
-            data_keys: plan.nested_input_keys().into_iter(),
-            rule_paths: rule_paths.into_iter(),
-            prefix,
             row,
+            data_keys: data_keys.into_iter(),
+            rule_paths: plan.rules.keys().collect::<Vec<_>>().into_iter(),
+            imports: imports.into_iter(),
             data: IndexMap::new(),
             rules: IndexMap::new(),
             awaiting: None,
         }
     }
 
-    fn resume(&mut self, walk: &mut Walk<'_>, input: Option<Output>) -> Step<'a> {
+    fn resume(&mut self, walk: &mut Walk<'a, '_>, input: Option<Output>) -> Step<'a> {
         match (self.awaiting.take(), input) {
             (None, None) => {}
             (Some(Awaiting::Data(key, mut entry)), Some(output)) => {
                 entry.result = Some(output.into_value());
                 self.data.insert(key, entry);
             }
-            (Some(Awaiting::Rule(path, mut entry)), Some(output)) => {
+            (Some(Awaiting::Rule(key, mut entry)), Some(output)) => {
                 entry.result = Some(output.into_value());
-                self.rules
-                    .insert(relative_rule_key(&path, &self.prefix), entry);
+                self.rules.insert(key, entry);
+            }
+            (Some(Awaiting::Import(alias)), Some(output)) => {
+                let (data, rules) = output.into_members();
+                assert!(
+                    data.is_empty(),
+                    "BUG: rules of `uses {alias}` were filled with data"
+                );
+                for (key, entry) in rules {
+                    self.rules.insert(format!("{alias}.{key}"), entry);
+                }
             }
             _ => panic!("BUG: members frame resumed with an unexpected child output"),
         }
@@ -708,6 +771,17 @@ impl<'a> MembersFrame<'a> {
                 return step;
             }
         }
+        if let Some(slot) = self.imports.next() {
+            let nested = InstanceKey::new(
+                Arc::clone(self.plan.import_row(Some(&self.row.row), slot)),
+                Some(self.row.clone()),
+            );
+            self.awaiting = Some(Awaiting::Import(slot.input_key()));
+            return Step::Call(Frame::Instance(InstanceFrame::new(
+                nested,
+                Publication::Rules,
+            )));
+        }
         Step::Return(Output::Members((
             std::mem::take(&mut self.data),
             std::mem::take(&mut self.rules),
@@ -716,33 +790,31 @@ impl<'a> MembersFrame<'a> {
 
     fn data_item(
         &mut self,
-        walk: &mut Walk<'_>,
-        path: DataPath,
+        walk: &mut Walk<'a, '_>,
+        path: &'a DataPath,
         definition: &'a DataDefinition,
     ) -> Option<Step<'a>> {
         let plan = self.plan;
-        if path.segments.len() != self.prefix.len()
-            || !path_under_prefix(&path.segments, &self.prefix)
-        {
-            return None;
-        }
         definition.schema_type()?;
-        let relative = relative_data_key(&path, &self.prefix);
-        let slot = match walk.ctx().data_slot(plan, &path).cloned() {
+        let key = path.input_key();
+        let slot = match walk.ctx().data_slot(plan, path).cloned() {
             Some(slot) => slot,
-            None if !path.segments.is_empty() => {
-                crate::evaluation::imports::eval_import_member(&path, plan, walk.ctx())
-            }
-            None => return None,
+            None => match plan.reference_ends.get(path) {
+                Some(ReferenceEnd::Rule(rule)) => {
+                    ensure_rule_values(plan.rule_index(rule), plan, walk.ctx());
+                    walk.ctx().rule_value(plan, rule).clone()
+                }
+                Some(ReferenceEnd::Promptable(_)) | None => return None,
+            },
         };
         if matches!(slot, OperationResult::Veto(VetoType::MissingData { .. })) {
             return None;
         }
         let display_type =
-            crate::evaluation::EvaluationContext::data_display_type(plan, &path, &slot);
+            crate::evaluation::EvaluationContext::data_display_type(plan, path, &slot);
         let mut entry = spec_entry(
             &slot,
-            path.input_key(),
+            key.clone(),
             RulePath {
                 segments: path.segments.clone(),
                 rule: path.data.clone(),
@@ -753,45 +825,36 @@ impl<'a> MembersFrame<'a> {
             Vec::new(),
         );
         let OperationResult::Value(bound) = slot else {
-            self.data.insert(relative, entry);
+            self.data.insert(key, entry);
             return None;
         };
         let Some(value) = entry.result.take() else {
-            self.data.insert(relative, entry);
+            self.data.insert(key, entry);
             return None;
         };
-        self.awaiting = Some(Awaiting::Data(relative, entry));
-        Some(Step::Call(Frame::fill(plan, bound.value, value)))
+        self.awaiting = Some(Awaiting::Data(key, entry));
+        Some(Step::Call(Frame::fill(bound.value, value)))
     }
 
-    fn rule_item(&mut self, walk: &mut Walk<'_>, path: RulePath) -> Option<Step<'a>> {
+    fn rule_item(&mut self, walk: &mut Walk<'a, '_>, path: &'a RulePath) -> Option<Step<'a>> {
         let plan = self.plan;
-        let row = self.row.as_deref();
         let exec = plan
             .rules
-            .get(&path)
+            .get(path)
             .expect("BUG: rule path missing from plan");
-        crate::evaluation::tree::ensure_rule_values(plan.rule_index(&path), plan, walk.ctx());
-        let local = walk.ctx().rule_value(plan, &path).clone();
+        ensure_rule_values(plan.rule_index(path), plan, walk.ctx());
+        let local = walk.ctx().rule_value(plan, path).clone();
         let missing_data = if local.is_missing_data() {
-            let keys = walk.ctx().missing_data_for_rule(plan, exec.normal_form);
-            match row {
-                Some(row) => keys
-                    .iter()
-                    .map(|key| crate::evaluation::rows::row_key(row, key))
-                    .collect(),
-                None => keys,
-            }
+            walk.ctx()
+                .missing_data_for_rule(plan, exec.normal_form, Some(&self.row))
         } else {
             Vec::new()
         };
-        let operation = match row {
-            Some(row) => crate::evaluation::rows::row_result(local, row, plan),
-            None => local,
-        };
+        let operation = row_result(local, &self.row, plan);
+        let key = path.input_key();
         let mut entry = spec_entry(
             &operation,
-            path.input_key(),
+            key.clone(),
             path.clone(),
             exec.source.clone(),
             exec.rule_type.as_ref(),
@@ -801,18 +864,16 @@ impl<'a> MembersFrame<'a> {
         match operation {
             OperationResult::Value(bound) => match entry.result.take() {
                 Some(value) => {
-                    self.awaiting = Some(Awaiting::Rule(path, entry));
-                    Some(Step::Call(Frame::fill(plan, bound.value, value)))
+                    self.awaiting = Some(Awaiting::Rule(key, entry));
+                    Some(Step::Call(Frame::fill(bound.value, value)))
                 }
                 None => {
-                    self.rules
-                        .insert(relative_rule_key(&path, &self.prefix), entry);
+                    self.rules.insert(key, entry);
                     None
                 }
             },
             OperationResult::Veto(_) => {
-                self.rules
-                    .insert(relative_rule_key(&path, &self.prefix), entry);
+                self.rules.insert(key, entry);
                 None
             }
         }
@@ -823,37 +884,6 @@ type FilledMembers = (
     IndexMap<String, SpecRuleResult>,
     IndexMap<String, SpecRuleResult>,
 );
-
-fn instance_identity(
-    plan: &ExecutionPlan,
-    instance: &SpecInstance,
-) -> (Option<String>, String, String) {
-    let last = instance
-        .prefix
-        .last()
-        .unwrap_or_else(|| panic!("BUG: spec instance '{instance}' has no uses hop"));
-    let import_path = DataPath {
-        segments: instance.prefix[..instance.prefix.len() - 1].to_vec(),
-        data: last.uses.clone(),
-    };
-    let Some(crate::planning::semantics::DataDefinition::Import { identity, .. }) =
-        crate::planning::normalize::lookup_data_definition(
-            &plan.data,
-            &plan.row_templates,
-            &import_path,
-        )
-    else {
-        panic!(
-            "BUG: spec instance '{instance}' is not an import at '{}'",
-            import_path.input_key()
-        );
-    };
-    (
-        identity.repository.clone(),
-        identity.spec.clone(),
-        identity.effective.to_string(),
-    )
-}
 
 fn spec_entry(
     operation: &OperationResult,
@@ -883,40 +913,6 @@ fn spec_entry(
         rule_type: built.rule_type.clone(),
         result: built.result.clone(),
     }
-}
-
-fn path_under_prefix(segments: &[PathSegment], prefix: &[PathSegment]) -> bool {
-    segments.len() >= prefix.len() && segments[..prefix.len()] == prefix[..]
-}
-
-fn relative_data_key(path: &DataPath, prefix: &[PathSegment]) -> String {
-    assert!(
-        path_under_prefix(&path.segments, prefix),
-        "BUG: data '{}' is under its instance but path_under_prefix is false",
-        path.input_key()
-    );
-    let mut key = String::new();
-    for segment in &path.segments[prefix.len()..] {
-        key.push_str(&segment.uses);
-        key.push('.');
-    }
-    key.push_str(&path.data);
-    key
-}
-
-fn relative_rule_key(path: &RulePath, prefix: &[PathSegment]) -> String {
-    assert!(
-        path_under_prefix(&path.segments, prefix),
-        "BUG: rule '{}' is under its instance but path_under_prefix is false",
-        path.input_key()
-    );
-    let mut key = String::new();
-    for segment in &path.segments[prefix.len()..] {
-        key.push_str(&segment.uses);
-        key.push('.');
-    }
-    key.push_str(&path.rule);
-    key
 }
 
 #[cfg(test)]
@@ -1209,7 +1205,6 @@ mod tests {
             TypeSpecification::Measure {
                 minimum: None,
                 maximum: None,
-                decimals: Some(2),
                 units: MeasureUnits::from(vec![
                     MeasureUnit {
                         name: "eur".to_string(),
@@ -1301,17 +1296,19 @@ mod tests {
             .clone()
             .expect("measure map");
         assert_eq!(measure.get("eur"), Some(&dec("10.00")));
-        assert_eq!(measure.get("usd"), Some(&dec("10.99")));
+        assert_eq!(
+            measure.get("usd"),
+            Some(&dec("10.98901098901098901098901098"))
+        );
     }
 
     #[test]
-    fn measure_rule_result_value_respects_decimals_on_unit_conversion() {
+    fn measure_rule_result_value_keeps_unit_conversion_unrounded() {
         let money = LemmaType::new(
             "money".to_string(),
             TypeSpecification::Measure {
                 minimum: None,
                 maximum: None,
-                decimals: Some(2),
                 units: MeasureUnits::from(vec![
                     MeasureUnit {
                         name: "eur".to_string(),
@@ -1365,7 +1362,10 @@ mod tests {
             .clone()
             .expect("measure map");
         assert_eq!(measure.get("eur"), Some(&dec("3.12")));
-        assert_eq!(measure.get("usd"), Some(&dec("3.71")));
+        assert_eq!(
+            measure.get("usd"),
+            Some(&dec("3.714285714285714285714285714"))
+        );
     }
 
     #[test]
@@ -1375,7 +1375,6 @@ mod tests {
             TypeSpecification::Ratio {
                 minimum: None,
                 maximum: None,
-                decimals: None,
                 units: RatioUnits::from(vec![
                     RatioUnit {
                         name: "percent".to_string(),
@@ -1450,13 +1449,11 @@ rule doubled: p * 2
 spec child 2025-01-01
 data money: measure
  -> unit eur: 1.00
- -> decimals 2
 
 spec child 2025-06-01
 data money: measure
  -> unit eur: 1.00
  -> unit usd: 0.91
- -> decimals 2
 "#
                 .to_string(),
             )])

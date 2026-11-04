@@ -27,7 +27,7 @@ pub use crate::planning::explanation::{
 pub struct Explanation {
     pub name: RulePath,
     pub result: OperationResult,
-    /// Type of [`Self::result`] for measure/ratio rendering (binding unit, decimals).
+    /// Type of [`Self::result`] for measure/ratio rendering (binding unit).
     pub result_type: Arc<LemmaType>,
     /// Family catalog needed to build the rule-node [`RuleResultValue`] on serialize.
     pub(crate) family_units: Arc<FamilyUnitCatalog>,
@@ -151,52 +151,60 @@ pub fn format_explanation(explanation: &Explanation) -> String {
 enum Connector {
     Branch,
     Last,
-    /// Row label: no tree connector; sits at the child indent.
-    None,
 }
 
-enum ConversionSteps<'a> {
-    Borrowed(&'a [SerializedConversionTraceStep]),
+enum ConversionSteps {
     Owned(Vec<SerializedConversionTraceStep>),
 }
 
-impl ConversionSteps<'_> {
+impl ConversionSteps {
     fn as_slice(&self) -> &[SerializedConversionTraceStep] {
         match self {
-            ConversionSteps::Borrowed(steps) => steps,
             ConversionSteps::Owned(steps) => steps.as_slice(),
         }
     }
 }
 
-/// Visible children of one parent, split once: connected nodes (tree connectors)
-/// first, then row labels. Rows always follow the connected nodes.
+/// Visible children of one parent, with tree connectors. `Filter` nodes are
+/// flattened away so matched rows sit directly under the list pipeline.
 struct Siblings<'a> {
-    connected: Vec<&'a ExplanationNode>,
-    rows: Vec<&'a ExplanationNode>,
+    nodes: Vec<&'a ExplanationNode>,
+    /// Pre-aligned comma headlines for [`ExplanationNode::Row`] entries, keyed by index.
+    row_headlines: std::collections::HashMap<usize, String>,
 }
 
 impl<'a> Siblings<'a> {
     fn new(nodes: impl Iterator<Item = &'a ExplanationNode>) -> Self {
-        let mut connected = Vec::new();
-        let mut rows = Vec::new();
+        let mut flat = Vec::new();
         for node in nodes {
-            if is_bare_literal_compose(node) {
-                continue;
-            }
-            if matches!(node, ExplanationNode::Row { .. }) {
-                rows.push(node);
-            } else if !rows.is_empty() {
-                panic!("BUG: non-row explanation node follows a Row sibling");
-            } else {
-                connected.push(node);
-            }
+            flatten_visible(node, &mut flat);
         }
-        Self { connected, rows }
+        let row_headlines = aligned_row_headlines(&flat);
+        Self {
+            nodes: flat,
+            row_headlines,
+        }
     }
 
     fn len(&self) -> usize {
-        self.connected.len() + self.rows.len()
+        self.nodes.len()
+    }
+}
+
+fn flatten_visible<'a>(node: &'a ExplanationNode, out: &mut Vec<&'a ExplanationNode>) {
+    let mut pending = vec![node];
+    while let Some(node) = pending.pop() {
+        if is_bare_literal_compose(node) || is_visually_empty_compose(node) {
+            continue;
+        }
+        match node {
+            ExplanationNode::Filter { children, .. } => {
+                for child in children.iter().rev() {
+                    pending.push(child);
+                }
+            }
+            _ => out.push(node),
+        }
     }
 }
 
@@ -216,6 +224,7 @@ enum Work<'a> {
         parent_body: Option<&'a str>,
         indent: String,
         next: usize,
+        elide_list_commands: bool,
     },
     CauseChildren {
         children: Vec<&'a ExplanationNode>,
@@ -223,7 +232,7 @@ enum Work<'a> {
         next: usize,
     },
     Conversion {
-        steps: ConversionSteps<'a>,
+        steps: ConversionSteps,
         siblings: Siblings<'a>,
         indent: String,
         next: usize,
@@ -239,19 +248,14 @@ struct FormatState<'a> {
 
 impl<'a> FormatState<'a> {
     fn push_line(&mut self, indent: &str, connector: Connector, text: &str) {
-        match connector {
-            Connector::None => self.lines.push(format!("{indent}{text}")),
-            Connector::Branch | Connector::Last => self
-                .lines
-                .push(format!("{indent}{} {text}", connector_str(connector))),
-        }
+        self.lines
+            .push(format!("{indent}{} {text}", connector_str(connector)));
     }
 
     fn child_indent(indent: &str, connector: Connector) -> String {
         match connector {
             Connector::Branch => format!("{indent}│  "),
             Connector::Last => format!("{indent}   "),
-            Connector::None => format!("{indent}   "),
         }
     }
 
@@ -270,7 +274,13 @@ impl<'a> FormatState<'a> {
         children: &'a [ExplanationNode],
         indent: String,
     ) {
-        let body_shown = !body.is_empty() && body != result_line;
+        // Bare data-path rule bodies (`rule guardian: has_ward`) already appear as the
+        // sole Data child (`has_ward: true`); printing the path again nests a duplicate.
+        let body_restated_by_sole_data = matches!(
+            children,
+            [ExplanationNode::Data { name, .. }] if name.input_key() == body
+        );
+        let body_shown = !body.is_empty() && body != result_line && !body_restated_by_sole_data;
         let total = causes.len() + usize::from(body_shown);
         // LIFO: push later output first so first cause prints first.
         if body_shown {
@@ -280,6 +290,7 @@ impl<'a> FormatState<'a> {
                 parent_body: Some(body),
                 indent: child_indent,
                 next: 0,
+                elide_list_commands: false,
             });
             self.stack.push(Work::Line {
                 indent: indent.clone(),
@@ -292,6 +303,7 @@ impl<'a> FormatState<'a> {
                 parent_body: None,
                 indent: indent.clone(),
                 next: 0,
+                elide_list_commands: false,
             });
         }
         for (i, cause) in causes.iter().enumerate().rev() {
@@ -353,7 +365,8 @@ impl<'a> FormatState<'a> {
                     parent_body,
                     indent,
                     next,
-                } => self.step_nodes(siblings, parent_body, indent, next),
+                    elide_list_commands,
+                } => self.step_nodes(siblings, parent_body, indent, next, elide_list_commands),
                 Work::CauseChildren {
                     children,
                     indent,
@@ -375,28 +388,33 @@ impl<'a> FormatState<'a> {
         parent_body: Option<&'a str>,
         indent: String,
         next: usize,
+        elide_list_commands: bool,
     ) {
         if next >= siblings.len() {
             return;
         }
-        let connected_len = siblings.connected.len();
-        let (node, connector) = if next < connected_len {
-            let connector = if next + 1 == connected_len {
-                Connector::Last
-            } else {
-                Connector::Branch
-            };
-            (siblings.connected[next], connector)
+        let connector = if next + 1 == siblings.len() {
+            Connector::Last
         } else {
-            (siblings.rows[next - connected_len], Connector::None)
+            Connector::Branch
         };
+        let node = siblings.nodes[next];
+        let row_headline = siblings.row_headlines.get(&next).cloned();
         self.stack.push(Work::Nodes {
             siblings,
             parent_body,
             indent: indent.clone(),
             next: next + 1,
+            elide_list_commands,
         });
-        self.emit_node(node, connector, parent_body, indent);
+        self.emit_node(
+            node,
+            connector,
+            parent_body,
+            indent,
+            elide_list_commands,
+            row_headline,
+        );
     }
 
     fn step_cause_children(
@@ -419,18 +437,19 @@ impl<'a> FormatState<'a> {
             indent: indent.clone(),
             next: next + 1,
         });
-        self.emit_node(node, connector, None, indent);
+        self.emit_node(node, connector, None, indent, false, None);
     }
 
     fn step_conversion(
         &mut self,
-        steps: ConversionSteps<'a>,
+        steps: ConversionSteps,
         siblings: Siblings<'a>,
         indent: String,
         next: usize,
     ) {
+        let sibling_len = siblings.len();
         let step_len = steps.as_slice().len();
-        let total = step_len + siblings.len();
+        let total = step_len + sibling_len;
         if next >= total {
             return;
         }
@@ -439,31 +458,27 @@ impl<'a> FormatState<'a> {
         } else {
             Connector::Branch
         };
-        if next < step_len {
-            let text = steps.as_slice()[next].text.clone();
+        if next < sibling_len {
+            let node = siblings.nodes[next];
+            let row_headline = siblings.row_headlines.get(&next).cloned();
             self.stack.push(Work::Conversion {
                 steps,
                 siblings,
                 indent: indent.clone(),
                 next: next + 1,
             });
-            self.push_line(&indent, connector, &text);
+            self.emit_node(node, connector, None, indent, false, row_headline);
             return;
         }
-        let op_index = next - step_len;
-        let connected_len = siblings.connected.len();
-        let (node, connector) = if op_index < connected_len {
-            (siblings.connected[op_index], connector)
-        } else {
-            (siblings.rows[op_index - connected_len], Connector::None)
-        };
+        let step_index = next - sibling_len;
+        let text = steps.as_slice()[step_index].text.clone();
         self.stack.push(Work::Conversion {
             steps,
             siblings,
             indent: indent.clone(),
             next: next + 1,
         });
-        self.emit_node(node, connector, None, indent);
+        self.push_line(&indent, connector, &text);
     }
 
     fn emit_node(
@@ -472,6 +487,8 @@ impl<'a> FormatState<'a> {
         connector: Connector,
         parent_body: Option<&'a str>,
         indent: String,
+        elide_list_commands: bool,
+        row_headline: Option<String>,
     ) {
         match node {
             ExplanationNode::RuleRef { id, name, result } => {
@@ -497,14 +514,45 @@ impl<'a> FormatState<'a> {
             ExplanationNode::Compose {
                 expression,
                 operands,
+                result: _,
                 ..
             } => {
+                let siblings = Siblings::new(operands.iter());
                 if parent_body.is_some_and(|body| body == expression.as_str()) {
+                    self.stack.push(Work::Nodes {
+                        siblings,
+                        parent_body: None,
+                        indent,
+                        next: 0,
+                        elide_list_commands,
+                    });
+                } else {
+                    self.push_line(&indent, connector, expression);
+                    let child_indent = Self::child_indent(&indent, connector);
+                    self.stack.push(Work::Nodes {
+                        siblings,
+                        parent_body: None,
+                        indent: child_indent,
+                        next: 0,
+                        elide_list_commands,
+                    });
+                }
+            }
+            ExplanationNode::ListCommand {
+                expression,
+                operands,
+                result: _,
+                ..
+            } => {
+                let elide = elide_list_commands
+                    || parent_body.is_some_and(|body| body == expression.as_str());
+                if elide {
                     self.stack.push(Work::Nodes {
                         siblings: Siblings::new(operands.iter()),
                         parent_body: None,
                         indent,
                         next: 0,
+                        elide_list_commands: true,
                     });
                 } else {
                     self.push_line(&indent, connector, expression);
@@ -514,6 +562,7 @@ impl<'a> FormatState<'a> {
                         parent_body: None,
                         indent: child_indent,
                         next: 0,
+                        elide_list_commands: true,
                     });
                 }
             }
@@ -535,18 +584,31 @@ impl<'a> FormatState<'a> {
                 expression,
                 steps,
                 operands,
+                result: _,
             } => {
                 let expression_is_parent_body =
                     parent_body.is_some_and(|body| body == expression.as_str());
+                let rule_steps: Vec<SerializedConversionTraceStep> = steps
+                    .iter()
+                    .filter(|step| !matches!(step.role, ConversionTraceRole::Outcome))
+                    .cloned()
+                    .collect();
+                // Rule 2: when the single operand is a Compose, skip the compose line
+                // (its expression is already on this conversion line) and promote the
+                // compose's operands to direct children.
+                let siblings = if let [ExplanationNode::Compose {
+                    operands: compose_operands,
+                    ..
+                }] = operands.as_slice()
+                {
+                    Siblings::new(compose_operands.iter())
+                } else {
+                    Siblings::new(operands.iter())
+                };
                 if expression_is_parent_body {
-                    let owned: Vec<SerializedConversionTraceStep> = steps
-                        .iter()
-                        .filter(|step| !matches!(step.role, ConversionTraceRole::Outcome))
-                        .cloned()
-                        .collect();
                     self.stack.push(Work::Conversion {
-                        steps: ConversionSteps::Owned(owned),
-                        siblings: Siblings::new(operands.iter()),
+                        steps: ConversionSteps::Owned(rule_steps),
+                        siblings,
                         indent,
                         next: 0,
                     });
@@ -554,8 +616,8 @@ impl<'a> FormatState<'a> {
                     self.push_line(&indent, connector, expression);
                     let child_indent = Self::child_indent(&indent, connector);
                     self.stack.push(Work::Conversion {
-                        steps: ConversionSteps::Borrowed(steps),
-                        siblings: Siblings::new(operands.iter()),
+                        steps: ConversionSteps::Owned(rule_steps),
+                        siblings,
                         indent: child_indent,
                         next: 0,
                     });
@@ -574,133 +636,62 @@ impl<'a> FormatState<'a> {
                 key,
                 fields,
             } => {
-                let label = row_label(*number, *appended, key);
-                let child_indent = Self::child_indent(&indent, Connector::None);
-                if fields.len() == 1 {
-                    match &fields[0] {
-                        ExplanationNode::RuleRef { id, name, result } => {
-                            let result_str = result
-                                .result
-                                .as_deref()
-                                .expect("BUG: RuleRef.result.result not filled by eval");
-                            if self.expanded.insert(*id) {
-                                self.push_line(
-                                    &indent,
-                                    Connector::None,
-                                    &format!("{label} {name}: {result_str}"),
-                                );
-                                self.stack.push(Work::RuleBody {
-                                    id: *id,
-                                    result_line: result_str.to_string(),
-                                    indent: child_indent,
-                                });
-                            } else {
-                                self.push_line(
-                                    &indent,
-                                    Connector::None,
-                                    &format!("{label} {name}: {result_str} (see above)"),
-                                );
-                            }
-                        }
-                        other => {
-                            let field_line = field_headline(other);
+                let tree_fields = row_tree_fields(key, fields);
+                // Numbered row whose only field is a RuleRef: `2. bonus: 950 eur`.
+                if key.is_empty()
+                    && row_comma_columns(key, fields).is_empty()
+                    && tree_fields.len() == 1
+                {
+                    if let ExplanationNode::RuleRef { id, name, result } = tree_fields[0] {
+                        let result_str = result
+                            .result
+                            .as_deref()
+                            .expect("BUG: RuleRef.result.result not filled by eval");
+                        let prefix = if *appended {
+                            format!("appended {number}.")
+                        } else {
+                            format!("{number}.")
+                        };
+                        let child_indent = Self::child_indent(&indent, connector);
+                        if self.expanded.insert(*id) {
                             self.push_line(
                                 &indent,
-                                Connector::None,
-                                &format!("{label} {field_line}"),
+                                connector,
+                                &format!("{prefix} {name}: {result_str}"),
+                            );
+                            self.stack.push(Work::RuleBody {
+                                id: *id,
+                                result_line: result_str.to_string(),
+                                indent: child_indent,
+                            });
+                        } else {
+                            self.push_line(
+                                &indent,
+                                connector,
+                                &format!("{prefix} {name}: {result_str} (see above)"),
                             );
                         }
+                        return;
                     }
-                } else {
-                    self.push_line(&indent, Connector::None, &label);
+                }
+                let headline = row_headline
+                    .unwrap_or_else(|| row_headline_for(*number, *appended, key, fields));
+                self.push_line(&indent, connector, &headline);
+                if !tree_fields.is_empty() {
+                    let child_indent = Self::child_indent(&indent, connector);
                     self.stack.push(Work::Nodes {
-                        siblings: Siblings::new(fields.iter()),
+                        siblings: Siblings::new(tree_fields.into_iter()),
                         parent_body: None,
                         indent: child_indent,
                         next: 0,
+                        elide_list_commands,
                     });
                 }
             }
-            ExplanationNode::Filter {
-                condition,
-                matched,
-                total,
-                children,
-            } => {
-                self.push_line(
-                    &indent,
-                    connector,
-                    &format!("{matched} of {total} are {condition}"),
-                );
-                let child_indent = Self::child_indent(&indent, connector);
-                self.stack.push(Work::Nodes {
-                    siblings: Siblings::new(children.iter()),
-                    parent_body: None,
-                    indent: child_indent,
-                    next: 0,
-                });
+            ExplanationNode::Filter { .. } => {
+                unreachable!("BUG: Filter nodes are flattened in Siblings::new");
             }
         }
-    }
-}
-
-fn row_label(number: usize, appended: bool, key: &[ExplanationNode]) -> String {
-    if key.is_empty() {
-        if appended {
-            format!("appended {number}.")
-        } else {
-            format!("{number}.")
-        }
-    } else {
-        let values: Vec<String> = key.iter().map(key_value_display).collect();
-        format!("[{}]", values.join(", "))
-    }
-}
-
-/// Key values in brackets: text is quoted so it cannot be read as a row number.
-fn key_value_display(node: &ExplanationNode) -> String {
-    match node {
-        ExplanationNode::Data { result, .. } => {
-            if let Some(text) = &result.text {
-                format!("\"{text}\"")
-            } else {
-                result
-                    .result
-                    .as_deref()
-                    .expect("BUG: row key Data must carry result")
-                    .to_string()
-            }
-        }
-        other => panic!("BUG: row key node is {other:?}, not Data"),
-    }
-}
-
-fn field_headline(field: &ExplanationNode) -> String {
-    match field {
-        ExplanationNode::RuleRef { name, result, .. } => {
-            let result_str = result
-                .result
-                .as_deref()
-                .expect("BUG: RuleRef.result.result not filled by eval");
-            format!("{name}: {result_str}")
-        }
-        ExplanationNode::Data { name, result } => {
-            let result_str = result
-                .result
-                .as_deref()
-                .expect("BUG: Data.result.result not filled by eval");
-            if name.data.is_empty() {
-                result_str.to_string()
-            } else {
-                format!("{name}: {result_str}")
-            }
-        }
-        ExplanationNode::DataUnused { name } => name.to_string(),
-        ExplanationNode::Veto { message } => match message.as_deref() {
-            Some(msg) if !msg.is_empty() => format!("veto \"{msg}\""),
-            _ => "veto".to_string(),
-        },
-        other => panic!("BUG: row field headline for unexpected node {other:?}"),
     }
 }
 
@@ -708,13 +699,225 @@ fn connector_str(connector: Connector) -> &'static str {
     match connector {
         Connector::Branch => "├─",
         Connector::Last => "└─",
-        Connector::None => "",
+    }
+}
+
+fn aligned_row_headlines(nodes: &[&ExplanationNode]) -> std::collections::HashMap<usize, String> {
+    let mut out = std::collections::HashMap::new();
+    let mut index = 0;
+    while index < nodes.len() {
+        if !matches!(nodes[index], ExplanationNode::Row { .. }) {
+            index += 1;
+            continue;
+        }
+        let start = index;
+        while index < nodes.len() && matches!(nodes[index], ExplanationNode::Row { .. }) {
+            index += 1;
+        }
+        let rows = &nodes[start..index];
+        let branched = rows.iter().any(|node| {
+            let ExplanationNode::Row { key, fields, .. } = node else {
+                unreachable!("BUG: row run contains non-Row");
+            };
+            !row_tree_fields(key, fields).is_empty()
+        });
+        let columns: Vec<Vec<RowColumn>> = rows
+            .iter()
+            .map(|node| {
+                let ExplanationNode::Row { key, fields, .. } = node else {
+                    unreachable!("BUG: row run contains non-Row");
+                };
+                row_comma_columns(key, fields)
+            })
+            .collect();
+        let col_widths = if branched {
+            Vec::new()
+        } else {
+            let width = columns.iter().map(|cols| cols.len()).max().unwrap_or(0);
+            let mut widths = vec![0; width];
+            for cols in &columns {
+                for (i, column) in cols.iter().enumerate() {
+                    widths[i] = widths[i].max(column.text.len());
+                }
+            }
+            widths
+        };
+        for (offset, (node, cols)) in rows.iter().zip(columns.iter()).enumerate() {
+            let ExplanationNode::Row {
+                number, appended, ..
+            } = node
+            else {
+                unreachable!("BUG: row run contains non-Row");
+            };
+            let line = if branched {
+                cols.iter()
+                    .map(|column| column.text.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            } else {
+                let mut line = String::new();
+                for (i, column) in cols.iter().enumerate() {
+                    let text = &column.text;
+                    if i + 1 == cols.len() {
+                        line.push_str(text);
+                    } else {
+                        line.push_str(text);
+                        line.push(',');
+                        let pad = col_widths[i].saturating_sub(text.len()) + 1;
+                        line.push_str(&" ".repeat(pad));
+                    }
+                }
+                line
+            };
+            let all_appended = rows
+                .iter()
+                .all(|row| matches!(row, ExplanationNode::Row { appended: true, .. }));
+            let headline = if key_is_empty(node) && !all_appended {
+                let prefix = if *appended {
+                    format!("appended {number}.")
+                } else {
+                    format!("{number}.")
+                };
+                if line.is_empty() {
+                    prefix
+                } else {
+                    format!("{prefix} {line}")
+                }
+            } else {
+                line
+            };
+            out.insert(start + offset, headline);
+        }
+    }
+    out
+}
+
+fn key_is_empty(node: &ExplanationNode) -> bool {
+    matches!(node, ExplanationNode::Row { key, .. } if key.is_empty())
+}
+
+fn row_headline_for(
+    number: usize,
+    appended: bool,
+    key: &[ExplanationNode],
+    fields: &[ExplanationNode],
+) -> String {
+    let cols = row_comma_columns(key, fields);
+    let comma = cols
+        .iter()
+        .map(|column| column.text.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+    if key.is_empty() {
+        let prefix = if appended {
+            format!("appended {number}.")
+        } else {
+            format!("{number}.")
+        };
+        if comma.is_empty() {
+            prefix
+        } else {
+            format!("{prefix} {comma}")
+        }
+    } else {
+        comma
+    }
+}
+
+/// One comma column of a row line.
+struct RowColumn {
+    name: String,
+    text: String,
+}
+
+fn row_comma_columns(key: &[ExplanationNode], fields: &[ExplanationNode]) -> Vec<RowColumn> {
+    let mut cols = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for node in key {
+        let column = row_column(node);
+        seen.insert(column.name.clone());
+        cols.push(column);
+    }
+    for node in fields {
+        if !is_comma_field(node) {
+            continue;
+        }
+        let column = row_column(node);
+        if seen.insert(column.name.clone()) {
+            cols.push(column);
+        }
+    }
+    cols
+}
+
+fn row_tree_fields<'a>(
+    key: &'a [ExplanationNode],
+    fields: &'a [ExplanationNode],
+) -> Vec<&'a ExplanationNode> {
+    let _ = key;
+    fields.iter().filter(|node| !is_comma_field(node)).collect()
+}
+
+fn is_comma_field(node: &ExplanationNode) -> bool {
+    matches!(
+        node,
+        ExplanationNode::Data { .. }
+            | ExplanationNode::DataUnused { .. }
+            | ExplanationNode::Veto { .. }
+    )
+}
+
+fn row_column(node: &ExplanationNode) -> RowColumn {
+    match node {
+        ExplanationNode::Data { name, result } => {
+            let value = result
+                .result
+                .as_deref()
+                .expect("BUG: row Data must carry result");
+            RowColumn {
+                name: name.to_string(),
+                text: format!("{name}: {value}"),
+            }
+        }
+        ExplanationNode::DataUnused { name } => RowColumn {
+            name: name.to_string(),
+            text: name.to_string(),
+        },
+        ExplanationNode::Veto { message } => {
+            let value = match message.as_deref() {
+                Some(msg) if !msg.is_empty() => format!("veto \"{msg}\""),
+                _ => "veto".to_string(),
+            };
+            RowColumn {
+                name: String::new(),
+                text: format!(": {value}"),
+            }
+        }
+        other => panic!("BUG: comma column node is {other:?}"),
     }
 }
 
 /// Bare literal compose: expression text already names it; ASCII omits the node.
 fn is_bare_literal_compose(node: &ExplanationNode) -> bool {
     matches!(node, ExplanationNode::Compose { operands, .. } if operands.is_empty())
+}
+
+/// Visually empty compose: a `Compose` whose every operand is itself omitted by
+/// the formatter (bare literal, or recursively visually empty). Its line would
+/// only restate a sub-expression already shown on the parent and Rule 7 strips
+/// its value, so it is dropped from siblings before tree connectors are assigned.
+fn is_visually_empty_compose(node: &ExplanationNode) -> bool {
+    let ExplanationNode::Compose { operands, .. } = node else {
+        return false;
+    };
+    operands.iter().all(operand_omitted_from_tree)
+}
+
+fn operand_omitted_from_tree(node: &ExplanationNode) -> bool {
+    if is_bare_literal_compose(node) {
+        return true;
+    }
+    is_visually_empty_compose(node)
 }
 
 /// `code is NL` already states the binding; ASCII skips child `code: NL`.

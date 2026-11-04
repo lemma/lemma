@@ -28,6 +28,9 @@ import org.jspecify.annotations.Nullable;
  * @param data inputs rules need by evaluation-data key ({@code properties})
  * @param required inputs a rule needs that have no committed value, sorted
  * @param rows instance-list row schemas by {@code $defs} name
+ * @param rowFieldNeededByRules per {@code $defs} name, row field to the {@code rules} keys that
+ *     need it through an instance list ({@code x-lemma-row-field-needed-by-rules}); fields no rule
+ *     needs are absent
  * @param rules this spec's rule graph, local plus reachable imports ({@code x-lemma-rules})
  * @param meta meta ({@code x-lemma-meta})
  * @param json the Show document
@@ -44,19 +47,23 @@ public record Show(
     Map<String, ShowData> data,
     List<String> required,
     Map<String, ShowRow> rows,
+    Map<String, Map<String, List<String>>> rowFieldNeededByRules,
     Map<String, ShowRule> rules,
     Map<String, LiteralValue> meta,
     String json) {
   private static final String DIALECT = "https://json-schema.org/draft/2020-12/schema";
 
   /**
-   * One uses hop on a Show data or rule path.
+   * One hop on a Show data or rule path: a uses alias, or (with {@code row}) a row written in
+   * the data list named {@code uses}.
    *
-   * @param uses uses alias for this hop
+   * @param uses uses alias, or the data list name when {@code row} is set
+   * @param row 1-based position of the row written in the data list; null for a uses hop
    * @param repository target repository name; null for the unnamed workspace
    * @param spec resolved target spec name
    */
-  public record PathSegment(String uses, @Nullable String repository, String spec) {
+  public record PathSegment(
+      String uses, @Nullable Integer row, @Nullable String repository, String spec) {
     /**
      * Parses JSON.
      *
@@ -67,6 +74,7 @@ public record Show(
     static PathSegment read(JsonParser p) throws IOException {
       JsonReading.expectStartObject(p, "PathSegment");
       String uses = null;
+      Integer row = null;
       String repository = null;
       String spec = null;
       while (p.nextToken() != JsonToken.END_OBJECT) {
@@ -74,6 +82,7 @@ public record Show(
         p.nextToken();
         switch (field) {
           case "uses" -> uses = JsonReading.readString(p);
+          case "row" -> row = JsonReading.readInt(p);
           case "repository" -> repository = JsonReading.readString(p);
           case "spec" -> spec = JsonReading.readString(p);
           default -> JsonReading.unknownField(field, "PathSegment");
@@ -85,7 +94,7 @@ public record Show(
       if (spec == null) {
         JsonReading.missingRequired("spec", "PathSegment");
       }
-      return new PathSegment(uses, repository, spec);
+      return new PathSegment(uses, row, repository, spec);
     }
   }
 
@@ -336,6 +345,7 @@ public record Show(
     Map<String, ShowData> data = null;
     List<String> required = List.of();
     Map<String, ShowRow> rows = Map.of();
+    Map<String, Map<String, List<String>>> rowFieldNeededByRules = Map.of();
     Map<String, ShowRule> rules = null;
     Map<String, LiteralValue> meta = null;
     while (p.nextToken() != JsonToken.END_OBJECT) {
@@ -350,6 +360,14 @@ public record Show(
         case "properties" -> data = JsonReading.readMap(p, ShowData::read);
         case "required" -> required = JsonReading.readList(p, JsonReading::readString);
         case "$defs" -> rows = JsonReading.readMap(p, ShowRow::read);
+        case "x-lemma-row-field-needed-by-rules" ->
+            rowFieldNeededByRules =
+                JsonReading.readMap(
+                    p,
+                    rowFields ->
+                        JsonReading.readMap(
+                            rowFields,
+                            neededBy -> JsonReading.readList(neededBy, JsonReading::readString)));
         case "x-lemma-repository" -> repository = JsonReading.readString(p);
         case "x-lemma-effective-from" -> effectiveFrom = JsonReading.readString(p);
         case "x-lemma-effective-to" -> effectiveTo = JsonReading.readString(p);
@@ -391,6 +409,7 @@ public record Show(
         data,
         required,
         rows,
+        rowFieldNeededByRules,
         rules,
         meta,
         json);

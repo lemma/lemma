@@ -771,7 +771,7 @@ rule out: cost_per_unit
 }
 
 #[test]
-fn measure_below_minimum_veto_respects_type_decimals() {
+fn measure_below_minimum_veto_shows_unrounded_converted_bound() {
     let code = r#"
 spec s
 data money: measure -> unit eur: 1 -> unit usd: 0.91
@@ -780,7 +780,6 @@ data cost_per_unit: measure
   -> unit eur_per_kilo: eur/kilogram
   -> unit usd_per_tonne: usd/tonne
   -> minimum 1.20 eur_per_kilo
-  -> decimals 2
 rule out: cost_per_unit
 "#;
 
@@ -804,12 +803,8 @@ rule out: cost_per_unit
         "expected user unit in message, got: {message}"
     );
     assert!(
-        message.contains("1318.68"),
-        "expected minimum bound rounded to 2 decimals, got: {message}"
-    );
-    assert!(
-        !message.contains("1318.681"),
-        "must not show extra decimal precision beyond type decimals, got: {message}"
+        message.contains("1318.681318681318681318681318"),
+        "expected unrounded converted minimum, got: {message}"
     );
 }
 

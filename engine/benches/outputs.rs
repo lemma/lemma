@@ -116,7 +116,7 @@ fn normalize_value(value: &ValueKind, lemma_type: &LemmaType) -> Output {
         },
         ValueKind::Text(s) => Output {
             kind: "text",
-            value: s.clone(),
+            value: s.to_string(),
             unit: None,
         },
         ValueKind::Date(dt) => Output {

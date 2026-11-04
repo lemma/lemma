@@ -735,6 +735,31 @@ fn run_prompt_tasks(session: &mut PromptSession<'_>, mut tasks: Vec<Task>) -> Re
     Ok(())
 }
 
+fn show_option(value: &EvaluateDataValue) -> String {
+    match value {
+        EvaluateDataValue::Literal(text) => text.clone(),
+        EvaluateDataValue::Boolean(bit) => bit.to_string(),
+        EvaluateDataValue::Map(fields) => fields
+            .iter()
+            .map(|(name, field)| format!("{name}: {}", show_option_leaf(field)))
+            .collect::<Vec<_>>()
+            .join(", "),
+        EvaluateDataValue::List(items) => items
+            .iter()
+            .map(show_option_leaf)
+            .collect::<Vec<_>>()
+            .join(", "),
+    }
+}
+
+fn show_option_leaf(value: &EvaluateDataValue) -> String {
+    match value {
+        EvaluateDataValue::Literal(text) => text.clone(),
+        EvaluateDataValue::Boolean(bit) => bit.to_string(),
+        EvaluateDataValue::Map(_) | EvaluateDataValue::List(_) => String::new(),
+    }
+}
+
 fn fill_missing_step(session: &mut PromptSession<'_>, tasks: &mut Vec<Task>) -> Result<()> {
     let response = session
         .engine
@@ -758,8 +783,75 @@ fn fill_missing_step(session: &mut PromptSession<'_>, tasks: &mut Vec<Task>) -> 
         Some(name) => name,
         None => return Ok(()),
     };
+    let options = response
+        .results
+        .values()
+        .find(|result| result.missing_data().iter().any(|key| key == &name))
+        .and_then(|result| result.missing_data_options().get(&name))
+        .cloned();
+
+    let options = options.or_else(|| match session.slots.get(&name)? {
+        Slot::Prompt { lemma_type, .. } => {
+            let static_opts = lemma_type.static_options();
+            if static_opts.is_empty() {
+                None
+            } else {
+                Some(
+                    static_opts
+                        .into_iter()
+                        .map(EvaluateDataValue::Literal)
+                        .collect(),
+                )
+            }
+        }
+        Slot::DeclaredRow { .. } => None,
+    });
 
     tasks.push(Task::FillMissing);
+
+    if let Some(options) = options {
+        if options.is_empty() {
+            anyhow::bail!("data '{name}' has no valid option");
+        }
+        let (lemma_type, location) = match session.slots.get(&name) {
+            Some(Slot::Prompt {
+                lemma_type,
+                location,
+                ..
+            }) => (lemma_type.clone(), location.clone()),
+            _ => panic!("BUG: MissingData key '{name}' has no interactive slot"),
+        };
+        let chosen = if options.len() == 1 {
+            options.into_iter().next().expect("BUG: one option")
+        } else {
+            let shown: Vec<String> = options.iter().map(show_option).collect();
+            let display = lemma_type.label_for_data_input(&step_label(&location));
+            let selected = Select::new(&display, shown)
+                .raw_prompt()
+                .context(format!("Failed to get option for {name}"))?;
+            options
+                .into_iter()
+                .nth(selected.index)
+                .expect("BUG: selected option index is one of the options")
+        };
+        write_at(session.collected, &location, chosen);
+        match session.engine.evaluate(
+            session.repo,
+            session.spec_name,
+            Some(session.now),
+            trial_evaluate_data(session.provided_data, session.collected),
+            session.rules_for_request,
+            false,
+        ) {
+            Ok(response) => {
+                if let Some(reason) = computation_veto_reason_for_trial_input(&response) {
+                    anyhow::bail!("{reason}");
+                }
+            }
+            Err(error) => anyhow::bail!("{error}"),
+        }
+        return Ok(());
+    }
 
     match session.slots.get(&name).cloned() {
         Some(Slot::Prompt {
@@ -1074,40 +1166,21 @@ fn prompt_value_for_type(
         TypeSpecification::Boolean { .. } => {
             prompt_boolean_data(&input_label, data_name, suggestion)
         }
-        TypeSpecification::Text {
-            options,
-            length,
-            help,
-            ..
-        } => {
-            if !options.is_empty() {
-                if options.len() == 1 {
-                    return Ok(options[0].clone());
-                }
-                let mut prompt =
-                    Select::new(&input_label, options.clone()).with_help_message(help.as_str());
-                if let Some(lit) = suggestion {
-                    if let ValueKind::Text(s) = &lit.value {
-                        if let Some(idx) = options.iter().position(|o| o == s) {
-                            prompt = prompt.with_starting_cursor(idx);
-                        }
-                    }
-                }
-                prompt
-                    .prompt()
-                    .context(format!("Failed to get option for {}", data_name))
-            } else {
-                let constraints = TextConstraints {
-                    length: *length,
-                    help: help.clone(),
-                };
-                prompt_text_data_with_constraints(&input_label, lemma_type, suggestion, &constraints)
-            }
+        TypeSpecification::Text { length, help } => {
+            let constraints = TextConstraints {
+                length: *length,
+                help: help.clone(),
+            };
+            prompt_text_data_with_constraints(
+                &input_label,
+                lemma_type,
+                suggestion,
+                &constraints,
+            )
         }
         TypeSpecification::Measure {
             minimum,
             maximum,
-            decimals,
             units,
             help,
             traits,
@@ -1117,7 +1190,6 @@ fn prompt_value_for_type(
             let measure_spec = TypeSpecification::Measure {
                 minimum: minimum.clone(),
                 maximum: maximum.clone(),
-                decimals: *decimals,
                 units: units.clone(),
                 traits: traits.clone(),
                 decomposition: decomposition.clone(),
@@ -1127,7 +1199,7 @@ fn prompt_value_for_type(
             let constraints = NumericConstraints {
                 minimum: measure_spec.minimum_decimal(),
                 maximum: measure_spec.maximum_decimal(),
-                decimals: *decimals,
+                decimals: None,
                 help: help.clone(),
             };
             prompt_measure_data(
@@ -1163,7 +1235,6 @@ fn prompt_value_for_type(
         TypeSpecification::Ratio {
             minimum,
             maximum,
-            decimals,
             units,
             help,
             ..
@@ -1171,7 +1242,6 @@ fn prompt_value_for_type(
             let ratio_spec = TypeSpecification::Ratio {
                 minimum: minimum.clone(),
                 maximum: maximum.clone(),
-                decimals: *decimals,
                 units: units.clone(),
                 unit: None,
                 help: help.clone(),
@@ -1179,17 +1249,10 @@ fn prompt_value_for_type(
             let constraints = NumericConstraints {
                 minimum: ratio_spec.minimum_decimal(),
                 maximum: ratio_spec.maximum_decimal(),
-                decimals: *decimals,
+                decimals: None,
                 help: help.clone(),
             };
-            prompt_ratio_data(
-                data_name,
-                &input_label,
-                suggestion,
-                lemma_type,
-                units,
-                &constraints,
-            )
+            prompt_ratio_data(data_name, suggestion, lemma_type, units, &constraints)
         }
         TypeSpecification::Date { .. } => prompt_date_data(&input_label, data_name, suggestion),
         TypeSpecification::Time { help, .. } => {
@@ -1376,8 +1439,8 @@ fn prompt_range_data(
         _ => unreachable!("BUG: prompt_range_data called with non-range type"),
     };
 
-    let start_title = lemma_type.label_for_data_input(&format!("{data_name}.start"));
-    let end_title = lemma_type.label_for_data_input(&format!("{data_name}.end"));
+    let start_title = lemma_type.label_for_data_input(&format!("{data_name} › start"));
+    let end_title = lemma_type.label_for_data_input(&format!("{data_name} › end"));
 
     let left_value = prompt_simple_text(
         &start_title,
@@ -1463,44 +1526,56 @@ fn prompt_measure_data(
 
 fn prompt_ratio_data(
     data_name: &str,
-    prompt_title: &str,
     suggestion: Option<&LiteralValue>,
     lemma_type: &LemmaType,
     units: &lemma::RatioUnits,
     constraints: &NumericConstraints,
 ) -> Result<String> {
-    let selected_unit = if units.len() == 1 {
-        units
-            .iter()
-            .next()
-            .map(|u| u.name.clone())
-            .expect("BUG: units.len() == 1 yields one unit")
-    } else {
-        let mut unit_choices: Vec<String> = vec!["(none)".to_string()];
-        unit_choices.extend(units.iter().map(|u| u.name.clone()));
-        Select::new(
-            &format!("Select ratio unit for {}", data_name),
-            unit_choices,
-        )
-        .prompt()
-        .context(format!("Failed to get ratio unit for {}", data_name))?
-    };
-    let default_decimal = if selected_unit == "(none)" {
-        suggestion.and_then(|lit| lit.magnitude_suggestion_for_decimal_prompt(lemma_type))
-    } else {
-        suggestion.and_then(|lit| lit.magnitude_in_unit(lemma_type, &selected_unit))
+    if units.is_empty() {
+        unreachable!("BUG: Ratio type has no units");
     }
-    .map(|decimal| decimal.to_string());
 
+    let default_unit = suggestion.and_then(|lit| match &lit.value {
+        ValueKind::Ratio(_) => lemma_type.ratio_primary_unit().map(|name| name.to_string()),
+        _ => None,
+    });
+
+    let unit_names: Vec<String> = units.iter().map(|u| u.name.clone()).collect();
+    let selected_unit = if unit_names.len() == 1 {
+        unit_names[0].clone()
+    } else {
+        let prompt_msg = format!("Select ratio unit for {}", data_name);
+        let mut select = Select::new(&prompt_msg, unit_names);
+        if let Some(def_unit) = default_unit.as_deref() {
+            if let Some(idx) = units.iter().position(|u| u.name == def_unit) {
+                select = select.with_starting_cursor(idx);
+            }
+        }
+        select
+            .prompt()
+            .context(format!("Failed to get ratio unit for {}", data_name))?
+    };
+
+    let default_decimal = suggestion
+        .and_then(|lit| lit.magnitude_in_unit(lemma_type, &selected_unit))
+        .map(|decimal| decimal.to_string());
+
+    let value_constraints = NumericConstraints {
+        help: if constraints.help.is_empty() {
+            format!("Enter numeric value (unit: {})", selected_unit)
+        } else {
+            constraints.help.clone()
+        },
+        ..constraints.clone()
+    };
     let value = prompt_decimal_input(
-        prompt_title,
+        &format!("Enter value for {} ({})", data_name, selected_unit),
         default_decimal.as_deref(),
-        constraints,
+        &value_constraints,
         "0.10",
     )?;
 
     match selected_unit.as_str() {
-        "(none)" => Ok(value),
         "percent" => Ok(format!("{}%", value)),
         "permille" => Ok(format!("{}%%", value)),
         other => Ok(format!("{} {}", value, other)),
@@ -1747,7 +1822,8 @@ rule use_gender: gender
 spec line
 data qty: number
 spec order
-uses lines: line list
+uses line
+data lines: line list
 data extra: number
 rule total: lines -> sum qty
 rule other: extra
@@ -1814,7 +1890,8 @@ spec line
 data price: number
 data qty: number
 spec order
-uses lines: line list
+uses line
+data lines: line list
   -> with price: 2
 rule total: lines -> sum qty
 "#
@@ -1863,7 +1940,8 @@ rule total: lines -> sum qty
 spec item
 data score: number
 spec cart
-uses items: item list
+uses item
+data items: item list
   -> with score: 10
   -> with score: 11
 rule average: items -> avg score

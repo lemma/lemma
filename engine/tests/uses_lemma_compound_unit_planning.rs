@@ -18,22 +18,23 @@ fn load_ok(code: &str, source_file: &str, message: &str) {
 }
 
 fn expect_plan_error(code: &str, source_file: &str, expected_fragment: &str) {
-    let mut engine = Engine::new();
-    let result = engine.load([(path_source(source_file), code.to_string())]);
-    assert!(
-        result.is_err(),
-        "expected planning to fail containing '{expected_fragment}'"
-    );
-    let errors = result.unwrap_err();
-    let combined = errors
-        .iter()
-        .map(ToString::to_string)
-        .collect::<Vec<_>>()
-        .join("; ");
+    let combined = plan_error_message(code, source_file);
     assert!(
         combined.contains(expected_fragment),
         "expected error containing '{expected_fragment}', got: {combined}"
     );
+}
+
+fn plan_error_message(code: &str, source_file: &str) -> String {
+    let mut engine = Engine::new();
+    let result = engine.load([(path_source(source_file), code.to_string())]);
+    assert!(result.is_err(), "expected planning to fail");
+    result
+        .unwrap_err()
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join("; ")
 }
 
 /// Mirrors `cli/tests/integrations/examples/03_spec_references.lemma` contractor block:
@@ -399,8 +400,6 @@ uses lemma units
 
 data money: measure
   -> unit eur: 1.00
-  -> decimals 2
-
 data wage_rate: measure
   -> unit eur_per_hour: eur/hour
 
@@ -487,8 +486,6 @@ uses lemma units
 
 data money: measure
   -> unit eur: 1.00
-  -> decimals 2
-
 data wage_rate: measure
   -> unit eur_per_hour: eur/hour
 
@@ -534,8 +531,6 @@ uses lemma units
 
 data money: measure
   -> unit eur: 1.00
-  -> decimals 2
-
 data wage_rate: measure
   -> unit eur_per_hour: eur/hour
 
@@ -582,8 +577,6 @@ uses lemma units
 
 data money: measure
   -> unit eur: 1.00
-  -> decimals 2
-
 data wage_rate: measure
   -> unit eur_per_hour: eur/hour
 
@@ -628,6 +621,119 @@ rule smoke: true
     );
 }
 
+/// `0.01 units.duration.hour` on a fresh measure copies duration. It is not a derivation.
+#[test]
+fn fresh_measure_scaled_qualified_hour_is_not_a_derivation() {
+    let message = plan_error_message(
+        r#"spec deel_spec
+uses lemma units
+
+data deel: measure
+  -> unit hundredth_hour: 0.01 units.duration.hour
+
+rule smoke: true
+"#,
+        "deel_qualified.lemma",
+    );
+    assert!(
+        message.contains("cannot use a single unit from another measure"),
+        "{message}"
+    );
+    assert!(message.contains("hour"), "{message}");
+    assert!(message.contains("duration"), "{message}");
+}
+
+/// Bare `0.01 hour` is the same scale, still not a derivation.
+#[test]
+fn fresh_measure_scaled_bare_hour_is_not_a_derivation() {
+    let message = plan_error_message(
+        r#"spec deel_spec
+uses lemma units
+
+data deel: measure
+  -> unit hundredth_hour: 0.01 hour
+
+rule smoke: true
+"#,
+        "deel_bare_scale.lemma",
+    );
+    assert!(
+        message.contains("cannot use a single unit from another measure"),
+        "{message}"
+    );
+    assert!(message.contains("hour"), "{message}");
+    assert!(message.contains("duration"), "{message}");
+}
+
+/// Prefix 1 (`hour`, `second`) on a fresh measure copies duration.
+#[test]
+fn fresh_measure_alias_of_hour_or_second_is_not_a_derivation() {
+    let hour_message = plan_error_message(
+        r#"spec deel_spec
+uses lemma units
+
+data deel: measure
+  -> unit my_hour: hour
+
+rule smoke: true
+"#,
+        "deel_hour_alias.lemma",
+    );
+    assert!(
+        hour_message.contains("cannot use a single unit from another measure"),
+        "{hour_message}"
+    );
+    assert!(hour_message.contains("hour"), "{hour_message}");
+    assert!(hour_message.contains("duration"), "{hour_message}");
+
+    let second_message = plan_error_message(
+        r#"spec deel_spec
+uses lemma units
+
+data deel: measure
+  -> unit my_second: 1 second
+
+rule smoke: true
+"#,
+        "deel_second_alias.lemma",
+    );
+    assert!(
+        second_message.contains("cannot use a single unit from another measure"),
+        "{second_message}"
+    );
+    assert!(second_message.contains("second"), "{second_message}");
+    assert!(second_message.contains("duration"), "{second_message}");
+}
+
+/// Extending duration keeps the nominal unit `second`. `1 hundredth_hour` is `0.01 hour`.
+#[test]
+fn duration_extension_hundredth_hour_converts_to_hour() {
+    let code = r#"spec deel_spec
+uses lemma units
+
+data deel: units.duration
+  -> unit hundredth_hour: 0.01 hour
+
+data one: 1 hundredth_hour
+
+rule as_hour:
+  one as hour
+"#;
+    let hour = evaluate_measure_unit(
+        code,
+        "hundredth_hour.lemma",
+        "deel_spec",
+        "as_hour",
+        "hour",
+        IndexMap::new(),
+    );
+    assert_eq!(
+        hour,
+        rust_decimal::Decimal::new(1, 2),
+        "1 hundredth_hour as hour must be 0.01"
+    );
+}
+
 /// `eur_per_hour * workday` cancels to money: 50 eur_per_hour * 1 workday → 400 eur.
 #[test]
 fn duration_extension_workday_times_wage_rate_is_money() {
@@ -637,8 +743,6 @@ uses lemma units
 
 data money: measure
   -> unit eur: 1.00
-  -> decimals 2
-
 data wage_rate: measure
   -> unit eur_per_hour: eur/hour
 
@@ -677,8 +781,6 @@ uses lemma units
 
 data money: measure
   -> unit eur: 1.00
-  -> decimals 2
-
 data hourly: 14.80 eur
 data hours_worked: 8 hour
 

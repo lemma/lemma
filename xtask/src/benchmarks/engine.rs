@@ -161,7 +161,7 @@ pub fn run(root: &Path) -> Result<(), String> {
 
     let accuracy = compute_accuracy(&outputs_by_spec, &python_by_spec)?;
     let (memory_rows, plan_memory_rows) = parse_memory_bench_stdout(&memory_stdout)?;
-    let snapshot_rows = parse_snapshot_bench_stdout(&logistics_stdout)?;
+    let embedded_rows = parse_logistics_embedded_bench_stdout(&logistics_stdout)?;
     let external_rows = parse_logistics_external_bench_stdout(&logistics_stdout)?;
     let env = capture_environment(root)?;
     let python_version = capture_stdout("python3", &["--version"], None)?;
@@ -176,7 +176,7 @@ pub fn run(root: &Path) -> Result<(), String> {
         accuracy: &accuracy,
         memory_rows: &memory_rows,
         plan_memory_rows: &plan_memory_rows,
-        snapshot_rows: &snapshot_rows,
+        embedded_rows: &embedded_rows,
         external_rows: &external_rows,
     })?;
 
@@ -281,7 +281,7 @@ fn parse_memory_bench_stdout(stdout: &str) -> Result<(Vec<MemoryRow>, Vec<Memory
 }
 
 /// Rungs of the logistics ladder the logistics bench must report, in order.
-const SNAPSHOT_LADDER: [usize; 4] = [1050, 6300, 18900, 126000];
+const LOGISTICS_LADDER: [usize; 4] = [1050, 6300, 18900, 126000];
 
 fn run_logistics_bench(root: &Path) -> Result<String, String> {
     let output = Command::new("cargo")
@@ -309,7 +309,7 @@ fn parse_milliseconds(cell: &str, what: &str) -> Result<f64, String> {
         .map_err(|error| format!("BUG: {what} parse failed: {error}"))
 }
 
-fn parse_snapshot_bench_stdout(stdout: &str) -> Result<Vec<SnapshotRow>, String> {
+fn parse_logistics_embedded_bench_stdout(stdout: &str) -> Result<Vec<LogisticsRow>, String> {
     let mut rows = Vec::new();
     for line in stdout.lines() {
         let line = line.trim();
@@ -317,10 +317,10 @@ fn parse_snapshot_bench_stdout(stdout: &str) -> Result<Vec<SnapshotRow>, String>
             continue;
         }
         let cells: Vec<&str> = line.split('|').map(str::trim).collect();
-        if cells.len() < 13 {
-            return Err(format!("BUG: malformed snapshot bench row: {line}"));
+        if cells.len() < 8 {
+            return Err(format!("BUG: malformed logistics bench row: {line}"));
         }
-        rows.push(SnapshotRow {
+        rows.push(LogisticsRow {
             profile: cells[1].to_string(),
             rate_cells: cells[2]
                 .parse::<usize>()
@@ -332,30 +332,19 @@ fn parse_snapshot_bench_stdout(stdout: &str) -> Result<Vec<SnapshotRow>, String>
             loaded_heap_bytes: cells[5]
                 .parse::<i128>()
                 .map_err(|error| format!("BUG: loaded heap parse failed: {error}"))?,
-            snapshot_bytes: cells[6]
-                .parse::<usize>()
-                .map_err(|error| format!("BUG: snapshot bytes parse failed: {error}"))?,
-            encode_ms: parse_milliseconds(cells[7], "encode")?,
-            restore_ms: parse_milliseconds(cells[8], "restore")?,
-            eval_ms: parse_milliseconds(cells[9], "eval")?,
-            restore_allocations: cells[10]
-                .parse::<usize>()
-                .map_err(|error| format!("BUG: allocations/restore parse failed: {error}"))?,
-            restored_heap_bytes: cells[11]
-                .parse::<i128>()
-                .map_err(|error| format!("BUG: restored heap parse failed: {error}"))?,
+            eval_ms: parse_milliseconds(cells[6], "eval")?,
         });
     }
     let reported: Vec<usize> = rows.iter().map(|row| row.rate_cells).collect();
-    if reported != SNAPSHOT_LADDER {
+    if reported != LOGISTICS_LADDER {
         return Err(format!(
-            "snapshot bench reported rungs {reported:?}, expected {SNAPSHOT_LADDER:?}"
+            "logistics bench reported rungs {reported:?}, expected {LOGISTICS_LADDER:?}"
         ));
     }
     Ok(rows)
 }
 
-fn parse_logistics_external_bench_stdout(stdout: &str) -> Result<Vec<ExternalCatalogRow>, String> {
+fn parse_logistics_external_bench_stdout(stdout: &str) -> Result<Vec<LogisticsRow>, String> {
     let mut rows = Vec::new();
     for line in stdout.lines() {
         let line = line.trim();
@@ -363,12 +352,12 @@ fn parse_logistics_external_bench_stdout(stdout: &str) -> Result<Vec<ExternalCat
             continue;
         }
         let cells: Vec<&str> = line.split('|').map(str::trim).collect();
-        if cells.len() < 12 {
+        if cells.len() < 8 {
             return Err(format!(
                 "BUG: malformed logistics_external bench row: {line}"
             ));
         }
-        rows.push(ExternalCatalogRow {
+        rows.push(LogisticsRow {
             profile: cells[1].to_string(),
             rate_cells: cells[2]
                 .parse::<usize>()
@@ -380,21 +369,13 @@ fn parse_logistics_external_bench_stdout(stdout: &str) -> Result<Vec<ExternalCat
             loaded_heap_bytes: cells[5]
                 .parse::<i128>()
                 .map_err(|error| format!("BUG: loaded heap parse failed: {error}"))?,
-            snapshot_bytes: cells[6]
-                .parse::<usize>()
-                .map_err(|error| format!("BUG: snapshot bytes parse failed: {error}"))?,
-            encode_ms: parse_milliseconds(cells[7], "encode")?,
-            restore_ms: parse_milliseconds(cells[8], "restore")?,
-            eval_ms: parse_milliseconds(cells[9], "eval")?,
-            restored_heap_bytes: cells[10]
-                .parse::<i128>()
-                .map_err(|error| format!("BUG: restored heap parse failed: {error}"))?,
+            eval_ms: parse_milliseconds(cells[6], "eval")?,
         });
     }
     let reported: Vec<usize> = rows.iter().map(|row| row.rate_cells).collect();
-    if reported != SNAPSHOT_LADDER {
+    if reported != LOGISTICS_LADDER {
         return Err(format!(
-            "logistics_external bench reported rungs {reported:?}, expected {SNAPSHOT_LADDER:?}"
+            "logistics_external bench reported rungs {reported:?}, expected {LOGISTICS_LADDER:?}"
         ));
     }
     Ok(rows)
@@ -590,8 +571,8 @@ struct ComposeReportContext<'a> {
     accuracy: &'a (AccuracyStats, Vec<AccuracyDeviation>),
     memory_rows: &'a [MemoryRow],
     plan_memory_rows: &'a [MemoryRow],
-    snapshot_rows: &'a [SnapshotRow],
-    external_rows: &'a [ExternalCatalogRow],
+    embedded_rows: &'a [LogisticsRow],
+    external_rows: &'a [LogisticsRow],
 }
 
 fn push_memory_table(out: &mut String, rows: &[MemoryRow], unit: &str) {
@@ -623,32 +604,13 @@ struct MemoryRow {
 }
 
 #[derive(Debug)]
-struct SnapshotRow {
+struct LogisticsRow {
     profile: String,
     rate_cells: usize,
     source_bytes: usize,
     load_ms: f64,
     loaded_heap_bytes: i128,
-    snapshot_bytes: usize,
-    encode_ms: f64,
-    restore_ms: f64,
     eval_ms: f64,
-    restore_allocations: usize,
-    restored_heap_bytes: i128,
-}
-
-#[derive(Debug)]
-struct ExternalCatalogRow {
-    profile: String,
-    rate_cells: usize,
-    source_bytes: usize,
-    load_ms: f64,
-    loaded_heap_bytes: i128,
-    snapshot_bytes: usize,
-    encode_ms: f64,
-    restore_ms: f64,
-    eval_ms: f64,
-    restored_heap_bytes: i128,
 }
 
 fn format_mebibytes(bytes: i128) -> String {
@@ -673,7 +635,7 @@ fn compose_report(ctx: ComposeReportContext<'_>) -> Result<String, String> {
         accuracy,
         memory_rows,
         plan_memory_rows,
-        snapshot_rows,
+        embedded_rows,
         external_rows,
     } = ctx;
     let (stats, deviations) = accuracy;
@@ -737,19 +699,18 @@ fn compose_report(ctx: ComposeReportContext<'_>) -> Result<String, String> {
          region.\n",
     );
     out.push_str(
-        "- Snapshot: `cargo bench -p lemma-engine --bench logistics` (embedded table) on the \
+        "- Logistics ladder: `cargo bench -p lemma-engine --bench logistics` (embedded table) on the \
          generated logistics ladder (1050 / 6300 / 18900 / 126000 rate cells; byte-identical to the \
          Java `SpecGenerator.logistics` fixtures). One `load`, then 1 warmup + 10 measured \
-         `Engine::snapshot`, `Engine::from_snapshot`, and eval (`shipment inputs` + `Engine::evaluate` → \
-         `cheapest`; catalog already in the plan). Heap columns are `stats_alloc` net bytes \
-         retained by the loaded and by the restored engine. The restored engine must evaluate \
-         `rate_shop.cheapest` to the same value as the loaded engine.\n",
+         eval (`shipment inputs` + `Engine::evaluate` → \
+         `cheapest`; catalog already in the plan). Loaded heap is `stats_alloc` net bytes \
+         retained by the loaded engine.\n",
     );
     out.push_str(
         "- External catalog: same `cargo bench -p lemma-engine --bench logistics` (external table) \
          on the same ladder with empty keyed lists in source and catalog rows held as JSON. Timed \
          eval = `parse_evaluate_data_object` + `Engine::evaluate` (1 warmup + 10 measured); that \
-         includes JSON parse, unlike embedded eval. Load / snapshot / restore measure the skeleton \
+         includes JSON parse, unlike embedded eval. Load measures the skeleton \
          only. Each rung must match embedded `rate_shop.cheapest`.\n\n",
     );
 
@@ -838,67 +799,50 @@ fn compose_report(ctx: ComposeReportContext<'_>) -> Result<String, String> {
     out.push_str("## Memory (per compile, parse + plan)\n\n");
     push_memory_table(&mut out, plan_memory_rows, "plan");
 
-    out.push_str("## Snapshot (logistics ladder)\n\n");
+    out.push_str("## Load and eval (logistics ladder)\n\n");
     out.push_str(
         "Multi-spec rating workspace: `rates_*` cards with 1050 list rows each (`-> key` / `find`), \
          `zones_*` with 900 ZIP3 rows per service, fuel brackets as range-keyed lists, one quote \
          pipeline per carrier and service, and a `rate_shop` that `uses` every quote. Eval median \
-         is shipment inputs + `run` to `cheapest` (catalog already planned). Restore is the number \
-         to watch for snapshot cost; snapshot bytes and restored heap are dominated by the per-cell \
-         type payload the plan store ships today.\n\n",
+         is shipment inputs + `run` to `cheapest` (catalog already planned). Spec-written rows \
+         are checked once against the row spec's \
+         shared template plan, and every nested consumer Arc-shares the one interned row store, \
+         so load and loaded heap scale with the unique catalog bodies, not with rows x \
+         consumers. Path strings are deduped by content across all path copies.\n\n",
     );
-    out.push_str(
-        "| Profile | Rate cells | Source | Load | Loaded heap | Snapshot | Encode median | Restore median | Eval median | Allocations/restore | Restored heap | Restored / loaded heap |\n",
-    );
-    out.push_str(
-        "|---------|-----------:|-------:|-----:|------------:|---------:|--------------:|---------------:|------------:|--------------------:|--------------:|-----------------------:|\n",
-    );
-    for row in snapshot_rows {
+    out.push_str("| Profile | Rate cells | Source | Load | Loaded heap | Eval median |\n");
+    out.push_str("|---------|-----------:|-------:|-----:|------------:|------------:|\n");
+    for row in embedded_rows {
         out.push_str(&format!(
-            "| `{}` | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} |\n",
+            "| `{}` | {} | {} | {} | {} | {} |\n",
             row.profile,
             row.rate_cells,
             format_mebibytes(row.source_bytes as i128),
             format_latency_ns(row.load_ms * 1_000_000.0),
             format_mebibytes(row.loaded_heap_bytes),
-            format_mebibytes(row.snapshot_bytes as i128),
-            format_latency_ns(row.encode_ms * 1_000_000.0),
-            format_latency_ns(row.restore_ms * 1_000_000.0),
             format_latency_ns(row.eval_ms * 1_000_000.0),
-            row.restore_allocations,
-            format_mebibytes(row.restored_heap_bytes),
-            format_ratio(row.restored_heap_bytes as f64, row.loaded_heap_bytes as f64),
         ));
     }
     out.push('\n');
 
-    out.push_str("## Snapshot / eval (logistics ladder, external catalog)\n\n");
+    out.push_str("## Load and eval (logistics ladder, external catalog)\n\n");
     out.push_str(
         "Same rate-shop workspace as the embedded ladder, but keyed catalog lists (`cells`, \
          ZIP3 zones, fuel brackets) stay empty in source and arrive as JSON evaluation data on \
          `rate_shop` (`qN.r.cells`, `qN.z.{service}_zones`, `qN.f.brackets`). Eval median is \
          JSON parse + `run` to `cheapest`.\n\n",
     );
-    out.push_str(
-        "| Profile | Rate cells | Source | Load | Loaded heap | Snapshot | Encode median | Restore median | Eval median | Restored heap | Restored / loaded heap |\n",
-    );
-    out.push_str(
-        "|---------|-----------:|-------:|-----:|------------:|---------:|--------------:|---------------:|------------:|--------------:|-----------------------:|\n",
-    );
+    out.push_str("| Profile | Rate cells | Source | Load | Loaded heap | Eval median |\n");
+    out.push_str("|---------|-----------:|-------:|-----:|------------:|------------:|\n");
     for row in external_rows {
         out.push_str(&format!(
-            "| `{}` | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} |\n",
+            "| `{}` | {} | {} | {} | {} | {} |\n",
             row.profile,
             row.rate_cells,
             format_mebibytes(row.source_bytes as i128),
             format_latency_ns(row.load_ms * 1_000_000.0),
             format_mebibytes(row.loaded_heap_bytes),
-            format_mebibytes(row.snapshot_bytes as i128),
-            format_latency_ns(row.encode_ms * 1_000_000.0),
-            format_latency_ns(row.restore_ms * 1_000_000.0),
             format_latency_ns(row.eval_ms * 1_000_000.0),
-            format_mebibytes(row.restored_heap_bytes),
-            format_ratio(row.restored_heap_bytes as f64, row.loaded_heap_bytes as f64),
         ));
     }
     out.push('\n');
@@ -1063,15 +1007,15 @@ mod tests {
             accuracy: &accuracy,
             memory_rows: &[],
             plan_memory_rows: &[],
-            snapshot_rows: &[],
+            embedded_rows: &[],
             external_rows: &[],
         })
         .expect("compose");
 
         assert!(report.contains("cargo benchmarks engine"));
         assert!(report.contains("Compile (Lemma, parse + plan)"));
-        assert!(report.contains("## Snapshot (logistics ladder)"));
-        assert!(report.contains("## Snapshot / eval (logistics ladder, external catalog)"));
+        assert!(report.contains("## Load and eval (logistics ladder)"));
+        assert!(report.contains("## Load and eval (logistics ladder, external catalog)"));
         assert!(report.contains(
             "[`engine/benches/specs/shipping.lemma`](https://github.com/lemma/lemma/blob/abc123/engine/benches/specs/shipping.lemma)"
         ));
@@ -1081,18 +1025,18 @@ mod tests {
         assert!(!report.contains("../../engine/benches/"));
     }
 
-    const SNAPSHOT_STDOUT: &str = "\
-| Profile | Rate cells | Source bytes | Load | Loaded heap | Snapshot bytes | Encode median | Restore median | Eval median | Allocations/restore | Restored heap | Restored / loaded heap |
-|---------|-----------:|-------------:|-----:|------------:|---------------:|--------------:|---------------:|------------:|--------------------:|--------------:|-----------------------:|
-| logistics_ground | 1050 | 87898 | 46.431 ms | 10231892 | 616603 | 1.851 ms | 7.623 ms | 2.100 ms | 77834 | 13124722 | 1.283 |
-| logistics_carrier | 6300 | 509122 | 404.459 ms | 74235095 | 4617773 | 18.835 ms | 45.534 ms | 12.500 ms | 586500 | 75607559 | 1.018 |
-| logistics_d2c | 18900 | 1520554 | 1270.649 ms | 220702690 | 13643905 | 55.490 ms | 137.404 ms | 40.000 ms | 1720094 | 218473564 | 0.990 |
-| logistics_enterprise | 126000 | 10121625 | 21065.850 ms | 1467607295 | 92171050 | 379.889 ms | 931.431 ms | 250.000 ms | 11355645 | 1436413854 | 0.979 |
+    const LOGISTICS_STDOUT: &str = "\
+| Profile | Rate cells | Source bytes | Load | Loaded heap | Eval median |
+|---------|-----------:|-------------:|-----:|------------:|------------:|
+| logistics_ground | 1050 | 87898 | 46.431 ms | 10231892 | 2.100 ms |
+| logistics_carrier | 6300 | 509122 | 404.459 ms | 74235095 | 12.500 ms |
+| logistics_d2c | 18900 | 1520554 | 1270.649 ms | 220702690 | 40.000 ms |
+| logistics_enterprise | 126000 | 10121625 | 21065.850 ms | 1467607295 | 250.000 ms |
 ";
 
     #[test]
-    fn parse_snapshot_bench_stdout_reads_every_rung() {
-        let rows = parse_snapshot_bench_stdout(SNAPSHOT_STDOUT).expect("parse");
+    fn parse_logistics_embedded_bench_stdout_reads_every_rung() {
+        let rows = parse_logistics_embedded_bench_stdout(LOGISTICS_STDOUT).expect("parse");
         assert_eq!(rows.len(), 4);
         let enterprise = &rows[3];
         assert_eq!(enterprise.profile, "logistics_enterprise");
@@ -1100,22 +1044,18 @@ mod tests {
         assert_eq!(enterprise.source_bytes, 10_121_625);
         assert_eq!(enterprise.load_ms, 21065.850);
         assert_eq!(enterprise.loaded_heap_bytes, 1_467_607_295);
-        assert_eq!(enterprise.snapshot_bytes, 92_171_050);
-        assert_eq!(enterprise.encode_ms, 379.889);
-        assert_eq!(enterprise.restore_ms, 931.431);
         assert_eq!(enterprise.eval_ms, 250.000);
-        assert_eq!(enterprise.restore_allocations, 11_355_645);
-        assert_eq!(enterprise.restored_heap_bytes, 1_436_413_854);
     }
 
     #[test]
-    fn parse_snapshot_bench_stdout_rejects_missing_rung() {
-        let without_enterprise: String = SNAPSHOT_STDOUT
+    fn parse_logistics_embedded_bench_stdout_rejects_missing_rung() {
+        let without_enterprise: String = LOGISTICS_STDOUT
             .lines()
             .filter(|line| !line.starts_with("| logistics_enterprise"))
             .map(|line| format!("{line}\n"))
             .collect();
-        let error = parse_snapshot_bench_stdout(&without_enterprise).expect_err("must reject");
+        let error =
+            parse_logistics_embedded_bench_stdout(&without_enterprise).expect_err("must reject");
         assert!(
             error.contains("expected [1050, 6300, 18900, 126000]"),
             "{error}"
@@ -1123,8 +1063,8 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_section_formats_units() {
-        let rows = parse_snapshot_bench_stdout(SNAPSHOT_STDOUT).expect("parse");
+    fn embedded_section_formats_units() {
+        let rows = parse_logistics_embedded_bench_stdout(LOGISTICS_STDOUT).expect("parse");
         let env = EnvironmentInfo {
             rustc_version: "rustc test".to_string(),
             uname: "Linux test x86_64".to_string(),
@@ -1166,25 +1106,25 @@ mod tests {
             accuracy: &accuracy,
             memory_rows: &[],
             plan_memory_rows: &[],
-            snapshot_rows: &rows,
+            embedded_rows: &rows,
             external_rows: &[],
         })
         .expect("compose");
         assert!(
             report.contains(
-                "| `logistics_enterprise` | 126000 | 9.7 MiB | 21065.850 ms | 1399.6 MiB | 87.9 MiB | 379.889 ms | 931.431 ms | 250.000 ms | 11355645 | 1369.9 MiB | 0.9787 |"
+                "| `logistics_enterprise` | 126000 | 9.7 MiB | 21065.850 ms | 1399.6 MiB | 250.000 ms |"
             ),
             "{report}"
         );
     }
 
     const EXTERNAL_STDOUT: &str = "\
-| Profile | Rate cells | Source bytes | Load | Loaded heap | Snapshot bytes | Encode median | Restore median | Eval median | Restored heap | Restored / loaded heap |
-|---------|-----------:|-------------:|-----:|------------:|---------------:|--------------:|---------------:|------------:|--------------:|-----------------------:|
-| logistics_ext_ground | 1050 | 12000 | 5.100 ms | 2000000 | 300000 | 0.500 ms | 1.200 ms | 8.400 ms | 2100000 | 1.050 |
-| logistics_ext_carrier | 6300 | 25000 | 12.000 ms | 5000000 | 800000 | 1.100 ms | 3.000 ms | 40.000 ms | 5200000 | 1.040 |
-| logistics_ext_d2c | 18900 | 40000 | 30.000 ms | 12000000 | 2000000 | 3.000 ms | 8.000 ms | 120.000 ms | 12500000 | 1.042 |
-| logistics_ext_enterprise | 126000 | 90000 | 200.000 ms | 80000000 | 15000000 | 20.000 ms | 50.000 ms | 900.000 ms | 82000000 | 1.025 |
+| Profile | Rate cells | Source bytes | Load | Loaded heap | Eval median |
+|---------|-----------:|-------------:|-----:|------------:|------------:|
+| logistics_ext_ground | 1050 | 12000 | 5.100 ms | 2000000 | 8.400 ms |
+| logistics_ext_carrier | 6300 | 25000 | 12.000 ms | 5000000 | 40.000 ms |
+| logistics_ext_d2c | 18900 | 40000 | 30.000 ms | 12000000 | 120.000 ms |
+| logistics_ext_enterprise | 126000 | 90000 | 200.000 ms | 80000000 | 900.000 ms |
 ";
 
     #[test]
@@ -1242,13 +1182,13 @@ mod tests {
             accuracy: &accuracy,
             memory_rows: &[],
             plan_memory_rows: &[],
-            snapshot_rows: &[],
+            embedded_rows: &[],
             external_rows: &rows,
         })
         .expect("compose");
         assert!(
             report.contains(
-                "| `logistics_ext_enterprise` | 126000 | 0.1 MiB | 200.000 ms | 76.3 MiB | 14.3 MiB | 20.000 ms | 50.000 ms | 900.000 ms | 78.2 MiB | 1.025 |"
+                "| `logistics_ext_enterprise` | 126000 | 0.1 MiB | 200.000 ms | 76.3 MiB | 900.000 ms |"
             ),
             "{report}"
         );

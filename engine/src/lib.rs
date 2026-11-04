@@ -21,7 +21,6 @@ pub(crate) mod planning;
 pub mod quality;
 pub(crate) mod registry;
 pub mod result_value;
-pub(crate) mod snapshot;
 pub(crate) mod spec_set_id;
 pub(crate) mod stdlib;
 pub(crate) mod string_distance;
@@ -54,6 +53,7 @@ pub use evaluation::evaluate_data::{
 };
 pub use evaluation::explanations::{format_explanation, Cause, Explanation, ExplanationNode};
 pub use evaluation::response::{Response, RuleResult};
+pub use planning::explanation::ExplainedListOp;
 
 #[deprecated(note = "use EvaluateDataValue")]
 pub type RunDataValue = EvaluateDataValue;
@@ -86,8 +86,8 @@ pub use planning::execution_plan::{
 pub use planning::explanation::{ConversionTraceRole, SerializedConversionTraceStep};
 pub use planning::explanation::{ExplainedRule, ExplainedRuleId};
 pub use planning::semantics::{
-    numbered_row_origin, row_field_input_key, DataPath, LemmaType, ListKey, LiteralValue,
-    PathSegment, SpecIdentity, TypeSpecification, ValueKind,
+    numbered_row_origin, row_field_input_key, DataPath, KeyField, LemmaType, ListKey, LiteralValue,
+    PathSegment, RulePath, SpecIdentity, TypeSpecification, ValueKind,
 };
 pub use result_value::{
     CalendarResult, RangeResult, RowReference, RowResult, RuleResultValue, RuleResultValueFailure,

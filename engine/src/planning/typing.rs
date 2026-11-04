@@ -3,21 +3,24 @@
 use crate::computation::arithmetic::{expand_signature_to_base_units, SignatureIndex};
 use crate::parsing::ast::PrimitiveKind;
 use crate::planning::semantics::{
-    calendar_decomposition, combine_decompositions, duration_decomposition, primitive_boolean_arc,
-    primitive_date_range_arc, primitive_number_arc, primitive_text_arc, primitive_time_arc,
-    range_type_specification_from_endpoints, ArithmeticComputation, BaseMeasureVector, LemmaType,
-    MathematicalComputation, SemanticConversionTarget, TypeExtends, TypeFamily, TypeSpecification,
+    combine_decompositions, duration_decomposition, primitive_boolean_arc, primitive_date_arc,
+    primitive_date_range_arc, primitive_number_arc, primitive_ratio_arc, primitive_text_arc,
+    primitive_time_arc, range_type_specification_from_endpoints, ArithmeticComputation,
+    BaseMeasureVector, DataPath, KeyField, LemmaType, ListKey, MathematicalComputation,
+    SemanticConversionTarget, TypeExtends, TypeFamily, TypeOptions, TypeSpecification,
 };
 use crate::planning::unit_index::UnitIndex;
+use indexmap::IndexMap;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
 /// Measure scope for arithmetic and anonymous-measure promotion: the plan's
-/// unit index plus its reverse signature index.
+/// unit index, reverse signature index, and named types for family-root lookup.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct MeasureScope<'a> {
     pub(crate) unit_index: &'a UnitIndex,
     pub(crate) signature_index: &'a SignatureIndex,
+    pub(crate) named_types: &'a IndexMap<String, Arc<LemmaType>>,
 }
 
 /// Result of a decomposition-based type lookup in scope.
@@ -48,12 +51,16 @@ pub(crate) fn resolve_anonymous_measure(
         return Arc::clone(ty);
     }
     let signature = ty.measure_runtime_signature();
-    if let Some((unit_name, named)) = scope.signature_index.get(&signature) {
+    if let Some((unit_name, named)) =
+        crate::computation::arithmetic::find_by_names(scope.signature_index, &signature)
+    {
         return Arc::new(named.as_ref().clone().with_unit(unit_name.clone()));
     }
     let owners = [ty.as_ref()];
     let expanded = expand_signature_to_base_units(&signature, scope.unit_index, &owners);
-    if let Some((unit_name, named)) = scope.signature_index.get(&expanded) {
+    if let Some((unit_name, named)) =
+        crate::computation::arithmetic::find_by_names(scope.signature_index, &expanded)
+    {
         return Arc::new(named.as_ref().clone().with_unit(unit_name.clone()));
     }
     if let Some(decomposition) = ty.measure_type_decomposition() {
@@ -127,309 +134,408 @@ pub(crate) fn compute_arithmetic_result_type(
     if result.is_anonymous_measure() {
         result = resolve_anonymous_measure(&result, scope);
     }
-    if matches!(op, ArithmeticComputation::Divide)
-        && left_type.is_number()
-        && right_type.is_measure()
-        && result.is_anonymous_measure()
-    {
-        result = primitive_number_arc().clone();
-    }
-    result
+    generalized_value_type(&result, scope)
 }
 
-/// Result of `left op right` for the operands in either order: the operands are tried as
-/// written, then swapped. Neither orientation matching is undetermined.
+/// A measure raised to a known integer. The composition is `scale_decomposition`
+/// of the left measure. An empty result is a number. [`resolve_anonymous_measure`]
+/// names the result when one declared unit matches, and keeps that unit. No match,
+/// or several families, stays anonymous so the rule boundary can reject it.
+///
+/// The exponent has already scaled. A cap failure is a planning error before this
+/// is called.
+pub(crate) fn quantity_integer_power_type(
+    left: &LemmaType,
+    exponent: i32,
+    scope: &MeasureScope<'_>,
+) -> Arc<LemmaType> {
+    let decomposition = left
+        .measure_type_decomposition()
+        .unwrap_or_else(|| panic!("BUG: measure power requires a resolved decomposition"));
+    let scaled = crate::planning::semantics::scale_decomposition(decomposition, exponent)
+        .expect("BUG: measure power exponent exceeds the cap after validation");
+    if scaled.is_empty() {
+        return primitive_number_arc().clone();
+    }
+    let anonymous = Arc::new(LemmaType::anonymous_for_decomposition(scaled));
+    resolve_anonymous_measure(&anonymous, scope)
+}
+
+/// Primitive (non-measure) or measure-family root, with slot bounds stripped.
+/// Anonymous measures pass through unchanged so the rule boundary can reject them.
+pub(crate) fn generalized_value_type(ty: &LemmaType, scope: &MeasureScope<'_>) -> Arc<LemmaType> {
+    if ty.vetoed() {
+        return Arc::new(LemmaType::veto_type());
+    }
+    if ty.is_undetermined() {
+        return Arc::new(LemmaType::undetermined_type());
+    }
+    if ty.is_anonymous_measure() {
+        return Arc::new(ty.clone());
+    }
+    if ty.is_measure() {
+        return Arc::new(measure_family_root(ty, scope).without_slot_bounds());
+    }
+    if ty.is_measure_range() {
+        let root = measure_family_root(ty, scope);
+        let mut range = root.without_slot_bounds();
+        range.specifications = root
+            .specifications
+            .range_from_element()
+            .expect("BUG: measure family root must define range_from_element");
+        range = range.without_slot_bounds();
+        return Arc::new(range);
+    }
+    if ty.is_number() || ty.is_number_range() {
+        return if ty.is_number_range() {
+            Arc::new(LemmaType::primitive(TypeSpecification::number_range()))
+        } else {
+            primitive_number_arc().clone()
+        };
+    }
+    if ty.is_ratio() || ty.is_ratio_range() {
+        return if ty.is_ratio_range() {
+            Arc::new(LemmaType::primitive(TypeSpecification::ratio_range()))
+        } else {
+            primitive_ratio_arc().clone()
+        };
+    }
+    if ty.is_boolean() {
+        return primitive_boolean_arc().clone();
+    }
+    if ty.is_text() {
+        return primitive_text_arc().clone();
+    }
+    if ty.is_date() {
+        return primitive_date_arc().clone();
+    }
+    if ty.is_time() {
+        return primitive_time_arc().clone();
+    }
+    if ty.is_date_range() {
+        return primitive_date_range_arc().clone();
+    }
+    if ty.is_time_range() {
+        return Arc::new(LemmaType::primitive(TypeSpecification::time_range()));
+    }
+    Arc::new(ty.clone())
+}
+
+fn measure_family_root(ty: &LemmaType, scope: &MeasureScope<'_>) -> LemmaType {
+    let Some(family) = ty.family() else {
+        return ty.clone();
+    };
+    if let Some(root) = scope.named_types.get(&family.name) {
+        if root.family() == Some(family) {
+            return root.as_ref().clone();
+        }
+    }
+    for candidate in scope.unit_index.values() {
+        if candidate.name.as_deref() == Some(family.name.as_str())
+            && candidate.family() == Some(family)
+        {
+            return candidate.as_ref().clone();
+        }
+    }
+    if ty.name.as_deref() == Some(family.name.as_str()) && ty.family() == Some(family) {
+        return ty.clone();
+    }
+    let mut root = ty.clone();
+    root.name = Some(family.name.clone());
+    root.extends = TypeExtends::Custom {
+        parent: "measure".to_string(),
+        family: family.clone(),
+        defining_spec: match &ty.extends {
+            TypeExtends::Custom { defining_spec, .. } => defining_spec.clone(),
+            TypeExtends::Primitive => crate::planning::semantics::TypeDefiningSpec::Local,
+        },
+    };
+    root
+}
+
+/// Result of `left op right`. Add/Multiply also try swapped operands (commutative);
+/// Subtract/Divide/Modulo/Power keep written order only.
 fn arithmetic_result_either_order(
     left_type: Arc<LemmaType>,
     op: &ArithmeticComputation,
     right_type: Arc<LemmaType>,
 ) -> Arc<LemmaType> {
-    let swapped_operands = (Arc::clone(&right_type), Arc::clone(&left_type));
-    for (left_type, right_type) in [(left_type, right_type), swapped_operands] {
-        let result = match (&left_type.specifications, &right_type.specifications) {
-            (TypeSpecification::Veto { .. }, _) | (_, TypeSpecification::Veto { .. }) => {
-                Arc::new(LemmaType::veto_type())
-            }
-            (TypeSpecification::Undetermined, _) => Arc::new(LemmaType::undetermined_type()),
+    let as_written = arithmetic_result_ordered(Arc::clone(&left_type), op, Arc::clone(&right_type));
+    if !matches!(
+        op,
+        ArithmeticComputation::Add | ArithmeticComputation::Multiply
+    ) {
+        return as_written;
+    }
+    if !as_written.is_undetermined() {
+        return as_written;
+    }
+    arithmetic_result_ordered(right_type, op, left_type)
+}
 
-            (TypeSpecification::Date { .. }, TypeSpecification::Time { .. }) => Arc::new(
-                LemmaType::anonymous_for_decomposition(duration_decomposition()),
-            ),
+fn arithmetic_result_ordered(
+    left_type: Arc<LemmaType>,
+    op: &ArithmeticComputation,
+    right_type: Arc<LemmaType>,
+) -> Arc<LemmaType> {
+    match (&left_type.specifications, &right_type.specifications) {
+        (TypeSpecification::Veto { .. }, _) | (_, TypeSpecification::Veto { .. }) => {
+            Arc::new(LemmaType::veto_type())
+        }
+        (TypeSpecification::Undetermined, _) | (_, TypeSpecification::Undetermined) => {
+            Arc::new(LemmaType::undetermined_type())
+        }
 
-            // Measure pairs must fall through to operator-specific arms below.
-            // The general equal-type guard must not short-circuit those.
-            _ if *left_type == *right_type
-                && !matches!(
-                    &left_type.specifications,
-                    TypeSpecification::Measure { .. }
-                        | TypeSpecification::MeasureRange { .. }
-                        | TypeSpecification::NumberRange { .. }
-                        | TypeSpecification::DateRange { .. }
-                        | TypeSpecification::TimeRange { .. }
-                        | TypeSpecification::RatioRange { .. }
+        (TypeSpecification::Date { .. }, TypeSpecification::Time { .. })
+            if matches!(op, ArithmeticComputation::Subtract) =>
+        {
+            Arc::new(LemmaType::anonymous_for_decomposition(
+                duration_decomposition(),
+            ))
+        }
+
+        // Measure pairs must fall through to operator-specific arms below.
+        // The general equal-type guard must not short-circuit those.
+        _ if *left_type == *right_type
+            && !matches!(
+                &left_type.specifications,
+                TypeSpecification::Measure { .. }
+                    | TypeSpecification::MeasureRange { .. }
+                    | TypeSpecification::NumberRange { .. }
+                    | TypeSpecification::DateRange { .. }
+                    | TypeSpecification::TimeRange { .. }
+                    | TypeSpecification::RatioRange { .. }
+            ) =>
+        {
+            Arc::clone(&left_type)
+        }
+
+        (TypeSpecification::Date { .. }, TypeSpecification::Measure { .. })
+            if right_type.is_duration_like_measure()
+                && matches!(
+                    op,
+                    ArithmeticComputation::Add | ArithmeticComputation::Subtract
                 ) =>
-            {
-                Arc::clone(&left_type)
-            }
+        {
+            Arc::clone(&left_type)
+        }
+        (TypeSpecification::Date { .. }, TypeSpecification::Measure { .. })
+            if right_type.is_calendar_like_measure()
+                && matches!(
+                    op,
+                    ArithmeticComputation::Add | ArithmeticComputation::Subtract
+                ) =>
+        {
+            Arc::clone(&left_type)
+        }
+        (TypeSpecification::Measure { .. }, TypeSpecification::Date { .. })
+            if left_type.is_calendar_like_measure() && matches!(op, ArithmeticComputation::Add) =>
+        {
+            Arc::clone(&right_type)
+        }
+        (TypeSpecification::Time { .. }, TypeSpecification::Measure { .. })
+            if right_type.is_duration_like_measure()
+                && matches!(
+                    op,
+                    ArithmeticComputation::Add | ArithmeticComputation::Subtract
+                ) =>
+        {
+            Arc::clone(&left_type)
+        }
 
-            (TypeSpecification::Date { .. }, TypeSpecification::Measure { .. })
-                if right_type.is_duration_like_measure() =>
-            {
+        (TypeSpecification::Measure { .. }, TypeSpecification::Ratio { .. })
+            if matches!(
+                op,
+                ArithmeticComputation::Multiply | ArithmeticComputation::Divide
+            ) =>
+        {
+            Arc::clone(&left_type)
+        }
+        (TypeSpecification::Measure { .. }, TypeSpecification::Number { .. }) => match op {
+            ArithmeticComputation::Multiply | ArithmeticComputation::Divide => {
                 Arc::clone(&left_type)
             }
-            (TypeSpecification::Date { .. }, TypeSpecification::Measure { .. })
-                if right_type.is_calendar_like_measure() =>
-            {
-                Arc::clone(&left_type)
-            }
-            (TypeSpecification::Measure { .. }, TypeSpecification::Date { .. })
-                if left_type.is_calendar_like_measure() =>
-            {
-                Arc::clone(&right_type)
-            }
-            (TypeSpecification::Time { .. }, TypeSpecification::Measure { .. })
-                if right_type.is_duration_like_measure() =>
-            {
-                Arc::clone(&left_type)
-            }
-
-            (TypeSpecification::Measure { .. }, TypeSpecification::Ratio { .. }) => {
-                Arc::clone(&left_type)
-            }
-            (TypeSpecification::Measure { .. }, TypeSpecification::Number { .. }) => match op {
-                ArithmeticComputation::Multiply
-                | ArithmeticComputation::Divide
-                | ArithmeticComputation::Modulo
-                | ArithmeticComputation::Power => Arc::clone(&left_type),
-                _ => Arc::new(LemmaType::undetermined_type()),
+            _ => Arc::new(LemmaType::undetermined_type()),
+        },
+        (
+            TypeSpecification::Measure {
+                decomposition: l_decomp_opt,
+                ..
             },
-            (
-                TypeSpecification::Measure {
-                    decomposition: l_decomp_opt,
-                    ..
-                },
-                TypeSpecification::Measure {
-                    decomposition: r_decomp_opt,
-                    ..
-                },
-            ) => match op {
-                ArithmeticComputation::Add | ArithmeticComputation::Subtract => {
-                    if left_type.compatible_with_anonymous_measure(&right_type)
-                        || right_type.compatible_with_anonymous_measure(&left_type)
-                    {
-                        let left_decomp = left_type.measure_type_decomposition();
-                        let right_decomp = right_type.measure_type_decomposition();
-                        if let (Some(ld), Some(rd)) = (left_decomp, right_decomp) {
-                            if ld == rd {
-                                if *ld == duration_decomposition() {
-                                    Arc::new(LemmaType::anonymous_for_decomposition(
-                                        duration_decomposition(),
-                                    ))
-                                } else {
-                                    Arc::new(LemmaType::anonymous_for_decomposition(ld.clone()))
-                                }
-                            } else if left_type.is_duration_like_measure()
-                                && right_type.is_duration_like_measure()
-                            {
-                                Arc::new(LemmaType::anonymous_for_decomposition(
-                                    duration_decomposition(),
-                                ))
-                            } else if left_type.is_calendar_like() && right_type.is_calendar_like()
-                            {
-                                Arc::new(LemmaType::anonymous_for_decomposition(
-                                    calendar_decomposition(),
-                                ))
-                            } else {
-                                Arc::clone(&left_type)
-                            }
-                        } else if left_type.is_duration_like_measure()
-                            && right_type.is_duration_like_measure()
-                        {
-                            Arc::new(LemmaType::anonymous_for_decomposition(
-                                duration_decomposition(),
-                            ))
-                        } else if left_type.is_calendar_like() && right_type.is_calendar_like() {
-                            Arc::new(LemmaType::anonymous_for_decomposition(
-                                calendar_decomposition(),
-                            ))
-                        } else {
-                            Arc::clone(&left_type)
-                        }
-                    } else {
-                        Arc::clone(&left_type)
-                    }
+            TypeSpecification::Measure {
+                decomposition: r_decomp_opt,
+                ..
+            },
+        ) => match op {
+            ArithmeticComputation::Add | ArithmeticComputation::Subtract => {
+                if left_type.is_anonymous_measure() || right_type.is_anonymous_measure() {
+                    Arc::new(LemmaType::undetermined_type())
+                } else {
+                    Arc::clone(&left_type)
                 }
-                ArithmeticComputation::Multiply | ArithmeticComputation::Divide => {
-                    match (l_decomp_opt, r_decomp_opt) {
-                        (Some(l_decomp), Some(r_decomp)) => {
-                            let Some(combined) = combine_decompositions(
-                                l_decomp,
-                                r_decomp,
-                                matches!(op, ArithmeticComputation::Multiply),
-                            ) else {
-                                return Arc::new(LemmaType::undetermined_type());
-                            };
-                            if combined.is_empty() {
-                                primitive_number_arc().clone()
-                            } else {
-                                Arc::new(LemmaType::anonymous_for_decomposition(combined))
-                            }
+            }
+            ArithmeticComputation::Multiply | ArithmeticComputation::Divide => {
+                match (l_decomp_opt, r_decomp_opt) {
+                    (Some(l_decomp), Some(r_decomp)) => {
+                        let Some(combined) = combine_decompositions(
+                            l_decomp,
+                            r_decomp,
+                            matches!(op, ArithmeticComputation::Multiply),
+                        ) else {
+                            return Arc::new(LemmaType::undetermined_type());
+                        };
+                        if combined.is_empty() {
+                            primitive_number_arc().clone()
+                        } else {
+                            Arc::new(LemmaType::anonymous_for_decomposition(combined))
                         }
-                        _ => Arc::clone(&left_type),
                     }
+                    _ => Arc::clone(&left_type),
+                }
+            }
+            _ => primitive_number_arc().clone(),
+        },
+
+        (
+            TypeSpecification::Number { .. },
+            TypeSpecification::Measure {
+                decomposition: r_decomp_opt,
+                ..
+            },
+        ) => match op {
+            ArithmeticComputation::Multiply => Arc::clone(&right_type),
+            ArithmeticComputation::Divide => match r_decomp_opt {
+                Some(r_decomp) if !r_decomp.is_empty() => {
+                    let negated: BaseMeasureVector =
+                        r_decomp.iter().map(|(k, &e)| (k.clone(), -e)).collect();
+                    Arc::new(LemmaType::anonymous_for_decomposition(negated))
                 }
                 _ => primitive_number_arc().clone(),
             },
+            _ => Arc::new(LemmaType::undetermined_type()),
+        },
 
-            (
-                TypeSpecification::Number { .. },
-                TypeSpecification::Measure {
-                    decomposition: r_decomp_opt,
-                    ..
-                },
-            ) => match op {
-                ArithmeticComputation::Multiply => Arc::clone(&right_type),
-                ArithmeticComputation::Divide => match r_decomp_opt {
-                    Some(r_decomp) if !r_decomp.is_empty() => {
-                        let negated: BaseMeasureVector =
-                            r_decomp.iter().map(|(k, &e)| (k.clone(), -e)).collect();
-                        Arc::new(LemmaType::anonymous_for_decomposition(negated))
-                    }
-                    _ => primitive_number_arc().clone(),
-                },
-                _ => Arc::new(LemmaType::undetermined_type()),
-            },
+        (TypeSpecification::Number { .. }, TypeSpecification::Ratio { .. }) => {
+            primitive_number_arc().clone()
+        }
+        (TypeSpecification::Ratio { .. }, TypeSpecification::Number { .. }) => match op {
+            ArithmeticComputation::Multiply => primitive_number_arc().clone(),
+            _ => Arc::clone(&left_type),
+        },
+        (TypeSpecification::Number { .. }, TypeSpecification::Number { .. }) => {
+            primitive_number_arc().clone()
+        }
 
-            (TypeSpecification::Number { .. }, TypeSpecification::Ratio { .. }) => {
-                primitive_number_arc().clone()
+        (TypeSpecification::Ratio { .. }, TypeSpecification::Ratio { .. }) => {
+            Arc::clone(&left_type)
+        }
+        (TypeSpecification::DateRange { .. }, TypeSpecification::DateRange { .. }) => match op {
+            ArithmeticComputation::Add | ArithmeticComputation::Subtract => {
+                range_span_type(&left_type)
             }
-            (TypeSpecification::Ratio { .. }, TypeSpecification::Number { .. }) => match op {
-                ArithmeticComputation::Multiply => primitive_number_arc().clone(),
-                _ => Arc::clone(&left_type),
-            },
-            (TypeSpecification::Number { .. }, TypeSpecification::Number { .. }) => {
-                primitive_number_arc().clone()
-            }
-
-            (TypeSpecification::Ratio { .. }, TypeSpecification::Ratio { .. }) => {
-                Arc::clone(&left_type)
-            }
-            (TypeSpecification::DateRange { .. }, TypeSpecification::DateRange { .. }) => {
-                match op {
-                    ArithmeticComputation::Add | ArithmeticComputation::Subtract => {
-                        range_span_type(&left_type)
-                    }
-                    _ => Arc::new(LemmaType::undetermined_type()),
-                }
-            }
-            (TypeSpecification::NumberRange { .. }, TypeSpecification::NumberRange { .. }) => {
-                match op {
-                    ArithmeticComputation::Add | ArithmeticComputation::Subtract => {
-                        range_span_type(&left_type)
-                    }
-                    _ => Arc::new(LemmaType::undetermined_type()),
-                }
-            }
-            (TypeSpecification::MeasureRange { .. }, TypeSpecification::MeasureRange { .. }) => {
-                match op {
-                    ArithmeticComputation::Add | ArithmeticComputation::Subtract
-                        if range_matches_range_measure(&left_type, &right_type) =>
-                    {
-                        range_span_type(&left_type)
-                    }
-                    _ => Arc::new(LemmaType::undetermined_type()),
-                }
-            }
-            (TypeSpecification::RatioRange { .. }, TypeSpecification::RatioRange { .. }) => {
-                match op {
-                    ArithmeticComputation::Add | ArithmeticComputation::Subtract => {
-                        range_span_type(&left_type)
-                    }
-                    _ => Arc::new(LemmaType::undetermined_type()),
-                }
-            }
-            (TypeSpecification::NumberRange { .. }, TypeSpecification::Number { .. })
-            | (TypeSpecification::RatioRange { .. }, TypeSpecification::Ratio { .. }) => match op {
+            _ => Arc::new(LemmaType::undetermined_type()),
+        },
+        (TypeSpecification::NumberRange { .. }, TypeSpecification::NumberRange { .. }) => {
+            match op {
                 ArithmeticComputation::Add | ArithmeticComputation::Subtract => {
                     range_span_type(&left_type)
                 }
                 _ => Arc::new(LemmaType::undetermined_type()),
-            },
-            (TypeSpecification::MeasureRange { .. }, TypeSpecification::Measure { .. }) => match op
-            {
+            }
+        }
+        (TypeSpecification::MeasureRange { .. }, TypeSpecification::MeasureRange { .. }) => {
+            match op {
                 ArithmeticComputation::Add | ArithmeticComputation::Subtract
-                    if range_matches_measure_type(&left_type, &right_type) =>
+                    if range_matches_range_measure(&left_type, &right_type) =>
                 {
                     range_span_type(&left_type)
                 }
                 _ => Arc::new(LemmaType::undetermined_type()),
-            },
-            (TypeSpecification::Number { .. }, TypeSpecification::NumberRange { .. }) => match op {
+            }
+        }
+        (TypeSpecification::RatioRange { .. }, TypeSpecification::RatioRange { .. }) => match op {
+            ArithmeticComputation::Add | ArithmeticComputation::Subtract => {
+                range_span_type(&left_type)
+            }
+            _ => Arc::new(LemmaType::undetermined_type()),
+        },
+        (TypeSpecification::NumberRange { .. }, TypeSpecification::Number { .. })
+        | (TypeSpecification::RatioRange { .. }, TypeSpecification::Ratio { .. }) => match op {
+            ArithmeticComputation::Add | ArithmeticComputation::Subtract => {
+                range_span_type(&left_type)
+            }
+            _ => Arc::new(LemmaType::undetermined_type()),
+        },
+        (TypeSpecification::MeasureRange { .. }, TypeSpecification::Measure { .. }) => match op {
+            ArithmeticComputation::Add | ArithmeticComputation::Subtract
+                if range_matches_measure_type(&left_type, &right_type) =>
+            {
+                range_span_type(&left_type)
+            }
+            _ => Arc::new(LemmaType::undetermined_type()),
+        },
+        (TypeSpecification::Number { .. }, TypeSpecification::NumberRange { .. }) => match op {
+            ArithmeticComputation::Add | ArithmeticComputation::Subtract => {
+                range_span_type(&right_type)
+            }
+            _ => Arc::new(LemmaType::undetermined_type()),
+        },
+        (TypeSpecification::Measure { .. }, TypeSpecification::MeasureRange { .. }) => match op {
+            ArithmeticComputation::Add | ArithmeticComputation::Subtract
+                if range_matches_measure_type(&right_type, &left_type) =>
+            {
+                range_span_type(&right_type)
+            }
+            _ => Arc::new(LemmaType::undetermined_type()),
+        },
+        (TypeSpecification::Ratio { .. }, TypeSpecification::RatioRange { .. }) => match op {
+            ArithmeticComputation::Add | ArithmeticComputation::Subtract => {
+                range_span_type(&right_type)
+            }
+            _ => Arc::new(LemmaType::undetermined_type()),
+        },
+        (TypeSpecification::DateRange { .. }, TypeSpecification::Measure { .. })
+            if right_type.is_duration_like_measure() =>
+        {
+            match op {
+                ArithmeticComputation::Add | ArithmeticComputation::Subtract => {
+                    range_span_type(&left_type)
+                }
+                _ => Arc::new(LemmaType::undetermined_type()),
+            }
+        }
+        (TypeSpecification::DateRange { .. }, TypeSpecification::Measure { .. })
+            if right_type.is_calendar_like_measure() =>
+        {
+            match op {
+                ArithmeticComputation::Add | ArithmeticComputation::Subtract => {
+                    Arc::clone(&left_type)
+                }
+                _ => Arc::new(LemmaType::undetermined_type()),
+            }
+        }
+        (TypeSpecification::Measure { .. }, TypeSpecification::DateRange { .. })
+            if left_type.is_duration_like_measure() =>
+        {
+            match op {
                 ArithmeticComputation::Add | ArithmeticComputation::Subtract => {
                     range_span_type(&right_type)
                 }
                 _ => Arc::new(LemmaType::undetermined_type()),
-            },
-            (TypeSpecification::Measure { .. }, TypeSpecification::MeasureRange { .. }) => match op
-            {
-                ArithmeticComputation::Add | ArithmeticComputation::Subtract
-                    if range_matches_measure_type(&right_type, &left_type) =>
-                {
-                    range_span_type(&right_type)
-                }
-                _ => Arc::new(LemmaType::undetermined_type()),
-            },
-            (TypeSpecification::Ratio { .. }, TypeSpecification::RatioRange { .. }) => match op {
+            }
+        }
+        (TypeSpecification::Measure { .. }, TypeSpecification::DateRange { .. })
+            if left_type.is_calendar_like_measure() =>
+        {
+            match op {
                 ArithmeticComputation::Add | ArithmeticComputation::Subtract => {
-                    range_span_type(&right_type)
+                    Arc::clone(&right_type)
                 }
                 _ => Arc::new(LemmaType::undetermined_type()),
-            },
-            (TypeSpecification::DateRange { .. }, TypeSpecification::Measure { .. })
-                if right_type.is_duration_like_measure() =>
-            {
-                match op {
-                    ArithmeticComputation::Add | ArithmeticComputation::Subtract => {
-                        range_span_type(&left_type)
-                    }
-                    _ => Arc::new(LemmaType::undetermined_type()),
-                }
             }
-            (TypeSpecification::DateRange { .. }, TypeSpecification::Measure { .. })
-                if right_type.is_calendar_like_measure() =>
-            {
-                match op {
-                    ArithmeticComputation::Add | ArithmeticComputation::Subtract => {
-                        Arc::clone(&left_type)
-                    }
-                    _ => Arc::new(LemmaType::undetermined_type()),
-                }
-            }
-            (TypeSpecification::Measure { .. }, TypeSpecification::DateRange { .. })
-                if left_type.is_duration_like_measure() =>
-            {
-                match op {
-                    ArithmeticComputation::Add | ArithmeticComputation::Subtract => {
-                        range_span_type(&right_type)
-                    }
-                    _ => Arc::new(LemmaType::undetermined_type()),
-                }
-            }
-            (TypeSpecification::Measure { .. }, TypeSpecification::DateRange { .. })
-                if left_type.is_calendar_like_measure() =>
-            {
-                match op {
-                    ArithmeticComputation::Add | ArithmeticComputation::Subtract => {
-                        Arc::clone(&right_type)
-                    }
-                    _ => Arc::new(LemmaType::undetermined_type()),
-                }
-            }
-            _ => continue,
-        };
-        return result;
+        }
+        _ => Arc::new(LemmaType::undetermined_type()),
     }
-    Arc::new(LemmaType::undetermined_type())
 }
 
 pub(crate) fn infer_range_type_from_endpoint_types(
@@ -451,6 +557,7 @@ pub(crate) fn infer_range_type_from_endpoint_types(
         name: None,
         specifications: spec,
         extends,
+        options: TypeOptions::default(),
     })
 }
 
@@ -463,6 +570,7 @@ fn named_range_element_type(range_type: &LemmaType) -> Arc<LemmaType> {
         name: range_type.name.clone(),
         specifications: element_spec,
         extends: range_type.extends.clone(),
+        options: TypeOptions::default(),
     })
 }
 
@@ -598,7 +706,7 @@ pub(crate) fn measure_range_matches_measure(
     }
 }
 
-pub(crate) fn logical_and_type(left: &LemmaType, right: &LemmaType) -> Arc<LemmaType> {
+pub(crate) fn logical_connective_type(left: &LemmaType, right: &LemmaType) -> Arc<LemmaType> {
     if left.vetoed() || right.vetoed() {
         return Arc::new(LemmaType::veto_type());
     }
@@ -616,7 +724,7 @@ pub(crate) fn logical_not_type(operand: &LemmaType) -> Arc<LemmaType> {
     if operand.vetoed() {
         return Arc::new(LemmaType::veto_type());
     }
-    if operand.is_undetermined() {
+    if operand.is_undetermined() || !operand.is_boolean() {
         return Arc::new(LemmaType::undetermined_type());
     }
     primitive_boolean_arc().clone()
@@ -629,12 +737,61 @@ pub(crate) fn comparison_type(left: &LemmaType, right: &LemmaType) -> Arc<LemmaT
     if left.is_undetermined() || right.is_undetermined() {
         return Arc::new(LemmaType::undetermined_type());
     }
+    let comparable = (left.is_boolean() && right.is_boolean())
+        || (left.is_text() && right.is_text())
+        || (left.is_number() && right.is_number())
+        || (left.is_ratio() && right.is_ratio())
+        || (left.is_date() && right.is_date())
+        || (left.is_time() && right.is_time())
+        || (left.is_measure()
+            && right.is_measure()
+            && !left.is_anonymous_measure()
+            && !right.is_anonymous_measure()
+            && left.same_measure_family(right))
+        || (left.is_duration_like() && right.is_duration_like())
+        || (left.is_calendar_like() && right.is_calendar_like())
+        || (left.is_calendar_like() && right.is_number())
+        || (left.is_number() && right.is_calendar_like())
+        || (left.is_range() && range_matches_measure_type(left, right))
+        || (right.is_range() && range_matches_measure_type(right, left));
+    if !comparable {
+        return Arc::new(LemmaType::undetermined_type());
+    }
+    primitive_boolean_arc().clone()
+}
+
+/// Result type of `value in range`. Distinct from comparisons: the right operand is a range.
+pub(crate) fn range_containment_type(value: &LemmaType, range: &LemmaType) -> Arc<LemmaType> {
+    if value.vetoed() || range.vetoed() {
+        return Arc::new(LemmaType::veto_type());
+    }
+    if value.is_undetermined() || range.is_undetermined() {
+        return Arc::new(LemmaType::undetermined_type());
+    }
+    if !range.is_range() {
+        return Arc::new(LemmaType::undetermined_type());
+    }
+    let compatible = (range.is_date_range() && value.is_date())
+        || (range.is_time_range() && (value.is_time() || value.is_date()))
+        || (range.is_number_range() && value.is_number())
+        || (range.is_measure_range()
+            && value.is_measure()
+            && !value.is_anonymous_measure()
+            && range_matches_measure_type(range, value))
+        || (range.is_ratio_range() && value.is_ratio())
+        || (range.is_calendar_like_range() && value.is_calendar_like());
+    if !compatible {
+        return Arc::new(LemmaType::undetermined_type());
+    }
     primitive_boolean_arc().clone()
 }
 
 pub(crate) fn date_predicate_type(operand: &LemmaType) -> Arc<LemmaType> {
     if operand.vetoed() {
         return Arc::new(LemmaType::veto_type());
+    }
+    if operand.is_undetermined() || !operand.is_date() {
+        return Arc::new(LemmaType::undetermined_type());
     }
     primitive_boolean_arc().clone()
 }
@@ -650,12 +807,57 @@ pub(crate) fn math_op_type(
     if operand.is_undetermined() {
         return Arc::new(LemmaType::undetermined_type());
     }
-    if crate::computation::mathematical_computation_preserves_measure_magnitude(op)
-        && operand.is_measure()
-    {
-        return resolve_anonymous_measure(operand, scope);
+    if operand.is_anonymous_measure() {
+        return Arc::new(LemmaType::undetermined_type());
     }
-    primitive_number_arc().clone()
+    if crate::computation::mathematical_computation_applies_to_magnitude(op)
+        && (operand.is_measure() || operand.is_ratio())
+    {
+        if operand.is_measure() {
+            return resolve_anonymous_measure(operand, scope);
+        }
+        return Arc::clone(operand);
+    }
+    if operand.is_number() {
+        return primitive_number_arc().clone();
+    }
+    Arc::new(LemmaType::undetermined_type())
+}
+
+/// Whether `operand -> round step` is defined: a number to a number step, a ratio to a
+/// ratio step, a measure to a step of its family (or of its dimensions when anonymous).
+pub(crate) fn step_rounding_compatible(operand: &LemmaType, step: &LemmaType) -> bool {
+    (operand.is_number() && step.is_number())
+        || (operand.is_ratio() && step.is_ratio())
+        || operand.same_measure_family(step)
+        || operand.compatible_with_anonymous_measure(step)
+}
+
+/// Type of `operand -> round` or `operand -> round step`.
+/// Without a step the result is the operand (a number). With a step it is the step's type.
+pub(crate) fn step_rounding_type(
+    operand: &Arc<LemmaType>,
+    step: Option<&Arc<LemmaType>>,
+) -> Arc<LemmaType> {
+    let Some(step) = step else {
+        if operand.vetoed() {
+            return Arc::new(LemmaType::veto_type());
+        }
+        if operand.is_undetermined() || !operand.is_number() {
+            return Arc::new(LemmaType::undetermined_type());
+        }
+        return Arc::clone(operand);
+    };
+    if operand.vetoed() || step.vetoed() {
+        return Arc::new(LemmaType::veto_type());
+    }
+    if operand.is_undetermined()
+        || step.is_undetermined()
+        || !step_rounding_compatible(operand, step)
+    {
+        return Arc::new(LemmaType::undetermined_type());
+    }
+    Arc::clone(step)
 }
 
 pub(crate) fn unit_conversion_type(
@@ -685,6 +887,9 @@ pub(crate) fn unit_conversion_type(
 pub(crate) fn past_future_range_type(offset: &LemmaType) -> Arc<LemmaType> {
     if offset.vetoed() {
         return Arc::new(LemmaType::veto_type());
+    }
+    if offset.is_undetermined() || (!offset.is_duration_like() && !offset.is_calendar_like()) {
+        return Arc::new(LemmaType::undetermined_type());
     }
     primitive_date_range_arc().clone()
 }
@@ -730,15 +935,313 @@ pub(crate) fn list_command_result_type(
     }
 }
 
-/// First non-veto non-undetermined body type; else veto.
-pub(crate) fn piecewise_type(bodies: impl IntoIterator<Item = Arc<LemmaType>>) -> Arc<LemmaType> {
+/// After `-> key`, the list type's key becomes those fields (planning and normalize share this).
+pub(crate) fn refine_list_key_type(
+    list_type: &Arc<LemmaType>,
+    fields: &[DataPath],
+) -> Arc<LemmaType> {
+    let TypeSpecification::List { element, help, .. } = &list_type.specifications else {
+        return Arc::clone(list_type);
+    };
+    Arc::new(LemmaType {
+        name: list_type.name.clone(),
+        specifications: TypeSpecification::List {
+            element: Arc::clone(element),
+            key: ListKey::Fields(
+                fields
+                    .iter()
+                    .map(|path| KeyField {
+                        name: path.input_key(),
+                        path: path.clone(),
+                    })
+                    .collect(),
+            ),
+            help: help.clone(),
+        },
+        extends: list_type.extends.clone(),
+        options: list_type.options.clone(),
+    })
+}
+
+/// First non-veto non-undetermined body type when all such bodies are identical;
+/// otherwise the generalized value type of the first. All-veto → veto.
+pub(crate) fn piecewise_type(
+    bodies: impl IntoIterator<Item = Arc<LemmaType>>,
+    scope: &MeasureScope<'_>,
+) -> Arc<LemmaType> {
+    let mut kept = Vec::new();
     let mut saw_any = false;
     for ty in bodies {
         saw_any = true;
         if !ty.vetoed() && !ty.is_undetermined() {
-            return ty;
+            kept.push(ty);
         }
     }
     assert!(saw_any, "BUG: piecewise_type with zero bodies");
-    Arc::new(LemmaType::veto_type())
+    let Some(first) = kept.first() else {
+        return Arc::new(LemmaType::veto_type());
+    };
+    if kept.iter().all(|ty| ty.as_ref() == first.as_ref()) {
+        return Arc::clone(first);
+    }
+    generalized_value_type(first, scope)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::computation::rational::rational_new;
+    use crate::planning::semantics::tests::test_type_family;
+    use crate::planning::unit_index::UnitIndex;
+
+    struct MoneyFamilyFixture {
+        money: Arc<LemmaType>,
+        deposit: Arc<LemmaType>,
+        fee: Arc<LemmaType>,
+        named: IndexMap<String, Arc<LemmaType>>,
+    }
+
+    fn money_family_types() -> MoneyFamilyFixture {
+        let family = test_type_family("money");
+        let money = Arc::new(LemmaType::new(
+            "money".to_string(),
+            TypeSpecification::measure(),
+            TypeExtends::custom_local("measure".to_string(), family.clone()),
+        ));
+        let mut deposit_spec = TypeSpecification::measure();
+        if let TypeSpecification::Measure { maximum, help, .. } = &mut deposit_spec {
+            *maximum = Some((rational_new(1000, 1), "eur".to_string()));
+            *help = "deposit cap".to_string();
+        }
+        let deposit = Arc::new(LemmaType::new(
+            "deposit".to_string(),
+            deposit_spec,
+            TypeExtends::custom_local("money".to_string(), family.clone()),
+        ));
+        let mut fee_spec = TypeSpecification::measure();
+        if let TypeSpecification::Measure { minimum, help, .. } = &mut fee_spec {
+            *minimum = Some((rational_new(1, 1), "eur".to_string()));
+            *help = "fee floor".to_string();
+        }
+        let fee = Arc::new(LemmaType::new(
+            "fee".to_string(),
+            fee_spec,
+            TypeExtends::custom_local("money".to_string(), family),
+        ));
+        let mut named = IndexMap::new();
+        named.insert("money".to_string(), Arc::clone(&money));
+        named.insert("deposit".to_string(), Arc::clone(&deposit));
+        named.insert("fee".to_string(), Arc::clone(&fee));
+        MoneyFamilyFixture {
+            money,
+            deposit,
+            fee,
+            named,
+        }
+    }
+
+    #[test]
+    fn arithmetic_measure_siblings_generalize_to_family_root() {
+        let fixture = money_family_types();
+        let unit_index = UnitIndex::new();
+        let signature_index = SignatureIndex::new();
+        let scope = MeasureScope {
+            unit_index: &unit_index,
+            signature_index: &signature_index,
+            named_types: &fixture.named,
+        };
+        let result = compute_arithmetic_result_type(
+            Arc::clone(&fixture.deposit),
+            &ArithmeticComputation::Add,
+            Arc::clone(&fixture.fee),
+            &scope,
+        );
+        assert_eq!(result.name.as_deref(), Some("money"));
+        assert!(result.same_measure_family(&fixture.money));
+        match &result.specifications {
+            TypeSpecification::Measure {
+                minimum,
+                maximum,
+                unit,
+                help,
+                ..
+            } => {
+                assert!(minimum.is_none());
+                assert!(maximum.is_none());
+                assert!(unit.is_none());
+                assert_eq!(help, "");
+            }
+            other => panic!("expected Measure, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn arithmetic_number_extensions_generalize_to_primitive() {
+        let mut age_spec = TypeSpecification::number();
+        if let TypeSpecification::Number { minimum, .. } = &mut age_spec {
+            *minimum = Some(rational_new(0, 1));
+        }
+        let age = Arc::new(LemmaType::new(
+            "age".to_string(),
+            age_spec,
+            TypeExtends::custom_local("number".to_string(), test_type_family("age")),
+        ));
+        let mut bonus_spec = TypeSpecification::number();
+        if let TypeSpecification::Number { minimum, .. } = &mut bonus_spec {
+            *minimum = Some(rational_new(0, 1));
+        }
+        let bonus = Arc::new(LemmaType::new(
+            "bonus_years".to_string(),
+            bonus_spec,
+            TypeExtends::custom_local("number".to_string(), test_type_family("bonus_years")),
+        ));
+        let unit_index = UnitIndex::new();
+        let signature_index = SignatureIndex::new();
+        let named = IndexMap::new();
+        let scope = MeasureScope {
+            unit_index: &unit_index,
+            signature_index: &signature_index,
+            named_types: &named,
+        };
+        let result =
+            compute_arithmetic_result_type(age, &ArithmeticComputation::Add, bonus, &scope);
+        assert!(result.is_number());
+        assert!(result.name.is_none());
+        assert!(matches!(result.extends, TypeExtends::Primitive));
+    }
+
+    #[test]
+    fn piecewise_mixed_measure_branches_generalize_to_family_root() {
+        let fixture = money_family_types();
+        let unit_index = UnitIndex::new();
+        let signature_index = SignatureIndex::new();
+        let scope = MeasureScope {
+            unit_index: &unit_index,
+            signature_index: &signature_index,
+            named_types: &fixture.named,
+        };
+        let picked = piecewise_type(
+            [Arc::clone(&fixture.deposit), Arc::clone(&fixture.fee)],
+            &scope,
+        );
+        assert_eq!(picked.name.as_deref(), Some("money"));
+        assert!(picked.same_measure_family(&fixture.money));
+        let reverse = piecewise_type([fixture.fee, Arc::clone(&fixture.deposit)], &scope);
+        assert_eq!(reverse.name.as_deref(), Some("money"));
+    }
+
+    #[test]
+    fn piecewise_identical_measure_branches_keep_named_type() {
+        let fixture = money_family_types();
+        let unit_index = UnitIndex::new();
+        let signature_index = SignatureIndex::new();
+        let scope = MeasureScope {
+            unit_index: &unit_index,
+            signature_index: &signature_index,
+            named_types: &fixture.named,
+        };
+        let picked = piecewise_type(
+            [Arc::clone(&fixture.deposit), Arc::clone(&fixture.deposit)],
+            &scope,
+        );
+        assert_eq!(picked.name.as_deref(), Some("deposit"));
+        assert_eq!(picked.as_ref(), fixture.deposit.as_ref());
+    }
+
+    fn empty_scope<'a>(
+        unit_index: &'a UnitIndex,
+        signature_index: &'a SignatureIndex,
+        named: &'a IndexMap<String, Arc<LemmaType>>,
+    ) -> MeasureScope<'a> {
+        MeasureScope {
+            unit_index,
+            signature_index,
+            named_types: named,
+        }
+    }
+
+    #[test]
+    fn arithmetic_rejects_non_commutative_invalid_orders() {
+        let unit_index = UnitIndex::new();
+        let signature_index = SignatureIndex::new();
+        let named = IndexMap::new();
+        let scope = empty_scope(&unit_index, &signature_index, &named);
+
+        let date = Arc::new(LemmaType::primitive(TypeSpecification::date()));
+        let time = Arc::new(LemmaType::primitive(TypeSpecification::time()));
+        let duration = Arc::new(LemmaType::anonymous_for_decomposition(
+            duration_decomposition(),
+        ));
+        let ratio = Arc::new(LemmaType::primitive(TypeSpecification::ratio()));
+        let measure = Arc::new(LemmaType::new(
+            "money".to_string(),
+            TypeSpecification::measure(),
+            TypeExtends::custom_local("measure".to_string(), test_type_family("money")),
+        ));
+
+        let duration_minus_date = compute_arithmetic_result_type(
+            Arc::clone(&duration),
+            &ArithmeticComputation::Subtract,
+            Arc::clone(&date),
+            &scope,
+        );
+        assert!(
+            duration_minus_date.is_undetermined(),
+            "duration - date must be Undetermined, got {}",
+            duration_minus_date.name()
+        );
+
+        let time_minus_date = compute_arithmetic_result_type(
+            Arc::clone(&time),
+            &ArithmeticComputation::Subtract,
+            Arc::clone(&date),
+            &scope,
+        );
+        assert!(
+            time_minus_date.is_undetermined(),
+            "time - date must be Undetermined, got {}",
+            time_minus_date.name()
+        );
+
+        let ratio_div_measure = compute_arithmetic_result_type(
+            Arc::clone(&ratio),
+            &ArithmeticComputation::Divide,
+            Arc::clone(&measure),
+            &scope,
+        );
+        assert!(
+            ratio_div_measure.is_undetermined(),
+            "ratio / measure must be Undetermined, got {}",
+            ratio_div_measure.name()
+        );
+
+        let date_plus_time =
+            compute_arithmetic_result_type(date, &ArithmeticComputation::Add, time, &scope);
+        assert!(
+            date_plus_time.is_undetermined(),
+            "date + time must be Undetermined, got {}",
+            date_plus_time.name()
+        );
+    }
+
+    #[test]
+    fn infer_helpers_return_undetermined_for_invalid_operands() {
+        let number = Arc::new(LemmaType::primitive(TypeSpecification::number()));
+        let text = Arc::new(LemmaType::primitive(TypeSpecification::text()));
+        let measure = Arc::new(LemmaType::new(
+            "money".to_string(),
+            TypeSpecification::measure(),
+            TypeExtends::custom_local("measure".to_string(), test_type_family("money")),
+        ));
+        let unit_index = UnitIndex::new();
+        let signature_index = SignatureIndex::new();
+        let named = IndexMap::new();
+        let scope = empty_scope(&unit_index, &signature_index, &named);
+
+        assert!(logical_not_type(&number).is_undetermined());
+        assert!(comparison_type(&text, &number).is_undetermined());
+        assert!(math_op_type(&MathematicalComputation::Sqrt, &measure, &scope).is_undetermined());
+        assert!(date_predicate_type(&number).is_undetermined());
+        assert!(past_future_range_type(&number).is_undetermined());
+    }
 }

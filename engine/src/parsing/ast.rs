@@ -29,7 +29,7 @@ pub(crate) fn canonical_logical_name(name: &str) -> std::borrow::Cow<'_, str> {
 }
 
 /// Span representing a location in source code
-#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize)]
 pub struct Span {
     pub start: usize,
     pub end: usize,
@@ -97,7 +97,8 @@ use std::hash::{Hash, Hasher};
 
 pub use crate::literals::{BooleanValue, DateTimeValue, TimeValue, TimezoneValue, Value};
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum EffectiveDate {
     Origin,
     DateTimeValue(crate::DateTimeValue),
@@ -165,7 +166,7 @@ impl fmt::Display for EffectiveDate {
 ///
 /// The parser fills [`LemmaRepository`] for each `repo` section before grouping specs in
 /// [`ParseResult`]; loaders set `dependency` when inserting dependency bundles.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone)]
 pub struct LemmaRepository {
     /// Repository name, including `@` when present. `None` for the default unnamed repository.
     pub name: Option<String>,
@@ -235,7 +236,7 @@ impl Hash for LemmaRepository {
 /// Textual repository qualifier as written in source (for example `@iso/countries`).
 /// `name` stores the qualifier verbatim, including a leading `@` when present. The planner
 /// resolves a [`RepositoryQualifier`] to an `Arc<LemmaRepository>` against the active context.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct RepositoryQualifier {
     pub name: String,
 }
@@ -267,7 +268,7 @@ impl fmt::Display for RepositoryQualifier {
 /// Context identity is `(repository, name, EffectiveDate)` or `std::ptr::eq` on a
 /// Context-owned row — not [`PartialEq`]. [`PartialEq`] is full AST equality
 /// (including statement [`Source`] spans) for [`crate::Engine::update`] skip only.
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct LemmaSpec {
     pub name: String,
     pub effective_from: EffectiveDate,
@@ -279,7 +280,7 @@ pub struct LemmaSpec {
     pub meta_fields: Vec<MetaField>,
 }
 
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct MetaField {
     pub key: String,
     pub value: Value,
@@ -292,7 +293,7 @@ impl fmt::Display for MetaField {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct LemmaData {
     pub reference: Reference,
     pub value: DataValue,
@@ -304,7 +305,7 @@ pub struct LemmaData {
 /// Unless clauses are evaluated in order, and the last matching condition wins.
 /// This matches natural language: "X unless A then Y, unless B then Z" - if both
 /// A and B are true, Z is returned (the last match).
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct UnlessClause {
     pub condition: Expression,
     pub result: Expression,
@@ -312,7 +313,7 @@ pub struct UnlessClause {
 }
 
 /// A rule with a single expression and optional unless clauses
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct LemmaRule {
     pub name: String,
     pub expression: Expression,
@@ -330,11 +331,35 @@ pub use crate::parsing::arena::{ExprId, ExprTable, ExprTree};
 
 /// One operator step of a flat left-associative chain. `source_location` spans from the
 /// start of the chain through `operand`.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone)]
 pub struct ChainStep<Op> {
     pub op: Op,
     pub operand: ExprId,
     pub source_location: Source,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum LogicalConnective {
+    And,
+    Or,
+}
+
+impl LogicalConnective {
+    #[must_use]
+    pub fn absorbing_operand(self) -> bool {
+        match self {
+            Self::And => false,
+            Self::Or => true,
+        }
+    }
+
+    #[must_use]
+    pub fn keyword(self) -> &'static str {
+        match self {
+            Self::And => "and",
+            Self::Or => "or",
+        }
+    }
 }
 
 /// Semantic equality as for [`Expression`]: the step's span is not part of its identity.
@@ -416,11 +441,12 @@ impl fmt::Display for CalendarPeriodUnit {
 }
 
 /// The kind/type of expression
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, PartialEq)]
 pub enum ExpressionKind {
     /// Parse-time literal value (type will be resolved during planning)
     Literal(Value),
+    /// Parser-only current value-list row inside a headless predicate comparison.
+    ImplicitRowValue,
     /// Unresolved reference (identifier or dot path). Resolved during planning to DataPath or RulePath.
     Reference(Reference),
     /// The `now` keyword — resolves to the evaluation datetime (= effective).
@@ -439,8 +465,9 @@ pub enum ExpressionKind {
     RangeContainment(ExprId, ExprId),
     /// Ordered endpoint of a range: `lower` (included) or `upper` (excluded).
     RangeBound(RangeBound, ExprId),
-    /// `a and b and c`: one left fold, operands in source order.
-    LogicalAnd {
+    /// One left fold of one logical connective, operands in source order.
+    Logical {
+        connective: LogicalConnective,
         first: ExprId,
         steps: Vec<ChainStep<()>>,
     },
@@ -465,6 +492,12 @@ pub enum ExpressionKind {
         list: ExprId,
         command: ListCommand,
     },
+    /// Postfix `->` rounding: `x -> round`, or `price -> round 0.05 eur` with a step.
+    StepRounding {
+        operand: ExprId,
+        mode: RoundingMode,
+        step: Option<ExprId>,
+    },
     /// Postfix member read on a parenthesised expression: `(staff -> find "ada").salary`.
     Member {
         base: ExprId,
@@ -476,6 +509,7 @@ impl ExprKind for ExpressionKind {
     fn for_each_child(&self, mut f: impl FnMut(ExprId)) {
         match self {
             ExpressionKind::Literal(_)
+            | ExpressionKind::ImplicitRowValue
             | ExpressionKind::Reference(_)
             | ExpressionKind::Now
             | ExpressionKind::Veto(_)
@@ -495,7 +529,13 @@ impl ExprKind for ExpressionKind {
                 f(*left);
                 f(*right);
             }
-            ExpressionKind::LogicalAnd { first, steps } => {
+            ExpressionKind::StepRounding { operand, step, .. } => {
+                f(*operand);
+                if let Some(step) = step {
+                    f(*step);
+                }
+            }
+            ExpressionKind::Logical { first, steps, .. } => {
                 f(*first);
                 steps.iter().for_each(|step| f(step.operand));
             }
@@ -513,6 +553,7 @@ impl ExprKind for ExpressionKind {
     fn children_mut(&mut self) -> Vec<&mut ExprId> {
         match self {
             ExpressionKind::Literal(_)
+            | ExpressionKind::ImplicitRowValue
             | ExpressionKind::Reference(_)
             | ExpressionKind::Now
             | ExpressionKind::Veto(_)
@@ -529,7 +570,14 @@ impl ExprKind for ExpressionKind {
             ExpressionKind::RangeLiteral(left, right)
             | ExpressionKind::RangeContainment(left, right)
             | ExpressionKind::Comparison(left, _, right) => vec![left, right],
-            ExpressionKind::LogicalAnd { first, steps } => std::iter::once(first)
+            ExpressionKind::StepRounding { operand, step, .. } => {
+                let mut children = vec![operand];
+                if let Some(step) = step {
+                    children.push(step);
+                }
+                children
+            }
+            ExpressionKind::Logical { first, steps, .. } => std::iter::once(first)
                 .chain(steps.iter_mut().map(|step| &mut step.operand))
                 .collect(),
             ExpressionKind::Arithmetic { first, steps } => std::iter::once(first)
@@ -545,7 +593,10 @@ impl ExprKind for ExpressionKind {
 impl ListCommand {
     fn for_each_child(&self, mut f: impl FnMut(ExprId)) {
         match self {
-            ListCommand::First | ListCommand::Last | ListCommand::Count => {}
+            ListCommand::First
+            | ListCommand::Last
+            | ListCommand::Count
+            | ListCommand::Key { .. } => {}
             ListCommand::Find { keys } => keys.iter().copied().for_each(f),
             ListCommand::Sum { argument }
             | ListCommand::Avg { argument }
@@ -555,7 +606,7 @@ impl ListCommand {
             | ListCommand::Sort { argument, .. } => argument.iter().copied().for_each(f),
             ListCommand::Any { form } | ListCommand::All { form } | ListCommand::Where { form } => {
                 match form {
-                    ListPredicate::Value { right, .. } => f(*right),
+                    ListPredicate::Value { expr } => f(*expr),
                     ListPredicate::Instance { expr } => f(*expr),
                 }
             }
@@ -569,7 +620,10 @@ impl ListCommand {
 
     fn children_mut(&mut self) -> Vec<&mut ExprId> {
         match self {
-            ListCommand::First | ListCommand::Last | ListCommand::Count => Vec::new(),
+            ListCommand::First
+            | ListCommand::Last
+            | ListCommand::Count
+            | ListCommand::Key { .. } => Vec::new(),
             ListCommand::Find { keys } => keys.iter_mut().collect(),
             ListCommand::Sum { argument }
             | ListCommand::Avg { argument }
@@ -579,7 +633,7 @@ impl ListCommand {
             | ListCommand::Sort { argument, .. } => argument.iter_mut().collect(),
             ListCommand::Any { form } | ListCommand::All { form } | ListCommand::Where { form } => {
                 match form {
-                    ListPredicate::Value { right, .. } => vec![right],
+                    ListPredicate::Value { expr } => vec![expr],
                     ListPredicate::Instance { expr } => vec![expr],
                 }
             }
@@ -595,7 +649,7 @@ impl ListCommand {
 }
 
 /// One postfix `->` command on a list-valued expression.
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum ListCommand {
     Find {
         keys: Vec<ExprId>,
@@ -637,11 +691,14 @@ pub enum ListCommand {
     With {
         rows: ListWithRows,
     },
+    /// `-> key a, b` on a Spec-element list expression.
+    Key {
+        fields: Vec<Reference>,
+    },
 }
 
 /// Operator of a value-list condition; the row value is the implicit left operand.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum RowCondition {
     Compare(ComparisonComputation),
     In,
@@ -657,14 +714,20 @@ impl fmt::Display for RowCondition {
 }
 
 /// `where` / `any` / `all` argument: value-list comparison, or instance-list expression.
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum ListPredicate {
-    Value { op: RowCondition, right: ExprId },
+    Value { expr: ExprId },
     Instance { expr: ExprId },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ListPredicateForm {
+    Value,
+    Instance,
+}
+
 /// `-> with` rows on a list expression.
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum ListWithRows {
     Values(Vec<ExprId>),
     FieldPairs(Vec<(Reference, ExprId)>),
@@ -679,7 +742,7 @@ pub enum ListWithRows {
 /// Examples:
 /// - Local "age": segments=[], name="age"
 /// - Cross-spec "employee.salary": segments=["employee"], name="salary"
-#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Reference {
     pub segments: Vec<String>,
     pub name: String,
@@ -773,16 +836,14 @@ impl ComparisonComputation {
 }
 
 /// The target type for `as` cast expressions (e.g. `as number`, `as eur`).
-#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum ConversionTarget {
     Type(PrimitiveKind),
     Unit { unit_name: String },
 }
 
 /// Types of logical negation
-#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum NegationType {
     Not,
 }
@@ -793,14 +854,13 @@ pub enum NegationType {
 /// validation and constraint enforcement — distinct from boolean `false`.
 ///
 /// Example: `veto "Must be over 18"` - blocks the rule entirely with a message
-#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct VetoExpression {
     pub message: Option<String>,
 }
 
 /// Mathematical computations
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
 pub enum MathematicalComputation {
     Sqrt,
     Sin,
@@ -812,14 +872,38 @@ pub enum MathematicalComputation {
     Log,
     Exp,
     Abs,
-    Floor,
-    Ceil,
+}
+
+/// Direction of a `-> round|floor|ceil <step>` command.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RoundingMode {
+    /// Nearest multiple; an exact half goes away from zero.
     Round,
+    /// Largest multiple at or below.
+    Floor,
+    /// Smallest multiple at or above.
+    Ceil,
+}
+
+impl RoundingMode {
+    pub fn keyword(self) -> &'static str {
+        match self {
+            RoundingMode::Round => "round",
+            RoundingMode::Floor => "floor",
+            RoundingMode::Ceil => "ceil",
+        }
+    }
+}
+
+impl fmt::Display for RoundingMode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.keyword())
+    }
 }
 
 /// Which endpoint of a range `lower` / `upper` reads.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
 pub enum RangeBound {
     Lower,
     Upper,
@@ -839,7 +923,7 @@ impl fmt::Display for RangeBound {
 /// [`SpecRef::repository`] is `None` for same-repository references, or
 /// `Some(RepositoryQualifier)` when a repository qualifier was written before the spec name.
 /// `effective` carries an optional explicit pin written next to the spec name.
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct SpecRef {
     /// Optional explicit repository qualifier. `None` means the reference resolves against
     /// the consumer spec's own repository.
@@ -917,7 +1001,7 @@ impl SpecRef {
 /// For example `meter/second^2` produces:
 /// - `UnitFactor { measure_ref: "meter", exp: 1 }`
 /// - `UnitFactor { measure_ref: "second", exp: -2 }`
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UnitFactor {
     pub measure_ref: String,
     pub exp: i32,
@@ -931,13 +1015,10 @@ pub struct UnitFactor {
 ///   `-> unit kmh: 3.6 meter/second`
 ///   The `prefix` is an additional scalar multiplier beyond what the unit
 ///   factor references contribute; it defaults to `1` when omitted.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum UnitArg {
-    Factor(#[serde(with = "crate::literals::decimal_binary_serde")] Decimal),
-    Expr(
-        #[serde(with = "crate::literals::decimal_binary_serde")] Decimal,
-        Vec<UnitFactor>,
-    ),
+    Factor(Decimal),
+    Expr(Decimal, Vec<UnitFactor>),
 }
 
 impl fmt::Display for UnitArg {
@@ -1001,7 +1082,7 @@ impl fmt::Display for UnitArg {
 /// Planning validates each command's args against the variant kinds it accepts
 /// and rejects mismatches without coercion (a `Text` literal is never a `Number`,
 /// a `Ratio` literal is never a bare `Number`, etc.).
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CommandArg {
     /// A typed literal value parsed by [`crate::parsing::parser::Parser::parse_literal_value`].
     Literal(crate::literals::Value),
@@ -1022,8 +1103,7 @@ impl fmt::Display for CommandArg {
 }
 
 /// Constraint command for type definitions. Derived from lexer tokens; no string matching.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum TypeConstraintCommand {
     Help,
     Suggest,
@@ -1136,7 +1216,7 @@ impl TypeConstraintCommand {
 }
 
 /// One `-> command …` row on a [`DataValue::Definition`].
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Constraint {
     pub command: TypeConstraintCommand,
     pub args: Vec<CommandArg>,
@@ -1178,18 +1258,32 @@ pub(crate) fn test_constraint(command: TypeConstraintCommand, args: Vec<CommandA
     )
 }
 
-/// Right-hand side of a `uses` block `-> with` binding: literal value or reference to copy.
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
+/// Single literal/reference right-hand side used by inline instance-list rows.
+#[derive(Debug, Clone, PartialEq)]
 pub enum WithRhs {
     Literal(Value),
     Reference { target: Reference },
 }
 
 /// One `-> with path: value` row under a [`DataValue::Import`] block.
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct UsesBinding {
     /// Path relative to the imported spec (no import alias prefix).
+    pub path: Reference,
+    pub rhs: UsesBindingRhs,
+    pub source_location: Source,
+}
+
+/// Right-hand side of one import `-> with path: ...` binding.
+#[derive(Debug, Clone, PartialEq)]
+pub enum UsesBindingRhs {
+    Literal(Value),
+    References { targets: Vec<Reference> },
+}
+
+/// One field assignment in an inline instance-list or option row.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RowBinding {
     pub path: Reference,
     pub rhs: WithRhs,
     pub source_location: Source,
@@ -1206,55 +1300,64 @@ pub fn prefix_reference(alias: &str, relative: &Reference) -> Reference {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, PartialEq)]
 /// Parse-time data value (before type resolution)
 pub enum DataValue {
     /// Declares data: optional explicit parent type, optional constraints (`-> ...`),
-    /// and optional literal value.
+    /// optional literal value, and optional instance-list body (`-> key` / `-> with` rows).
     ///
     /// Examples:
     /// - `data x: 3.14` → `base: None`, `value: Some(Number)`
     /// - `data x: number -> minimum 0` → `base: Some(Number)`, `constraints: Some(...)`
     /// - `data x: finance.money` → `base: Some(Qualified { spec_alias: "finance", inner: Custom("money") })`
+    /// - `data staff: employee list -> with name: "Ada"` → `base: Some(List { … })`, `list: Some(…)`
+    ///
+    /// Value-list rows stay in `constraints` (`money list -> with 89 eur`). Instance-list
+    /// `-> key` and field / named-instance rows live in `list`.
     Definition {
         base: Option<ParentType>,
         constraints: Option<Vec<Constraint>>,
         value: Option<Value>,
+        list: Option<InstanceListBody>,
     },
     /// Import from another spec (surface syntax is `uses`; alias is [`LemmaData::reference`]).
     Import {
         spec_ref: SpecRef,
         bindings: Vec<UsesBinding>,
     },
-    /// `uses x: spec list`: instance list of `spec_ref` rows.
-    ImportList { spec_ref: SpecRef, list: UsesList },
+    /// `uses` names one spec. A list after that target is a parse error, so planning
+    /// never sees this variant. It stays so matches stay exhaustive with the published type.
+    ImportList {
+        spec_ref: SpecRef,
+        list: InstanceListBody,
+    },
 }
 
-/// Commands under a `uses x: spec list` declaration.
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
-pub struct UsesList {
-    pub key: Option<UsesListKey>,
-    pub rows: Vec<UsesListRow>,
+/// Instance-list body on `data x: spec list`: `-> key` and `-> with` rows.
+#[derive(Debug, Clone, PartialEq)]
+pub struct InstanceListBody {
+    pub key: Option<InstanceListKey>,
+    pub rows: Vec<InstanceListRow>,
+    /// `-> option` field rows. These constrain the list. They are not list rows.
+    pub option_rows: Vec<InstanceListRow>,
 }
 
-/// `-> key a, b` under a `uses x: spec list`.
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
-pub struct UsesListKey {
+/// `-> key a, b` under a data instance list.
+#[derive(Debug, Clone, PartialEq)]
+pub struct InstanceListKey {
     pub fields: Vec<Reference>,
     pub source_location: Source,
 }
 
-/// One `-> with` line under a `uses x: spec list`.
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum UsesListRow {
+/// One `-> with` line under a data instance list.
+#[derive(Debug, Clone, PartialEq)]
+pub enum InstanceListRow {
     /// `-> with drink: "latte", price: 3.50 eur`: one row.
     Fields {
-        bindings: Vec<UsesBinding>,
+        bindings: Vec<RowBinding>,
         source_location: Source,
     },
-    /// `-> with ada, grace`: one row per item.
+    /// `-> with ada, grace`: one row per named `uses` instance.
     Values {
         values: Vec<WithRhs>,
         source_location: Source,
@@ -1279,14 +1382,19 @@ impl DataValue {
                 base: None,
                 constraints: None,
                 value: Some(_),
+                list: None,
             }
         )
     }
 
     /// Whether planning must resolve this [`LemmaData`] row through the type resolver / named types.
+    ///
+    /// Spec-element instance lists (`list: Some` or empty `spec list`) are planned via
+    /// `add_instance_list`, not the named-type registry.
     #[must_use]
     pub fn definition_needs_type_resolution(&self) -> bool {
         match self {
+            DataValue::Definition { list: Some(_), .. } => false,
             DataValue::Definition { base: Some(_), .. }
             | DataValue::Definition {
                 constraints: Some(_),
@@ -1296,6 +1404,7 @@ impl DataValue {
                 base: None,
                 constraints: None,
                 value: Some(v),
+                list: None,
             } => !matches!(v, Value::NumberWithUnit(_, _)),
             DataValue::Import { .. }
             | DataValue::ImportList { .. }
@@ -1303,8 +1412,8 @@ impl DataValue {
         }
     }
 
-    /// Spec named by a `uses` alias: a single import or an instance list's row spec.
-    /// Types and units read through either alias the same way.
+    /// Spec named by a `uses` alias.
+    /// Types and units read through the alias the same way.
     #[must_use]
     pub fn uses_spec_ref(&self) -> Option<&SpecRef> {
         match self {
@@ -1441,6 +1550,7 @@ impl<'a> SyntaxNode<'a> for ExprRef<'a, ExpressionKind> {
                 atom: AstAtom::Literal(value),
                 starts_with_sign: value_starts_with_sign(value),
             },
+            ExpressionKind::ImplicitRowValue => SyntaxView::ImplicitRowValue,
             ExpressionKind::Reference(reference) => atom(AstAtom::Reference(reference)),
             ExpressionKind::Now => atom(AstAtom::Now),
             ExpressionKind::Veto(veto) => atom(AstAtom::Veto(veto)),
@@ -1463,12 +1573,17 @@ impl<'a> SyntaxNode<'a> for ExprRef<'a, ExpressionKind> {
             ExpressionKind::RangeBound(bound, operand) => {
                 SyntaxView::Prefix(bound, self.child(*operand))
             }
-            ExpressionKind::LogicalAnd { first, steps } => SyntaxView::Conjunction(
-                std::iter::once(*first)
+            ExpressionKind::Logical {
+                connective,
+                first,
+                steps,
+            } => SyntaxView::Logical {
+                connective: *connective,
+                operands: std::iter::once(*first)
                     .chain(steps.iter().map(|step| step.operand))
                     .map(|id| self.child(id))
                     .collect(),
-            ),
+            },
             ExpressionKind::Arithmetic { first, steps } => {
                 let level = match steps.first() {
                     Some(step) => &step.op,
@@ -1505,6 +1620,14 @@ impl<'a> SyntaxNode<'a> for ExprRef<'a, ExpressionKind> {
                 list: self.child(*list),
                 command: command_view(self.table, command),
             },
+            ExpressionKind::StepRounding {
+                operand,
+                mode,
+                step,
+            } => SyntaxView::ListCommand {
+                list: self.child(*operand),
+                command: CommandView::Step(mode.keyword(), step.map(|id| self.child(id))),
+            },
             ExpressionKind::Member { base, path } => SyntaxView::Member {
                 base: self.child(*base),
                 path: AstAtom::Reference(path),
@@ -1517,13 +1640,10 @@ impl<'a> SyntaxNode<'a> for ExprRef<'a, ExpressionKind> {
 fn predicate_view<'a>(
     table: &'a ExprTable<ExpressionKind>,
     form: &'a ListPredicate,
-) -> PredicateView<'a, ExprRef<'a, ExpressionKind>> {
+) -> PredicateView<ExprRef<'a, ExpressionKind>> {
     let child = |id: ExprId| ExprRef { table, id };
     match form {
-        ListPredicate::Value { op, right } => PredicateView::Value {
-            op,
-            right: child(*right),
-        },
+        ListPredicate::Value { expr } => PredicateView::Value(child(*expr)),
         ListPredicate::Instance { expr } => PredicateView::Instance(child(*expr)),
     }
 }
@@ -1534,6 +1654,23 @@ pub(crate) fn display_list_command(
     command: &ListCommand,
 ) -> String {
     CommandSyntax(&command_view(table, command)).to_string()
+}
+
+/// Renders the `->` command of `id` (a list command or step rounding) in call form.
+pub(crate) fn display_pipe_command(table: &ExprTable<ExpressionKind>, id: ExprId) -> String {
+    let command = match table.kind(id) {
+        ExpressionKind::ListCommand { command, .. } => command_view(table, command),
+        ExpressionKind::StepRounding { mode, step, .. } => {
+            CommandView::Step(mode.keyword(), step.map(|id| ExprRef { table, id }))
+        }
+        other => panic!("BUG: piped expression must be a `->` command, got {other:?}"),
+    };
+    format!("{:#}", CommandSyntax(&command))
+}
+
+/// Renders the expression `id` in `table` as Lemma syntax.
+pub(crate) fn display_expression(table: &ExprTable<ExpressionKind>, id: ExprId) -> String {
+    Syntax(ExprRef { table, id }).to_string()
 }
 
 fn command_view<'a>(
@@ -1573,6 +1710,9 @@ fn command_view<'a>(
                 .map(|(name, value)| (Some(AstAtom::Reference(name)), child(value)))
                 .collect(),
         }),
+        ListCommand::Key { fields } => {
+            CommandView::Key(fields.iter().map(AstAtom::Reference).collect())
+        }
     }
 }
 
@@ -1630,9 +1770,6 @@ impl fmt::Display for MathematicalComputation {
             MathematicalComputation::Log => write!(f, "log"),
             MathematicalComputation::Exp => write!(f, "exp"),
             MathematicalComputation::Abs => write!(f, "abs"),
-            MathematicalComputation::Floor => write!(f, "floor"),
-            MathematicalComputation::Ceil => write!(f, "ceil"),
-            MathematicalComputation::Round => write!(f, "round"),
         }
     }
 }
@@ -1683,7 +1820,11 @@ impl std::fmt::Display for PrimitiveKind {
 ///
 /// `name` is the declared type name (the data name that introduces this type).
 /// For `data temperature: measure`, name = "temperature", primitive = Measure.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+///
+/// [`ParentType::Custom`] is a bare type or Spec name. Pin and `@repo` live on
+/// `uses`, not on a list or type parent (`uses tax_bracket 2024` then
+/// `data brackets: tax_bracket list`).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum ParentType {
     Primitive {
         primitive: PrimitiveKind,
@@ -1707,11 +1848,19 @@ pub enum ParentType {
     },
 }
 
+impl ParentType {
+    /// Local custom type name.
+    #[must_use]
+    pub fn custom(name: impl Into<String>) -> Self {
+        Self::Custom { name: name.into() }
+    }
+}
+
 impl std::fmt::Display for ParentType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             ParentType::Primitive { primitive } => write!(f, "{}", primitive),
-            ParentType::Custom { name } => write!(f, "{}", name),
+            ParentType::Custom { name } => write!(f, "{name}"),
             ParentType::Qualified { spec_alias, inner } => {
                 write!(f, "{spec_alias}.{inner}")
             }
@@ -1881,6 +2030,7 @@ impl<'a> fmt::Display for AsLemmaSource<'a, DataValue> {
                 base,
                 constraints,
                 value,
+                list: _,
             } => {
                 if base.is_none() && constraints.is_none() {
                     if let Some(v) = value {
@@ -1911,11 +2061,9 @@ impl<'a> fmt::Display for AsLemmaSource<'a, DataValue> {
             DataValue::Import {
                 spec_ref,
                 bindings: _,
-            } => {
-                write!(f, "uses {}", spec_ref)
             }
-            DataValue::ImportList { spec_ref, list: _ } => {
-                write!(f, "uses {} list", spec_ref)
+            | DataValue::ImportList { spec_ref, list: _ } => {
+                write!(f, "uses {}", spec_ref)
             }
         }
     }
@@ -2004,18 +2152,20 @@ fn canonicalize_expression_kind(kind: &mut ExpressionKind) {
         ExpressionKind::Member { path, .. } => canonicalize_reference(path),
         ExpressionKind::ListCommand { command, .. } => canonicalize_list_command(command),
         ExpressionKind::Now
+        | ExpressionKind::ImplicitRowValue
         | ExpressionKind::DateRelative(..)
         | ExpressionKind::DateCalendar(..)
         | ExpressionKind::RangeLiteral(..)
         | ExpressionKind::PastFutureRange(..)
         | ExpressionKind::RangeContainment(..)
         | ExpressionKind::RangeBound(..)
-        | ExpressionKind::LogicalAnd { .. }
+        | ExpressionKind::Logical { .. }
         | ExpressionKind::Arithmetic { .. }
         | ExpressionKind::Comparison(..)
         | ExpressionKind::UnitConversion(..)
         | ExpressionKind::LogicalNegation(..)
         | ExpressionKind::MathematicalComputation(..)
+        | ExpressionKind::StepRounding { .. }
         | ExpressionKind::Veto(_)
         | ExpressionKind::ResultIsVeto(..) => {}
     }
@@ -2047,6 +2197,11 @@ fn canonicalize_list_command(command: &mut ListCommand) {
                 canonicalize_reference(name);
             }
         }
+        ListCommand::Key { fields } => {
+            for field in fields {
+                canonicalize_reference(field);
+            }
+        }
     }
 }
 
@@ -2061,6 +2216,7 @@ pub(crate) fn canonicalize_data_value(data_value: &mut DataValue) {
             base,
             constraints,
             value,
+            list,
         } => {
             if let Some(base) = base {
                 canonicalize_parent_type(base);
@@ -2071,6 +2227,9 @@ pub(crate) fn canonicalize_data_value(data_value: &mut DataValue) {
             if let Some(value) = value {
                 canonicalize_value(value);
             }
+            if let Some(list) = list {
+                canonicalize_instance_list_body(list);
+            }
         }
         DataValue::Import { spec_ref, bindings } => {
             canonicalize_spec_ref(spec_ref);
@@ -2078,19 +2237,28 @@ pub(crate) fn canonicalize_data_value(data_value: &mut DataValue) {
         }
         DataValue::ImportList { spec_ref, list } => {
             canonicalize_spec_ref(spec_ref);
-            if let Some(key) = &mut list.key {
-                for field in &mut key.fields {
-                    canonicalize_reference(field);
+            canonicalize_instance_list_body(list);
+        }
+    }
+}
+
+pub(crate) fn canonicalize_instance_list_body(list: &mut InstanceListBody) {
+    if let Some(key) = &mut list.key {
+        for field in &mut key.fields {
+            canonicalize_reference(field);
+        }
+    }
+    for row in list.rows.iter_mut().chain(list.option_rows.iter_mut()) {
+        match row {
+            InstanceListRow::Fields { bindings, .. } => {
+                for binding in bindings {
+                    canonicalize_reference(&mut binding.path);
+                    canonicalize_with_rhs(&mut binding.rhs);
                 }
             }
-            for row in &mut list.rows {
-                match row {
-                    UsesListRow::Fields { bindings, .. } => canonicalize_uses_bindings(bindings),
-                    UsesListRow::Values { values, .. } => {
-                        for value in values {
-                            canonicalize_with_rhs(value);
-                        }
-                    }
+            InstanceListRow::Values { values, .. } => {
+                for value in values {
+                    canonicalize_with_rhs(value);
                 }
             }
         }
@@ -2107,7 +2275,14 @@ fn canonicalize_with_rhs(rhs: &mut WithRhs) {
 fn canonicalize_uses_bindings(bindings: &mut [UsesBinding]) {
     for binding in bindings {
         canonicalize_reference(&mut binding.path);
-        canonicalize_with_rhs(&mut binding.rhs);
+        match &mut binding.rhs {
+            UsesBindingRhs::Literal(value) => canonicalize_value(value),
+            UsesBindingRhs::References { targets } => {
+                for target in targets {
+                    canonicalize_reference(target);
+                }
+            }
+        }
     }
 }
 
@@ -2265,24 +2440,6 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn test_negation_types() {
-        let json = serde_json::to_string(&NegationType::Not).expect("serialize NegationType");
-        let decoded: NegationType = serde_json::from_str(&json).expect("deserialize NegationType");
-        assert_eq!(decoded, NegationType::Not);
-    }
-
-    #[test]
-    fn parent_type_primitive_serde_externally_tagged() {
-        let p = ParentType::Primitive {
-            primitive: PrimitiveKind::Number,
-        };
-        let json = serde_json::to_string(&p).expect("ParentType::Primitive must serialize");
-        assert!(json.contains("\"Primitive\"") && json.contains("\"primitive\""));
-        let back: ParentType = serde_json::from_str(&json).expect("deserialize");
-        assert_eq!(back, p);
-    }
-
     // =====================================================================
     // DataValue Display — constraint formatting
     // =====================================================================
@@ -2321,6 +2478,8 @@ mod tests {
                 vec![text_arg("single")],
             )]),
             value: None,
+
+            list: None,
         };
         assert_eq!(
             format!("{}", AsLemmaSource(&fv)),
@@ -2339,6 +2498,8 @@ mod tests {
                 vec![number_arg("10")],
             )]),
             value: None,
+
+            list: None,
         };
         assert_eq!(format!("{}", AsLemmaSource(&fv)), "number -> suggest 10");
     }
@@ -2354,6 +2515,8 @@ mod tests {
                 vec![text_arg("Enter a measure")],
             )]),
             value: None,
+
+            list: None,
         };
         assert_eq!(
             format!("{}", AsLemmaSource(&fv)),
@@ -2372,6 +2535,8 @@ mod tests {
                 test_constraint(TypeConstraintCommand::Option, vec![text_arg("inactive")]),
             ]),
             value: None,
+
+            list: None,
         };
         assert_eq!(
             format!("{}", AsLemmaSource(&fv)),
@@ -2402,6 +2567,8 @@ mod tests {
                 ),
             ]),
             value: None,
+
+            list: None,
         };
         assert_eq!(
             format!("{}", AsLemmaSource(&fv)),
@@ -2420,6 +2587,8 @@ mod tests {
                 vec![measure_arg("0", "eur")],
             )]),
             value: None,
+
+            list: None,
         };
         assert_eq!(
             format!("{}", AsLemmaSource(&fv)),
@@ -2438,6 +2607,8 @@ mod tests {
                 vec![boolean_arg(BooleanValue::True)],
             )]),
             value: None,
+
+            list: None,
         };
         assert_eq!(format!("{}", AsLemmaSource(&fv)), "boolean -> suggest true");
     }
@@ -2445,14 +2616,14 @@ mod tests {
     #[test]
     fn as_lemma_source_duration_default() {
         let fv = DataValue::Definition {
-            base: Some(ParentType::Custom {
-                name: "duration".to_string(),
-            }),
+            base: Some(ParentType::custom("duration")),
             constraints: Some(vec![test_constraint(
                 TypeConstraintCommand::Suggest,
                 vec![duration_arg("40", "hour")],
             )]),
             value: None,
+
+            list: None,
         };
         assert_eq!(
             format!("{}", AsLemmaSource(&fv)),
@@ -2465,14 +2636,14 @@ mod tests {
         // Named types (user-defined): the parser produces a typed Text literal for
         // quoted suggestion values like `suggest "single"`.
         let fv = DataValue::Definition {
-            base: Some(ParentType::Custom {
-                name: "filing_status_type".to_string(),
-            }),
+            base: Some(ParentType::custom("filing_status_type")),
             constraints: Some(vec![test_constraint(
                 TypeConstraintCommand::Suggest,
                 vec![text_arg("single")],
             )]),
             value: None,
+
+            list: None,
         };
         assert_eq!(
             format!("{}", AsLemmaSource(&fv)),
@@ -2491,6 +2662,8 @@ mod tests {
                 vec![text_arg("say \"hello\"")],
             )]),
             value: None,
+
+            list: None,
         };
         assert_eq!(
             format!("{}", AsLemmaSource(&fv)),
@@ -2615,6 +2788,8 @@ mod tests {
                 ),
             ]),
             value: None,
+
+            list: None,
         };
         assert_eq!(
             format!("{}", AsLemmaSource(&fv)),

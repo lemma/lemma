@@ -16,6 +16,7 @@ use crate::computation::rational::{
     rational_is_zero, rational_new, rational_one, rational_operation, rational_zero,
     NumericFailure, NumericOperation, RationalInteger,
 };
+use crate::parsing::ast::LogicalConnective;
 use crate::parsing::ast::PrimitiveKind;
 use crate::planning::ordered_dispatch::{
     classify_dispatch, dispatch_key_of_literal, paint_dispatch_regions, region_for_value,
@@ -430,21 +431,24 @@ fn flatten_associative(
     Ok(Some(n.cells.intern_empty(operator.wrap(flat))))
 }
 
-/// Merge a nested `and` operand into its `and` parent. Operand order is kept.
+/// Merge a nested logical operand into its same-connective parent.
 fn flatten_conjunction(
     n: &mut Normalizer<'_>,
     id: NormalFormId,
 ) -> Result<Option<NormalFormId>, Error> {
-    let NormalFormKind::And(children) = &n.cells.get(id).kind else {
+    let NormalFormKind::Logical(connective, children) = &n.cells.get(id).kind else {
         return Ok(None);
     };
+    let connective = *connective;
     let children = children.clone();
     let mut flat = Vec::with_capacity(children.len());
     let mut flattened = false;
     for child in children {
         let cell = n.cells.get(child);
         match &cell.kind {
-            NormalFormKind::And(inner) if cell.rule_ref.is_none() => {
+            NormalFormKind::Logical(inner_connective, inner)
+                if *inner_connective == connective && cell.rule_ref.is_none() =>
+            {
                 flat.extend_from_slice(inner);
                 flattened = true;
             }
@@ -454,7 +458,10 @@ fn flatten_conjunction(
     if !flattened {
         return Ok(None);
     }
-    Ok(Some(n.cells.intern_empty(NormalFormKind::And(flat))))
+    Ok(Some(
+        n.cells
+            .intern_empty(NormalFormKind::Logical(connective, flat)),
+    ))
 }
 
 /// Operands of a same-operator Sum/Product that exists only as this cell's fold
@@ -773,32 +780,34 @@ fn eliminate_identities(
                 return Ok(None);
             }
         }
-        NormalFormKind::And(children) => {
+        NormalFormKind::Logical(connective, children) => {
+            let connective = *connective;
+            let absorbing = connective.absorbing_operand();
             let children = children.clone();
             if children
                 .iter()
-                .any(|child| is_literal_bool(cells, *child, false))
+                .any(|child| is_literal_bool(cells, *child, absorbing))
             {
                 return Ok(Some(cells.fold_into(
-                    NormalFormKind::Leaf(LeafKind::Literal(LiteralValue::from_bool(false))),
+                    NormalFormKind::Leaf(LeafKind::Literal(LiteralValue::from_bool(absorbing))),
                     id,
                 )));
             }
             let kept: Vec<NormalFormId> = children
                 .iter()
                 .copied()
-                .filter(|child| !is_literal_bool(cells, *child, true))
+                .filter(|child| !is_literal_bool(cells, *child, !absorbing))
                 .collect();
             if kept.len() == children.len() {
                 return Ok(None);
             }
             match kept.len() {
                 0 => cells.fold_into(
-                    NormalFormKind::Leaf(LeafKind::Literal(LiteralValue::from_bool(true))),
+                    NormalFormKind::Leaf(LeafKind::Literal(LiteralValue::from_bool(!absorbing))),
                     id,
                 ),
                 1 => cells.fold_into_survivor(kept[0], id),
-                _ => cells.fold_into(NormalFormKind::And(kept), id),
+                _ => cells.fold_into(NormalFormKind::Logical(connective, kept), id),
             }
         }
         NormalFormKind::Not(inner) => {
@@ -1295,9 +1304,10 @@ fn logical_idempotency(
     id: NormalFormId,
 ) -> Result<Option<NormalFormId>, Error> {
     let cells = &mut n.cells;
-    let NormalFormKind::And(children) = &cells.get(id).kind else {
+    let NormalFormKind::Logical(connective, children) = &cells.get(id).kind else {
         return Ok(None);
     };
+    let connective = *connective;
     // Id equality only: Kind equality would collapse distinct rule references
     // that share body Kind after cons. A repeated operand is already known true
     // when reached again, so only its first occurrence is kept.
@@ -1312,7 +1322,9 @@ fn logical_idempotency(
     }
     match unique.as_slice() {
         [only] => Ok(Some(cells.fold_into_survivor(*only, id))),
-        _ => Ok(Some(cells.fold_into(NormalFormKind::And(unique), id))),
+        _ => Ok(Some(
+            cells.fold_into(NormalFormKind::Logical(connective, unique), id),
+        )),
     }
 }
 
@@ -1411,7 +1423,8 @@ fn unless_condition_contains_literal_false(cells: &Cells<'_>, id: NormalFormId) 
         if is_literal_bool(cells, current, false) {
             return true;
         }
-        if let NormalFormKind::And(children) = &cells.get(current).kind {
+        if let NormalFormKind::Logical(LogicalConnective::And, children) = &cells.get(current).kind
+        {
             pending.extend(children.iter().copied());
         }
     }
@@ -1848,7 +1861,7 @@ fn equality_conjuncts(cells: &mut Cells<'_>, condition: NormalFormId) -> Vec<Equ
     if cell.rule_ref.is_some() {
         return Vec::new();
     }
-    let NormalFormKind::And(children) = &cell.kind else {
+    let NormalFormKind::Logical(LogicalConnective::And, children) = &cell.kind else {
         return Vec::new();
     };
     let children = children.clone();
@@ -1866,7 +1879,7 @@ fn equality_conjuncts(cells: &mut Cells<'_>, condition: NormalFormId) -> Vec<Equ
         let residual = match rest.as_slice() {
             [] => unreachable!("BUG: And has at least two operands"),
             [only] => *only,
-            _ => cells.intern_empty(NormalFormKind::And(rest)),
+            _ => cells.intern_empty(NormalFormKind::Logical(LogicalConnective::And, rest)),
         };
         out.push(EqualityConjunct {
             scrutinee,

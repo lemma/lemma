@@ -228,6 +228,45 @@ rule mass_cost: 2 eur_per_kilogram * 3 units.mass.kilogram"#;
 }
 
 #[test]
+fn qualified_hour_spelling_matches_bare_hour_signature() {
+    let message = expect_plan_error(
+        r#"spec t
+uses lemma units
+data money: measure
+  -> unit eur: 1
+data rate_a: measure
+  -> unit eur_per_hour: eur/hour
+data rate_b: measure
+  -> unit pay: eur/units.duration.hour
+"#,
+    );
+    assert!(message.contains("ambiguous unit signature"), "{message}");
+    assert!(message.contains("eur_per_hour"), "{message}");
+    assert!(message.contains("pay"), "{message}");
+}
+
+#[test]
+fn same_qualified_kilogram_declared_twice_is_one_signature() {
+    let message = expect_plan_error(
+        r#"spec t
+uses lemma units
+data money: measure
+  -> unit eur: 1
+data bag: measure
+  -> unit kilogram: 999
+data price_a: measure
+  -> unit per_a: eur/bag.kilogram
+data price_b: measure
+  -> unit per_b: eur/bag.kilogram
+"#,
+    );
+    assert!(message.contains("ambiguous unit signature"), "{message}");
+    assert!(message.contains("per_a"), "{message}");
+    assert!(message.contains("per_b"), "{message}");
+    assert!(!message.contains("units.mass.kilogram"), "{message}");
+}
+
+#[test]
 fn compound_unit_with_ambiguous_bare_factor_must_be_qualified() {
     let msg = expect_plan_error(
         r#"spec t
@@ -296,7 +335,7 @@ rule local: 1 bag.kilogram"#;
 fn as_extension_unit() {
     let code = r#"spec t
 data money_a: measure -> unit eur: 1
-data money_b: money_a -> decimals 2
+data money_b: money_a -> minimum 0 eur
 data x: 10 eur
 rule r: x as money_b.eur"#;
     let display = eval_display(code, "t", "r");

@@ -13,7 +13,8 @@ fuzz_target!(|data: &[u8]| {
             s.to_string(),
         )]);
 
-        // Property: load Ok => every loaded spec must evaluate without panic.
+        // Property: load Ok => every loaded spec must evaluate and format
+        // explanations without panic.
         if loaded.is_ok() {
             let now = DateTimeValue::now();
             let spec_names: Vec<String> = engine
@@ -26,15 +27,30 @@ fuzz_target!(|data: &[u8]| {
                 .map(|version| version.name.clone())
                 .collect();
             for name in spec_names {
-                if let Err(error) = engine.evaluate(
+                match engine.evaluate(
                     None,
                     &name,
                     Some(&now),
                     IndexMap::new(),
                     None,
-                    false,
+                    true,
                 ) {
-                    std::hint::black_box(error);
+                    Ok(response) => {
+                        if let Ok(json) = serde_json::to_string(&lemma::api::Response::from(
+                            &response,
+                        )) {
+                            std::hint::black_box(json);
+                        }
+                        for result in response.results.values() {
+                            if let Some(explanation) = &result.explanation {
+                                std::hint::black_box(lemma::format_explanation(explanation));
+                                std::hint::black_box(format!("{explanation:?}"));
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        std::hint::black_box(error);
+                    }
                 }
             }
         }

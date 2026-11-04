@@ -1540,7 +1540,8 @@ data qty: number -> suggest 1
 rule cost: price * qty
 
 spec order
-uses lines: line list
+uses line
+data lines: line list
 data discounts: number list
   -> with 5, 10
 rule total: lines -> sum cost
@@ -1549,7 +1550,7 @@ rule discount_total: discounts -> sum
 
 spec part
 data own_cost: number
-uses components: part list
+data components: part list
 rule unit_cost:
   own_cost + (components -> sum components.unit_cost)
   unless components -> count is 0 then own_cost
@@ -1607,7 +1608,8 @@ uses article: article
 rule cost: qty * article.price
 
 spec order
-uses lines: line list
+uses line
+data lines: line list
   -> with qty: 2, article.price: 5
   -> with qty: 1
 rule total: lines -> sum cost
@@ -1619,7 +1621,8 @@ rule applies: income > threshold
 
 spec tax
 data income: number
-uses brackets: bracket list
+uses bracket
+data brackets: bracket list
   -> with threshold: 0, income: income
 rule applicable: brackets -> where applies -> count
 "#;
@@ -1720,6 +1723,39 @@ rule applicable: brackets -> where applies -> count
             schemas["RuleResultValue"]["properties"]["list"]["items"]["$ref"],
             "#/components/schemas/RuleResultValue"
         );
+    }
+
+    #[test]
+    fn shared_row_schema_across_parents_does_not_panic() {
+        let code = r#"
+spec article
+data price: number
+
+spec line
+uses article: article
+data qty: number
+rule cost: qty * article.price
+
+spec order
+uses line
+data lines: line list
+rule total: lines -> sum cost
+
+spec cart
+uses line
+data lines: line list
+rule subtotal: lines -> sum qty
+"#;
+        let engine = create_engine_with_code(code);
+        let document = generate_openapi(&engine, false);
+        let row = &document["components"]["schemas"]["LemmaRow_line"];
+        assert_eq!(row["type"], "object");
+        assert_eq!(
+            row["properties"]["qty"]["x-lemma-needed-by-rules"],
+            json!([])
+        );
+        assert!(document["paths"].get("/order").is_some());
+        assert!(document["paths"].get("/cart").is_some());
     }
 
     #[test]

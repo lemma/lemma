@@ -335,7 +335,7 @@ rule r: i.x
 // ─── User override via EvaluateData::resolve uses dotted input_key ────────
 
 #[test]
-fn user_override_of_nested_binding_via_dotted_key() {
+fn sending_sealed_nested_binding_is_request_error() {
     let code = r#"
 spec inner
 data x: number
@@ -347,21 +347,26 @@ rule r: i.x
 "#;
     let mut engine = Engine::new();
     load_ok(&mut engine, code);
+    let now = DateTimeValue::now();
+    let sealed = engine
+        .evaluate(None, "outer", Some(&now), IndexMap::new(), None, false)
+        .expect("evaluates");
+    assert_eq!(rule_value(&sealed, "r"), "42");
+
     let mut data = IndexMap::new();
     data.insert("i.x".to_string(), "99".into());
-    let now = DateTimeValue::now();
-    let resp = engine
+    let err = engine
         .evaluate(None, "outer", Some(&now), data, None, false)
-        .expect("evaluates");
-    assert_eq!(
-        rule_value(&resp, "r"),
-        "99",
-        "user override via 'i.x' dotted key must win over binding literal"
+        .expect_err("sealed uses key is a request error");
+    let text = err.to_string();
+    assert!(
+        text.contains("i.x") && text.contains("sealed"),
+        "expected request error for sealed i.x, got: {text}"
     );
 }
 
 #[test]
-fn user_override_of_depth_3_binding() {
+fn sending_sealed_depth_3_binding_is_request_error() {
     let code = r#"
 spec leaf
 data v: number
@@ -376,13 +381,22 @@ rule r: m.l.v
 "#;
     let mut engine = Engine::new();
     load_ok(&mut engine, code);
+    let now = DateTimeValue::now();
+    let sealed = engine
+        .evaluate(None, "outer", Some(&now), IndexMap::new(), None, false)
+        .expect("evaluates");
+    assert_eq!(rule_value(&sealed, "r"), "5");
+
     let mut data = IndexMap::new();
     data.insert("m.l.v".to_string(), "123".into());
-    let now = DateTimeValue::now();
-    let resp = engine
+    let err = engine
         .evaluate(None, "outer", Some(&now), data, None, false)
-        .expect("evaluates");
-    assert_eq!(rule_value(&resp, "r"), "123");
+        .expect_err("sealed uses key is a request error");
+    let text = err.to_string();
+    assert!(
+        text.contains("m.l.v") && text.contains("sealed"),
+        "expected request error for sealed m.l.v, got: {text}"
+    );
 }
 
 // ─── Override key casing: case-insensitive API match ─────────────────

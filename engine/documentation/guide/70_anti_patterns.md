@@ -61,9 +61,7 @@ rule is_eligible:
 ```
 RIGHT: boolean rules (`is_adult` and `has_valid_id`).
 
-Unnecessary `repo` (WRONG). RIGHT: single-file `spec` without `repo`.
-
-No `or` (WRONG): `rule is_eligible: is_adult or has_guardian`. See **Syntax**; use `unless` or separate booleans.
+Unnecessary `repo` (WRONG). RIGHT: specs in the repository, no `repo` block, unless a second namespace is required.
 
 Constraints on rules (WRONG): `rule discount: 10% -> help "…"`. `->` is data-only (see **Syntax**).
 

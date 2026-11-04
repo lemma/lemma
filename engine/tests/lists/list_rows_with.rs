@@ -14,7 +14,8 @@ data drink: text
 data price: measure
   -> unit eur: 1.00
 spec coffee_order
-uses menu: menu_item list
+uses menu_item
+data menu: menu_item list
   -> with drink: "espresso", price: 2.50 eur
 rule first_drink:
   (menu -> first).drink
@@ -33,7 +34,8 @@ fn list_row_with_overrides_literal_fill() {
 spec xx
 data z: 5
 spec test
-uses zz: xx list
+uses xx
+data zz: xx list
   -> with z: 22
   -> with z: 24
 rule x:
@@ -51,7 +53,8 @@ spec xx
 data z: number
   -> with 5
 spec test
-uses zz: xx list
+uses xx
+data zz: xx list
   -> with z: 22
   -> with z: 24
 rule x:
@@ -68,7 +71,8 @@ fn list_row_with_binds_open_number() {
 spec xx
 data z: number
 spec test
-uses zz: xx list
+uses xx
+data zz: xx list
   -> with z: 22
   -> with z: 24
 rule x:
@@ -99,9 +103,10 @@ spec menu_item
 data drink: text
 data price: measure
   -> unit eur: 1.00
-  -> decimals 2
+
 spec coffee_order
-uses menu: menu_item list
+uses menu_item
+data menu: menu_item list
   -> with
        drink: "latte",
        price: 3.50 eur
@@ -111,7 +116,7 @@ rule first_price:
     );
     assert_eq!(
         value(&evaluate(&engine, "coffee_order", data(&[])), "first_price"),
-        "3.50 eur"
+        "3.5 eur"
     );
 }
 
@@ -126,7 +131,8 @@ spec line
 uses item: product_info
 data qty: number
 spec order
-uses lines: line list
+uses line
+data lines: line list
   -> with item.price: 3 eur, qty: 2
 rule unit_price:
   (lines -> first).item.price
@@ -145,11 +151,93 @@ fn unknown_row_path_is_planning_error() {
 spec employee
 data name: text
 spec payroll
-uses staff: employee list
+uses employee
+data staff: employee list
   -> with bonus: 1
 "#,
     );
     assert_contains(&err, "bonus");
+}
+
+#[test]
+fn a_dotted_field_written_on_every_row_binds_each_row() {
+    let engine = load_ok(
+        r#"
+spec product_info
+data price: measure
+  -> unit eur: 1.00
+spec line
+uses item: product_info
+data qty: number
+rule amount:
+  item.price * qty
+spec order
+uses line
+data lines: line list
+  -> with item.price: 3 eur, qty: 2
+  -> with qty: 1, item.price: 5 eur
+  -> with item.price: 7 eur, qty: 3
+rule total:
+  lines -> sum amount
+"#,
+    );
+    assert_eq!(
+        value(&evaluate(&engine, "order", data(&[])), "total"),
+        "32 eur"
+    );
+}
+
+#[test]
+fn an_out_of_range_row_value_is_rejected_once_at_its_binding() {
+    let err = load_planning_err(
+        r#"
+spec employee
+data salary: number
+  -> minimum 0
+spec payroll
+uses employee
+data staff: employee list
+  -> with salary: 1
+  -> with salary: -5
+uses ada: employee
+  -> with salary: -7
+"#,
+    );
+    let row: Vec<&str> = err.lines().filter(|line| line.contains("-5")).collect();
+    assert_eq!(row.len(), 1, "the row value is reported once: {err}");
+    assert_contains(row[0], "test.lemma:9:6");
+    let import: Vec<&str> = err.lines().filter(|line| line.contains("-7")).collect();
+    assert_eq!(import.len(), 1, "the `uses` value is reported once: {err}");
+    assert_contains(import[0], "test.lemma:11:");
+}
+
+#[test]
+fn a_misspelled_row_field_is_reported_at_every_row_that_writes_it() {
+    let err = load_planning_err(
+        r#"
+spec employee
+data name: text
+data salary: number
+spec payroll
+uses employee
+data staff: employee list
+  -> with name: "Ada", salary: 1
+  -> with name: "Bo", salry: 2
+  -> with name: "Cy", salary: 3
+  -> with name: "Di", salry: 4
+"#,
+    );
+    let reports: Vec<&str> = err
+        .lines()
+        .filter(|line| line.contains("row field `salry` is not data on `employee`"))
+        .collect();
+    assert_eq!(reports.len(), 2, "one report per row that writes it: {err}");
+    assert_contains(reports[0], "test.lemma:9:23");
+    assert_contains(reports[1], "test.lemma:11:23");
+    assert!(
+        !err.contains("`salary`") && !err.contains("`name`"),
+        "the rows' other fields resolve: {err}"
+    );
 }
 
 #[test]
@@ -159,7 +247,8 @@ fn same_path_twice_in_one_row_is_planning_error() {
 spec employee
 data name: text
 spec payroll
-uses staff: employee list
+uses employee
+data staff: employee list
   -> with name: "Ada", name: "Grace"
 "#,
     );
@@ -175,7 +264,8 @@ data sku: text
 spec line
 uses item: product_info
 spec order
-uses lines: line list
+uses line
+data lines: line list
   -> key item.sku
 "#,
     );
@@ -195,7 +285,8 @@ uses ada: employee
   -> with name: "Ada", salary: 9000 eur
 uses grace: employee
   -> with name: "Grace", salary: 9500 eur
-uses staff: employee list
+uses employee
+data staff: employee list
   -> with ada, grace
 rule total:
   staff -> sum salary
@@ -218,13 +309,24 @@ data salary: measure
 spec payroll
 uses ada: employee
   -> with name: "Ada"
-uses staff: employee list
+uses employee
+data staff: employee list
   -> with ada
 rule paid:
   (staff -> first).salary
 "#,
     );
-    let response = evaluate(&engine, "payroll", data(&[("ada.salary", lit("9000 eur"))]));
+    // The row copied from `ada` has its own key; `ada.salary` is the instance's.
+    let open = evaluate(&engine, "payroll", data(&[]));
+    assert_eq!(
+        missing_data(&open, "paid"),
+        vec!["staff.1.salary".to_string()]
+    );
+    let response = evaluate(
+        &engine,
+        "payroll",
+        data(&[("staff.1.salary", lit("9000 eur"))]),
+    );
     assert_eq!(value(&response, "paid"), "9000 eur");
 }
 
@@ -281,7 +383,8 @@ data drink: text
 data price: measure
   -> unit eur: 1.00
 spec coffee_order
-uses menu: menu_item list
+uses menu_item
+data menu: menu_item list
   -> with drink: "espresso", price: 2.50 eur
 rule extended:
   menu -> with drink: "mocha", price: 4.00 eur
@@ -347,7 +450,8 @@ data drink: text
 data price: measure
   -> unit eur: 1.00
 spec coffee_order
-uses menu: menu_item list
+uses menu_item
+data menu: menu_item list
   -> key drink
   -> with drink: "espresso", price: 2.50 eur
 rule extended:
@@ -366,7 +470,8 @@ data drink: text
 data price: measure
   -> unit eur: 1.00
 spec coffee_order
-uses menu: menu_item list
+uses menu_item
+data menu: menu_item list
   -> key drink
 rule extended:
   menu -> with drink: "espresso", price: 3.00 eur

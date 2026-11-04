@@ -13,8 +13,6 @@ declare module './lemma.bindings.js' {
   namespace Engine {
     /** Create engine with named limit overrides. Unknown keys throw. */
     function withLimits(limits: Record<string, number>): Engine;
-    /** Restore an engine from {@link Engine.snapshot} bytes. */
-    function fromSnapshot(bytes: Uint8Array): Engine;
   }
 
   interface Engine {
@@ -83,12 +81,6 @@ declare module './lemma.bindings.js' {
 
     /** Resource limits configured for this engine. */
     limits(): ResourceLimits;
-
-    /**
-     * Persist parsed specs + plans + limits as opaque bytes.
-     * Restore with {@link Engine.fromSnapshot}.
-     */
-    snapshot(): Uint8Array;
 
     /**
      * Canonical formatting of Lemma source. Throws `EngineError` on parse error.
@@ -270,8 +262,8 @@ export interface RowReference {
   spec: string;
   /** Resolved row effective date; empty for the origin row. */
   effective: string;
-  /** Row path relative to its holder, e.g. `lines.2`. */
-  instance: string;
+  /** Row path relative to its holder, e.g. `lines.2`. Omitted for a row appended with `-> with`, whose identity is its place in the list. */
+  instance?: string;
   index: number;
 }
 
@@ -371,7 +363,6 @@ export type TypeSpecification =
         kind: "measure";
         minimum: NamedBound | null;
         maximum: NamedBound | null;
-        decimals: number | null;
         units: MeasureUnit[];
         traits: ("duration" | "calendar")[];
         decomposition: Record<string, number> | null;
@@ -398,7 +389,6 @@ export type TypeSpecification =
         kind: "ratio";
         minimum: string | null;
         maximum: string | null;
-        decimals: number | null;
         units: RatioUnit[];
         /** Written unit when this type describes a value (omit on schema-only types). */
         unit?: string;
@@ -454,10 +444,12 @@ export type TypeSpecification =
         repository?: string;
       };
 
-/** One uses hop on a Show data or rule path. */
+/** One hop on a Show data or rule path: a uses alias, or (with `row`) a row written in the data list named `uses`. */
 export interface PathSegment {
-  /** Uses alias for this hop. */
+  /** Uses alias, or the data list name when `row` is set. */
   uses: string;
+  /** 1-based position of the row written in the data list `uses`. */
+  row?: number;
   /** Target repository name; omitted for the unnamed workspace. */
   repository?: string;
   /** Resolved target spec name. */
@@ -590,18 +582,45 @@ export type ExplainedRule = {
 } & RuleResultValue;
 
 /** Nested explanation tree node (tagged by `type`). */
+/** List command identity on a `list_command` explanation node. */
+export type ExplainedListOp =
+  | "find"
+  | "first"
+  | "last"
+  | "count"
+  | "sum"
+  | "avg"
+  | "product"
+  | "min"
+  | "max"
+  | "any"
+  | "all"
+  | "where"
+  | "top"
+  | "with"
+  | "key"
+  | { sort: { descending: boolean } };
+
 export type ExplanationNode =
   | ({
       type: "rule_ref";
       id: number;
       name: string;
     } & RuleResultValue)
-  | {
+  | ({
       type: "compose";
       expression: string;
       operator?: "add" | "subtract" | "multiply" | "divide" | "modulo" | "power";
       operands: ExplanationNode[];
-    }
+    } & RuleResultValue)
+  | ({
+      type: "list_command";
+      expression: string;
+      /** Command fragment after `->`. */
+      stage: string;
+      op: ExplainedListOp;
+      operands: ExplanationNode[];
+    } & RuleResultValue)
   | ({
       type: "data";
       name: string;
@@ -610,12 +629,12 @@ export type ExplanationNode =
       type: "data_unused";
       name: string;
     }
-  | {
+  | ({
       type: "conversion";
       expression: string;
       steps: ConversionStep[];
       operands: ExplanationNode[];
-    }
+    } & RuleResultValue)
   | {
       type: "veto";
       message?: string;
@@ -691,6 +710,7 @@ export type ShowExpression =
   | { type: "data"; name: string }
   | { type: "rule"; name: string }
   | { type: "and"; operands: ShowExpression[] }
+  | { type: "or"; operands: ShowExpression[] }
   | { type: "not"; operand: ShowExpression }
   | {
       type: "arithmetic";
@@ -726,11 +746,15 @@ export type ShowExpression =
         | "atan"
         | "log"
         | "exp"
-        | "abs"
-        | "floor"
-        | "ceil"
-        | "round";
+        | "abs";
       operand: ShowExpression;
+    }
+  /** Postfix rounding: `x -> round`, or `price -> round 0.05 eur` with a step. */
+  | {
+      type: "step_rounding";
+      mode: "round" | "floor" | "ceil";
+      operand: ShowExpression;
+      step?: ShowExpression;
     }
   | { type: "veto"; message?: string }
   | { type: "now" }
@@ -766,7 +790,7 @@ export type ShowExpression =
   /** Field of a computed row: `(lines -> first).price`. */
   | { type: "member"; base: ShowExpression; member: string }
   /** Field of the row a list command visits (`price` in `lines -> where price > 1`). */
-  | { type: "row_field"; field: string }
+  | { type: "row_field"; field: string; qualifier?: string[] }
   /** The item a value-list command visits (`>= 100 eur` in `fares -> where >= 100 eur`). */
   | { type: "row_value" }
   /** One `field: value` of a `with` row. */
@@ -796,7 +820,8 @@ export type ShowListCommand =
   | "where"
   | "sort"
   | "top"
-  | "with";
+  | "with"
+  | "key";
 
 /** One arm of a rule's flat last-match table. Default arm omits condition. */
 export interface ShowBranch {
@@ -831,6 +856,8 @@ export interface Show {
   required?: string[];
   /** Instance-list row schemas, referenced from `items.$ref`. */
   $defs?: Record<string, ShowRowSchema>;
+  /** Per `$defs` row schema name: row field to the `x-lemma-rules` keys that need it through an instance list. Fields no rule needs are absent; omitted when none. */
+  "x-lemma-row-field-needed-by-rules"?: Record<string, Record<string, string[]>>;
   /** Interned repository name; omitted for the unnamed workspace. */
   "x-lemma-repository"?: string;
   "x-lemma-effective-from"?: string;

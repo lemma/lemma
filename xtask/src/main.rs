@@ -9,6 +9,7 @@ mod maven_natives;
 mod nuget_natives;
 mod recursion;
 mod schema;
+mod todo_check;
 mod versions;
 mod versions_diff;
 mod warnings;
@@ -44,6 +45,36 @@ fn run(args: &[&str]) {
     }
 }
 
+fn run_publishable_package_gate() {
+    // --list checks the package file set without resolving path+version pins against
+    // crates.io. Full package/verify needs the registry; release bottom-up publish owns that.
+    for crate_name in ["lemma-engine", "lemma-lsp", "lemma-openapi", "lemma"] {
+        let args = ["package", "-p", crate_name, "--list", "--allow-dirty"];
+        let output = Command::new(cargo_bin())
+            .args(args)
+            .output()
+            .unwrap_or_else(|e| panic!("failed to run {} {args:?}: {e}", cargo_bin()));
+        let combined = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        if !output.status.success() {
+            print!("{combined}");
+            exit_for_child_status(output.status, &format!("{} {args:?}", cargo_bin()));
+        }
+        if let Err(error) =
+            warnings::reject_warnings_in_output(&format!("cargo {args:?}"), &combined)
+        {
+            print!("{combined}");
+            eprintln!("{error}");
+            std::process::exit(1);
+        }
+        let file_count = output.stdout.iter().filter(|&&b| b == b'\n').count();
+        eprintln!("package --list {crate_name}: ok ({file_count} files)");
+    }
+}
+
 fn run_versions_verify() {
     let root = versions::workspace_root();
     if let Err(e) = versions::versions_verify(&root) {
@@ -68,7 +99,6 @@ const FUZZ_TARGETS: &[&str] = &[
     "fuzz_literals",
     "fuzz_deeply_nested",
     "fuzz_data_bindings",
-    "fuzz_snapshot_decode",
 ];
 /// Wall-clock budget for `--fuzz`, split evenly across [`FUZZ_TARGETS`].
 const FUZZ_BUDGET_SECS: u64 = 300;
@@ -348,30 +378,46 @@ fn run_fuzz_precommit() {
     }
 }
 
-fn parse_precommit_flags(args: impl Iterator<Item = String>) -> bool {
-    let mut run_fuzz = false;
-    for arg in args {
-        match arg.as_str() {
-            "--fuzz" => run_fuzz = true,
-            other => {
-                eprintln!("xtask: unknown precommit flag {other:?}");
-                usage();
-                std::process::exit(1);
-            }
-        }
-    }
-    run_fuzz
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PrecommitFlags {
+    run_coverage: bool,
+    run_fuzz: bool,
 }
 
-fn precommit(run_fuzz: bool) {
-    eprintln!("xtask: versions-verify");
-    run_versions_verify();
-    eprintln!("xtask: mix precommit");
-    run_mix_precommit();
-    eprintln!("xtask: vscode ci + compile + package");
-    run_vscode_precommit();
+fn parse_precommit_flags(args: impl Iterator<Item = String>) -> Result<PrecommitFlags, String> {
+    let mut flags = PrecommitFlags {
+        run_coverage: false,
+        run_fuzz: false,
+    };
+    for arg in args {
+        match arg.as_str() {
+            "--coverage" => flags.run_coverage = true,
+            "--fuzz" => flags.run_fuzz = true,
+            other => return Err(format!("unknown precommit flag {other:?}")),
+        }
+    }
+    Ok(flags)
+}
+
+fn precommit_from_args(args: impl Iterator<Item = String>) {
+    match parse_precommit_flags(args) {
+        Ok(flags) => precommit(flags),
+        Err(message) => {
+            eprintln!("xtask: {message}");
+            usage();
+            std::process::exit(1);
+        }
+    }
+}
+
+fn precommit(flags: PrecommitFlags) {
     eprintln!("xtask: fmt --check");
     run(&["fmt", "--all", "--", "--check"]);
+    eprintln!("xtask: todo-check");
+    if let Err(e) = todo_check::run(&versions::workspace_root()) {
+        eprintln!("{e}");
+        std::process::exit(1);
+    }
     eprintln!("xtask: recursion-check");
     if let Err(e) = recursion::run(&versions::workspace_root()) {
         eprintln!("{e}");
@@ -412,6 +458,12 @@ fn precommit(run_fuzz: bool) {
         "-D",
         "warnings",
     ]);
+    eprintln!("xtask: versions-verify");
+    run_versions_verify();
+    eprintln!("xtask: mix precommit");
+    run_mix_precommit();
+    eprintln!("xtask: vscode ci + compile + package");
+    run_vscode_precommit();
     eprintln!("xtask: nextest");
     run(&[
         "nextest",
@@ -421,19 +473,8 @@ fn precommit(run_fuzz: bool) {
         "--run-ignored",
         "all",
     ]);
-    eprintln!("xtask: cargo package (publishable crates)");
-    run(&[
-        "package",
-        "-p",
-        "lemma-engine",
-        "-p",
-        "lemma-lsp",
-        "-p",
-        "lemma-openapi",
-        "-p",
-        "lemma",
-        "--allow-dirty",
-    ]);
+    eprintln!("xtask: cargo package --list (publishable crates)");
+    run_publishable_package_gate();
     eprintln!("xtask: npm wasm package");
     run_npm_wasm_precommit();
     eprintln!("xtask: maven package");
@@ -441,13 +482,15 @@ fn precommit(run_fuzz: bool) {
     eprintln!("xtask: nuget package");
     run_nuget_precommit();
     run_deny_precommit();
-    eprintln!("xtask: coverage --check");
-    let root = versions::workspace_root();
-    if let Err(e) = coverage::run(&root, &[String::from("all"), String::from("--check")]) {
-        eprintln!("coverage: {e}");
-        std::process::exit(1);
+    if flags.run_coverage {
+        eprintln!("xtask: coverage --check");
+        let root = versions::workspace_root();
+        if let Err(e) = coverage::run(&root, &[String::from("all"), String::from("--check")]) {
+            eprintln!("coverage: {e}");
+            std::process::exit(1);
+        }
     }
-    if run_fuzz {
+    if flags.run_fuzz {
         eprintln!("xtask: fuzz (5 minute budget across targets)");
         run_fuzz_precommit();
     }
@@ -456,7 +499,7 @@ fn precommit(run_fuzz: bool) {
 
 fn usage() {
     eprintln!(
-        "usage:\n  cargo precommit [--fuzz] | cargo run -p xtask -- [precommit] [--fuzz]\n  cargo verify   | cargo run -p xtask -- versions-verify\n  cargo bump <version> | cargo run -p xtask -- versions-bump <version>\n  cargo changelog | cargo run -p xtask -- versions-diff [semver]\n  cargo lsp | cargo run -p xtask -- lsp [vsix|prepare|package|publish-marketplace|publish-openvsx|--help]\n  cargo run -p xtask -- hex-standalone\n  cargo benchmarks <engine|cli|all> | cargo run -p xtask -- benchmarks <engine|cli|all>\n  cargo coverage <engine|cli|all> [--check] | cargo run -p xtask -- coverage <engine|cli|all> [--check]\n  cargo run -p xtask -- schema [--check]\n  cargo run -p xtask -- llms\n  cargo run -p xtask -- maven-natives\n  cargo run -p xtask -- nuget-natives\n  cargo run -p xtask -- recursion-check\n\n  --fuzz  after the gate, run engine/fuzz for 5 minutes total (split across targets; CI uses this)"
+        "usage:\n  cargo precommit [--coverage] [--fuzz] | cargo run -p xtask -- [precommit] [--coverage] [--fuzz]\n  cargo verify   | cargo run -p xtask -- versions-verify\n  cargo bump <version> | cargo run -p xtask -- versions-bump <version>\n  cargo changelog | cargo run -p xtask -- versions-diff [semver]\n  cargo lsp | cargo run -p xtask -- lsp [vsix|prepare|package|publish-marketplace|publish-openvsx|--help]\n  cargo run -p xtask -- hex-standalone\n  cargo benchmarks <engine|cli|all> | cargo run -p xtask -- benchmarks <engine|cli|all>\n  cargo coverage <engine|cli|all> [--check] | cargo run -p xtask -- coverage <engine|cli|all> [--check]\n  cargo run -p xtask -- schema [--check]\n  cargo run -p xtask -- llms\n  cargo run -p xtask -- maven-natives\n  cargo run -p xtask -- nuget-natives\n  cargo run -p xtask -- recursion-check\n  cargo run -p xtask -- todo-check\n\n  --coverage  after the gate, run coverage all --check (CI uses this)\n  --fuzz      after the gate, run engine/fuzz for 5 minutes total (split across targets; CI push uses this)"
     );
 }
 
@@ -464,12 +507,12 @@ fn main() {
     let mut args = std::env::args().skip(1);
     let sub = args.next();
     match sub.as_deref() {
-        None => precommit(parse_precommit_flags(args)),
-        Some("precommit") => precommit(parse_precommit_flags(args)),
-        Some("--fuzz") => {
-            let mut rest = vec!["--fuzz".to_string()];
+        None => precommit_from_args(args),
+        Some("precommit") => precommit_from_args(args),
+        Some(flag @ ("--coverage" | "--fuzz")) => {
+            let mut rest = vec![flag.to_string()];
             rest.extend(args);
-            precommit(parse_precommit_flags(rest.into_iter()));
+            precommit_from_args(rest.into_iter());
         }
         Some("versions-verify") => {
             run_versions_verify();
@@ -617,6 +660,18 @@ fn main() {
                 std::process::exit(1);
             }
         }
+        Some("todo-check") => {
+            if args.next().is_some() {
+                eprintln!("todo-check: takes no arguments");
+                usage();
+                std::process::exit(1);
+            }
+            let root = versions::workspace_root();
+            if let Err(e) = todo_check::run(&root) {
+                eprintln!("{e}");
+                std::process::exit(1);
+            }
+        }
         Some("-h" | "--help" | "help") => {
             usage();
         }
@@ -625,5 +680,35 @@ fn main() {
             usage();
             std::process::exit(1);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{parse_precommit_flags, PrecommitFlags};
+
+    fn flags(args: &[&str]) -> PrecommitFlags {
+        parse_precommit_flags(args.iter().copied().map(str::to_string)).expect("valid flags")
+    }
+
+    #[test]
+    fn bare_precommit_skips_coverage_and_fuzz() {
+        let parsed = flags(&[]);
+        assert!(!parsed.run_coverage);
+        assert!(!parsed.run_fuzz);
+    }
+
+    #[test]
+    fn coverage_and_fuzz_flags_combine_in_either_order() {
+        let coverage_first = flags(&["--coverage", "--fuzz"]);
+        let fuzz_first = flags(&["--fuzz", "--coverage"]);
+        assert!(coverage_first.run_coverage && coverage_first.run_fuzz);
+        assert_eq!(coverage_first, fuzz_first);
+    }
+
+    #[test]
+    fn unknown_precommit_flag_is_rejected() {
+        let err = parse_precommit_flags(["--nope".to_string()].into_iter()).unwrap_err();
+        assert!(err.contains("--nope"), "{err}");
     }
 }

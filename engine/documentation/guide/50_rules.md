@@ -13,7 +13,7 @@ Default is not "prefer yes/no." It is the answer **in principle for this rule's 
 
 Examples by domain: shipping often earned (`no` unless grant); discount often `0%`; fees use the policy's usual fee, not "free unless expensive."
 
-Forbidden: double denial (`yes` / `unless not … then no`); fail-each-check cascades; invented `*_compliant` default-yes helpers; a single `no` / `unless … then yes` when the condition is the whole answer (see **Anti-patterns**). In `and` chains, do not mix a bare name with `is false` (WRONG: `x and y is false`); use parallel probes (`x is false and y is true`) or parentheses. `not` before `and` takes the call form: `not(x) and y`.
+Forbidden: double denial (`yes` / `unless not … then no`); fail-each-check cascades; invented `*_compliant` default-yes helpers; a single `no` / `unless … then yes` when the condition is the whole answer (see **Anti-patterns**). In `and` chains, do not mix a bare name with `is false` (WRONG: `x and y is false`); use parallel probes (`x is false and y is true`) or parentheses. `or` binds looser than `and`: `a or b and c` is `a or (b and c)`. `not` before `and` or `or` takes the call form: `not(x) and y`, `not(x) or y`.
 
 **Overlapping unless (last wins)**
 
@@ -39,7 +39,7 @@ VIP ordering 75 items gets **25%** (not 20%): both `qty >= 50` and `is_vip` matc
 
 **List commands**
 
-Postfix `->` in rule expressions: `staff -> sum bonus`, `menu -> find ordered`, `staff -> sort salary desc -> first`. One operand is bare; anything wider takes parentheses (`lines -> sum(qty * price)`). `->` binds tighter than operators: `items -> count > 0`.
+Postfix `->` in rule expressions: `staff -> sum bonus`, `menu -> find ordered`, `staff -> sort salary desc -> first`. One operand is bare; anything wider takes parentheses (`lines -> sum(qty * price)`). `->` takes everything on its left up to a comparison, `in`, `not`, `and`, `or`: `items -> count > 0`, `own_cost + (parts -> sum cost)`.
 
 - Reduce: `sum`, `avg`, `product`, `min`, `max`, `count`, `any`, `all`.
 - Transform (same list type): `where`, `sort ... asc|desc`, `top n`, `with`.

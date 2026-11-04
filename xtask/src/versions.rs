@@ -10,10 +10,12 @@ mod tracked {
 
     pub const PATH_DEP_MANIFESTS: &[&str] = &[
         "cli/Cargo.toml",
+        "xtask/Cargo.toml",
         "openapi/Cargo.toml",
         "engine/lsp/Cargo.toml",
         "engine/packages/hex/native/lemma_hex/Cargo.toml",
         "engine/packages/maven/native/lemma_jni/Cargo.toml",
+        "engine/packages/nuget/native/lemma_dotnet/Cargo.toml",
     ];
 
     pub const HEX_MIX: &str = "engine/packages/hex/mix.exs";

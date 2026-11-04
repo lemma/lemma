@@ -24,8 +24,6 @@ use crate::computation::rational::{NumericFailure, RationalInteger};
 use crate::computation::VetoType;
 use crate::parsing::ast::PrimitiveKind;
 use crate::planning::semantics::{ComparisonComputation, LemmaType, LiteralValue, ValueKind};
-use serde::de::Visitor;
-use serde::{Deserialize, Deserializer, Serialize};
 
 /// One breakpoint in an ordered dispatch table.
 ///
@@ -38,39 +36,14 @@ use serde::{Deserialize, Deserializer, Serialize};
 /// `extract_reachable`, and `PlanView` merges, so a shared string is one refcount
 /// bump per clone where an owned one is an allocation per clone (measured 10%
 /// slower load on the 126000 logistics fixture).
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum DispatchKey {
-    Text(#[serde(deserialize_with = "arc_str_from_str")] Arc<str>),
+    Text(Arc<str>),
     /// Stored magnitude of a number, ratio or measure. Measure magnitudes are held
     /// in canonical base-unit space, which is why one key covers all three.
     Rational(RationalInteger),
     Date(NaiveDateTime),
     Time(NaiveDateTime),
-}
-
-/// serde's own `Arc<str>` impl goes through an intermediate `String` (two
-/// allocations and a copy per key); this builds the `Arc` straight from the
-/// decoded `&str`.
-fn arc_str_from_str<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Arc<str>, D::Error> {
-    struct ArcStrVisitor;
-
-    impl Visitor<'_> for ArcStrVisitor {
-        type Value = Arc<str>;
-
-        fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            formatter.write_str("a string")
-        }
-
-        fn visit_str<E: serde::de::Error>(self, value: &str) -> Result<Arc<str>, E> {
-            Ok(Arc::from(value))
-        }
-
-        fn visit_string<E: serde::de::Error>(self, value: String) -> Result<Arc<str>, E> {
-            Ok(Arc::from(value))
-        }
-    }
-
-    deserializer.deserialize_str(ArcStrVisitor)
 }
 
 /// Borrowed probe used only while searching a dispatch table.
@@ -131,7 +104,7 @@ pub(crate) fn dispatch_key_of_literal(
     value: &ValueKind,
 ) -> Result<DispatchKey, DispatchKeyBuildError> {
     match value {
-        ValueKind::Text(text) => Ok(DispatchKey::Text(Arc::from(text.as_str()))),
+        ValueKind::Text(text) => Ok(DispatchKey::Text(Arc::clone(text))),
         ValueKind::Number(magnitude)
         | ValueKind::Measure(magnitude)
         | ValueKind::Ratio(magnitude) => Ok(DispatchKey::Rational(magnitude.clone())),
@@ -163,7 +136,7 @@ pub(crate) enum DispatchProbeOutcome<'a> {
 
 pub(crate) fn dispatch_probe_of(value: &ValueKind) -> DispatchProbeOutcome<'_> {
     match value {
-        ValueKind::Text(text) => DispatchProbeOutcome::Probe(DispatchProbe::Text(text.as_str())),
+        ValueKind::Text(text) => DispatchProbeOutcome::Probe(DispatchProbe::Text(text.as_ref())),
         ValueKind::Number(magnitude)
         | ValueKind::Measure(magnitude)
         | ValueKind::Ratio(magnitude) => {
@@ -625,18 +598,6 @@ mod tests {
     }
 
     #[test]
-    fn text_key_serde_is_a_plain_string_and_round_trips() {
-        let key = text_key("NL");
-        let json = serde_json::to_string(&key).expect("serialize");
-        assert_eq!(json, r#"{"Text":"NL"}"#);
-        let restored: DispatchKey = serde_json::from_str(&json).expect("deserialize json");
-        assert_eq!(restored, key);
-        let bytes = postcard::to_allocvec(&key).expect("serialize postcard");
-        let restored: DispatchKey = postcard::from_bytes(&bytes).expect("deserialize postcard");
-        assert_eq!(restored, key);
-    }
-
-    #[test]
     fn paint_last_wins_matches_forward_overwrite_on_overlapping_spans() {
         // Same scenario as the fold test: x > 5 then 1, x > 10 then 2.
         // Regions: below5 | at5 | (5,10) | at10 | above10
@@ -690,7 +651,7 @@ mod tests {
 
     #[test]
     fn probe_of_text_and_rational_borrows_without_clone() {
-        let text = ValueKind::Text("NL".to_string());
+        let text = ValueKind::Text(Arc::from("NL"));
         let number = ValueKind::Number(rational_new(3, 1));
         match dispatch_probe_of(&text) {
             DispatchProbeOutcome::Probe(DispatchProbe::Text(borrowed)) => {
@@ -725,13 +686,13 @@ mod tests {
                 ComparisonComputation::Is,
             ),
             (
-                LiteralValue::text("NL".into()),
-                LiteralValue::text("NL".into()),
+                LiteralValue::text("NL"),
+                LiteralValue::text("NL"),
                 ComparisonComputation::Is,
             ),
             (
-                LiteralValue::text("NL".into()),
-                LiteralValue::text("BE".into()),
+                LiteralValue::text("NL"),
+                LiteralValue::text("BE"),
                 ComparisonComputation::IsNot,
             ),
             (

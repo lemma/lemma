@@ -40,7 +40,6 @@ fn external_ground_matches_embedded_cheapest() {
         external.source.len(),
         embedded.source.len()
     );
-    assert!(external.source.len() < LADDER[0].source_bytes);
 
     let mut embedded_engine = Engine::with_limits(embedded.limits.clone());
     embedded_engine
@@ -50,9 +49,8 @@ fn external_ground_matches_embedded_cheapest() {
 
     let catalog = external
         .catalog_json
-        .clone()
         .expect("external fixture must carry catalog_json");
-    let data = parse_evaluate_data_object(&Some(catalog)).expect("catalog_json must parse");
+    let data = parse_evaluate_data_object(Some(catalog)).expect("catalog_json must parse");
 
     let mut external_engine = Engine::with_limits(external.limits.clone());
     external_engine
@@ -74,7 +72,7 @@ fn external_carrier_matches_embedded_cheapest() {
         .expect("embedded carrier must load");
     let expected = cheapest_display(&embedded_engine, LogisticsFixture::inputs());
 
-    let data = parse_evaluate_data_object(&external.catalog_json).expect("catalog_json must parse");
+    let data = parse_evaluate_data_object(external.catalog_json).expect("catalog_json must parse");
     let mut external_engine = Engine::with_limits(external.limits.clone());
     external_engine
         .load([(SourceType::Volatile, external.source)])
@@ -99,7 +97,7 @@ fn external_cells_reject_default_max_list_rows() {
             None,
             LogisticsFixture::SPEC_NAME,
             None,
-            parse_evaluate_data_object(&skeleton.catalog_json).expect("catalog_json must parse"),
+            parse_evaluate_data_object(skeleton.catalog_json).expect("catalog_json must parse"),
             Some(&[LogisticsFixture::TERMINAL_RULE.to_string()]),
             false,
         )

@@ -1,10 +1,11 @@
 //! End-to-end tests for strict veto semantics under normalization.
 //!
 //! Normalization may only delete a subexpression whose removal cannot change the
-//! result: a total operand, or a literal `false` operand of `and`, which decides the
-//! conjunction whatever the other operands are. These tests pin the contract that the
-//! folded and unfolded forms of the same expression produce identical evaluation
-//! results for all of: value present, value missing, and operand vetoes.
+//! result: a total operand, a literal `false` operand of `and`, or a literal `true`
+//! operand of `or`. Those absorbing literals decide the connective whatever the
+//! other operands are. These tests pin the contract that the folded and unfolded
+//! forms of the same expression produce identical evaluation results for all of:
+//! value present, value missing, and operand vetoes.
 
 use indexmap::IndexMap;
 use lemma::{DateTimeValue, Engine, EvaluateDataValue};
@@ -424,6 +425,84 @@ rule backward: {} and {}
                 rule_result(&response, "backward"),
                 &expected_and(second, first),
                 &format!("backward {second_kind:?} and {first_kind:?}"),
+            );
+        }
+    }
+}
+
+/// Expected outcome of `first or second`. A true operand decides regardless of
+/// position. Otherwise the first missing or vetoed operand in source order
+/// propagates.
+fn expected_or(first: (OperandKind, &'static str), second: (OperandKind, &'static str)) -> Outcome {
+    let operands = [first, second];
+    if operands.iter().any(|(kind, _)| *kind == OperandKind::True) {
+        return Outcome::Result("true");
+    }
+    for (kind, _) in operands {
+        match kind {
+            OperandKind::False => {}
+            OperandKind::True => unreachable!("BUG: true operand decided above"),
+            OperandKind::Missing => {
+                let names = operands
+                    .iter()
+                    .filter(|(kind, _)| *kind == OperandKind::Missing)
+                    .map(|(_, name)| *name)
+                    .collect();
+                return Outcome::Missing(names);
+            }
+            OperandKind::Veto => return Outcome::Veto("blocked"),
+        }
+    }
+    Outcome::Result("false")
+}
+
+#[test]
+fn or_is_order_independent_for_every_operand_kind_pair() {
+    let kinds = [
+        OperandKind::True,
+        OperandKind::False,
+        OperandKind::Missing,
+        OperandKind::Veto,
+    ];
+    for first_kind in kinds {
+        for second_kind in kinds {
+            let first = (first_kind, "a");
+            let second = (second_kind, "b");
+            let engine = load(&format!(
+                r#"
+spec matrix
+data a: boolean
+data b: boolean
+rule blocked: veto "blocked"
+rule forward: {} or {}
+rule backward: {} or {}
+"#,
+                operand_expression(first_kind, "a"),
+                operand_expression(second_kind, "b"),
+                operand_expression(second_kind, "b"),
+                operand_expression(first_kind, "a"),
+            ));
+            let mut inputs: Vec<(&str, &str)> = Vec::new();
+            match first_kind {
+                OperandKind::True => inputs.push(("a", "true")),
+                OperandKind::False => inputs.push(("a", "false")),
+                OperandKind::Missing | OperandKind::Veto => {}
+            }
+            match second_kind {
+                OperandKind::True => inputs.push(("b", "true")),
+                OperandKind::False => inputs.push(("b", "false")),
+                OperandKind::Missing | OperandKind::Veto => {}
+            }
+            let response = run(&engine, "matrix", &inputs);
+            assert_outcome(
+                rule_result(&response, "forward"),
+                &expected_or(first, second),
+                &format!("forward {first_kind:?} or {second_kind:?}"),
+            );
+            assert_outcome(
+                rule_result(&response, "backward"),
+                &expected_or(second, first),
+                &format!("backward {second_kind:?} or {first_kind:?}"),
             );
         }
     }

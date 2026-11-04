@@ -82,7 +82,7 @@ rule discount:
   unless is_vip         then 25%
 ```
 
-Overrides stay flat: later rules can change outcomes by conditioning on earlier rules. There is no nesting and no encapsulation. There is no `or` operator; disjunction is expressed with unless chains or separate boolean rules. More patterns: [Conditional logic](../learn/conditional_logic.md).
+Overrides stay flat: later rules can change outcomes by conditioning on earlier rules. There is no nesting and no encapsulation. Compose booleans with `and`, `or`, and `not`. More patterns: [Conditional logic](../learn/conditional_logic.md).
 
 The example’s layout makes the `unless` chain read as a flat decision table. Last-match-wins removes the need for explicit negations, which keeps the table short and clear.
 
@@ -103,9 +103,9 @@ The example’s layout makes the `unless` chain read as a flat decision table. L
 | `^`      | Exponentiation                                | `base ^ exponent`  |
 
 
-**Modulo**: `a mod b` is floored: `a == floor(a / b) * b + (a mod b)`. Negative operands: `-7 mod 3` = `2`, `7 mod -3` = `-2`. `%` is the percent suffix only (`50%`), so a number before `%` is a percent literal and `7 % 3` is a parse error.
+**Modulo**: `a mod b` takes two numbers. It is floored: `a == floor(a / b) * b + (a mod b)`. Negative operands: `-7 mod 3` = `2`, `7 mod -3` = `-2`. A ratio or a measure on either side, including a `data` or `rule` reference, is a planning error. `%` is the percent suffix only (`50%`), so a number before `%` is a percent literal and `7 % 3` is a parse error.
 
-**Rounding operators** (`round`, `floor`, `ceil`) on measures operate on the magnitude in the operand's declared unit. `round(x as gram)` rounds the gram magnitude, not the original unit's.
+**Rounding**: `x -> round`, `x -> floor` and `x -> ceil` round a number to an integer. An exact half goes away from zero: `5 / 2 -> round` is `3`, `-5 / 2 -> round` is `-3`. With a step, `x -> round <step>`, `x -> floor <step>` and `x -> ceil <step>` round to a whole multiple of the step: `price -> round 0.05 eur` rounds to the nearest 5 cent, `duration -> ceil 15 minute` rounds up to the next quarter hour, `rate -> floor 0.1 percent` rounds down to a tenth of a percent, and `x -> round 0.01` rounds a number to two decimals. The step is a positive literal of the same kind as `x`: a number for a number, a ratio for a ratio, and a measure of the same family (or the same dimensions) for a measure. The result has the step's unit, so `weight -> round 1 kilogram` is in kilogram even when `weight` was in gram. Without a step, a measure or ratio is a planning error that suggests one with a unit (`price -> round 1 eur`), because the integer to round to depends on the unit. A step that is not a literal, is zero or negative, or does not fit `x` is a planning error. A step followed by a comparison takes the call form: `price -> round(0.05 eur) > 10 eur`. Prefix `round(x)`, `floor(x)` and `ceil(x)` are parse errors that suggest `x -> round`.
 
 ### Comparison
 
@@ -131,17 +131,18 @@ See [Veto](../learn/types_and_units.md#veto) to learn more about `veto` with for
 
 | Operator | Description | Example                       |
 | -------- | ----------- | ----------------------------- |
+| `or`     | Logical OR  | `is_adult or has_guardian`    |
 | `and`    | Logical AND | `is_valid and not is_blocked` |
 | `not`    | Logical NOT | `not is_suspended`, `not(score >= 70)` |
 
 
-There is no `or` operator. Express disjunction with `unless` chains or separate boolean rules. Within one condition, use `and` and `not`.
+`or` binds looser than `and`: `a or b and c` is `a or (b and c)`. `not` before `and` or `or` takes the call form: `not(a) or b`.
 
-`and` is order-independent. A `false` operand decides the result whatever the other operands are, so a missing or vetoed sibling does not matter. Without a `false` operand, the first missing or vetoed operand in source order decides the result.
+`and` and `or` are order-independent for their absorbing operand. A `false` operand decides `and`, and a `true` operand decides `or`, whatever the other operands are, so a missing or vetoed sibling does not matter. Without an absorbing operand, the first missing or vetoed operand in source order decides the result.
 
 ### Mathematical
 
-Prefix operators (and `not`) take their argument in one of two forms. **Call form** `floor(x)` (a space before `(` is allowed): the argument ends at the matching `)`, and operators after it apply to the result, so `floor(x) + 1` adds to the floored value and `floor (x + 1)` floors the sum. **Bare form** `floor x`: the argument is exactly one operand (a literal, reference, `->` chain, range literal, parenthesised expression, or another bare prefix operator such as `floor abs x`), and only `->`, `then`, `unless`, `)`, `,` or the end of the expression may follow it. `floor x + 1`, `floor x as gram`, `sqrt x ^ 2`, `not x > 3` and `not a and b` are parse errors that suggest both readings (`floor(x + 1)` or `floor(x) + 1`). A bare argument never starts with a sign: write `abs(-1)`. The formatter writes the bare form when it is allowed and the call form otherwise. `sqrt`, `sin`, `cos`, `tan`, `asin`, `acos`, `atan`, `log`, and `exp` require a **number**. `abs`, `ceil`, `floor`, and `round` also accept a **measure**: the unit is preserved and the operator applies to the magnitude in the operand's bound unit. `lower` and `upper` require a **range** (see [Range endpoints](#range-endpoints)).
+Prefix operators (and `not`) take their argument in one of two forms. **Call form** `abs(x)` (a space before `(` is allowed): the argument ends at the matching `)`, and operators after it apply to the result, so `abs(x) + 1` adds to the absolute value and `abs (x + 1)` takes the absolute value of the sum. **Bare form** `abs x`: the argument is exactly one operand (a literal, reference, range literal, parenthesised expression, or another bare prefix operator such as `abs sqrt x`), and only `->`, `then`, `unless`, `)`, `,` or the end of the expression may follow it. A `->` after it applies to the prefix result: `abs saldo -> floor 1 eur` floors `abs saldo`. `not` is the exception: `not x -> any` is a parse error; write `not (x -> any)`. `abs x + 1`, `abs x as gram`, `sqrt x ^ 2`, `not x > 3` and `not a and b` are parse errors that suggest both readings (`abs(x + 1)` or `abs(x) + 1`). A bare argument never starts with a sign: write `abs(-1)`. The formatter writes the bare form when it is allowed and the call form otherwise. `sqrt`, `sin`, `cos`, `tan`, `asin`, `acos`, `atan`, `log` and `exp` require a **number**. `abs` also accepts a **measure** or a **ratio**, and the unit is preserved. Rounding is postfix only (see **Rounding**). `lower` and `upper` require a **range** (see [Range endpoints](#range-endpoints)).
 
 
 | Operator | Description                     | Example                         |
@@ -155,10 +156,7 @@ Prefix operators (and `not`) take their argument in one of two forms. **Call for
 | `atan`   | Inverse tangent                 | `atan(value)` or `atan value`   |
 | `log`    | Natural logarithm               | `log(value)` or `log value`     |
 | `exp`    | Exponential                     | `exp(value)` or `exp value`     |
-| `abs`    | Absolute value (quantities too) | `abs(value)` or `abs value`     |
-| `floor`  | Round down (quantities too)     | `floor(value)` or `floor value` |
-| `ceil`   | Round up (quantities too)       | `ceil(value)` or `ceil value`   |
-| `round`  | Round nearest (quantities too)  | `round(value)` or `round value` |
+| `abs`    | Absolute value (measures and ratios too, no unit needed) | `abs(value)` or `abs value` |
 | `lower`  | Smaller endpoint of a range     | `lower(5...10)` or `lower period` |
 | `upper`  | Larger endpoint of a range (excluded) | `upper(5...10)` or `upper period` |
 
@@ -195,14 +193,16 @@ Lower binds looser. Use parentheses when an operand would otherwise bind too tig
 
 | Level | Constructs |
 | ----- | ---------- |
-| Lowest | `and` |
+| Lowest | `or` |
+| | `and` |
 | | `not` (see [Mathematical](#mathematical) for its argument) |
 | | Comparisons (`>`, `<`, `>=`, `<=`, `is`, `is not`), `in`, date predicates, `is veto` |
+| | `->` commands (see [Lists](#lists) and **Rounding**) |
 | | `+`, `-` |
 | | `*`, `/`, `mod` |
 | | `^` |
 | | `as` |
-| | Prefix operators (`sqrt`, `floor`, `lower`, `upper`, …): call form `floor(x)`, or one bare operand |
+| | Prefix operators (`sqrt`, `abs`, `lower`, `upper`, …): call form `abs(x)`, or one bare operand |
 | | `...` (range literal) |
 | Highest | Atoms, `veto`, `now`, `past`/`future` windows |
 
@@ -380,6 +380,8 @@ These edges participate in temporal slicing: the engine creates slice boundaries
 ### Setting data on an imported spec (`uses` block)
 
 Under a `uses` line, `  -> with path: value` sets a literal or reference on a **data slot of the imported spec**. The path is relative to that import (no alias prefix). Several pairs on one line are comma-separated (`-> with name: "Ada", monthly_salary: 7_500`). Standalone `with alias.field: …` is a parse error; nest under `uses`. Use `data` for local slots.
+
+When the target slot is an instance list, the value is one or more local `uses` names of the list's row Spec: `-> with components: spoke` adds one row and `-> with components: rim, hub, spoke` adds three rows in that comma order. Each row is a copy of the named instance: it lives under the list's own path (`components.1`) and its bindings are a copy of that instance's `-> with` bindings. A field the copy does not bind is data of that row (`components.1.weight`). The `uses` declarations may appear before or after the binding. Repeating a name is valid on a numbered list. On a list with `-> key`, the copied literal keys must be unique; conflicts are planning errors.
 
 Constraint chains (`-> ...`) on binding values are not allowed; they belong on `data`.
 
@@ -695,15 +697,15 @@ A list is an ordered sequence of rows of one type. See [Lists](../learn/lists.md
 
 | Form | Rows | Overridable |
 |------|------|-------------|
-| `data x: V list` | values of data type `V` (`money list`, `date range list`) | yes, as a whole |
-| `uses x: spec list` | instances of `spec` | yes, as a whole |
+| `data x: V list` | values of data type `V` (`money list`, `date range list`) | yes (whole list and/or dotted cells) |
+| `data x: spec list` | instances of `spec` | yes (whole list and/or dotted cells) |
 | `rule x: V list -> with ...` | fixed values | no |
-| `rule x: <list expression>` | computed | no |
+| `rule x: <list expression>` | computed / sealed catalog | no |
 
-- `list` follows the complete Spec reference, pin included: `uses brackets: tax_bracket 2024 list`, `uses rates: @carrier/tariffs rate 2025-06-01 list`.
-- `data x: spec list` is a planning error that suggests `uses x: spec list`.
+- Import one Spec with `uses`, own a list with `data x: spec list`, or seal a catalog as a list-valued rule.
+- Pin and `@repo` stay on `uses`: `uses tax_bracket 2024` then `data brackets: tax_bracket list`; `uses @carrier/tariffs rate 2025-06-01` then `data rates: rate list`.
 - A list without rows is empty. A list is never missing data.
-- In a type position, a list alias names the row Spec's types: `data ordered: menu.drink`. In an expression, a dot on a list alias is allowed only inside a command argument, where it names the current row.
+- In a type position, a **`uses` Spec alias** or a **`data` instance list** names row fields: `data ordered: menu_item.drink` and `data ordered: menu.drink`. A list-valued rule is not a type path. In an expression, a dot on a list alias is allowed only inside a command argument, where it names the current row.
 
 ### Rows: `-> with`
 
@@ -722,11 +724,11 @@ data fares: money list
 - On an instance list, `-> with field: value, field: value` adds one inline row. Fields are paths relative to the row Spec (`product.price`). A row may also continue over several lines after each comma.
 - `-> with ada, grace` adds named instances, declared with `uses`, as rows. One `-> with` cannot mix field pairs and references.
 - `-> with` only appends; it never replaces a row. In a Rule, `fares -> with 64 eur` appends to the current value of `fares`.
-- A Spec may declare a list of its own rows (`uses components: part list` inside `spec part`). Such a self-list has no source rows. Single-instance self-reference stays an error.
+- A Spec may declare a list of its own rows (`data components: part list` inside `spec part`). Such a self-list has no source rows. Single-instance self-reference stays an error.
 
 ### Keys
 
-- `-> key field, field` (instance lists only, before the first `-> with`) identifies rows by those fields of the row Spec. Dotted key fields are an error.
+- `-> key field, field` (instance lists only; at most once, before the first `-> with`) identifies rows by those fields of the row Spec. Dotted key fields are an error.
 - Without `-> key`, rows are numbered `1` to `n` in row order. Value lists are always numbered.
 - In source rows, a duplicate key, or overlapping ranges on a range key, is a planning error. When a key field has options, each row key must be one of those options; options need not all have a row.
 - In evaluation-data rows, a duplicate key, an invalid option or overlapping ranges vetoes the whole list.
@@ -734,7 +736,7 @@ data fares: money list
 
 ### Commands
 
-List commands are postfix `->` expressions in Rules and `unless` results. On a `data` or `uses` declaration they are a planning error. A command takes its argument bare when the argument is one operand (`staff -> sum bonus`). Otherwise it uses the call form (`lines -> sum(qty * price)`), with several arguments comma-separated inside the parentheses. `->` binds tighter than every binary operator.
+List commands are postfix `->` expressions in Rules and `unless` results. On a `data` declaration they are a planning error. A command takes its argument bare when the argument is one operand (`staff -> sum bonus`). Otherwise it uses the call form (`lines -> sum(qty * price)`), with several arguments comma-separated inside the parentheses. `->` binds looser than `+`, `-`, `*`, `/`, `mod`, `^` and `as`, and tighter than comparisons, `in`, `not`, `and` and `or`: `a + b -> sum x` is `(a + b) -> sum x`, and `items -> count > 0` is `(items -> count) > 0`. An arithmetic operator after a command is a parse error that asks for parentheses around the command: write `(fares -> sum) - 5 eur`. A bare argument followed by a comparison is a parse error too: write `staff -> sum(bonus) > 500 eur`.
 
 | Command | Value list | Instance list | Result |
 |---------|-----------|---------------|--------|
@@ -750,21 +752,21 @@ List commands are postfix `->` expressions in Rules and `unless` results. On a `
 | `first`, `last` | no argument | no argument | row |
 | `with` | values | field pairs | same list type |
 
-- A value-list condition is exactly one comparison with the row value as left operand: `fares -> where >= 100 eur`, `fares -> where in 100 eur...200 eur`, `codes -> any is "A1"`.
+- A value-list condition is a comparison with the row value as left operand: `fares -> where >= 100 eur`, `fares -> where in 100 eur...200 eur`, `codes -> any is "A1"`. Compound `and` / `or` needs call form: `fares -> where(> 5 or is 3)`, `fares -> where((> 5 and < 10) or is 3)`. Bare `where > 5 or is 3` is a parse error. Chained `where` commands still mean conjunction. An instance-list predicate is an ordinary boolean row expression: `people -> where(adult or guardian)`. Commas are not disjunction.
 - In an instance-list argument, the row's Data and Rules and the enclosing Spec's names are in scope. A name defined on both sides must be qualified with the list name (`components.quantity`).
 - `top n` takes a literal or a reference of type `number`. A reference that is not a whole number of at least 0 vetoes.
-- Row values are read with a dot: `selected_drink.price`, `(staff -> sort salary desc -> first).bonus`.
+- Row values are read with a dot: `selected_drink.price`, `(staff -> sort salary desc -> first).bonus`. If that member is a `uses` instance, it remains bound to the selected row and can be read or returned: `(lines -> first).item.price`, `(lines -> first).item`.
 - Veto: `avg`, `product`, `min`, `max`, `first`, `last` on an empty list; `find` with no row. If any row vetoes, the reduction or filter vetoes with the first such row's reason. `sum` over no rows is 0, `count` is 0, `any` is false, `all` is true, `where` gives an empty list.
 
 ### Reserved keywords
 
-`list`, `key`, `find`, `first`, `last`, `sum`, `avg`, `product`, `count`, `min`, `max`, `any`, `all`, `where`, `sort`, `top`, `asc`, `desc`, `is`, `past`, `future`, `permille` and `mod` are reserved in any case. They cannot be data, rule, spec, alias or unit names.
+`list`, `key`, `find`, `first`, `last`, `sum`, `avg`, `product`, `count`, `min`, `max`, `any`, `all`, `where`, `sort`, `top`, `asc`, `desc`, `is`, `past`, `future`, `permille`, `mod`, `or` and `that` are reserved in any case. They cannot be data, rule, spec, alias or unit names.
 
 ### Evaluation data and results
 
 - A list is one input key with an array that replaces every source row: literal strings for a value list, objects keyed by row data names for an instance list. Per-row keys such as `staff.2.salary` are request errors. `name=value` and form bodies cannot carry a list.
 - Missing row fields are reported by row number: `staff.2.salary`, `components.1.components.2.own_cost`.
-- A list result has `list` (one value per row). A row result has `row` (`spec`, `effective`, `instance`, `index`); `index` points into the response's top-level `rows`, which lists each referenced row once with its `data` and `rules`.
+- A list result has `list` (one value per row). A row result, including a `uses` instance projected from a row, has `row` (`spec`, `effective`, `instance`, `index`); `instance` names the bound path (`staff.2`, `lines.1.item`) and `index` points into the response's top-level `rows`, which lists each referenced row once with its `data` and `rules`.
 - Show types have `kind: "list"` with `element` and `key` (`"numbered"` or `{"fields": [...]}`).
 
 ## Data
@@ -812,12 +814,11 @@ data status: text
 data amount: measure
   -> unit eur: 1.00
   -> unit usd: 0.91
-  -> decimals 2
 ```
 
 A literal on the right-hand side fills the slot. A type alone leaves it open. `-> with <value>` fills a typed slot. `-> suggest` is only a suggestion for callers or UIs; it does not fill and so the engine still requires the value to be provided.
 
-Constraints such as `-> minimum`, `-> maximum`, `-> option`, `-> unit`, `-> decimals`, `-> with`, `-> suggest`, and `-> help` depend on the primitive: see [Data commands](#data-commands). At evaluation, an open input with no supplied value yields a missing-data veto when the rule needs it; a bad value (wrong type, failed constraint, disallowed option, excess decimals) vetoes that data. Duplicate names that canonicalize to the same identifier (for example `Age` and `age`) are a request error.
+Constraints such as `-> minimum`, `-> maximum`, `-> option`, `-> unit`, `-> decimals` (number only), `-> with`, `-> suggest`, and `-> help` depend on the primitive: see [Data commands](#data-commands). At evaluation, an open input with no supplied value yields a missing-data veto when the rule needs it; a bad value (wrong type, failed constraint, disallowed option, excess decimals on a number) vetoes that data. Duplicate names that canonicalize to the same identifier (for example `Age` and `age`) are a request error.
 
 ### Named types
 
@@ -848,7 +849,6 @@ spec money_type
 data money: measure
   -> unit eur: 1.00
   -> unit usd: 0.91
-  -> decimals 2
   -> minimum 0 eur
 ```
 
@@ -888,15 +888,27 @@ Each `->` row on a `data` declaration is a **data command**. Built-in primitives
 | `time range`    | The start time and end time of the time range.                   |
 
 
-**For** `measure` **and** `number`**:**
+`option` and `options` constrain any type, including each element of a list. `-> option` adds one literal of that type. `-> options` adds literals of that type, or names exactly one rule whose result is a list of that type. A later `-> option` or `-> options` adds to the set. A list of spec instances takes no `-> option` or `-> options`; that is a planning error. A quoted string is text. A bare name that is both a legal value and a rule is a planning error. A value outside the set vetoes. No `options` leaves the value unconstrained by a set. On a list, `minimum`, `maximum`, `decimals` (number only), and `length` belong on the element type. Text keeps those static displays on the type as `options`, and `show` also publishes them as `enum`. A rule result's `missing_data_options` is the closed list of values for this run. A missing input with no entry is not constrained. An empty array means nothing is valid.
 
-- `unit <name> <value>` - Define a unit (measure only; see [Compound units](#compound-units) for derived forms). Literals and `as` targets that use the unit follow [Qualifying units](#qualifying-units).
-- `decimals <n>` - Set decimal precision (0-255)
+**For** `number`**:**
+
+- `decimals <n>` - Set decimal precision (0-28)
 - `minimum <value>` - Set minimum value
 - `maximum <value>` - Set maximum value
 - `help "<text>"` - Add help text
 - `with <value>` - Fill the slot with a value (committed; callers may override). Cannot combine with `suggest` on the same declaration
 - `suggest <value>` - Set suggestion value (UI hint; does not commit)
+
+**For** `measure`**:**
+
+- `unit <name> <value>` - Define a unit (see [Compound units](#compound-units) for derived forms). Literals and `as` targets that use the unit follow [Qualifying units](#qualifying-units).
+- `minimum <value>` - Set minimum value
+- `maximum <value>` - Set maximum value
+- `help "<text>"` - Add help text
+- `with <value>` - Fill the slot with a value (committed; callers may override). Cannot combine with `suggest` on the same declaration
+- `suggest <value>` - Set suggestion value (UI hint; does not commit)
+
+A measure or ratio has no `decimals`: its precision depends on the unit. Round in a rule instead, for example `price -> round 0.01 eur`.
 
 **For** `ratio`**:**
 
@@ -911,8 +923,6 @@ In the **show JSON**, `measure` and `ratio` types expose type-level `minimum` / 
 
 **For** `text`**:**
 
-- `option "<value>"` - Add a single allowed option
-- `options "<value1>", "<value2>", ...` - Add multiple allowed options
 - `length <n>` - Exact string length
 - `help "<text>"` - Add help text
 - `with "<value>"` - Fill the slot with a value (committed; callers may override). Cannot combine with `suggest` on the same declaration

@@ -45,13 +45,6 @@ public sealed class Engine : IDisposable
         }
     }
 
-    public static Engine FromSnapshot(byte[] bytes)
-    {
-        ArgumentNullException.ThrowIfNull(bytes);
-        NativeLibraryLoader.EnsureLoaded();
-        return Call(() => new Engine(NativeEngine.FromSnapshot(bytes)));
-    }
-
     public void Load(string code)
     {
         ArgumentNullException.ThrowIfNull(code);
@@ -113,7 +106,7 @@ public sealed class Engine : IDisposable
     {
         ArgumentNullException.ThrowIfNull(spec);
         var json = WithNative(native => native.Show(repository, spec, effective));
-        return LemmaJson.Deserialize<Show>(json);
+        return Lemmabase.Lemma.Engine.Show.Parse(json);
     }
 
     public string Source(string? repository, string? spec = null, string? effective = null)
@@ -148,11 +141,6 @@ public sealed class Engine : IDisposable
     {
         var json = WithNative(native => native.Limits());
         return LemmaJson.Deserialize<ResourceLimits>(json);
-    }
-
-    public byte[] Snapshot()
-    {
-        return WithNative(native => native.Snapshot());
     }
 
     public IReadOnlyList<Recommendation> Quality()

@@ -6,10 +6,12 @@ use std::process::Command;
 
 pub use crate::versions::UNIFFI_VERSION;
 pub const UNIFFI_BINDGEN_CS_TAG: &str = "v0.11.0+v0.31.0";
+const CSHARPIER_VERSION: &str = "1.3.0";
 
 pub fn run(root: &Path) -> Result<(), String> {
     require_uniffi_bindgen_cs()?;
     verify_uniffi_crate_pin(root)?;
+    let csharpier_dir = ensure_csharpier(root)?;
 
     let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
     let target_dir = std::env::var("CARGO_TARGET_DIR")
@@ -58,7 +60,7 @@ pub fn run(root: &Path) -> Result<(), String> {
         "nuget-natives: uniffi-bindgen-cs --library {}",
         built.display()
     );
-    let status = Command::new("uniffi-bindgen-cs")
+    let output = Command::new("uniffi-bindgen-cs")
         .args([
             "--library",
             built.to_str().ok_or("library path is not UTF-8")?,
@@ -66,18 +68,166 @@ pub fn run(root: &Path) -> Result<(), String> {
             generated_dir.to_str().ok_or("generated dir is not UTF-8")?,
             "--config",
             config.to_str().ok_or("config path is not UTF-8")?,
+            "--no-format",
         ])
-        .status()
+        .output()
         .map_err(|e| format!("failed to run uniffi-bindgen-cs: {e}"))?;
-    if !status.success() {
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    print!("{combined}");
+    if !output.status.success() {
         return Err("uniffi-bindgen-cs failed".to_string());
     }
+    crate::warnings::reject_warnings_in_output("uniffi-bindgen-cs", &combined)?;
+    format_generated_csharp(&csharpier_dir, &generated_dir)?;
 
     let version = crate::versions::read_workspace_version(root)?;
     let version_file = nuget_pkg.join("engine.version");
     fs::write(&version_file, format!("{version}\n"))
         .map_err(|e| format!("failed to write {}: {e}", version_file.display()))?;
 
+    Ok(())
+}
+
+fn ensure_csharpier(root: &Path) -> Result<PathBuf, String> {
+    let tool_dir = root.join("target").join("csharpier");
+    fs::create_dir_all(&tool_dir)
+        .map_err(|e| format!("failed to create {}: {e}", tool_dir.display()))?;
+    let bin = tool_dir.join(csharpier_bin_name());
+    if bin.is_file() {
+        match csharpier_version(&bin) {
+            Ok(version) if version == CSHARPIER_VERSION => return Ok(tool_dir),
+            Ok(_) | Err(_) => {
+                let status = Command::new("dotnet")
+                    .args(["tool", "uninstall", "csharpier", "--tool-path"])
+                    .arg(&tool_dir)
+                    .status()
+                    .map_err(|e| format!("failed to run dotnet tool uninstall csharpier: {e}"))?;
+                if !status.success() {
+                    return Err(format!(
+                        "dotnet tool uninstall csharpier failed in {}",
+                        tool_dir.display()
+                    ));
+                }
+            }
+        }
+    }
+    eprintln!("nuget-natives: dotnet tool install csharpier {CSHARPIER_VERSION}");
+    let status = Command::new("dotnet")
+        .args([
+            "tool",
+            "install",
+            "csharpier",
+            "--version",
+            CSHARPIER_VERSION,
+            "--tool-path",
+        ])
+        .arg(&tool_dir)
+        .status()
+        .map_err(|e| format!("failed to run dotnet tool install csharpier: {e}"))?;
+    if !status.success() {
+        return Err(format!(
+            "dotnet tool install csharpier {CSHARPIER_VERSION} failed"
+        ));
+    }
+    if !bin.is_file() {
+        return Err(format!(
+            "csharpier {CSHARPIER_VERSION} installed but {} is missing",
+            bin.display()
+        ));
+    }
+    Ok(tool_dir)
+}
+
+fn csharpier_bin_name() -> &'static str {
+    if cfg!(windows) {
+        "csharpier.exe"
+    } else {
+        "csharpier"
+    }
+}
+
+fn csharpier_version(bin: &Path) -> Result<String, String> {
+    let output = Command::new(bin)
+        .arg("--version")
+        .output()
+        .map_err(|e| format!("failed to run {}: {e}", bin.display()))?;
+    if !output.status.success() {
+        return Err(format!("{} --version failed", bin.display()));
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    Ok(stdout.lines().next().unwrap_or("").trim().to_string())
+}
+
+fn format_generated_csharp(csharpier_dir: &Path, generated_dir: &Path) -> Result<(), String> {
+    let mut found = false;
+    let entries = fs::read_dir(generated_dir)
+        .map_err(|e| format!("failed to read {}: {e}", generated_dir.display()))?;
+    for entry in entries {
+        let path = entry
+            .map_err(|e| format!("failed to read {}: {e}", generated_dir.display()))?
+            .path();
+        if path.extension().and_then(|extension| extension.to_str()) != Some("cs") {
+            continue;
+        }
+        found = true;
+        // CSharpier skips paths matched by gitignore. Generated/ is gitignored, so format a copy outside the repo.
+        let temp_dir = std::env::temp_dir().join(format!("lemma-csharpier-{}", std::process::id()));
+        fs::create_dir_all(&temp_dir)
+            .map_err(|e| format!("failed to create {}: {e}", temp_dir.display()))?;
+        let file_name = path
+            .file_name()
+            .expect("BUG: C# binding path has no file name");
+        let temp_file = temp_dir.join(file_name);
+        fs::copy(&path, &temp_file).map_err(|e| {
+            format!(
+                "failed to copy {} to {}: {e}",
+                path.display(),
+                temp_file.display()
+            )
+        })?;
+        let bin = csharpier_dir.join(csharpier_bin_name());
+        eprintln!("nuget-natives: csharpier format {}", path.display());
+        let output = Command::new(&bin)
+            .args(["format", "--include-generated", "--no-cache"])
+            .arg(&temp_file)
+            .output()
+            .map_err(|e| format!("failed to run {}: {e}", bin.display()))?;
+        let combined = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        print!("{combined}");
+        if !output.status.success() {
+            return Err(format!("csharpier failed on {}", path.display()));
+        }
+        crate::warnings::reject_warnings_in_output("csharpier", &combined)?;
+        if !combined.contains("Formatted 1 ") {
+            return Err(format!(
+                "csharpier did not format {}:\n{combined}",
+                path.display()
+            ));
+        }
+        fs::copy(&temp_file, &path).map_err(|e| {
+            format!(
+                "failed to copy {} to {}: {e}",
+                temp_file.display(),
+                path.display()
+            )
+        })?;
+        fs::remove_dir_all(&temp_dir)
+            .map_err(|e| format!("failed to remove {}: {e}", temp_dir.display()))?;
+    }
+    if !found {
+        return Err(format!(
+            "uniffi-bindgen-cs wrote no C# files in {}",
+            generated_dir.display()
+        ));
+    }
     Ok(())
 }
 

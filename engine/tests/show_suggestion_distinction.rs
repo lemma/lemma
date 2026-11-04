@@ -134,25 +134,20 @@ rule r: a.r
     let template = engine
         .show(None, "a/template", Some(&now))
         .expect("template show");
-    let template_x = template.data.get("a.x").expect("a.x in template show");
     assert!(
-        template_x.value.is_some(),
-        "literal with must surface as value"
+        !template.data.contains_key("a.x"),
+        "sealed uses key must not be an input: {:?}",
+        template.data.keys().collect::<Vec<_>>()
     );
-    assert_eq!(
-        template_x.value.as_ref().and_then(|v| v.number),
-        Some(rust_decimal::Decimal::from(2)),
-        "literal with fills magnitude 2"
-    );
-    assert!(
-        template_x.suggestion.is_none(),
-        "template must not inherit typedef suggestion once slot is filled"
-    );
+    let response = engine
+        .evaluate(None, "a/template", Some(&now), IndexMap::new(), None, false)
+        .expect("evaluate");
+    assert_eq!(response.results.get("r").expect("r").result(), Some("2"));
 }
 
-/// Inner `uses a -> with x: 6` must surface on consumer Show as `b.a.x` value 6.
+/// Inner `uses a -> with x: 6` is sealed. Show omits `b.a.x`. Evaluation reads 6.
 #[test]
-fn show_lists_inner_with_literal_through_uses_chain() {
+fn show_omits_inner_with_literal_through_uses_chain() {
     let code = r#"
 spec a
 data x: number
@@ -172,12 +167,10 @@ rule z: b.a.x
         .expect("load");
     let now = DateTimeValue::now();
     let show = engine.show(None, "c", Some(&now)).expect("show c");
-    let entry = show.data.get("b.a.x").expect("b.a.x in show");
-    assert_eq!(
-        entry.value.as_ref().and_then(|v| v.number),
-        Some(rust_decimal::Decimal::from(6)),
-        "inner -> with must be Show value, got {:?}",
-        entry.value
+    assert!(
+        !show.data.contains_key("b.a.x"),
+        "sealed uses key must not be an input: {:?}",
+        show.data.keys().collect::<Vec<_>>()
     );
     let response = engine
         .evaluate(None, "c", Some(&now), IndexMap::new(), None, false)
@@ -205,13 +198,15 @@ rule z: b.a.x
         .expect("load");
     let now = DateTimeValue::now();
     let show = engine.show(None, "c", Some(&now)).expect("show c");
-    let entry = show.data.get("b.a.x").expect("b.a.x in show");
-    assert_eq!(
-        entry.value.as_ref().and_then(|v| v.number),
-        Some(rust_decimal::Decimal::from(2)),
-        "must not fall back to leaf data literal 1, got {:?}",
-        entry.value
+    assert!(
+        !show.data.contains_key("b.a.x"),
+        "sealed uses key must not be an input: {:?}",
+        show.data.keys().collect::<Vec<_>>()
     );
+    let response = engine
+        .evaluate(None, "c", Some(&now), IndexMap::new(), None, false)
+        .expect("evaluate");
+    assert_eq!(response.results.get("z").expect("z").result(), Some("2"));
 }
 
 #[test]
@@ -238,13 +233,15 @@ rule z: c.b.a.x
         .expect("load");
     let now = DateTimeValue::now();
     let show = engine.show(None, "d", Some(&now)).expect("show d");
-    let entry = show.data.get("c.b.a.x").expect("c.b.a.x in show");
-    assert_eq!(
-        entry.value.as_ref().and_then(|v| v.number),
-        Some(rust_decimal::Decimal::from(6)),
-        "3-hop Show must see b's with, got {:?}",
-        entry.value
+    assert!(
+        !show.data.contains_key("c.b.a.x"),
+        "sealed uses key must not be an input: {:?}",
+        show.data.keys().collect::<Vec<_>>()
     );
+    let response = engine
+        .evaluate(None, "d", Some(&now), IndexMap::new(), None, false)
+        .expect("evaluate");
+    assert_eq!(response.results.get("z").expect("z").result(), Some("6"));
 }
 
 #[test]
@@ -268,17 +265,19 @@ rule z: b.a.x
         .expect("load");
     let now = DateTimeValue::now();
     let show = engine.show(None, "c", Some(&now)).expect("show c");
-    let entry = show.data.get("b.a.x").expect("b.a.x in show");
-    assert_eq!(
-        entry.value.as_ref().and_then(|v| v.number),
-        Some(rust_decimal::Decimal::from(9)),
-        "outer deep with must win, got {:?}",
-        entry.value
+    assert!(
+        !show.data.contains_key("b.a.x"),
+        "sealed uses key must not be an input: {:?}",
+        show.data.keys().collect::<Vec<_>>()
     );
+    let response = engine
+        .evaluate(None, "c", Some(&now), IndexMap::new(), None, false)
+        .expect("evaluate");
+    assert_eq!(response.results.get("z").expect("z").result(), Some("9"));
 }
 
 #[test]
-fn evaluate_overrides_inner_with_listed_on_show() {
+fn evaluate_cannot_override_inner_with_listed_on_show() {
     let code = r#"
 spec a
 data x: number
@@ -297,10 +296,19 @@ rule z: b.a.x
         .load([(lemma::SourceType::Volatile, code.to_string())])
         .expect("load");
     let now = DateTimeValue::now();
+    let without = engine
+        .evaluate(None, "c", Some(&now), IndexMap::new(), None, false)
+        .expect("evaluate");
+    assert_eq!(without.results.get("z").expect("z").result(), Some("6"));
+
     let mut data = IndexMap::new();
     data.insert("b.a.x".to_string(), "8".into());
-    let response = engine
+    let err = engine
         .evaluate(None, "c", Some(&now), data, None, false)
-        .expect("evaluate");
-    assert_eq!(response.results.get("z").expect("z").result(), Some("8"));
+        .expect_err("sealed uses key is a request error");
+    let text = err.to_string();
+    assert!(
+        text.contains("x") || matches!(err, lemma::Error::Request { .. }),
+        "expected request Error, got: {text}"
+    );
 }

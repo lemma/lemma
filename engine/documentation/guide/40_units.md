@@ -29,7 +29,7 @@ Bare unit when exactly one declarer is in scope (`5 kilogram`, `5 eur`). When tw
 
 **Ranges: half-open intervals**
 
-Ranges: lower bound inclusive, upper bound exclusive (`lo...hi`). Test with `in`. Width: `lo...hi as <unit>` (duration/measure). Add `as number` only when a bare number is required. Bare `as number` on date/measure ranges fails. Read an endpoint with `lower` / `upper` (`lower 5...10`, `upper period`). `lower` is included; `upper` is excluded. `...` binds tighter than those operators. `-> lower` / `-> upper` still constrain a range slot; they are not the operators. `lower` and `upper` are reserved names. Typedefs: `number range`, `date range`, `measure range`, `ratio range`. Month/year intervals: `uses lemma units` and inline literals (`18 year...67 year`) or `units.calendar range`. Prefix operators (`floor`, `sqrt`, `lower`, …) and `not` take `floor(x)` or one bare operand: `floor(x) + 1` adds to the result, `floor (x + 1)` floors the sum, `floor x + 1` is a parse error.
+Ranges: lower bound inclusive, upper bound exclusive (`lo...hi`). Test with `in`. Width: `lo...hi as <unit>` (duration/measure). Add `as number` only when a bare number is required. Bare `as number` on date/measure ranges fails. Read an endpoint with `lower` / `upper` (`lower 5...10`, `upper period`). `lower` is included; `upper` is excluded. `...` binds tighter than those operators. `-> lower` / `-> upper` still constrain a range slot; they are not the operators. `lower` and `upper` are reserved names. Typedefs: `number range`, `date range`, `measure range`, `ratio range`. Month/year intervals: `uses lemma units` and inline literals (`18 year...67 year`) or `units.calendar range`. Prefix operators (`abs`, `sqrt`, `lower`, …) and `not` take `abs(x)` or one bare operand: `abs(x) + 1` adds to the result, `abs (x + 1)` takes the absolute value of the sum, `abs x + 1` is a parse error. Rounding is postfix: `x -> round` or `price -> round 0.05 eur`.
 
 The snippet below is a syntax sample, not one policy.
 
@@ -74,7 +74,7 @@ rule total:
   wage * time_worked
 ```
 
-Layer compound units: `eur_per_hour` builds on `eur` and `hour`. Dimensional checks run at plan time.
+Layer compound units: `eur_per_hour` builds on `eur` and `hour`. Dimensional checks run at plan time. A quantity raised to an integer power is a declared unit with that composition: `2 meter ^ 2` is `4 square_meter`. A power with no declared unit in scope is a planning error.
 
 **Date predicates relative to `now`**
 

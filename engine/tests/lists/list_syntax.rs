@@ -8,7 +8,8 @@ use crate::lists::{
 
 const KEYWORDS: &[&str] = &[
     "list", "key", "find", "first", "last", "sum", "avg", "product", "count", "min", "max", "any",
-    "all", "where", "sort", "top", "asc", "desc", "is", "past", "future", "permille", "mod",
+    "all", "where", "sort", "top", "asc", "desc", "is", "past", "future", "permille", "mod", "or",
+    "that",
 ];
 
 #[test]
@@ -69,12 +70,13 @@ data volume_band: volume range
 data price: money
 
 spec freight
-uses rates: freight_rate list
+uses freight_rate
+data rates: freight_rate list
   -> key band, volume_band
   -> with band: 0 kilogram...5 kilogram, volume_band: 0 liter...2 liter, price: 6.95 eur
 
-data parcel_weight: rates.weight
-data parcel_volume: rates.volume
+data parcel_weight: freight_rate.weight
+data parcel_volume: freight_rate.volume
 
 rule shipping_cost:
   (rates -> find parcel_weight, parcel_volume).price
@@ -241,8 +243,9 @@ fn command_call_and_bare_forms_on_value_list() {
         ("fares -> where(>= 100 eur) -> count", "1"),
         ("fares -> where (>= 100 eur) -> count", "1"),
         ("fares -> where in 60 eur...90 eur -> count", "2"),
-        ("fares -> sum * 2", "546 eur"),
-        ("fares -> sum - 5 eur", "268 eur"),
+        ("(fares -> sum) * 2", "546 eur"),
+        ("(fares -> sum) - 5 eur", "268 eur"),
+        ("fares -> sum > 200 eur", "true"),
         ("fares -> sort desc -> top 2 -> first", "120 eur"),
         ("(fares -> top 1 -> first) + 1 eur", "90 eur"),
     ] {
@@ -321,7 +324,8 @@ data qty: number
 data sku: text
 
 spec order
-uses lines: line list
+uses line
+data lines: line list
   -> with qty: 3, sku: "latte"
 
 rule first_qty:
@@ -347,7 +351,8 @@ uses item: product_info
 data qty: number
 
 spec order
-uses lines: line list
+uses line
+data lines: line list
   -> with qty: 3, item.price: 2 eur
 
 rule first_price:
@@ -369,7 +374,8 @@ data qty: number
 data sku: text
 
 spec order
-uses lines: line list
+uses line
+data lines: line list
   -> with qty: 3 sku: "latte"
 "#,
     );
@@ -389,7 +395,8 @@ uses item: product_info
 data qty: number
 
 spec order
-uses lines: line list
+uses line
+data lines: line list
   -> with qty: 3 item.price: 2 eur
 "#,
     );
@@ -406,7 +413,8 @@ data salary: measure
   -> unit eur: 1.00
 
 spec payroll
-uses staff: employee list
+uses employee
+data staff: employee list
   -> with name: "Ada", salary: 9000 eur
   -> with name: "Grace", salary: 9500 eur
 
@@ -435,7 +443,38 @@ data rate: ratio
             "tax.lemma",
             r#"
 spec income_tax
-uses brackets: tax_bracket 2024 list
+uses tax_bracket 2024
+data brackets: tax_bracket list
+  -> with rate: 36%
+
+rule first_rate:
+  (brackets -> first).rate
+"#,
+        ),
+    ]);
+    assert_eq!(
+        value(&evaluate(&engine, "income_tax", data(&[])), "first_rate"),
+        "36%"
+    );
+}
+
+#[test]
+fn list_element_is_the_uses_alias() {
+    let engine = load_files(&[
+        (
+            "bracket.lemma",
+            r#"
+spec tax_bracket 2024-01-01
+data rate: ratio
+  -> with 36%
+"#,
+        ),
+        (
+            "tax.lemma",
+            r#"
+spec income_tax
+uses tb: tax_bracket 2024
+data brackets: tb list
   -> with rate: 36%
 
 rule first_rate:
@@ -456,14 +495,13 @@ fn list_follows_repository_qualified_pin() {
         r#"
 spec rate 2025-06-01
 data price: measure
-  -> unit eur: 1.00
-  -> decimals 2
-"#,
+  -> unit eur: 1.00"#,
         &[(
             "shipping.lemma",
             r#"
 spec parcel
-uses rates: @carrier/tariffs rate 2025-06-01 list
+uses @carrier/tariffs rate 2025-06-01
+data rates: rate list
   -> with price: 4.95 eur
 
 rule first_price:

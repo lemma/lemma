@@ -7,7 +7,8 @@ const BASE: &str = r#"spec xx
 data z: number
 data name: text
 spec test
-uses zz: xx list
+uses xx
+data zz: xx list
   -> key z
   -> with z: 5, name: "b"
   -> with z: 7, name: "a"
@@ -143,7 +144,8 @@ uses dd
 data z: dd.code
 
 spec test 2025-01-01
-uses zz: xx list
+uses xx
+data zz: xx list
   -> key z
   -> with z: 5
   -> with z: 7

@@ -4,6 +4,7 @@
 
 use indexmap::IndexMap;
 use lemma::DateTimeValue;
+use lemma::EvaluateDataValue;
 use lemma::{Engine, SourceType};
 use std::collections::HashMap;
 use std::str::FromStr;
@@ -189,6 +190,150 @@ fn data_binding_at_max_fractional_digits_evaluates() {
         doubled.result.as_ref().expect("rule result value").number,
         Some(expected),
         "doubled 0.(1×{scale}) must be 0.(2×{scale})"
+    );
+}
+
+#[test]
+fn fuzz_data_bindings_multi_key_overlay_shapes_no_panic() {
+    let code = r#"
+spec item
+data name: text
+data price: measure
+  -> unit eur: 1
+spec fuzz_test
+uses item
+data n: number
+data b: boolean
+data items: item list
+  -> key name
+  -> with name: "a", price: 1 eur
+rule rn: n
+rule rb: b
+rule total: items -> sum price
+"#;
+    let mut engine = Engine::new();
+    engine
+        .load([(
+            SourceType::Path(std::sync::Arc::new(std::path::PathBuf::from(
+                "fuzz_binding_multi",
+            ))),
+            code.to_string(),
+        )])
+        .expect("multi-type fuzz fixture must load");
+
+    let entries = vec![
+        ("n".to_string(), EvaluateDataValue::Literal("3".into())),
+        ("b".to_string(), EvaluateDataValue::Boolean(true)),
+        (
+            "items.1.price".to_string(),
+            EvaluateDataValue::Map(IndexMap::from([(
+                "eur".to_string(),
+                EvaluateDataValue::Literal("9".into()),
+            )])),
+        ),
+        (
+            "nosuch".to_string(),
+            EvaluateDataValue::List(vec![EvaluateDataValue::Boolean(false)]),
+        ),
+    ];
+    let data = lemma::evaluate_data_from_entries(entries).expect("distinct keys");
+    let now = DateTimeValue::now();
+    // Property mirrored from fuzz_data_bindings: overlays and odd keys must not panic.
+    // Request Error and Veto are both acceptable outcomes.
+    match engine.evaluate(None, "fuzz_test", Some(&now), data, None, false) {
+        Ok(response) => {
+            assert!(response.results.contains_key("rn"));
+            std::hint::black_box(response);
+        }
+        Err(error) => {
+            std::hint::black_box(error);
+        }
+    }
+
+    // Shape mismatch against a scalar field is a request Error, never a panic.
+    let mismatch = lemma::evaluate_data_from_entries(vec![(
+        "n".to_string(),
+        EvaluateDataValue::Boolean(true),
+    )])
+    .expect("single key");
+    if let Err(error) = engine.evaluate(None, "fuzz_test", Some(&now), mismatch, None, false) {
+        std::hint::black_box(error);
+    }
+}
+
+#[test]
+fn fuzz_parser_explain_formats_without_panic() {
+    let code = r#"
+spec fuzz_explain
+data x: 2
+rule doubled: x * 2
+"#;
+    let mut engine = Engine::new();
+    engine
+        .load([(
+            SourceType::Path(std::sync::Arc::new(std::path::PathBuf::from(
+                "fuzz_explain",
+            ))),
+            code.to_string(),
+        )])
+        .expect("explain fixture must load");
+    let now = DateTimeValue::now();
+    let response = engine
+        .evaluate(
+            None,
+            "fuzz_explain",
+            Some(&now),
+            IndexMap::new(),
+            None,
+            true,
+        )
+        .expect("explain evaluate must succeed");
+    serde_json::to_string(&lemma::api::Response::from(&response))
+        .expect("Response with explanations must serialize");
+    let doubled = response.results.get("doubled").expect("doubled");
+    let explanation = doubled
+        .explanation
+        .as_ref()
+        .expect("explain:true must attach an explanation");
+    let ascii = lemma::format_explanation(explanation);
+    assert!(
+        ascii.contains("doubled"),
+        "formatted explanation must name the rule, got: {ascii}"
+    );
+    std::hint::black_box(format!("{explanation:?}"));
+}
+
+#[test]
+fn fuzz_expressions_typed_operand_loads_and_evaluates() {
+    let code = r#"
+spec fuzz_test
+uses lemma units
+data x: 100
+data y: 50
+data flag: true
+data label: "a"
+data m: measure
+  -> unit kilogram: 1
+  -> unit gram: 0.001
+  -> suggest 1 kilogram
+rule test_expr: (x + y) * 2
+"#;
+    let mut engine = Engine::new();
+    engine
+        .load([(
+            SourceType::Path(std::sync::Arc::new(std::path::PathBuf::from("fuzz_expr"))),
+            code.to_string(),
+        )])
+        .expect("typed operand fixture must load");
+    let now = DateTimeValue::now();
+    let response = engine
+        .evaluate(None, "fuzz_test", Some(&now), IndexMap::new(), None, false)
+        .expect("typed operand evaluate must succeed");
+    let result = response.results.get("test_expr").expect("test_expr");
+    assert!(
+        !result.vetoed,
+        "typed operand fixture must not veto, got {:?}",
+        result.veto_reason
     );
 }
 

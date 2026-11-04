@@ -28,7 +28,7 @@ Input parsing and response decimal strings both enforce [`Decimal::MAX_SCALE`](h
 | Literals, JSON input, API input | Magnitude ±79,228,162,514,264,337,593,543,950,335 (~7.92×10²⁸); at most 28 decimal digits (`Decimal::MAX_SCALE`) |
 | Internal compute (ℚ) | Numerator and denominator of every operator result at most 32,768 bits each (up to 9,865 decimal digits); all BigInt allocation is fallible |
 
-Intermediate values during evaluation may exceed the decimal range or use more precision than 28 digits. Internal computation never precision-fails. Only top-level rule results written into the response envelope are rounded to `Decimal::MAX_SCALE`. Magnitude overflow (`|value| > Decimal::MAX`) vetoes with `Calculated result exceeds decimal value limit`. That rounding applies when building the response envelope, not when storing in `rule_values` (which keeps exact ℚ values).
+Intermediate values during evaluation may exceed the decimal range or use more precision than 28 digits. Internal computation never precision-fails. Only top-level rule results written into the response envelope are rounded to `Decimal::MAX_SCALE`. Magnitude overflow (`|value| > Decimal::MAX`) vetoes with `Calculated result exceeds decimal value limit`. That rounding applies when building the response envelope, not when storing in `rule_values` (which keeps exact ℚ values). `round`, `floor`, and `ceil` do not pass through this boundary.
 
 Every operator result (`+`, `-`, `*`, `/`, `mod`, `^` on numbers, ratios and quantities) is checked against the 32,768-bit limit on its numerator and on its denominator. A result beyond it vetoes with `numeric result exceeds the maximum of 32768 bits`. With `data base: number` bound to `2`, `base ^ 32767` (32,768 bits) evaluates exactly and `base ^ 32768` vetoes. A power whose result provably exceeds the limit vetoes before it is computed, so `2 ^ years` with a huge `years` fails immediately. Constant number expressions (every operand a number literal) are folded during planning; one that exceeds the limit is a planning Error instead of a Veto, like `1 / 0`.
 
@@ -44,10 +44,12 @@ CLI and human-readable formatting show a decimal when [`RationalInteger::try_to_
 
 These stay in ℚ end-to-end (no mid-pipeline decimal):
 
-- `+`, `-`, `*`, `/`, `mod` on numbers, ratios, quantities
+- `+`, `-`, `*`, `/` on numbers, ratios, quantities, and `mod` on numbers
 - Unit conversion (`as <unit>`): `magnitude × from_factor ÷ to_factor`
 - Comparisons
 - Integer powers whose result stays within the 32,768-bit limit; rational powers when the result is exact (e.g. `4 ^ 0.5` → `2`)
+- `x -> floor` (toward −∞), `x -> ceil` (toward +∞), and `x -> round` on a number. `round` takes the nearer integer, and an exact half goes away from zero (`5 / 2 -> round` is `3`, `-5 / 2 -> round` is `-3`).
+- Rounding to a step: `x -> round <step>`, `x -> floor <step>` and `x -> ceil <step>` on a number, a measure, or a ratio. The quotient `x / step` is rounded to an integer and multiplied back by the step, all in ℚ, so `price -> round 0.05 eur` is an exact multiple of 5 cent.
 
 Long conversion chains telescope in ℚ. Example: `37 base` through fourteen prime units forward and back stays exactly `37`; stepwise decimal at fixed precision drifts to `36.999…`.
 
@@ -58,7 +60,6 @@ Long conversion chains telescope in ℚ. Example: `37 base` through fourteen pri
 | `^` on irrationals (e.g. `2 ^ 0.5`) | `Decimal::MAX_SCALE` digit fallback when no exact root |
 | `sqrt`, `sin`, `cos`, `log`, … | `Decimal::MAX_SCALE` digit semantics; operands converted via `try_to_decimal` |
 | `tan` | Computed as `sin / cos` at `Decimal::MAX_SCALE` digit semantics. Near π/2 the relative error is at most about `1e-28 / (π/2 − \|x\|)`, because `cos` is evaluated from the 28-digit π/2 constant. Veto where `cos` is exactly zero or the quotient overflows |
-| `floor`, `ceil`, `round` on measures | Operate at Decimal precision |
 | ℚ result beyond 32,768 bits | Veto (`numeric result exceeds the maximum of 32768 bits`); planning Error for constant number expressions; no decimal fallback |
 | ℚ allocation failure | Veto (`out of memory`); no decimal fallback |
 | Division by zero | Literal zero divisor in a Rule (e.g. `1 / 0`) → planning Error. Zero from runtime Data → Veto (never approximated) |
@@ -106,7 +107,7 @@ Never `Number()` / `parseFloat()` / `float()`. Precision breaks above ~9×10¹�
 ## Spec authors
 
 - Money, units, ratios: exact by default; define unit factors as clean literals.
-- `decimals n`: constrains decimal scale when validating Data inputs, suggestions, and value copies, not internal ℚ compute or intermediate Rule steps.
+- `decimals n` (number only): constrains decimal scale when validating Data inputs, suggestions, and value copies, not internal ℚ compute or intermediate Rule steps. A measure or ratio has no `decimals`, because its precision depends on the unit; round in a rule to a step instead (`price -> round 0.01 eur`).
 - Keep deliverable top-level Rule results within the 28-digit decimal limit; magnitude overflow at output vetoes.
 
 ## Related

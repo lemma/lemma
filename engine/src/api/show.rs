@@ -6,7 +6,7 @@ use crate::api::value::RuleResultValue;
 use crate::literals::{MeasureUnits, RatioUnits};
 use crate::parsing::ast::{
     ArithmeticComputation, CalendarPeriodUnit, ComparisonComputation, DateCalendarKind,
-    DateRelativeKind, MathematicalComputation, PrimitiveKind, RangeBound,
+    DateRelativeKind, MathematicalComputation, PrimitiveKind, RangeBound, RoundingMode,
 };
 use crate::planning::execution_plan::{
     ExecutionPlan, Show as DomainShow, ShowBranch as DomainShowBranch,
@@ -29,10 +29,14 @@ use serde_json::{json, Map, Value as JsonValue};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
-/// One `uses` hop on a Show data or rule path.
+/// One hop on a Show data or rule path: a `uses` alias, or (with `row`) a row written
+/// in the data list named `uses`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PathSegment {
     pub uses: String,
+    /// Row number (1-based) when this hop is a spec-written row of list `uses`.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub row: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub repository: Option<String>,
     pub spec: String,
@@ -41,9 +45,10 @@ pub struct PathSegment {
 impl From<&DomainPathSegment> for PathSegment {
     fn from(segment: &DomainPathSegment) -> Self {
         Self {
-            uses: segment.uses.clone(),
-            repository: segment.repository.clone(),
-            spec: segment.spec.clone(),
+            uses: segment.uses.to_string(),
+            row: segment.row,
+            repository: segment.repository.as_ref().map(|arc| arc.to_string()),
+            spec: segment.spec.to_string(),
         }
     }
 }
@@ -83,6 +88,9 @@ pub enum ShowExpression {
     And {
         operands: Vec<ShowExpression>,
     },
+    Or {
+        operands: Vec<ShowExpression>,
+    },
     Not {
         operand: Box<ShowExpression>,
     },
@@ -102,6 +110,12 @@ pub enum ShowExpression {
     Math {
         op: MathematicalComputation,
         operand: Box<ShowExpression>,
+    },
+    StepRounding {
+        mode: RoundingMode,
+        operand: Box<ShowExpression>,
+        #[serde(skip_serializing_if = "Option::is_none", default)]
+        step: Option<Box<ShowExpression>>,
     },
     Veto {
         #[serde(skip_serializing_if = "Option::is_none", default)]
@@ -146,6 +160,8 @@ pub enum ShowExpression {
     },
     RowField {
         field: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        qualifier: Option<Vec<String>>,
     },
     RowValue,
     RowFieldValue {
@@ -199,6 +215,9 @@ fn convert_show_node(node: &DomainShowExpression, operands: Vec<ShowExpression>)
         DomainShowExpression::And { .. } => ShowExpression::And {
             operands: operands.collect(),
         },
+        DomainShowExpression::Or { .. } => ShowExpression::Or {
+            operands: operands.collect(),
+        },
         DomainShowExpression::Not { .. } => ShowExpression::Not {
             operand: Box::new(take_operand(&mut operands)),
         },
@@ -230,6 +249,14 @@ fn convert_show_node(node: &DomainShowExpression, operands: Vec<ShowExpression>)
             op: op.clone(),
             operand: Box::new(take_operand(&mut operands)),
         },
+        DomainShowExpression::StepRounding { mode, step, .. } => {
+            let operand = Box::new(take_operand(&mut operands));
+            ShowExpression::StepRounding {
+                mode: *mode,
+                operand,
+                step: step.as_ref().map(|_| Box::new(take_operand(&mut operands))),
+            }
+        }
         DomainShowExpression::Veto { message } => ShowExpression::Veto {
             message: message.clone(),
         },
@@ -272,8 +299,9 @@ fn convert_show_node(node: &DomainShowExpression, operands: Vec<ShowExpression>)
             base: Box::new(take_operand(&mut operands)),
             member: member.clone(),
         },
-        DomainShowExpression::RowField { field } => ShowExpression::RowField {
+        DomainShowExpression::RowField { field, qualifier } => ShowExpression::RowField {
             field: field.clone(),
+            qualifier: qualifier.clone(),
         },
         DomainShowExpression::RowValue => ShowExpression::RowValue,
         DomainShowExpression::RowFieldValue { field, .. } => ShowExpression::RowFieldValue {
@@ -325,7 +353,11 @@ impl From<&DomainShowRule> for ShowRule {
             lemma_type: LemmaType::from(&rule.lemma_type),
             path: rule.path.iter().map(PathSegment::from).collect(),
             branches: rule.branches.iter().map(ShowBranch::from).collect(),
-            depends_on_rules: rule.depends_on_rules.clone(),
+            depends_on_rules: rule
+                .depends_on_rules
+                .iter()
+                .map(|path| path.input_key())
+                .collect(),
         }
     }
 }
@@ -359,9 +391,18 @@ pub fn show_document(engine: &Engine, show: &DomainShow) -> JsonValue {
         document.insert("description".to_string(), json!(commentary));
     }
     document.extend(input_object_schema(show, &mut rows));
-    let defs = rows.into_defs();
+    let (defs, row_field_needed_by_rules) = rows.into_defs();
     if !defs.is_empty() {
         document.insert("$defs".to_string(), JsonValue::Object(defs));
+    }
+    if !row_field_needed_by_rules.is_empty() {
+        // Parent-specific: which of this Show's rules need each `$defs` row field.
+        // Kept off `$defs` so `LemmaRow_*` schemas are identical across Show documents
+        // (OpenAPI shares them by row identity).
+        document.insert(
+            "x-lemma-row-field-needed-by-rules".to_string(),
+            JsonValue::Object(row_field_needed_by_rules),
+        );
     }
     if let Some(repository) = &show.repository {
         document.insert("x-lemma-repository".to_string(), json!(repository));
@@ -437,13 +478,13 @@ fn input_object_schema(show: &DomainShow, rows: &mut RowSchemas) -> Map<String, 
 }
 
 /// Row `$defs` object: local types, plus any other `show.data` slots on the row
-/// (imported fields, local instance lists). `needed_by_rules` come from the
-/// consumer plan's instance-list [`NeededByRules::fields`], not the row Show.
-fn row_object_schema(
-    show: &DomainShow,
-    identity: &SpecIdentity,
-    rows: &mut RowSchemas,
-) -> Map<String, JsonValue> {
+/// (imported fields, local instance lists).
+///
+/// `x-lemma-needed-by-rules` on these properties is always empty: parent consumers
+/// differ per Show document, and `$defs` are keyed by row identity so every Show
+/// must render the same `LemmaRow_*` schema. Parent field consumers live on the
+/// document as `x-lemma-row-field-needed-by-rules`.
+fn row_object_schema(show: &DomainShow, rows: &mut RowSchemas) -> Map<String, JsonValue> {
     let mut properties = Map::new();
     let mut required = Vec::new();
     for (name, lemma_type) in &show.types {
@@ -468,8 +509,7 @@ fn row_object_schema(
         if entry.value.is_none() && !is_list {
             required.push(name.clone());
         }
-        let needed = rows.row_field_needed_by_rules(identity, name);
-        properties.insert(name.clone(), property_schema(entry, rows, &needed));
+        properties.insert(name.clone(), property_schema(entry, rows, &[]));
     }
     for (name, data) in &show.data {
         if properties.contains_key(name) {
@@ -482,8 +522,7 @@ fn row_object_schema(
         if data.value.is_none() && !is_list {
             required.push(name.clone());
         }
-        let needed = rows.row_field_needed_by_rules(identity, name);
-        properties.insert(name.clone(), property_schema(data, rows, &needed));
+        properties.insert(name.clone(), property_schema(data, rows, &[]));
     }
     required.sort();
     let mut schema = Map::new();
@@ -496,12 +535,19 @@ fn row_object_schema(
     schema
 }
 
+/// Property names of a row `$defs` schema: local types, then any other `show.data` keys.
+fn row_property_names(show: &DomainShow) -> BTreeSet<String> {
+    let mut names: BTreeSet<String> = show.types.keys().cloned().collect();
+    names.extend(show.data.keys().cloned());
+    names
+}
+
 fn property_schema(
     data: &DomainShowData,
     rows: &mut RowSchemas,
     needed_by_rules: &[String],
 ) -> JsonValue {
-    let mut schema = type_schema(&data.lemma_type.specifications, rows);
+    let mut schema = type_schema(&data.lemma_type, rows);
     let help = specification_help(&data.lemma_type.specifications);
     if !help.is_empty() {
         schema.insert("description".to_string(), json!(help));
@@ -549,12 +595,9 @@ fn property_schema(
 
 /// Standard keywords for one type. Lists are a JSON array: rows of an instance list are
 /// objects (`$defs` row schema), items of a value list are the element's literal.
-fn type_schema(
-    specification: &DomainTypeSpecification,
-    rows: &mut RowSchemas,
-) -> Map<String, JsonValue> {
-    let DomainTypeSpecification::List { element, .. } = specification else {
-        return scalar_data_schema(specification);
+fn type_schema(lemma_type: &DomainLemmaType, rows: &mut RowSchemas) -> Map<String, JsonValue> {
+    let DomainTypeSpecification::List { element, .. } = &lemma_type.specifications else {
+        return scalar_data_schema(lemma_type);
     };
     let mut schema = Map::new();
     let items = match &element.specifications {
@@ -562,7 +605,7 @@ fn type_schema(
         DomainTypeSpecification::List { .. } => {
             unreachable!("BUG: lists do not nest; planning rejects a list element list")
         }
-        element => JsonValue::Object(scalar_data_schema(element)),
+        _ => JsonValue::Object(scalar_data_schema(element)),
     };
     schema.insert("type".to_string(), json!("array"));
     schema.insert("items".to_string(), items);
@@ -574,7 +617,8 @@ fn type_schema(
 }
 
 /// A scalar data slot. Measure and ratio data also accept a single-unit object (`{"eur": "84"}`).
-fn scalar_data_schema(specification: &DomainTypeSpecification) -> Map<String, JsonValue> {
+fn scalar_data_schema(lemma_type: &DomainLemmaType) -> Map<String, JsonValue> {
+    let specification = &lemma_type.specifications;
     let names: Vec<&str> = match specification {
         DomainTypeSpecification::Measure { units, .. } => {
             units.iter().map(|unit| unit.name.as_str()).collect()
@@ -582,7 +626,7 @@ fn scalar_data_schema(specification: &DomainTypeSpecification) -> Map<String, Js
         DomainTypeSpecification::Ratio { units, .. } => {
             units.iter().map(|unit| unit.name.as_str()).collect()
         }
-        _ => return scalar_type_schema(specification),
+        _ => return scalar_type_schema(lemma_type),
     };
     let unit_map = json!({
         "type": "object",
@@ -594,15 +638,14 @@ fn scalar_data_schema(specification: &DomainTypeSpecification) -> Map<String, Js
     let mut schema = Map::new();
     schema.insert(
         "oneOf".to_string(),
-        json!([
-            JsonValue::Object(scalar_type_schema(specification)),
-            unit_map
-        ]),
+        json!([JsonValue::Object(scalar_type_schema(lemma_type)), unit_map]),
     );
+    publish_option_enum(&mut schema, lemma_type);
     schema
 }
 
-fn scalar_type_schema(specification: &DomainTypeSpecification) -> Map<String, JsonValue> {
+fn scalar_type_schema(lemma_type: &DomainLemmaType) -> Map<String, JsonValue> {
+    let specification = &lemma_type.specifications;
     let mut schema = Map::new();
     match specification {
         DomainTypeSpecification::Boolean { .. } => {
@@ -614,13 +657,8 @@ fn scalar_type_schema(specification: &DomainTypeSpecification) -> Map<String, Js
                 ]),
             );
         }
-        DomainTypeSpecification::Text {
-            length, options, ..
-        } => {
+        DomainTypeSpecification::Text { length, .. } => {
             schema.insert("type".to_string(), json!("string"));
-            if !options.is_empty() {
-                schema.insert("enum".to_string(), json!(options));
-            }
             if let Some(length) = length {
                 schema.insert("minLength".to_string(), json!(length));
                 schema.insert("maxLength".to_string(), json!(length));
@@ -675,7 +713,23 @@ fn scalar_type_schema(specification: &DomainTypeSpecification) -> Map<String, Js
             unreachable!("BUG: undetermined sentinel type on a Show data entry")
         }
     }
+    publish_option_enum(&mut schema, lemma_type);
     schema
+}
+
+fn publish_option_enum(schema: &mut Map<String, JsonValue>, lemma_type: &DomainLemmaType) {
+    if lemma_type.options.values.is_empty() {
+        return;
+    }
+    schema.insert(
+        "enum".to_string(),
+        json!(lemma_type
+            .options
+            .values
+            .iter()
+            .map(|option| lemma_type.display_bound(&option.value))
+            .collect::<Vec<_>>()),
+    );
 }
 
 fn specification_help(specification: &DomainTypeSpecification) -> String {
@@ -931,7 +985,7 @@ fn strip_standard_keywords(value: &mut JsonValue) {
 struct RowSchemas<'a> {
     engine: &'a Engine,
     /// Consumer plan whose instance-list [`crate::planning::execution_plan::NeededByRules::fields`]
-    /// annotate `$defs`.
+    /// feed `x-lemma-row-field-needed-by-rules` (not `$defs`).
     consumer: Option<&'a ExecutionPlan>,
     started: BTreeSet<SpecIdentity>,
     pending: Vec<SpecIdentity>,
@@ -949,18 +1003,30 @@ impl<'a> RowSchemas<'a> {
         }
     }
 
-    /// Builds every row schema reached from the document. Row schemas that reference
-    /// further row specs queue them on `pending`, so the walk never nests.
-    fn into_defs(mut self) -> Map<String, JsonValue> {
+    /// Builds every row schema reached from the document, plus the parent-rule map
+    /// for each def. Row schemas that reference further row specs queue them on
+    /// `pending`, so the walk never nests.
+    fn into_defs(mut self) -> (Map<String, JsonValue>, Map<String, JsonValue>) {
+        let mut row_field_needed_by_rules = Map::new();
         while let Some(identity) = self.pending.pop() {
             let show = self.engine.show_spec(&identity);
             let mut schema = Map::new();
             schema.insert("title".to_string(), json!(format!("{identity} row")));
-            schema.extend(row_object_schema(&show, &identity, &mut self));
-            self.defs
-                .insert(row_def_name(&identity), JsonValue::Object(schema));
+            schema.extend(row_object_schema(&show, &mut self));
+            let def_name = row_def_name(&identity);
+            let mut field_map = Map::new();
+            for field in row_property_names(&show) {
+                let needed = self.row_field_needed_by_rules(&identity, &field);
+                if !needed.is_empty() {
+                    field_map.insert(field, json!(needed));
+                }
+            }
+            if !field_map.is_empty() {
+                row_field_needed_by_rules.insert(def_name.clone(), JsonValue::Object(field_map));
+            }
+            self.defs.insert(def_name, JsonValue::Object(schema));
         }
-        self.defs.into_iter().collect()
+        (self.defs.into_iter().collect(), row_field_needed_by_rules)
     }
 
     /// Parent Show.rules keys that need `field` on rows of `identity`.
@@ -972,14 +1038,15 @@ impl<'a> RowSchemas<'a> {
             .row_field_needed_by_rules(identity, field)
             .into_iter()
             .map(|rule_position| {
-                consumer
+                &consumer
                     .rules
                     .get_index(rule_position as usize)
                     .expect("BUG: needed_by_rules field consumer out of consumer.rules range")
                     .1
                     .path
-                    .input_key()
             })
+            .filter(|rule_path| consumer.show_rules.contains_key(*rule_path))
+            .map(|rule_path| rule_path.input_key())
             .collect()
     }
 
@@ -1282,7 +1349,8 @@ data enabled: boolean
 spec line_item
 data weight: number
 data roast: boolean
-uses processing list
+uses step: processing
+data processing: step list
   -> with weight: weight, type: "roast", enabled: roast
 rule cost: processing -> where enabled -> count
 "#
@@ -1441,6 +1509,7 @@ rule cost: processing -> where enabled -> count
             repository: repository.map(str::to_string),
             spec: spec.to_string(),
             effective: crate::parsing::ast::EffectiveDate::Origin,
+            slice: crate::parsing::ast::EffectiveDate::Origin,
         }
     }
 

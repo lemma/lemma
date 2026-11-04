@@ -22,7 +22,7 @@ A handbook, statute, or SOP with more than one policy: list the policies you fou
 
 Narrative (SOP prose, code with retries and logging): distill to principle + exceptions. Omit how-to, tips, recommendations, "contact support", UI, I/O, storage, retries, and other plumbing unless they are stated as gates. Do not copy every sentence, or every code branch, into a rule.
 
-Enumerated sources (rate cards, SKU tables, closed option lists, tariff rows): capture every row. Dropping a row is a silent policy change. Encode rows of several columns as an instance list with `-> key` and one `-> with` per row, read with `find` (see **Data**: Lists). A single closed choice mapped to one value can stay `-> option` plus a lookup rule (default `veto`; see **Veto**). Never a prose summary.
+Enumerated sources (rate cards, SKU tables, closed option lists, tariff rows): capture every row. Dropping a row is a silent policy change. Encode rows of several columns as an instance list with `-> key` and one `-> with` per row, read with `find` (see **Data**: Lists). A single closed option mapped to one value can stay `-> option` plus a lookup rule (default `veto`; see **Veto**). Never a prose summary.
 
 Distill is not invent. If you cannot tell what the rule is, stop and ask. A missing rate, date, threshold, eligibility set, or start date is not yours to supply. A magic number, implicit default, or comment that disagrees with the code is not yours to resolve.
 
@@ -123,7 +123,7 @@ See **Data**, **Rules**, **Veto**, **Anti-patterns**. In short:
 **Author, verify, deliver**
 
 1. Author only after the hard stop is clear.
-2. `check`. Then `add_spec` or `update_spec`. Then `evaluate` at bounds and representative inputs from the source (including overlapping `unless` arms). Result wording must match the policy.
+2. `check`. Then `add_spec` or `update_spec`. Then `evaluate` with the spec name, not a file path, at bounds and representative inputs from the source (including overlapping `unless` arms). Result wording must match the policy.
 3. Walk the inventory: every clause is an arm, a bound, or an explicit omit. Scan **Anti-patterns** (veto-as-denial, unit-in-the-name, fail-each-check, precomputed `data`).
 4. Call `source`. Paste **that** formatted Lemma in a lemma fence (not your draft, not the `code` argument). Confirm loaded.
 5. Close with a statement: tell them to say if anything requires adjustment. Not a yes/no question. No new policy questions. No follow-up work. Stop.

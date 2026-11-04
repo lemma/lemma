@@ -948,7 +948,7 @@ rule status: "unknown"
     let effective = make_effective(2026, 3, 7, 12, 0, 0);
     let lit = eval_rule_date(&engine, "test", "status", &effective, IndexMap::new());
     if let ValueKind::Text(s) = &lit.value {
-        assert_eq!(s, "recently_completed");
+        assert_eq!(s.as_ref(), "recently_completed");
     } else {
         panic!("expected Text, got {:?}", lit.value);
     }

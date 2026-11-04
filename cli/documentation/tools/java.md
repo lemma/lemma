@@ -17,14 +17,14 @@ Maven:
 <dependency>
   <groupId>com.lemmabase</groupId>
   <artifactId>lemma-engine</artifactId>
-  <version>0.10.2</version>
+  <version>0.10.3</version>
 </dependency>
 ```
 
 Gradle (Kotlin DSL): consume the published artifact; this repository builds the package with Maven only:
 
 ```kotlin
-implementation("com.lemmabase:lemma-engine:0.10.2")
+implementation("com.lemmabase:lemma-engine:0.10.3")
 ```
 
 Requires JDK 21+.
@@ -113,18 +113,16 @@ Engine.create().use { engine ->
 |--------|------|
 | `Engine.version()` | Semver of the loaded native engine (e.g. `"0.9.12"`) |
 | `Engine.create()` / `Engine.create(ResourceLimits)` / `Engine.create(ResourceLimits.Builder)` | Construct engine (named limit overrides; unset keys keep engine defaults) |
-| `Engine.fromSnapshot(byte[])` | Restore engine from `snapshot()` bytes |
 | `load(String)` / `load(Map<String,String>)` / `load(Path)` / `loadResource(Class, String)` | Validate and load sources (volatile, labeled, file, or classpath) |
 | `install(String)` / `install(String, HttpClient)` | Download only from LemmaBase (`RepositoryInstallResult`); then `load`; does not write `lemma_deps/` |
 | `evaluate(EvaluateRequest)` | Evaluate; named fields only |
 | `specs()` / `show(...)` / `source(...)` / `remove(...)` / `update(...)` | Inspect and manage loaded specs (`specs()` returns `Repository` groups of `SpecVersion` rows, including `dependencies`) |
 | `limits()` | Current resource limits |
-| `snapshot()` | Opaque bytes of parsed specs + plans + limits. Restore with `fromSnapshot`. |
 | `quality()` | Structural quality recommendations across loaded specs (advisory only) |
 | `Lemma.format(String)` | Format source without an engine |
 | `close()` | Drop native engine (`AutoCloseable` + `Cleaner`) |
 
-`EvaluateRequest.of(spec)` defaults: repository null, effective null, rules null (all rules), explain false. An empty `rules` list is a request error. With `explain(true)`, a value/veto/missing-data `RuleResult` may carry an `ExplanationNode.Rule` whose children are a sealed `ExplanationNode` tree. `show(...)` returns `Show`, read from the evaluation-data JSON Schema document: `types()` is local data declarations (`x-lemma-types`); each `Show.data()` entry is `ShowData` (inputs rules need; `type()` is a `ShowPropertyType`, the type constraints without help text or text options, which the `schema()` property schema states as `description`, `enum` and `minLength` / `maxLength`), `required()` the inputs a rule needs that have no value, `rows()` the instance-list row schemas (`ShowRow`) and `json()` the document itself, to validate evaluation data against. `RuleResult` and `RuleResultValue` are sealed; pattern-match on the variant.
+`EvaluateRequest.of(spec)` defaults: repository null, effective null, rules null (all rules), explain false. An empty `rules` list is a request error. With `explain(true)`, a value/veto/missing-data `RuleResult` may carry an `ExplanationNode.Rule` whose children are a sealed `ExplanationNode` tree. `show(...)` returns `Show`, read from the evaluation-data JSON Schema document: `types()` is local data declarations (`x-lemma-types`); each `Show.data()` entry is `ShowData` (inputs rules need; `type()` is a `ShowPropertyType`, the type constraints without help text or text options, which the `schema()` property schema states as `description`, `enum` and `minLength` / `maxLength`), `required()` the inputs a rule needs that have no value, `rows()` the instance-list row schemas (`ShowRow`), `rowFieldNeededByRules()` per row schema the row fields parent rules need through a list (`x-lemma-row-field-needed-by-rules`), and `json()` the document itself, to validate evaluation data against. `RuleResult` and `RuleResultValue` are sealed; pattern-match on the variant.
 
 Lists:
 
@@ -133,20 +131,7 @@ Lists:
 - A row-valued rule is `RuleResult.Row` with a `RowReference` (`spec`, `effective`, `instance` such as `staff.2`, and `index`). `index` points into `Response.rows()`, a list of `RuleResult.RowResult`, each with its `data()` and `rules()`. A row from the origin spec has an empty `effective`.
 - `SpecResult.path()` lists each `uses` hop to a spec instance.
 - Show types: `LemmaType.ListType` with `element()` and `key()` (`ListKey.Numbered` or `ListKey.Fields`). An instance list with source rows has a `ShowData.value()` `ListValue` (null `result()`) of `RuleResultValue.SourceRow` items in row order (`fields()` the fields the row sets).
-- Evaluation data for a slot bound to data or a rule on a `uses` (`uses i: inner -> with x: base`) overrides the wire (same as a literal `-> with` default).
-
-Persist and restore without re-parsing:
-
-```java
-import java.nio.file.Files;
-import java.nio.file.Path;
-
-byte[] bytes = engine.snapshot();
-Files.write(Path.of("engine.lems"), bytes);
-try (Engine restored = Engine.fromSnapshot(Files.readAllBytes(Path.of("engine.lems")))) {
-  // evaluate / show / specs
-}
-```
+- Evaluation data for a slot bound by `uses -> with` (literal or reference) is a request error (sealed). List inputs accept a whole-array replace and/or dotted `list.N.field` keys matching ask keys.
 
 Downloads a repository from LemmaBase (download only; then `load`). Default `HttpClient` follows JVM proxy/trust defaults; pass a configured client when needed:
 

@@ -178,7 +178,6 @@ pub fn api_v1_schema() -> Value {
         vec![
             ("minimum", nullable_named_bound()),
             ("maximum", nullable_named_bound()),
-            ("decimals", nullable_integer()),
             (
                 "units",
                 json!({"type": "array", "items": {"$ref": "#/$defs/MeasureUnit"}}),
@@ -224,7 +223,6 @@ pub fn api_v1_schema() -> Value {
         vec![
             ("minimum", nullable_decimal_string()),
             ("maximum", nullable_decimal_string()),
-            ("decimals", nullable_integer()),
             (
                 "units",
                 json!({"type": "array", "items": {"$ref": "#/$defs/RatioUnit"}}),
@@ -447,6 +445,17 @@ pub fn api_v1_schema() -> Value {
             "missing_data".to_string(),
             json!({"type": "array", "items": {"type": "string"}}),
         );
+        m.insert(
+            "missing_data_options".to_string(),
+            json!({
+                "type": "object",
+                "additionalProperties": {
+                    "type": "array",
+                    "items": {}
+                },
+                "description": "Closed values for keys in missing_data on this run. A key with no entry is not constrained by a set. An empty array means nothing is valid. Each item is evaluation data. Static options come first, then rows from the options rule."
+            }),
+        );
         m
     };
 
@@ -502,6 +511,52 @@ pub fn api_v1_schema() -> Value {
         let mut m = rule_result_value_properties.clone();
         m.insert("type".to_string(), json!({"const": "data"}));
         m.insert("name".to_string(), json!({"type": "string"}));
+        m
+    };
+
+    let compose_node_properties = {
+        let mut m = rule_result_value_properties.clone();
+        m.insert("type".to_string(), json!({"const": "compose"}));
+        m.insert("expression".to_string(), json!({"type": "string"}));
+        m.insert(
+            "operator".to_string(),
+            json!({
+                "type": "string",
+                "enum": ["add", "subtract", "multiply", "divide", "modulo", "power"]
+            }),
+        );
+        m.insert(
+            "operands".to_string(),
+            json!({"type": "array", "items": {"$ref": "#/$defs/ExplanationNode"}}),
+        );
+        m
+    };
+
+    let list_command_node_properties = {
+        let mut m = rule_result_value_properties.clone();
+        m.insert("type".to_string(), json!({"const": "list_command"}));
+        m.insert("expression".to_string(), json!({"type": "string"}));
+        m.insert("stage".to_string(), json!({"type": "string"}));
+        m.insert("op".to_string(), json!({"$ref": "#/$defs/ExplainedListOp"}));
+        m.insert(
+            "operands".to_string(),
+            json!({"type": "array", "items": {"$ref": "#/$defs/ExplanationNode"}}),
+        );
+        m
+    };
+
+    let conversion_node_properties = {
+        let mut m = rule_result_value_properties.clone();
+        m.insert("type".to_string(), json!({"const": "conversion"}));
+        m.insert("expression".to_string(), json!({"type": "string"}));
+        m.insert(
+            "steps".to_string(),
+            json!({"type": "array", "items": {"$ref": "#/$defs/ConversionStep"}}),
+        );
+        m.insert(
+            "operands".to_string(),
+            json!({"type": "array", "items": {"$ref": "#/$defs/ExplanationNode"}}),
+        );
         m
     };
 
@@ -686,9 +741,9 @@ pub fn api_v1_schema() -> Value {
         },
         "RowReference": {
             "type": "object",
-            "required": ["spec", "effective", "instance", "index"],
+            "required": ["spec", "effective", "index"],
             "additionalProperties": false,
-            "description": "A row of an instance list. Its data and rules are Response.rows[index]. instance is the row path relative to the spec holding this value (lines.2).",
+            "description": "A row of an instance list. Its data and rules are Response.rows[index]. instance is the row path relative to the spec holding this value (lines.2); omitted for a row appended with -> with, whose identity is its place in the list.",
             "properties": {
                 "repository": {"type": "string"},
                 "spec": {"type": "string"},
@@ -726,9 +781,10 @@ pub fn api_v1_schema() -> Value {
             "type": "object",
             "required": ["uses", "spec"],
             "additionalProperties": false,
-            "description": "One uses hop on a Show data or rule path. uses is the alias; repository is omitted for the unnamed workspace; spec is the resolved target name.",
+            "description": "One hop on a Show data or rule path: a uses alias, or (with row) the row written at that 1-based position in the data list named uses. repository is omitted for the unnamed workspace; spec is the resolved target name.",
             "properties": {
                 "uses": {"type": "string"},
+                "row": {"type": "integer", "minimum": 1},
                 "repository": {"type": "string"},
                 "spec": {"type": "string"}
             }
@@ -803,7 +859,7 @@ pub fn api_v1_schema() -> Value {
                 "x-lemma-needed-by-rules": {
                     "type": "array",
                     "items": {"type": "string"},
-                    "description": "x-lemma-rules keys that transitively need this data after normalize. Empty = reuse catalog only (not an eval intake key for this spec)."
+                    "description": "On top-level properties: x-lemma-rules keys that transitively need this data after normalize. Empty = reuse catalog only (not an eval intake key for this spec). On $defs row properties always empty — parent field consumers are x-lemma-row-field-needed-by-rules."
                 },
                 "x-lemma-value": {"$ref": "#/$defs/RuleResultValue"},
                 "x-lemma-suggestion": {"$ref": "#/$defs/RuleResultValue"}
@@ -813,7 +869,7 @@ pub fn api_v1_schema() -> Value {
             "type": "object",
             "required": ["title", "type", "additionalProperties", "properties"],
             "additionalProperties": false,
-            "description": "Row object schema of an instance list, one per row spec in the Show document's $defs. Every row-spec data entry is a property, dotted uses fields included.",
+            "description": "Row object schema of an instance list, one per row spec in the Show document's $defs. Identity-keyed and identical across Show documents; parent field consumers are document-level x-lemma-row-field-needed-by-rules. Every row-spec data entry is a property, dotted uses fields included.",
             "properties": {
                 "title": {"type": "string"},
                 "type": {"const": "object"},
@@ -887,6 +943,19 @@ pub fn api_v1_schema() -> Value {
                 },
                 {
                     "type": "object",
+                    "required": ["type", "operands"],
+                    "additionalProperties": false,
+                    "properties": {
+                        "type": {"const": "or"},
+                        "operands": {
+                            "type": "array",
+                            "minItems": 2,
+                            "items": {"$ref": "#/$defs/ShowExpression"}
+                        }
+                    }
+                },
+                {
+                    "type": "object",
                     "required": ["type", "operand"],
                     "additionalProperties": false,
                     "properties": {
@@ -948,9 +1017,21 @@ pub fn api_v1_schema() -> Value {
                         "type": {"const": "math"},
                         "op": {"type": "string", "enum": [
                             "sqrt", "sin", "cos", "tan", "asin", "acos", "atan",
-                            "log", "exp", "abs", "floor", "ceil", "round"
+                            "log", "exp", "abs"
                         ]},
                         "operand": {"$ref": "#/$defs/ShowExpression"}
+                    }
+                },
+                {
+                    "type": "object",
+                    "required": ["type", "mode", "operand"],
+                    "additionalProperties": false,
+                    "description": "Postfix rounding: `x -> round`, or `price -> round 0.05 eur` with a step.",
+                    "properties": {
+                        "type": {"const": "step_rounding"},
+                        "mode": {"type": "string", "enum": ["round", "floor", "ceil"]},
+                        "operand": {"$ref": "#/$defs/ShowExpression"},
+                        "step": {"$ref": "#/$defs/ShowExpression"}
                     }
                 },
                 {
@@ -1066,7 +1147,12 @@ pub fn api_v1_schema() -> Value {
                     "description": "Field of the current row inside a list command argument.",
                     "properties": {
                         "type": {"const": "row_field"},
-                        "field": {"type": "string"}
+                        "field": {"type": "string"},
+                        "qualifier": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "List path prefix when the row field was authored with a qualifier."
+                        }
                     }
                 },
                 {
@@ -1091,13 +1177,13 @@ pub fn api_v1_schema() -> Value {
                     "type": "object",
                     "required": ["type", "list", "command", "args"],
                     "additionalProperties": false,
-                    "description": "Postfix list command (`staff -> sum bonus`). direction is present exactly on sort. A value-list condition is a comparison or range_containment whose left operand is row_value.",
+                    "description": "Postfix list command (`staff -> sum bonus`). direction is present exactly on sort. A value-list condition is a comparison or range_containment whose left operand is row_value, or a logical `and`/`or` of those comparisons.",
                     "properties": {
                         "type": {"const": "list_command"},
                         "list": {"$ref": "#/$defs/ShowExpression"},
                         "command": {"type": "string", "enum": [
                             "find", "first", "last", "count", "sum", "avg", "product", "min",
-                            "max", "any", "all", "where", "sort", "top", "with"
+                            "max", "any", "all", "where", "sort", "top", "with", "key"
                         ]},
                         "direction": {"type": "string", "enum": ["asc", "desc"]},
                         "args": {"type": "array", "items": {"$ref": "#/$defs/ShowExpression"}}
@@ -1187,7 +1273,7 @@ pub fn api_v1_schema() -> Value {
             ]
         },
         "Show": {
-            "description": "Result of Engine::show: a Draft 2020-12 JSON Schema for the spec's evaluation-data inputs. properties holds inputs rules need (non-empty x-lemma-needed-by-rules), required the unbound ones, $defs instance-list row schemas. x-lemma-types is local data declarations; x-lemma-rules is this spec's rule graph (local plus reachable imports).",
+            "description": "Result of Engine::show: a Draft 2020-12 JSON Schema for the spec's evaluation-data inputs. properties holds inputs rules need (non-empty x-lemma-needed-by-rules), required the unbound ones, $defs instance-list row schemas (identity-stable across Show documents). x-lemma-row-field-needed-by-rules maps each LemmaRow_* def to the parent rules that need each row field. x-lemma-types is local data declarations; x-lemma-rules is this spec's rule graph (local plus reachable imports).",
             "allOf": [
                 {"$ref": "https://json-schema.org/draft/2020-12/schema"},
                 {
@@ -1214,7 +1300,18 @@ pub fn api_v1_schema() -> Value {
                             "additionalProperties": {"$ref": "#/$defs/LemmaType"},
                             "description": "Local data declarations (empty path), declaration order."
                         },
-                        "x-lemma-rules": {"type": "object", "additionalProperties": {"$ref": "#/$defs/ShowRule"}}
+                        "x-lemma-rules": {"type": "object", "additionalProperties": {"$ref": "#/$defs/ShowRule"}},
+                        "x-lemma-row-field-needed-by-rules": {
+                            "type": "object",
+                            "additionalProperties": {
+                                "type": "object",
+                                "additionalProperties": {
+                                    "type": "array",
+                                    "items": {"type": "string"}
+                                }
+                            },
+                            "description": "Per $defs LemmaRow_* name: map of row field input key to parent x-lemma-rules keys that need that field through an instance list. Omitted when no row field is needed by a parent rule. Kept off $defs so row schemas stay identical across Show documents."
+                        }
                     }
                 }
             ]
@@ -1358,6 +1455,7 @@ pub fn api_v1_schema() -> Value {
             "oneOf": [
                 {"$ref": "#/$defs/RuleRefNode"},
                 {"$ref": "#/$defs/ComposeNode"},
+                {"$ref": "#/$defs/ListCommandNode"},
                 {"$ref": "#/$defs/DataNode"},
                 {"$ref": "#/$defs/DataUnusedNode"},
                 {"$ref": "#/$defs/ConversionNode"},
@@ -1365,6 +1463,35 @@ pub fn api_v1_schema() -> Value {
                 {"$ref": "#/$defs/RowNode"},
                 {"$ref": "#/$defs/FilterNode"}
             ]
+        },
+        "ExplainedListOp": {
+            "description": "List command identity on a list_command explanation node.",
+            "oneOf": [
+                {"type": "string", "enum": [
+                    "find", "first", "last", "count", "sum", "avg", "product", "min", "max",
+                    "any", "all", "where", "top", "with", "key"
+                ]},
+                {
+                    "type": "object",
+                    "required": ["sort"],
+                    "additionalProperties": false,
+                    "properties": {
+                        "sort": {
+                            "type": "object",
+                            "required": ["descending"],
+                            "additionalProperties": false,
+                            "properties": {"descending": {"type": "boolean"}}
+                        }
+                    }
+                }
+            ]
+        },
+        "ListCommandNode": {
+            "type": "object",
+            "required": ["type", "expression", "stage", "op", "operands"],
+            "additionalProperties": false,
+            "description": "One NormalForm list command cell (menu -> sum price). stage is the command fragment after ->. RuleResultValue fields are flattened.",
+            "properties": list_command_node_properties
         },
         "RuleNode": {
             "type": "object",
@@ -1391,7 +1518,7 @@ pub fn api_v1_schema() -> Value {
             "type": "object",
             "required": ["type", "number", "fields"],
             "additionalProperties": false,
-            "description": "One instance-list row a list command read. Label in ASCII is n. when unkeyed, or [key values] when field-keyed.",
+            "description": "One instance-list row a list command read. ASCII: numbered rows use n.; keyed rows print key and data fields as comma columns (no brackets).",
             "properties": {
                 "type": {"const": "row"},
                 "number": {"type": "integer", "minimum": 1},
@@ -1417,15 +1544,8 @@ pub fn api_v1_schema() -> Value {
             "type": "object",
             "required": ["type", "expression", "operands"],
             "additionalProperties": false,
-            "properties": {
-                "type": {"const": "compose"},
-                "expression": {"type": "string"},
-                "operator": {
-                    "type": "string",
-                    "enum": ["add", "subtract", "multiply", "divide", "modulo", "power"]
-                },
-                "operands": {"type": "array", "items": {"$ref": "#/$defs/ExplanationNode"}}
-            }
+            "description": "Composed expression (arithmetic, comparison, logical, …). RuleResultValue fields are flattened.",
+            "properties": compose_node_properties
         },
         "DataNode": {
             "type": "object",
@@ -1448,12 +1568,8 @@ pub fn api_v1_schema() -> Value {
             "type": "object",
             "required": ["type", "expression", "steps", "operands"],
             "additionalProperties": false,
-            "properties": {
-                "type": {"const": "conversion"},
-                "expression": {"type": "string"},
-                "steps": {"type": "array", "items": {"$ref": "#/$defs/ConversionStep"}},
-                "operands": {"type": "array", "items": {"$ref": "#/$defs/ExplanationNode"}}
-            }
+            "description": "Unit conversion. RuleResultValue fields are flattened (outcome on the expression line).",
+            "properties": conversion_node_properties
         },
         "VetoNode": {
             "type": "object",

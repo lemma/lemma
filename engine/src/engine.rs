@@ -5,11 +5,10 @@ use crate::parsing::ast::{DateTimeValue, LemmaRepository, LemmaSpec};
 use crate::parsing::source::SourceType;
 use crate::parsing::{parse, EffectiveDate};
 use crate::planning::execution_plan::{ExecutionPlan, Show, ShowData};
-use crate::planning::semantics::{DataDefinition, SpecIdentity};
+use crate::planning::semantics::{DataDefinition, DataPath, RulePath, SpecIdentity};
 use crate::planning::{LemmaSpecSet, PlanStore};
 use crate::{Error, ResourceLimits, Response};
 use indexmap::IndexMap;
-use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -73,12 +72,12 @@ fn promote_effective_to_instant(mut dt: DateTimeValue) -> DateTimeValue {
 pub const EMBEDDED_STDLIB_REPOSITORY: &str = "lemma";
 
 /// One `uses` target from a spec version's source.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct SpecDependency {
-    #[serde(skip_serializing_if = "Option::is_none", default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub repository: Option<String>,
     pub name: String,
-    #[serde(skip_serializing_if = "Option::is_none", default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub effective: Option<DateTimeValue>,
 }
 
@@ -96,14 +95,14 @@ impl std::fmt::Display for SpecDependency {
 }
 
 /// One temporal spec version from [`Engine::specs`].
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct SpecVersion {
     pub name: String,
-    #[serde(skip_serializing_if = "Option::is_none", default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub effective_from: Option<DateTimeValue>,
-    #[serde(skip_serializing_if = "Option::is_none", default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub effective_to: Option<DateTimeValue>,
-    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub dependencies: Vec<SpecDependency>,
 }
 
@@ -135,9 +134,9 @@ impl std::fmt::Display for SpecVersion {
 /// [`Self::repository`] is absent for the default unnamed repository.
 /// [`Self::from_dependency`] is true for lemma_deps and the embedded stdlib;
 /// it is omitted from JSON.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct Repository {
-    #[serde(skip_serializing_if = "Option::is_none", default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub repository: Option<String>,
     pub specs: Vec<SpecVersion>,
     #[serde(skip)]
@@ -215,11 +214,9 @@ fn uses_dependencies(spec: &LemmaSpec) -> Vec<SpecDependency> {
 /// prefixes on the spec name. Repository names include the `@` prefix when present
 /// (e.g. `"@org/repo"`). Dependency isolation is enforced at `insert_spec`: all specs
 /// in a repository must share the same `dependency` provenance ID.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug)]
 pub struct Context {
-    #[serde(with = "crate::snapshot::shared::arc_key_index_map")]
     repositories: IndexMap<Arc<LemmaRepository>, IndexMap<String, LemmaSpecSet>>,
-    #[serde(with = "crate::snapshot::shared::arc")]
     workspace: Arc<LemmaRepository>,
 }
 
@@ -251,10 +248,11 @@ impl Context {
     /// Look up a repository by name without creating a new one.
     #[must_use]
     pub fn find_repository(&self, name: &str) -> Option<Arc<LemmaRepository>> {
-        let probe = Arc::new(LemmaRepository::new(Some(name.to_string())));
+        let canonical = crate::parsing::ast::canonical_logical_name(name);
         self.repositories
-            .get_key_value(&probe)
-            .map(|(k, _)| Arc::clone(k))
+            .keys()
+            .find(|repo| repo.name.as_deref() == Some(canonical.as_ref()))
+            .cloned()
     }
 
     /// All spec sets, keyed by `(repository, name)`. Iteration order: repository first
@@ -278,10 +276,10 @@ impl Context {
     /// is loaded.
     #[must_use]
     pub fn spec_set(&self, repository: &Arc<LemmaRepository>, name: &str) -> Option<&LemmaSpecSet> {
-        let canonical_name = crate::parsing::ast::ascii_lowercase_logical_name(name.to_string());
+        let canonical_name = crate::parsing::ast::canonical_logical_name(name);
         self.repositories
             .get(repository)
-            .and_then(|m| m.get(&canonical_name))
+            .and_then(|m| m.get(canonical_name.as_ref()))
     }
 
     /// Spec sets belonging to a repository. Panics if the repository is not in the map
@@ -346,26 +344,43 @@ impl Context {
     ///    provenance. A locally loaded repo cannot be merged with a dependency repo, and
     ///    two different dependencies cannot contribute to the same repo name.
     /// 2. No duplicate `(repository, name, effective_from)` triples.
+    ///
+    /// A repository already in the context keeps its `Arc`: the spec set holds that one,
+    /// not the header of the source being inserted.
     pub fn insert_spec(
         &mut self,
         repository: Arc<LemmaRepository>,
         spec: LemmaSpec,
     ) -> Result<(), Vec<Error>> {
-        if let Some((existing_repo, _)) = self.repositories.get_key_value(&repository) {
-            if existing_repo.dependency != repository.dependency {
-                let repo_subject = match repository.name.as_deref() {
-                    Some(name) => format!("Repository '{name}'"),
-                    None => "The default repository".to_string(),
-                };
-                let existing_owner = match &existing_repo.dependency {
-                    None => "a local source".to_string(),
-                    Some(id) => format!("dependency '{id}'"),
-                };
-                let new_owner = match &repository.dependency {
-                    None => "a local source".to_string(),
-                    Some(id) => format!("dependency '{id}'"),
-                };
-                return Err(vec![Error::validation_with_context(
+        self.insert_spec_replacing(repository, spec, None)
+    }
+
+    /// [`Self::insert_spec`] for a spec that replaces a version taken out by
+    /// [`Self::take_spec`]: an equal spec keeps the replaced version's `Arc`
+    /// ([`LemmaSpecSet::insert_replacing`]).
+    pub(crate) fn insert_spec_replacing(
+        &mut self,
+        repository: Arc<LemmaRepository>,
+        spec: LemmaSpec,
+        replaced: Option<Arc<LemmaSpec>>,
+    ) -> Result<(), Vec<Error>> {
+        let repository = match self.repositories.get_key_value(&repository) {
+            None => repository,
+            Some((existing_repo, _)) => {
+                if existing_repo.dependency != repository.dependency {
+                    let repo_subject = match repository.name.as_deref() {
+                        Some(name) => format!("Repository '{name}'"),
+                        None => "The default repository".to_string(),
+                    };
+                    let existing_owner = match &existing_repo.dependency {
+                        None => "a local source".to_string(),
+                        Some(id) => format!("dependency '{id}'"),
+                    };
+                    let new_owner = match &repository.dependency {
+                        None => "a local source".to_string(),
+                        Some(id) => format!("dependency '{id}'"),
+                    };
+                    return Err(vec![Error::validation_with_context(
                     format!(
                         "{repo_subject} was introduced by {existing_owner} but {new_owner} also declares it"
                     ),
@@ -374,8 +389,10 @@ impl Context {
                     Some(&spec),
                     None,
                 )]);
+                }
+                Arc::clone(existing_repo)
             }
-        }
+        };
 
         let entry = self
             .repositories
@@ -391,10 +408,33 @@ impl Context {
         if !entry
             .entry(name.clone())
             .or_insert_with(|| LemmaSpecSet::new(repository, name))
-            .insert(spec)
+            .insert_replacing(spec, replaced)
         {
             unreachable!("BUG: duplicate effective_from rejected above");
         }
+        Ok(())
+    }
+
+    /// Rollback insertion of a version removed by [`Self::take_spec`], keeping the
+    /// removed `Arc` so plans that reference it stay shared.
+    pub(crate) fn insert_spec_replacing_owned(
+        &mut self,
+        repository: Arc<LemmaRepository>,
+        spec: Arc<LemmaSpec>,
+    ) -> Result<(), Vec<Error>> {
+        let name = spec.name.clone();
+        let effective_from = spec.effective_from.clone();
+        if self
+            .spec_set(&repository, &name)
+            .is_some_and(|ss| ss.get_exact(effective_from.as_ref()).is_some())
+        {
+            panic!("BUG: rollback insert found a live spec at the removed identity");
+        }
+        let entry = self.repositories.entry(repository.clone()).or_default();
+        entry
+            .entry(name.clone())
+            .or_insert_with(|| LemmaSpecSet::new(repository, name))
+            .insert_owned(spec);
         Ok(())
     }
 
@@ -409,19 +449,32 @@ impl Context {
         name: &str,
         effective_from: Option<&DateTimeValue>,
     ) -> bool {
-        let Some(inner) = self.repositories.get_mut(repository) else {
-            return false;
-        };
-        let Some(ss) = inner.get_mut(name) else {
-            return false;
-        };
-        if !ss.remove(effective_from) {
-            return false;
-        }
+        self.take_spec(repository, name, effective_from).is_some()
+    }
+
+    /// Drop every named repository that holds no spec, keeping the order of the rest. The
+    /// default repository always exists. A batch prunes only after it commits, so a
+    /// rollback finds every repository it emptied still in place.
+    pub(crate) fn remove_empty_repositories(&mut self) {
+        let workspace = Arc::clone(&self.workspace);
+        self.repositories
+            .retain(|repository, by_name| !by_name.is_empty() || *repository == workspace);
+    }
+
+    /// Remove by `(repository, name, effective_from)`, returning the removed spec `Arc`.
+    pub(crate) fn take_spec(
+        &mut self,
+        repository: &Arc<LemmaRepository>,
+        name: &str,
+        effective_from: Option<&DateTimeValue>,
+    ) -> Option<Arc<LemmaSpec>> {
+        let inner = self.repositories.get_mut(repository)?;
+        let ss = inner.get_mut(name)?;
+        let removed = ss.take(effective_from)?;
         if ss.is_empty() {
             inner.shift_remove(name);
         }
-        true
+        Some(removed)
     }
 }
 
@@ -453,6 +506,13 @@ enum Mutation {
 
 type StagedSpec = (SourceType, Arc<LemmaRepository>, LemmaSpec);
 
+/// A version taken out of the context by a batch, kept until the batch commits or rolls
+/// back. Its `Arc` goes to the spec that replaces it, or back on rollback.
+struct RemovedSpec {
+    repository: Arc<LemmaRepository>,
+    spec: Arc<LemmaSpec>,
+}
+
 /// Engine for evaluating Lemma rules.
 ///
 /// Pure Rust implementation that evaluates Lemma specs directly from the AST.
@@ -461,7 +521,6 @@ type StagedSpec = (SourceType, Arc<LemmaRepository>, LemmaSpec);
 /// The engine never performs network calls. External `@` references must be
 /// pre-resolved (include dependency sources in the source map, or drive
 /// [`crate::Resolve`] with a host [`crate::HttpTransport`]) before loading.
-#[derive(Serialize, Deserialize)]
 pub struct Engine {
     pub(crate) context: Context,
     pub(crate) plans: PlanStore,
@@ -502,10 +561,10 @@ impl Engine {
         &self.limits
     }
 
-    /// Instance-list source row counts and Arc pointers by path for `spec`.
+    /// Instance-list row store row counts and Arc pointers by path for `spec`.
     ///
-    /// Each entry is `(path, row_count, Arc::as_ptr as usize)`. Diagnostic for
-    /// Load-cost investigation. Not a supported consumer API.
+    /// Each entry is `(path, row_count, Arc::as_ptr of the row store as usize)`.
+    /// Diagnostic for Load-cost investigation. Not a supported consumer API.
     #[doc(hidden)]
     pub fn debug_instance_list_row_counts(
         &self,
@@ -523,21 +582,10 @@ impl Engine {
             .instance_lists
             .iter()
             .map(|(path, source)| {
-                let label = if path.segments.is_empty() {
-                    path.data.clone()
-                } else {
-                    let mut parts: Vec<&str> = path
-                        .segments
-                        .iter()
-                        .map(|segment| segment.uses.as_str())
-                        .collect();
-                    parts.push(path.data.as_str());
-                    parts.join(".")
-                };
                 (
-                    label,
-                    source.rows.len(),
-                    std::sync::Arc::as_ptr(&source.rows) as usize,
+                    path.data.clone(),
+                    source.store.rows.len(),
+                    Arc::as_ptr(&source.store) as usize,
                 )
             })
             .collect();
@@ -582,26 +630,6 @@ impl Engine {
         }
         rows.sort_by(|left, right| left.0.cmp(&right.0).then(left.1.cmp(&right.1)));
         rows
-    }
-
-    /// Serialize this engine (parsed specs + execution plans + limits) to bytes.
-    ///
-    /// Format: postcard header (`LEMS` magic + crate version) then a CRC32-protected
-    /// postcard body. Same sources loaded into two engines produce identical bytes.
-    ///
-    /// Typical use: `std::fs::write(path, engine.snapshot()?)` then later
-    /// `Engine::from_snapshot(&std::fs::read(path)?)`.
-    pub fn snapshot(&self) -> Result<Vec<u8>, Error> {
-        crate::snapshot::encode(self)
-    }
-
-    /// Restore an engine from [`Self::snapshot`] bytes.
-    ///
-    /// Rejects wrong magic, engine version mismatch, CRC failure, or corrupt body
-    /// with [`Error`]. Does not re-load the embedded stdlib (it is inside the snapshot).
-    /// After restore, `run` / `show` / `specs` / `update` / `remove` work as on a live engine.
-    pub fn from_snapshot(bytes: &[u8]) -> Result<Self, Error> {
-        crate::snapshot::decode(bytes)
     }
 
     /// Load Lemma sources in one planning pass. Pairs are `(source_type, source_text)`.
@@ -773,15 +801,15 @@ impl Engine {
         }
     }
 
-    /// Interface of the resolved spec `identity` names, e.g. the row spec of a list type.
-    /// Identities come from loaded plans, so the plan exists.
+    /// Interface of the resolved spec slice `identity` names, e.g. the row spec of a list
+    /// type. Identities come from loaded plans, so the plan exists.
     pub fn show_spec(&self, identity: &SpecIdentity) -> Show {
         let plan = self
             .plans
             .get_plan(
                 identity.repository.as_deref(),
                 &identity.spec,
-                &identity.effective,
+                &identity.slice,
             )
             .unwrap_or_else(|| panic!("BUG: no plan for resolved spec '{identity}'"));
         self.show_plan(plan, identity.repository.as_deref())
@@ -818,85 +846,46 @@ impl Engine {
             Vec::new();
         let mut data_entries: Vec<(usize, usize, String, ShowData)> = Vec::new();
 
-        for (path, definition) in plan.nested_input_keys() {
+        for (path, definition) in plan.input_slots() {
             let Some(lemma_type) = definition.schema_type().cloned() else {
                 continue;
             };
             let input_key = path.input_key();
-            if path.segments.is_empty()
-                && matches!(
-                    definition,
-                    DataDefinition::Value { .. }
-                        | DataDefinition::TypeDeclaration { .. }
-                        | DataDefinition::Reference { .. }
-                )
-            {
+            if matches!(
+                definition,
+                DataDefinition::Value { .. }
+                    | DataDefinition::TypeDeclaration { .. }
+                    | DataDefinition::Reference { .. }
+            ) {
                 type_entries.push((
                     definition.source().span.start,
                     input_key.clone(),
                     lemma_type.clone(),
                 ));
             }
-            let rule_positions = plan.data_needed_by(&path);
-            if rule_positions.is_empty() {
+            // A slot the spec bound (`uses -> with`, a row field) is not promptable.
+            if definition.is_bound() {
                 continue;
             }
-            let used_by: Vec<String> = rule_positions
-                .iter()
-                .map(|&rule_position| {
-                    plan.rules
-                        .get_index(rule_position as usize)
-                        .expect("BUG: needed_by_rules position out of plan.rules range")
-                        .1
-                        .path
-                        .input_key()
-                })
-                .collect();
-            let display = plan.data_display.get(&path);
-            data_entries.push((
-                path.segments.len(),
-                definition.source().span.start,
-                input_key.clone(),
-                ShowData {
-                    lemma_type: lemma_type.clone(),
-                    path: path.segments.clone(),
-                    value: match definition {
-                        DataDefinition::InstanceList { .. } => {
-                            crate::planning::execution_plan::show_instance_list_value(plan, &path)
-                        }
-                        _ => {
-                            if let Some(target) = plan.import_overlay_reference_target(&path) {
-                                // Document the wire; not a literal default (OpenAPI skips
-                                // default when reference is set) and not `required`.
-                                Some(crate::result_value::RuleResultValue {
-                                    reference: Some(target),
-                                    ..Default::default()
-                                })
-                            } else {
-                                display.and_then(|d| {
-                                    d.value.as_ref().map(|bound| {
-                                        crate::planning::execution_plan::show_bound_result_value(
-                                            bound,
-                                            &lemma_type,
-                                            &input_key,
-                                            crate::planning::execution_plan::ShowBoundRole::Value,
-                                        )
-                                    })
-                                })
-                            }
-                        }
-                    },
-                    suggestion: display.and_then(|d| {
-                        d.suggestion.as_ref().map(|bound| {
-                            crate::planning::execution_plan::show_bound_result_value(
-                                bound,
-                                &lemma_type,
-                                &input_key,
-                                crate::planning::execution_plan::ShowBoundRole::Suggestion,
-                            )
-                        })
-                    }),
-                    needed_by_rules: used_by,
+            data_entries.extend(Self::show_data_entry(plan, path, path, definition));
+        }
+        for (path, identity) in &plan.show_import_data {
+            let template = plan.row_template(identity);
+            let local = DataPath::local(path.data.clone());
+            let definition = template.data.get(&local).unwrap_or_else(|| {
+                panic!(
+                    "BUG: Show import data '{path}' missing from template '{}'",
+                    template.spec_name
+                )
+            });
+            data_entries.extend(Self::show_data_entry(plan, path, &local, definition).map(
+                |(depth, position, name, mut entry)| {
+                    if let DataDefinition::InstanceList { .. } = definition {
+                        entry.value = crate::planning::execution_plan::show_instance_list_value(
+                            template, &local,
+                        );
+                    }
+                    (depth, position, name, entry)
                 },
             ));
         }
@@ -944,6 +933,94 @@ impl Engine {
             rules: rule_entries.into_iter().collect(),
             meta: plan.meta.clone(),
         }
+    }
+
+    /// Show entry of data `path` (composed from `uses` hops) of `plan`, defined as
+    /// `local` by `definition` in the plan that declares it; `None` when no Show rule
+    /// needs it.
+    fn show_data_entry(
+        plan: &ExecutionPlan,
+        path: &DataPath,
+        local: &DataPath,
+        definition: &DataDefinition,
+    ) -> Option<(usize, usize, String, ShowData)> {
+        let declaring = match plan.show_import_data.get(path) {
+            Some(identity) => plan.row_template(identity),
+            None => plan,
+        };
+        let lemma_type = definition
+            .schema_type()
+            .expect("BUG: promptable Show data has a schema type")
+            .clone();
+        let input_key = path.input_key();
+        let local_readers = plan
+            .data
+            .get_index_of(path)
+            .map(|data_pos| plan.needed_by_rules[data_pos].rules.as_slice())
+            .unwrap_or_default()
+            .iter()
+            .map(|&position| {
+                plan.rules
+                    .get_index(position as usize)
+                    .expect("BUG: needed_by_rules position out of plan.rules range")
+                    .0
+            });
+        let show_readers = plan
+            .show_needed_by
+            .get(path)
+            .map(Vec::as_slice)
+            .unwrap_or_default()
+            .iter()
+            .map(|&position| {
+                plan.show_rules
+                    .get_index(position as usize)
+                    .expect("BUG: show_needed_by position out of show_rules range")
+                    .0
+            });
+        let mut used_by: Vec<String> = local_readers
+            .chain(show_readers)
+            .map(RulePath::input_key)
+            .collect();
+        if used_by.is_empty() {
+            return None;
+        }
+        used_by.sort();
+        let display = declaring.data_display.get(local);
+        Some((
+            path.segments.len(),
+            definition.source().span.start,
+            input_key.clone(),
+            ShowData {
+                lemma_type: lemma_type.clone(),
+                path: path.segments.clone(),
+                value: match definition {
+                    DataDefinition::InstanceList { .. } => {
+                        crate::planning::execution_plan::show_instance_list_value(declaring, local)
+                    }
+                    _ => display.and_then(|d| {
+                        d.value.as_ref().map(|bound| {
+                            crate::planning::execution_plan::show_bound_result_value(
+                                bound,
+                                &lemma_type,
+                                &input_key,
+                                crate::planning::execution_plan::ShowBoundRole::Value,
+                            )
+                        })
+                    }),
+                },
+                suggestion: display.and_then(|d| {
+                    d.suggestion.as_ref().map(|bound| {
+                        crate::planning::execution_plan::show_bound_result_value(
+                            bound,
+                            &lemma_type,
+                            &input_key,
+                            crate::planning::execution_plan::ShowBoundRole::Suggestion,
+                        )
+                    })
+                }),
+                needed_by_rules: used_by,
+            },
+        ))
     }
 
     /// Formatted canonical Lemma source for a repository or one spec slice.
@@ -995,7 +1072,7 @@ impl Engine {
         let now_literal = crate::planning::semantics::LiteralValue::date(now_semantic);
         let evaluator = Evaluator;
         let mut response =
-            evaluator.evaluate(plan, &evaluate_data, now_literal, &response_rules, explain);
+            evaluator.evaluate(plan, &evaluate_data, now_literal, response_rules, explain);
 
         response.spec_effective_from = plan.effective_from.clone();
         response.spec_effective_to = plan.effective_to.clone();
@@ -1140,7 +1217,7 @@ impl Engine {
     /// submission order rather than scrambled by hash iteration.
     fn apply(&mut self, mutations: Vec<Mutation>, embedded_stdlib: bool) -> Result<(), Errors> {
         let mut sources: IndexMap<SourceType, String> = IndexMap::new();
-        let mut to_restore: Vec<(Arc<LemmaRepository>, LemmaSpec)> = Vec::new();
+        let mut to_remove: Vec<(Arc<LemmaRepository>, String, EffectiveDate)> = Vec::new();
         let mut replace: Option<(Option<String>, SourceType, String)> = None;
         let mut saw_load = false;
         let mut saw_remove = false;
@@ -1168,7 +1245,11 @@ impl Engine {
                             )
                         });
                     saw_remove = true;
-                    to_restore.push((Arc::clone(&repository_arc), spec_to_remove.clone()));
+                    to_remove.push((
+                        Arc::clone(&repository_arc),
+                        spec_to_remove.name.clone(),
+                        spec_to_remove.effective_from.clone(),
+                    ));
                 }
                 Mutation::Load { source_type, code } => {
                     saw_load = true;
@@ -1214,12 +1295,11 @@ impl Engine {
             );
         }
 
-        let sources_map: HashMap<SourceType, String> = sources.clone().into_iter().collect();
         for st in sources.keys() {
             if let Err(e) = Self::validate_source_type_key(st, embedded_stdlib) {
                 return Err(Errors {
                     errors: vec![e],
-                    sources: sources_map,
+                    sources: sources.into_iter().collect(),
                 });
             }
         }
@@ -1247,7 +1327,7 @@ impl Engine {
             });
         }
 
-        self.commit_staged(to_restore, staged, sources.into_iter().collect())
+        self.commit_staged(to_remove, staged, sources.into_iter().collect())
     }
 
     fn validate_source_type_key(
@@ -1377,7 +1457,7 @@ impl Engine {
         embedded_stdlib: bool,
     ) -> Result<(), Errors> {
         let mut sources: IndexMap<SourceType, String> = IndexMap::new();
-        sources.insert(source_type.clone(), code.clone());
+        sources.insert(source_type.clone(), code);
 
         if let Err(e) = Self::validate_source_type_key(&source_type, embedded_stdlib) {
             return Err(Errors {
@@ -1394,16 +1474,20 @@ impl Engine {
             &self.limits
         };
 
-        let staged =
-            match self.stage_parsed_source(&source_type, &code, parse_limits, embedded_stdlib) {
-                Ok(s) => s,
-                Err(errors) => {
-                    return Err(Errors {
-                        errors,
-                        sources: sources.into_iter().collect(),
-                    });
-                }
-            };
+        let staged = match self.stage_parsed_source(
+            &source_type,
+            &sources[&source_type],
+            parse_limits,
+            embedded_stdlib,
+        ) {
+            Ok(s) => s,
+            Err(errors) => {
+                return Err(Errors {
+                    errors,
+                    sources: sources.into_iter().collect(),
+                });
+            }
+        };
 
         let prune = matches!(source_type, SourceType::Path(_) | SourceType::Dependency(_));
         if staged.is_empty() && !prune {
@@ -1449,7 +1533,7 @@ impl Engine {
             ));
         }
 
-        let mut to_restore: Vec<(Arc<LemmaRepository>, LemmaSpec)> = Vec::new();
+        let mut to_remove: Vec<(Arc<LemmaRepository>, String, EffectiveDate)> = Vec::new();
         for (repository, by_name) in self.context.repositories() {
             for spec_set in by_name.values() {
                 for spec in spec_set.iter_specs() {
@@ -1462,7 +1546,11 @@ impl Engine {
                         spec.effective_from.clone(),
                     );
                     if prune || staged_keys.contains(&key) {
-                        to_restore.push((Arc::clone(repository), spec.clone()));
+                        to_remove.push((
+                            Arc::clone(repository),
+                            spec.name.clone(),
+                            spec.effective_from.clone(),
+                        ));
                     }
                 }
             }
@@ -1473,19 +1561,22 @@ impl Engine {
             .map(|(_, repo, spec)| (source_type.clone(), repo, spec))
             .collect();
 
-        self.commit_staged(to_restore, staged_for_commit, sources.into_iter().collect())
+        self.commit_staged(to_remove, staged_for_commit, sources.into_iter().collect())
     }
 
     fn commit_staged(
         &mut self,
-        to_restore: Vec<(Arc<LemmaRepository>, LemmaSpec)>,
+        to_remove: Vec<(Arc<LemmaRepository>, String, EffectiveDate)>,
         staged: Vec<StagedSpec>,
         sources: HashMap<SourceType, String>,
     ) -> Result<(), Errors> {
-        for (repo, spec) in &to_restore {
-            if !self.context.remove_spec(repo, spec) {
-                panic!("BUG: to_restore row must be live in context");
-            }
+        let mut removed: Vec<RemovedSpec> = Vec::new();
+        for (repository, name, effective_from) in to_remove {
+            let spec = self
+                .context
+                .take_spec(&repository, &name, effective_from.as_ref())
+                .expect("BUG: a spec to remove must be live in context");
+            removed.push(RemovedSpec { repository, spec });
         }
 
         let mut inserted: Vec<(Arc<LemmaRepository>, String, EffectiveDate)> = Vec::new();
@@ -1493,19 +1584,30 @@ impl Engine {
         for (_, repository_arc, spec) in staged {
             let name = spec.name.clone();
             let effective_from = spec.effective_from.clone();
-            match self.context.insert_spec(Arc::clone(&repository_arc), spec) {
+            let replaced = removed
+                .iter()
+                .find(|replaced| {
+                    replaced.repository == repository_arc
+                        && replaced.spec.name == name
+                        && replaced.spec.effective_from == effective_from
+                })
+                .map(|replaced| Arc::clone(&replaced.spec));
+            match self
+                .context
+                .insert_spec_replacing(Arc::clone(&repository_arc), spec, replaced)
+            {
                 Ok(()) => inserted.push((repository_arc, name, effective_from)),
                 Err(es) => errors.extend(es),
             }
         }
         if !errors.is_empty() {
-            self.rollback_apply(&inserted, &to_restore);
+            self.rollback_apply(&inserted, removed);
             return Err(Errors { errors, sources });
         }
 
         let result = crate::planning::plan(&self.context, &self.limits, &self.plans);
         if !result.errors.is_empty() {
-            self.rollback_apply(&inserted, &to_restore);
+            self.rollback_apply(&inserted, removed);
             return Err(Errors {
                 errors: result.errors,
                 sources,
@@ -1513,13 +1615,14 @@ impl Engine {
         }
 
         self.plans = result.plans;
+        self.context.remove_empty_repositories();
         Ok(())
     }
 
     fn rollback_apply(
         &mut self,
         inserted: &[(Arc<LemmaRepository>, String, EffectiveDate)],
-        removed: &[(Arc<LemmaRepository>, LemmaSpec)],
+        removed: Vec<RemovedSpec>,
     ) {
         for (repo, inserted_name, inserted_effective) in inserted.iter().rev() {
             if !self.context.remove_spec_by_identity(
@@ -1530,10 +1633,26 @@ impl Engine {
                 panic!("BUG: inserted spec must be removable on rollback");
             }
         }
-        for (repo, spec) in removed.iter().rev() {
+        for removed_spec in removed.into_iter().rev() {
+            let RemovedSpec { repository, spec } = removed_spec;
+            let name = spec.name.clone();
+            let effective_from = spec.effective_from.clone();
             self.context
-                .insert_spec(Arc::clone(repo), spec.clone())
+                .insert_spec_replacing_owned(Arc::clone(&repository), Arc::clone(&spec))
                 .expect("BUG: restore removed spec for rollback");
+            let spec_set = self
+                .context
+                .spec_set(&repository, &name)
+                .expect("BUG: restored spec set must be live after rollback");
+            let restored = spec_set.spec_arc(
+                spec_set
+                    .get_exact(effective_from.as_ref())
+                    .expect("BUG: restored spec must be live after rollback"),
+            );
+            assert!(
+                Arc::ptr_eq(restored, &spec),
+                "BUG: rollback of spec '{name}' must restore its own Arc"
+            );
         }
     }
 
@@ -1584,6 +1703,143 @@ mod tests {
             timezone: None,
             granularity: crate::literals::DateGranularity::Full,
         }
+    }
+
+    /// Each source parses into its own `LemmaRepository` `Arc`. A spec set must hold the
+    /// context's `Arc` for its repository, so one repository is one allocation however
+    /// many sources and replans contribute specs to it.
+    #[test]
+    fn every_spec_set_shares_its_repository_arc_with_the_context() {
+        let path = |name: &str| SourceType::Path(Arc::new(std::path::PathBuf::from(name)));
+        let mut engine = Engine::new();
+        engine
+            .load([
+                (path("a.lemma"), "spec a\ndata x: 1\n"),
+                (path("b.lemma"), "spec b\nuses a\nrule y: a.x\n"),
+                (path("c.lemma"), "repo shared\nspec c\ndata z: 1\n"),
+                (path("d.lemma"), "repo shared\nspec d\ndata w: 1\n"),
+            ])
+            .expect("sources load");
+        engine
+            .update(None, "spec a\ndata x: 1\n".to_string(), path("a.lemma"))
+            .expect("unchanged a applies");
+        engine
+            .update(
+                None,
+                "spec b\nuses a\nrule y: a.missing\n".to_string(),
+                path("b.lemma"),
+            )
+            .expect_err("b reading a missing rule fails to plan");
+
+        let mut unshared = Vec::new();
+        for (repository, by_name) in engine.context.repositories() {
+            for spec_set in by_name.values() {
+                if !Arc::ptr_eq(repository, &spec_set.repository) {
+                    unshared.push(format!("{:?} {}", repository.name, spec_set.name));
+                }
+            }
+        }
+        assert!(
+            unshared.is_empty(),
+            "spec sets hold their own repository Arc: {}",
+            unshared.join(", ")
+        );
+    }
+
+    /// A repository whose last spec is removed no longer exists, so its provenance must
+    /// not outlive it: a local source may then declare a repository of the same name.
+    #[test]
+    fn a_repository_emptied_of_dependency_specs_can_be_declared_locally() {
+        let mut engine = Engine::new();
+        engine
+            .load([(
+                SourceType::Dependency("shared".to_string()),
+                "spec a\ndata v: 1\n",
+            )])
+            .expect("dependency loads");
+        engine
+            .remove(Some("shared"), "a", None)
+            .expect("dependency spec removes");
+        engine
+            .load([(
+                SourceType::Path(Arc::new(std::path::PathBuf::from("local.lemma"))),
+                "repo shared\nspec b\ndata w: 1\n",
+            )])
+            .expect("a local repository named like a removed dependency repository loads");
+    }
+
+    /// Removing the last spec of a named repository removes the repository from the
+    /// listing; the default repository is always listed.
+    #[test]
+    fn an_emptied_repository_is_not_listed() {
+        let path = |name: &str| SourceType::Path(Arc::new(std::path::PathBuf::from(name)));
+        let mut engine = Engine::new();
+        engine
+            .load([
+                (path("named.lemma"), "repo shared\nspec c\ndata z: 1\n"),
+                (path("default.lemma"), "spec d\ndata w: 1\n"),
+            ])
+            .expect("sources load");
+        engine
+            .remove(Some("shared"), "c", None)
+            .expect("named spec removes");
+        engine
+            .remove(None, "d", None)
+            .expect("default spec removes");
+
+        let listed: Vec<Option<String>> = engine
+            .specs()
+            .into_iter()
+            .map(|repository| repository.repository)
+            .collect();
+        assert!(
+            !listed.contains(&Some("shared".to_string())),
+            "emptied repository still listed: {listed:?}"
+        );
+        assert!(
+            listed.contains(&None),
+            "default repository must stay listed: {listed:?}"
+        );
+    }
+
+    /// Re-parsing the only file of a repository, or failing a batch that replaces it,
+    /// leaves the repository where it was in the listing.
+    #[test]
+    fn replacing_every_spec_of_a_repository_keeps_its_position() {
+        let path = |name: &str| SourceType::Path(Arc::new(std::path::PathBuf::from(name)));
+        let mut engine = Engine::new();
+        engine
+            .load([
+                (path("north.lemma"), "repo north\nspec a\ndata x: 1\n"),
+                (path("south.lemma"), "repo south\nspec b\ndata y: 1\n"),
+            ])
+            .expect("sources load");
+        let order = |engine: &Engine| -> Vec<Option<String>> {
+            engine
+                .specs()
+                .into_iter()
+                .map(|repository| repository.repository)
+                .collect()
+        };
+        let loaded = order(&engine);
+
+        engine
+            .update(
+                Some("north"),
+                "repo north\nspec a\ndata x: 1\n".to_string(),
+                path("north.lemma"),
+            )
+            .expect("unchanged north applies");
+        assert_eq!(order(&engine), loaded, "after an unchanged re-parse");
+
+        engine
+            .update(
+                Some("north"),
+                "repo north\nspec a\nrule r: missing\n".to_string(),
+                path("north.lemma"),
+            )
+            .expect_err("a rule reading missing data fails to plan");
+        assert_eq!(order(&engine), loaded, "after a failed batch");
     }
 
     #[test]
@@ -2587,7 +2843,7 @@ rule formatted: helper_value + 0"#
         let mut engine = Engine::new();
         let batch = engine.load([(
             SourceType::Dependency(EMBEDDED_STDLIB_REPOSITORY.to_string()),
-            "spec finance\ndata money: ratio -> decimals 2".to_string(),
+            "spec finance\ndata rate: ratio".to_string(),
         )]);
         assert!(
             batch.is_err(),

@@ -13,6 +13,9 @@ serde_json.workspace = true
 rust_decimal.workspace = true
 toml_edit = "0.25"
 
+[dev-dependencies]
+lemma-lsp = { version = "=0.10.3", path = "../engine/lsp" }
+
 [[bin]]
 name = "xtask"
 path = "src/main.rs"

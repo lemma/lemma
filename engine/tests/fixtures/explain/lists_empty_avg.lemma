@@ -1,0 +1,11 @@
+spec item
+
+data score: number
+
+
+spec scores
+
+uses item
+
+rule average:
+  item list -> avg score

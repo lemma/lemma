@@ -524,7 +524,7 @@ pub mod http {
                         }),
                     )
                 })?;
-                lemma::parse_evaluate_data_object(&Some(value)).map_err(|e| {
+                lemma::parse_evaluate_data_object(Some(value)).map_err(|e| {
                     (
                         StatusCode::BAD_REQUEST,
                         Json(ErrorResponse {

@@ -1,0 +1,5 @@
+first_bonus: 5
+└─ (items -> first).bonus
+   ├─ items -> first
+   │  └─ items: items.1
+   └─ 1. extra: 5

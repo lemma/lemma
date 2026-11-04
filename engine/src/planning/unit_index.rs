@@ -2,9 +2,10 @@
 //! Qualify with `Type.unit`, `alias.Type.unit`, nested import paths, or `alias.unit`
 //! when that import scope identifies the owner.
 
-use crate::planning::semantics::{primitive_ratio_arc, LemmaType, SpecIdentity, TypeSpecification};
+use crate::planning::semantics::{
+    primitive_ratio_arc, LemmaType, SpecVersionKey, TypeSpecification,
+};
 use indexmap::IndexMap;
-use serde::{Deserialize, Serialize};
 use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 
@@ -69,13 +70,12 @@ impl PlanningOwner {
 }
 
 /// Bound owner after magnitudes: eval and Show read Arcs from here.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub enum UnitOwner {
     PrimitiveRatio,
     Named {
         import_path: Vec<String>,
         type_name: String,
-        #[serde(with = "crate::snapshot::shared::arc")]
         lemma_type: Arc<LemmaType>,
     },
 }
@@ -349,10 +349,10 @@ impl PlanningUnitIndex {
 
     /// Attach local Arcs from final `resolved` and add missing family-root units.
     #[must_use]
-    pub fn bind(
+    pub(crate) fn bind(
         self,
         resolved: &IndexMap<String, Arc<LemmaType>>,
-        this_spec: &SpecIdentity,
+        this_spec: &SpecVersionKey,
     ) -> UnitIndex {
         let mut bound = UnitIndex::new();
         for (unit_name, owner) in self.into_iter_owners() {
@@ -433,7 +433,7 @@ impl PlanningUnitIndex {
 }
 
 /// Expression-scope units after bind: every declarer per bare unit name.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default)]
 pub struct UnitIndex {
     by_bare: IndexMap<String, Vec<UnitOwner>>,
 }
@@ -937,13 +937,13 @@ mod tests {
     use crate::computation::rational::rational_one;
     use crate::literals::{MeasureUnit, MeasureUnits};
     use crate::parsing::ast::EffectiveDate;
-    use crate::planning::semantics::{LemmaType, SpecIdentity, TypeExtends, TypeSpecification};
+    use crate::planning::semantics::{LemmaType, SpecVersionKey, TypeExtends, TypeSpecification};
     use indexmap::IndexMap;
     use std::collections::HashMap;
     use std::sync::Arc;
 
-    fn test_spec() -> SpecIdentity {
-        SpecIdentity {
+    fn test_spec() -> SpecVersionKey {
+        SpecVersionKey {
             repository: None,
             spec: "test".into(),
             effective: EffectiveDate::Origin,
@@ -980,7 +980,6 @@ mod tests {
             name.to_string(),
             TypeSpecification::Measure {
                 units,
-                decimals: None,
                 traits: vec![],
                 decomposition: None,
                 minimum: None,
@@ -1157,7 +1156,6 @@ mod tests {
                 TypeSpecification::Ratio {
                     minimum: None,
                     maximum: None,
-                    decimals: None,
                     units,
                     unit: None,
                     help: String::new(),
@@ -1224,7 +1222,6 @@ mod tests {
                 TypeSpecification::Ratio {
                     minimum: None,
                     maximum: None,
-                    decimals: None,
                     units,
                     unit: None,
                     help: String::new(),

@@ -1,52 +1,62 @@
-use crate::computation::rational::{NumericFailure, RationalInteger};
+use crate::computation::rational::{rational_is_zero, NumericFailure, RationalInteger};
+use crate::computation::{mathematical_computation_applies_to_magnitude, OperationResult};
 use crate::engine::Context;
 use crate::literals::{MeasureUnit, MeasureUnits};
 use crate::parsing::arena::{ExprId, ExprKind, ExprRef, ExprTable, ExprTree};
 use crate::parsing::ast::{
     self as ast, CommandArg, Constraint, EffectiveDate, LemmaData, LemmaRepository, LemmaRule,
-    LemmaSpec, ParentType, PrimitiveKind, RowCondition, TypeConstraintCommand, Value, WithRhs,
+    LemmaSpec, ParentType, PrimitiveKind, TypeConstraintCommand, Value, WithRhs,
 };
 use crate::parsing::source::Source;
 use crate::planning::discovery;
-use crate::planning::execution_plan::{self, import_rule_needs, ExecutionPlan, ImportNeed};
+use crate::planning::execution_plan::{self, ExecutionPlan};
 use crate::planning::instance_list::{
-    self, DataSource, InstanceListSource, InstanceLists, KeyedRow, SourceRow,
+    self, InstanceListSource, InstanceLists, KeyIndex, RowHop, RowStore, RowTemplate, StoreKeyField,
 };
+use crate::planning::normalize::{LeafKind, NormalFormId, NormalFormKind, NormalFormListOp};
 use crate::planning::semantics::{
-    self, bound_value_kind_from_raw_suggestion, calendar_decomposition, canonicalize_signature,
-    conversion_target_to_semantic, duration_decomposition, lift_range_endpoint,
-    number_with_unit_to_value_kind, parser_value_to_value_kind, primitive_boolean_arc,
-    primitive_date_arc, primitive_number_arc, primitive_ratio_arc, primitive_text_arc,
-    primitive_time_arc, range_type_specification_from_endpoints, value_kind_matches_spec,
-    value_to_semantic, ArithmeticComputation, BaseMeasureVector, BoundValueKind,
-    ComparisonComputation, DataDefinition, DataPath, Expression, ExpressionKind, ImportOverlay,
-    LemmaType, ListKey, ListOp, ListPredKind, ListReduce, LiteralValue, PathSegment, RawSuggestion,
-    ReferenceEnd, ReferenceTarget, RowEnd, RulePath, SemanticConversionTarget, SpecIdentity,
-    SpecInstance, SpecMemberEnd, SpecMemberTarget, SpecValue, TypeDefiningSpec, TypeExtends,
-    TypeFamily, TypeSpecification, TypedLiteral, UnitTokenResolver, ValueKind,
+    self, apply_list_with_rows, apply_option_constraint, apply_spec_member_command,
+    bound_value_kind_from_raw_suggestion, calendar_decomposition, calendar_unit_factor,
+    canonicalize_signature, conversion_target_to_semantic, duration_decomposition,
+    lift_range_endpoint, number_with_unit_to_value_kind, parser_value_to_value_kind,
+    primitive_boolean_arc, primitive_date_arc, primitive_number_arc, primitive_ratio_arc,
+    primitive_text_arc, primitive_time_arc, range_type_specification_from_endpoints,
+    scale_decomposition, value_kind_matches_spec, value_to_semantic, ArithmeticComputation,
+    BaseMeasureVector, BoundValueKind, ComparisonComputation, ConstraintNames, DataDefinition,
+    DataOrigin, DataPath, Expression, ExpressionKind, KeyField, LemmaType, ListKey, ListOp,
+    ListPredKind, ListReduce, LiteralValue, PathSegment, RawSuggestion, ReferenceEnd,
+    ReferenceTarget, RowBinding, RowEnd, RowInstance, RowOrigin, RulePath,
+    SemanticConversionTarget, SpecIdentity, SpecInstance, SpecVersionKey, TypeDefiningSpec,
+    TypeExtends, TypeFamily, TypeOptions, TypeSpecification, TypedLiteral, UnitTokenResolver,
+    ValueKind, SPEC_LIST_HAS_NO_OPTIONS,
 };
-use crate::planning::spec_value::RulePresence;
+use crate::planning::spec_value::{RowFieldRead, RulePresence, SpecCandidates};
 use crate::planning::typing::{
     comparison_type, date_predicate_type, list_command_result_type, list_has_instance_rows,
-    logical_and_type, logical_not_type, math_op_type, measure_range_matches_measure,
+    logical_connective_type, logical_not_type, math_op_type, measure_range_matches_measure,
     past_future_range_type, piecewise_type, range_bound_result_type, range_matches_measure_type,
-    range_matches_range_measure, range_span_type, resolve_anonymous_measure, result_is_veto_type,
-    unit_conversion_type, ListCommandResultKind, MeasureScope,
+    range_matches_range_measure, range_span_type, refine_list_key_type, resolve_anonymous_measure,
+    result_is_veto_type, step_rounding_compatible, step_rounding_type, unit_conversion_type,
+    ListCommandResultKind, MeasureScope,
 };
 use crate::planning::unit_index::{
     PlanningOwner, PlanningUnitIndex, UnitIndex, UnitMergeConflict, UnitOwner,
 };
 use crate::Error;
 
+use crate::computation::arithmetic::{SignatureFactor, SignatureIndex};
+use crate::computation::units::owning_type_declares_unit_name;
+use crate::evaluation::evaluate_data::typed_literal_from_parsed;
+use crate::limits::{ResourceLimits, MAX_UNIT_EXPONENT};
 pub use crate::planning::typing::DecompositionMatch;
 pub(crate) use crate::planning::typing::{
     compute_arithmetic_result_type, find_unique_measure_type_in_unit_index,
-    infer_range_type_from_endpoint_types,
+    infer_range_type_from_endpoint_types, quantity_integer_power_type,
 };
+use crate::string_distance::closest_name;
 use ast::DataValue as ParsedDataValue;
 use indexmap::IndexMap;
 use rust_decimal::Decimal;
-use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::fmt;
@@ -56,12 +66,14 @@ use std::sync::Arc;
 /// The memo does not include `computed_rule_types` or `resolved_types`, so an entry is valid
 /// only while those are unchanged. Every change to either must be followed by `clear()`:
 /// after phase 4 merges rule-target constraints into `resolved_types`, and when
-/// `recursive_rule_seed` replaces a recursive rule's undetermined placeholder with its seed.
+/// `ensure_seed` replaces a recursive rule's undetermined placeholder with its seed.
 #[derive(Default)]
 struct InferExpressionTypeCache {
     /// Types of a table's nodes in table order, keyed by the table's address. A table lists
     /// children before parents, so a typed prefix always covers the operands of its next node.
     tables: HashMap<usize, Vec<Arc<LemmaType>>>,
+    /// Keys of the tables typed since the last [`Self::clear`].
+    typed: Vec<usize>,
 }
 
 impl InferExpressionTypeCache {
@@ -71,22 +83,25 @@ impl InferExpressionTypeCache {
 
     /// Forgets every type and keeps each table's storage for the next wave.
     fn clear(&mut self) {
-        self.tables.values_mut().for_each(Vec::clear);
+        for key in self.typed.drain(..) {
+            self.tables
+                .get_mut(&key)
+                .expect("BUG: a typed table is in the cache")
+                .clear();
+        }
     }
 }
 
 /// Data bindings map: maps a target data name path to the binding's value and source.
 ///
-/// The key is the full path of **data names** from the root spec to the target data.
-/// Spec set names are intentionally excluded from the key because spec ref bindings may change
-/// which spec a segment points to — matching by data names only ensures bindings
-/// are applied correctly regardless of spec ref bindings.
-///
-/// Example: `data employee.salary: 7500` in the root spec produces key `["employee", "salary"]`.
+/// The key is the path of **data names** from the spec being built to the target data,
+/// relative to that spec: `-> with salary: 7500` on `uses employee` in the spec being
+/// built is `["employee", "salary"]`; when the import is built, the same binding is
+/// passed down as `["salary"]`. Spec names are not part of the key.
 type DataBindings = IndexMap<Vec<String>, (BindingValue, Source)>;
 
-/// Binding value stored in [`DataBindings`]. Only two forms are valid for a
-/// cross-spec binding: a literal value, or a reference to another data or rule.
+/// Binding value stored in [`DataBindings`]: a scalar literal/reference or the rows
+/// that replace an instance-list slot.
 ///
 /// References on the binding's right-hand side (e.g. `data license.other: law.other`)
 /// are resolved at binding collection time against the spec in which the binding
@@ -98,20 +113,153 @@ pub(crate) enum BindingValue {
     /// Literal RHS (parsed as a `Value`). Applied as a plain value to the bound data.
     Literal(ast::Value),
     /// Reference RHS pre-resolved to a concrete reference target.
-    Reference {
-        target: ReferenceTarget,
-        constraints: Option<Vec<Constraint>>,
-    },
+    Reference { target: ReferenceTarget },
+    /// `-> with items: ada, kim` on a `uses`: the named `uses` instances of the spec that
+    /// wrote the binding, in order. Resolved to [`Self::InstanceRows`] by that spec.
+    InstanceAliases(Vec<ast::Reference>),
+    /// Rows that replace an instance-list slot of an imported spec: one copy per alias.
+    InstanceRows(Vec<RowCopy>),
 }
 
-impl execution_plan::ReferenceOwner for Graph<'_> {
-    fn owner_data(&self) -> &IndexMap<DataPath, DataDefinition> {
-        &self.data
+/// A row written in a data list: the bindings its local instance is planned with.
+///
+/// `-> with ada` copies every binding of `uses ada`; `-> with name: "x"` binds the
+/// written fields. Keys are relative to the row spec.
+#[derive(Debug, Clone)]
+pub(crate) struct RowCopy {
+    /// Spec of the copied instance (the alias's spec, or the list's row spec for a field row).
+    identity: SpecIdentity,
+    /// `ada` for `-> with ada`; `row 2` for a field row.
+    name: String,
+    bindings: DataBindings,
+    source: Source,
+}
+
+/// Identity of a row reached from the plan being built, for visited sets.
+type RowKey = *const RowInstance;
+
+/// A row reached from the plan being built: `context` holds the rows whose contexts
+/// enclose it, outermost first. The last is the row owning it; empty when this plan
+/// owns it.
+#[derive(Clone)]
+struct Located<'s> {
+    row: &'s RowInstance,
+    context: Vec<&'s RowInstance>,
+}
+
+impl<'s> Located<'s> {
+    fn root(row: &'s RowInstance) -> Self {
+        Self {
+            row,
+            context: Vec::new(),
+        }
     }
 
-    fn owner_templates(&self) -> &BTreeMap<SpecIdentity, Arc<ExecutionPlan>> {
-        &self.instance_lists.templates
+    /// Context of the rows this row owns.
+    fn inside(&self) -> Vec<&'s RowInstance> {
+        let mut context = self.context.clone();
+        context.push(self.row);
+        context
     }
+
+    /// Context of the rows owned by the scope a binding written `hops` instances
+    /// above this row names ([`InstanceKey::scope`]).
+    fn context_at(&self, hops: u32) -> Vec<&'s RowInstance> {
+        let hops = usize::try_from(hops).expect("BUG: hops fit usize");
+        let len = self.context.len();
+        assert!(
+            hops <= len,
+            "BUG: a binding hops above the plan being built"
+        );
+        self.context[..len - hops].to_vec()
+    }
+
+    /// The row a binding written `hops` instances above this row resolves in; `None`
+    /// for the plan being built.
+    fn scope(&self, hops: u32) -> Option<Located<'s>> {
+        let mut context = self.context_at(hops);
+        let row = context.pop()?;
+        Some(Located { row, context })
+    }
+
+    fn key(&self) -> Vec<RowKey> {
+        self.context
+            .iter()
+            .chain(std::iter::once(&self.row))
+            .map(|row| *row as RowKey)
+            .collect()
+    }
+
+    /// Hops naming this row from the plan being built, when it and every row enclosing
+    /// it is a `uses` import.
+    fn import_segments(&self) -> Option<Vec<PathSegment>> {
+        self.context
+            .iter()
+            .chain(std::iter::once(&self.row))
+            .map(|row| match &row.origin {
+                RowOrigin::Import { alias } => Some(PathSegment::import(alias, &row.identity)),
+                RowOrigin::Numbered { .. }
+                | RowOrigin::Written { .. }
+                | RowOrigin::Inline { .. } => None,
+            })
+            .collect()
+    }
+}
+
+/// A read of `end` landing on row `at`.
+struct ForcedRead<'s> {
+    at: Located<'s>,
+    end: RowEnd,
+}
+
+/// How [`Graph::template_rule_reads`] treats rule references.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RuleWalk {
+    /// Walk the referenced rule's reads in the same context.
+    Follow,
+    /// Read the referenced rule, and read data slots too.
+    Show,
+}
+
+/// Where a reference target lands: on this plan's own `end`, or as a read on a row.
+enum Landing<'s> {
+    Plan(RowEnd),
+    Row(ForcedRead<'s>),
+}
+
+/// Rules of `uses` imports that Show reaches from the rules of the plan being built,
+/// with every Show edge, keyed by paths composed from the import hops.
+#[derive(Debug, Default)]
+pub(crate) struct ShowImports {
+    /// Edges into imports of each rule of this plan, and every edge of each reached
+    /// import rule.
+    pub(crate) edges: BTreeMap<RulePath, BTreeSet<RulePath>>,
+    /// The edges of each reached import rule its normalized body reads: the rules whose
+    /// data needs it shares.
+    pub(crate) need_edges: BTreeMap<RulePath, BTreeSet<RulePath>>,
+    /// Data each Show rule reads that no binding fills: data of this plan, or data of
+    /// an import.
+    pub(crate) data_reads: BTreeMap<RulePath, BTreeSet<DataPath>>,
+    /// Template identity of every import data path in [`Self::data_reads`].
+    pub(crate) data: BTreeMap<DataPath, SpecIdentity>,
+    /// Every reached import rule: its template identity and its rule there.
+    pub(crate) rules: BTreeMap<RulePath, (SpecIdentity, RulePath)>,
+}
+
+type ScopeKey = Vec<Vec<Vec<RowKey>>>;
+
+fn scope_key(scope: &[Vec<Located<'_>>]) -> ScopeKey {
+    scope
+        .iter()
+        .map(|rows| rows.iter().map(Located::key).collect())
+        .collect()
+}
+
+/// Rows the list command at row level `level` iterates.
+fn level_rows<'r, 's>(scope: &'r [Vec<Located<'s>>], level: u32) -> &'r [Located<'s>] {
+    scope
+        .get(usize::try_from(level).expect("BUG: row level fits usize"))
+        .expect("BUG: row read outside its list command's scope")
 }
 
 #[derive(Debug)]
@@ -122,11 +270,8 @@ pub(crate) struct Graph<'a> {
     rules: BTreeMap<RulePath, RuleNode<'a>>,
     /// Rules whose expression conversion failed. Each has an error in `graph_errors`.
     dropped_rules: BTreeSet<RulePath>,
-    /// Local rules in dependency order (topo).
+    /// Every rule in dependency order (topo), imports flattened in.
     rule_order: Vec<RulePath>,
-    /// [`Self::rule_order`] with the named-`uses` rules locals reach, each placed
-    /// after the owner rules its site overlays bind.
-    execution_order: Vec<RulePath>,
     /// Data→data references in dependency order (topo). Targets before dependents
     /// so chained references resolve. Refs to non-reference data are unordered
     /// among themselves.
@@ -134,120 +279,17 @@ pub(crate) struct Graph<'a> {
     /// Every [`DataDefinition::Reference`] path → where its chain ends.
     /// Filled in [`Self::validate`] after data-reference cycles are rejected.
     reference_ends: IndexMap<DataPath, ReferenceEnd>,
-    /// Instances each local rule can yield (empty when not spec-valued), relative to
-    /// this spec. Filled by [`Self::link_spec_values`].
-    rule_candidates: HashMap<RulePath, Vec<SpecInstance>>,
+    /// Instances each rule can yield (empty when not spec-valued or list-valued).
+    /// Filled by [`Self::link_spec_values`].
+    rule_candidates: HashMap<RulePath, SpecCandidates>,
     instance_lists: InstanceLists,
-}
-
-/// Result of [`Graph::lookup_data`]: local graph slot or a peeled import-template field.
-pub(crate) enum DataLookup<'p> {
-    Local(&'p DataDefinition),
-    Import(&'p DataDefinition),
-}
-
-impl<'p> DataLookup<'p> {
-    pub(crate) fn definition(&self) -> &'p DataDefinition {
-        match self {
-            DataLookup::Local(definition) | DataLookup::Import(definition) => definition,
-        }
-    }
-}
-
-/// First Import hop on consumer `data` → shared template plan.
-pub(crate) fn first_import_template<'p>(
-    data: &'p IndexMap<DataPath, DataDefinition>,
-    templates: &'p BTreeMap<SpecIdentity, Arc<ExecutionPlan>>,
-    first: &PathSegment,
-) -> Option<&'p ExecutionPlan> {
-    let import_marker = DataPath::local(first.uses.clone());
-    let DataDefinition::Import { identity, .. } = data.get(&import_marker)? else {
-        return None;
-    };
-    templates.get(identity).map(Arc::as_ref)
-}
-
-/// Local `uses` marker `hop` on `data`, its identity and template plan.
-fn root_import_hop<'p>(
-    data: &'p IndexMap<DataPath, DataDefinition>,
-    templates: &'p BTreeMap<SpecIdentity, Arc<ExecutionPlan>>,
-    hop: &str,
-) -> Option<(DataPath, &'p SpecIdentity, &'p ExecutionPlan)> {
-    let import = DataPath::local(hop.to_string());
-    let DataDefinition::Import { identity, .. } = data.get(&import)? else {
-        return None;
-    };
-    let template = templates.get(identity)?;
-    Some((import, identity, template))
-}
-
-/// Self-list row field `name` (dotted through named `uses`) on the spec being planned,
-/// `rules` being its rules so far.
-fn root_row_end(
-    data: &IndexMap<DataPath, DataDefinition>,
-    templates: &BTreeMap<SpecIdentity, Arc<ExecutionPlan>>,
-    rules: &[&RulePath],
-    name: &str,
-) -> Option<RowEnd> {
-    let Some((hop, rest)) = name.split_once('.') else {
-        return instance_list::row_end_of(instance_list::RowEndView::Root(data, rules), name);
-    };
-    let (import, identity, template) = root_import_hop(data, templates, hop)?;
-    Some(
-        match instance_list::row_end_of(instance_list::RowEndView::Plan(template), rest)? {
-            RowEnd::Data(path) => {
-                RowEnd::Data(absolute_import_member_path(&import, identity, &path))
-            }
-            RowEnd::Rule(rule) => {
-                let absolute = absolute_import_member_path(
-                    &import,
-                    identity,
-                    &DataPath {
-                        segments: rule.segments,
-                        data: rule.rule,
-                    },
-                );
-                RowEnd::Rule(RulePath {
-                    segments: absolute.segments,
-                    rule: absolute.data,
-                })
-            }
-        },
-    )
-}
-
-/// Peel Import hops on a rule path using a data map + template store (no Graph borrow).
-pub(crate) fn peel_rule_from<'p>(
-    data: &'p IndexMap<DataPath, DataDefinition>,
-    templates: &'p BTreeMap<SpecIdentity, Arc<ExecutionPlan>>,
-    path: &RulePath,
-) -> Option<(&'p ExecutionPlan, &'p RulePath)> {
-    let first = path.segments.first()?;
-    let template = first_import_template(data, templates, first)?;
-    let rest = RulePath {
-        segments: path.segments[1..].to_vec(),
-        rule: path.rule.clone(),
-    };
-    template.peel_rule(&rest)
-}
-
-/// Consumer-qualified path for a template-relative overlay field under `import_path`.
-pub(crate) fn absolute_import_member_path(
-    import_path: &DataPath,
-    identity: &SpecIdentity,
-    relative: &DataPath,
-) -> DataPath {
-    let mut segments = import_path.segments.clone();
-    segments.push(PathSegment {
-        uses: import_path.data.clone(),
-        repository: identity.repository.clone(),
-        spec: identity.spec.clone(),
-    });
-    segments.extend(relative.segments.iter().cloned());
-    DataPath {
-        segments,
-        data: relative.data.clone(),
-    }
+    /// The rules of this plan and every `uses` import rule they reach, with their reads.
+    /// Filled by [`Self::sort_show_rules`].
+    show_imports: ShowImports,
+    /// Dependencies of every Show rule, keyed like `show_order`.
+    show_edges: BTreeMap<RulePath, BTreeSet<RulePath>>,
+    /// Show rules in dependency order: ready rules in path order, first ready first.
+    show_order: Vec<RulePath>,
 }
 
 impl<'a> Graph<'a> {
@@ -264,50 +306,9 @@ impl<'a> Graph<'a> {
             RulePresence::Present
         } else if self.dropped_rules.contains(path) {
             RulePresence::Dropped
-        } else if peel_rule_from(&self.data, &self.instance_lists.templates, path).is_some() {
-            // Rule lives on a named `uses` template, not in this graph's rule map.
-            RulePresence::Present
-        } else if path.segments.first().is_some_and(|hop| {
-            matches!(
-                self.data.get(&DataPath::local(hop.uses.clone())),
-                Some(DataDefinition::Import { .. })
-            )
-        }) {
-            // Import hop exists but template peel failed (nested planning error
-            // already recorded). Treat as dropped so topo does not panic.
-            RulePresence::Dropped
         } else {
             RulePresence::Absent
         }
-    }
-
-    /// Whether `path` is a local rule of this graph (not merely an import-template member).
-    pub(crate) fn has_local_rule(&self, path: &RulePath) -> bool {
-        self.rules.contains_key(path)
-    }
-
-    /// Data at `path` on this graph, or after peeling leading Import hops into templates.
-    pub(crate) fn lookup_data(&self, path: &DataPath) -> Option<DataLookup<'_>> {
-        if let Some(definition) = self.data.get(path) {
-            return Some(DataLookup::Local(definition));
-        }
-        let (_, _, definition) = self.peel_data(path)?;
-        Some(DataLookup::Import(definition))
-    }
-
-    /// Peel `alias…` hops through Import markers into nested templates; `path.data` is
-    /// the final field on the last template.
-    pub(crate) fn peel_data(
-        &self,
-        path: &DataPath,
-    ) -> Option<(&ExecutionPlan, &DataPath, &DataDefinition)> {
-        let first = path.segments.first()?;
-        let template = first_import_template(&self.data, &self.instance_lists.templates, first)?;
-        let rest = DataPath {
-            segments: path.segments[1..].to_vec(),
-            data: path.data.clone(),
-        };
-        template.peel_data(&rest)
     }
 
     pub(crate) fn rules_mut(&mut self) -> &mut BTreeMap<RulePath, RuleNode<'a>> {
@@ -318,10 +319,6 @@ impl<'a> Graph<'a> {
         &self.rule_order
     }
 
-    pub(crate) fn execution_order(&self) -> &[RulePath] {
-        &self.execution_order
-    }
-
     pub(crate) fn data_reference_order(&self) -> &[DataPath] {
         &self.data_reference_order
     }
@@ -330,8 +327,20 @@ impl<'a> Graph<'a> {
         &self.reference_ends
     }
 
-    pub(crate) fn rule_candidates(&self) -> &HashMap<RulePath, Vec<SpecInstance>> {
+    pub(crate) fn rule_candidates(&self) -> &HashMap<RulePath, SpecCandidates> {
         &self.rule_candidates
+    }
+
+    pub(crate) fn show_imports(&self) -> &ShowImports {
+        &self.show_imports
+    }
+
+    pub(crate) fn show_edges(&self) -> &BTreeMap<RulePath, BTreeSet<RulePath>> {
+        &self.show_edges
+    }
+
+    pub(crate) fn show_order(&self) -> &[RulePath] {
+        &self.show_order
     }
 
     pub(crate) fn main_spec(&self) -> &LemmaSpec {
@@ -354,12 +363,13 @@ impl<'a> Graph<'a> {
             local_constraints: Option<Vec<Constraint>>,
             local_suggestion: Option<BoundValueKind>,
             local_value: Option<BoundValueKind>,
+            origin: DataOrigin,
         }
 
         let mut schema: HashMap<DataPath, Arc<LemmaType>> = HashMap::new();
         let mut declared_suggestions: HashMap<DataPath, BoundValueKind> = HashMap::new();
         let mut declared_values: HashMap<DataPath, BoundValueKind> = HashMap::new();
-        let mut values: HashMap<DataPath, LiteralValue> = HashMap::new();
+        let mut values: HashMap<DataPath, (LiteralValue, DataOrigin)> = HashMap::new();
         let mut value_sources: HashMap<DataPath, Source> = HashMap::new();
         let mut references: HashMap<DataPath, PendingReference> = HashMap::new();
 
@@ -368,9 +378,10 @@ impl<'a> Graph<'a> {
                 DataDefinition::Value {
                     value,
                     resolved_type,
+                    origin,
                     source,
                 } => {
-                    values.insert(path.clone(), value.clone());
+                    values.insert(path.clone(), (value.clone(), *origin));
                     value_sources.insert(path.clone(), source.clone());
                     schema.insert(path.clone(), Arc::clone(resolved_type));
                 }
@@ -396,6 +407,7 @@ impl<'a> Graph<'a> {
                     local_constraints,
                     local_suggestion,
                     local_value,
+                    origin,
                     ..
                 } => {
                     schema.insert(path.clone(), Arc::clone(resolved_type));
@@ -407,6 +419,7 @@ impl<'a> Graph<'a> {
                             local_constraints: local_constraints.clone(),
                             local_suggestion: local_suggestion.clone(),
                             local_value: local_value.clone(),
+                            origin: *origin,
                         },
                     );
                 }
@@ -414,7 +427,7 @@ impl<'a> Graph<'a> {
         }
 
         let mut coercion_errors: Vec<Error> = Vec::new();
-        for (path, value) in values.iter_mut() {
+        for (path, (value, _)) in values.iter_mut() {
             let Some(schema_type) = schema.get(path).cloned() else {
                 continue;
             };
@@ -470,10 +483,11 @@ impl<'a> Graph<'a> {
                         local_constraints: pending.local_constraints,
                         local_suggestion: pending.local_suggestion,
                         local_value: pending.local_value,
+                        origin: pending.origin,
                         source,
                     },
                 );
-            } else if let Some(value) = values.remove(path) {
+            } else if let Some((value, origin)) = values.remove(path) {
                 let resolved_type = schema
                     .remove(path)
                     .expect("BUG: value data must have schema type after coercion");
@@ -482,6 +496,7 @@ impl<'a> Graph<'a> {
                     DataDefinition::Value {
                         value,
                         resolved_type,
+                        origin,
                         source,
                     },
                 );
@@ -744,7 +759,8 @@ impl<'a> Graph<'a> {
                 match apply_constraints_to_spec(
                     self.main_spec,
                     &constraint_type_name,
-                    merged.specifications.clone(),
+                    &reference_path.data,
+                    &mut merged,
                     constraints,
                     &source,
                     ConstraintSuggestionSink {
@@ -753,7 +769,7 @@ impl<'a> Graph<'a> {
                         resolve_unit: Some(&resolve_unit),
                     },
                 ) {
-                    Ok(specs) => merged.specifications = specs,
+                    Ok(()) => {}
                     Err(errs) => {
                         errors.extend(errs);
                         continue;
@@ -821,87 +837,6 @@ impl<'a> Graph<'a> {
         }
     }
 
-    /// Type-check named-`uses` overlay references against the template field type.
-    /// Same kind / measure-family rules as [`Self::resolve_data_reference_types`].
-    fn validate_import_overlay_reference_types(&self) -> Result<(), Vec<Error>> {
-        let mut errors = Vec::new();
-        for (import_path, definition) in &self.data {
-            let DataDefinition::Import {
-                identity,
-                overlay,
-                source,
-                ..
-            } = definition
-            else {
-                continue;
-            };
-            if overlay.is_empty() {
-                continue;
-            }
-            let Some(template) = self.instance_lists.templates.get(identity).map(Arc::as_ref)
-            else {
-                panic!(
-                    "BUG: import '{}' has overlay but no template during overlay type check",
-                    import_path.input_key()
-                );
-            };
-            for (relative, entry) in overlay {
-                // Rule-target overlays: type-checked after rule inference (Phase 4).
-                let ImportOverlay::Reference {
-                    target: ReferenceTarget::Data(target_path),
-                    ..
-                } = entry
-                else {
-                    continue;
-                };
-                let Some((_, _, field_def)) = template.peel_data(relative) else {
-                    panic!(
-                        "BUG: overlay path '{}' missing from template during type check",
-                        relative.input_key()
-                    );
-                };
-                let Some(lhs) = field_def.resolved_type_arc() else {
-                    panic!(
-                        "BUG: overlay field '{}' must be typed",
-                        relative.input_key()
-                    );
-                };
-                if lhs.is_undetermined() {
-                    continue;
-                }
-                let absolute = absolute_import_member_path(import_path, identity, relative);
-                let target_type = self
-                    .lookup_data(target_path)
-                    .and_then(|lookup| lookup.definition().resolved_type_arc().cloned());
-                let Some(target_type) = target_type else {
-                    errors.push(reference_error(
-                        self.main_spec,
-                        source,
-                        format!(
-                            "Data reference '{}' target '{}' does not exist",
-                            absolute, target_path
-                        ),
-                    ));
-                    continue;
-                };
-                if let Some(msg) = reference_kind_mismatch_message(
-                    lhs.as_ref(),
-                    target_type.as_ref(),
-                    &absolute,
-                    target_path,
-                    "target",
-                ) {
-                    errors.push(reference_error(self.main_spec, source, msg));
-                }
-            }
-        }
-        if errors.is_empty() {
-            Ok(())
-        } else {
-            Err(errors)
-        }
-    }
-
     /// Resolve each rule-target [`DataDefinition::Reference`]'s `resolved_type`
     /// from the inferred type of the target rule. Applies the same LHS-vs-target
     /// kind compatibility check and local `-> ...` constraint merge that
@@ -941,7 +876,9 @@ impl<'a> Graph<'a> {
                 match self.rule_presence(target_rule_path) {
                     RulePresence::Dropped => {}
                     RulePresence::Present => {
-                        panic!("BUG: rule type not inferred before dependent in topological order")
+                        panic!(
+                            "BUG: rule '{target_rule_path}' type not inferred before dependent '{reference_path}' in topological order"
+                        )
                     }
                     RulePresence::Absent => {
                         errors.push(reference_error(
@@ -982,7 +919,8 @@ impl<'a> Graph<'a> {
                     match apply_constraints_to_spec(
                         self.main_spec,
                         &constraint_type_name,
-                        merged.specifications.clone(),
+                        &reference_path.data,
+                        &mut merged,
                         constraints,
                         source,
                         ConstraintSuggestionSink {
@@ -991,7 +929,7 @@ impl<'a> Graph<'a> {
                             resolve_unit: Some(&resolve_unit),
                         },
                     ) {
-                        Ok(specs) => merged.specifications = specs,
+                        Ok(()) => {}
                         Err(errs) => {
                             errors.extend(errs);
                             continue;
@@ -1071,7 +1009,8 @@ impl<'a> Graph<'a> {
                 match apply_constraints_to_spec(
                     self.main_spec,
                     &constraint_type_name,
-                    merged.specifications.clone(),
+                    &reference_path.data,
+                    &mut merged,
                     constraints,
                     source,
                     ConstraintSuggestionSink {
@@ -1080,7 +1019,7 @@ impl<'a> Graph<'a> {
                         resolve_unit: Some(&resolve_unit),
                     },
                 ) {
-                    Ok(specs) => merged.specifications = specs,
+                    Ok(()) => {}
                     Err(errs) => {
                         errors.extend(errs);
                         continue;
@@ -1150,81 +1089,6 @@ impl<'a> Graph<'a> {
             }
         }
 
-        // Named-`uses` overlay rule targets: same kind check once rule types exist.
-        for (import_path, definition) in &self.data {
-            let DataDefinition::Import {
-                identity,
-                overlay,
-                source,
-                ..
-            } = definition
-            else {
-                continue;
-            };
-            if overlay.is_empty() {
-                continue;
-            }
-            let Some(template) = self.instance_lists.templates.get(identity).map(Arc::as_ref)
-            else {
-                continue;
-            };
-            for (relative, entry) in overlay {
-                let ImportOverlay::Reference {
-                    target: ReferenceTarget::Rule(target_rule),
-                    ..
-                } = entry
-                else {
-                    continue;
-                };
-                let Some((_, _, field_def)) = template.peel_data(relative) else {
-                    continue;
-                };
-                let Some(lhs) = field_def.resolved_type_arc() else {
-                    continue;
-                };
-                if lhs.is_undetermined() {
-                    continue;
-                }
-                let absolute = absolute_import_member_path(import_path, identity, relative);
-                let target_type = computed_rule_types
-                    .get(target_rule)
-                    .cloned()
-                    .or_else(|| {
-                        self.rules
-                            .get(target_rule)
-                            .map(|node| Arc::clone(&node.rule_type))
-                    })
-                    .or_else(|| {
-                        peel_rule_from(&self.data, &self.instance_lists.templates, target_rule)
-                            .and_then(|(body, local)| {
-                                body.rules
-                                    .get(local)
-                                    .map(|rule| Arc::clone(&rule.rule_type))
-                            })
-                    });
-                let Some(target_type) = target_type else {
-                    errors.push(reference_error(
-                        self.main_spec,
-                        source,
-                        format!(
-                            "Data reference '{}' target rule '{}' does not exist",
-                            absolute, target_rule
-                        ),
-                    ));
-                    continue;
-                };
-                if let Some(msg) = reference_kind_mismatch_message(
-                    lhs.as_ref(),
-                    target_type.as_ref(),
-                    &absolute,
-                    target_rule,
-                    "target rule",
-                ) {
-                    errors.push(reference_error(self.main_spec, source, msg));
-                }
-            }
-        }
-
         if errors.is_empty() {
             Ok(())
         } else {
@@ -1233,31 +1097,84 @@ impl<'a> Graph<'a> {
     }
 
     /// Add a `depends_on_rules` edge from every rule that reads a rule-target
-    /// reference data path to the reference's target rule. Planning needs the
-    /// target in `completed_rules` (NormalFormId) before the consumer lowers,
-    /// and topological sort must detect cycles that flow through reference paths.
-    ///
-    /// Walks data-target reference chains so that a path `y: m.x` where
-    /// `m.x: r` is a rule-target reference, still adds a dep edge from any
-    /// consumer of `y` to `r`.
+    /// reference data path to the reference's target rule. Planning needs a
+    /// reference target in `completed_rules` (NormalFormId) before the consumer
+    /// lowers, and topological sort must detect cycles that flow through reference
+    /// paths.
+    /// Kind-check every reference a stored row binds, now that data and rule target
+    /// types are final. Stored rows are data of the row store, not data definitions,
+    /// so they do not pass through [`Self::resolve_data_reference_types`] /
+    /// [`Self::resolve_rule_reference_types`]; the compatibility check mirrors them.
+    fn check_row_store_reference_types(
+        &mut self,
+        computed_rule_types: &HashMap<RulePath, Arc<LemmaType>>,
+    ) -> Result<(), Vec<Error>> {
+        let mut errors = Vec::new();
+        let graph = StoredRowKindCheckGraph {
+            main_spec: self.main_spec,
+            lists: &self.instance_lists,
+            data: &self.data,
+            rules: &self.rules,
+            dropped_rules: &self.dropped_rules,
+            computed_rule_types,
+        };
+        check_stored_row_reference_types(&graph, &mut errors);
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(errors)
+        }
+    }
+
     fn add_rule_reference_dependency_edges(&mut self) {
-        if self.reference_ends.is_empty() {
-            return;
+        let mut reference_targets: BTreeMap<RulePath, BTreeSet<RulePath>> = BTreeMap::new();
+        for (rule_path, rule_node) in &self.rules {
+            let mut found = BTreeSet::new();
+            for node in rule_node.expression.table.nodes() {
+                if let ExpressionKind::DataPath(path) = &node.kind {
+                    if let Some(ReferenceEnd::Rule(target)) = self.reference_ends.get(path) {
+                        found.insert(target.clone());
+                    }
+                }
+            }
+            reference_targets.insert(rule_path.clone(), found);
         }
 
+        for (rule_path, targets) in reference_targets {
+            self.rules
+                .get_mut(&rule_path)
+                .expect("BUG: rule with reference targets missing in graph")
+                .depends_on_rules
+                .extend(targets);
+        }
+    }
+
+    /// A rule that reads data whose type names an options rule depends on that rule,
+    /// so its inputs are needs of the reader and the options rule is ordered first.
+    fn add_options_rule_dependency_edges(&mut self) {
         let mut updates: Vec<(RulePath, RulePath)> = Vec::new();
         for (rule_path, rule_node) in &self.rules {
-            let mut found: BTreeSet<RulePath> = BTreeSet::new();
-            collect_rule_reference_dependencies(
-                &rule_node.expression,
-                &self.reference_ends,
-                &mut found,
-            );
-            for target in found {
+            let mut targets = BTreeSet::new();
+            for node in rule_node.expression.table.nodes() {
+                let ExpressionKind::DataPath(path) = &node.kind else {
+                    continue;
+                };
+                let Some(target) = self
+                    .data
+                    .get(path)
+                    .and_then(|definition| definition.schema_type())
+                    .and_then(|lemma_type| execution_plan::options_rule_path(path, lemma_type))
+                else {
+                    continue;
+                };
+                if self.rules.contains_key(&target) {
+                    targets.insert(target);
+                }
+            }
+            for target in targets {
                 updates.push((rule_path.clone(), target));
             }
         }
-
         for (rule_path, target) in updates {
             self.rules
                 .get_mut(&rule_path)
@@ -1267,10 +1184,839 @@ impl<'a> Graph<'a> {
         }
     }
 
+    /// Rules a rule forces while it reads rows, as dependency edges. A row's
+    /// references stay deferred until a read lands on their field: opening the row's
+    /// context resolves the deferred reference of every field the read touches, in the
+    /// context the binding names. A reference this plan wrote forces its target rule
+    /// here; one written inside a row spec runs in that row's context and its reads
+    /// land on further rows, so the walk follows them until they reach this plan.
+    /// Evaluation spawns each target rule at that point, so a cycle through rows would
+    /// re-enter the running rule. Runs after [`Self::link_spec_values`] and before the
+    /// final topological sort, which reports the cycle.
+    fn add_stored_row_dependency_edges(&mut self) {
+        let mut updates: Vec<(RulePath, BTreeSet<RulePath>)> = Vec::new();
+        for (rule_path, rule_node) in &self.rules {
+            let edges = self.forced_rules(self.rule_row_reads(rule_node));
+            if !edges.is_empty() {
+                updates.push((rule_path.clone(), edges));
+            }
+        }
+        for (rule_path, edges) in updates {
+            self.rules
+                .get_mut(&rule_path)
+                .expect("BUG: rule with stored-row edges missing in graph")
+                .depends_on_rules
+                .extend(edges);
+        }
+    }
+
+    /// Reads rule `rule_node` of this plan makes on rows: row fields of the lists its
+    /// commands iterate, and members of the rows its expressions yield.
+    fn rule_row_reads<'s>(&'s self, rule_node: &RuleNode<'_>) -> Vec<ForcedRead<'s>> {
+        let table = &rule_node.expression.table;
+        let mut reads: Vec<ForcedRead<'s>> = Vec::new();
+        // `scope` holds the rows each enclosing list command iterates, by row
+        // level (outermost first).
+        let mut visited: HashSet<(ExprId, ScopeKey)> = HashSet::new();
+        let mut stack: Vec<(ExprId, Vec<Vec<Located<'s>>>)> = Vec::new();
+        for (condition, result) in &rule_node.branches {
+            if let Some(condition) = condition {
+                stack.push((*condition, Vec::new()));
+            }
+            stack.push((*result, Vec::new()));
+        }
+        while let Some((id, scope)) = stack.pop() {
+            if !visited.insert((id, scope_key(&scope))) {
+                continue;
+            }
+            match table.kind(id) {
+                ExpressionKind::RowField { level, end, .. } => {
+                    for row in level_rows(&scope, *level) {
+                        reads.push(ForcedRead {
+                            at: row.clone(),
+                            end: end.clone(),
+                        });
+                    }
+                }
+                ExpressionKind::ListCommand {
+                    list,
+                    op,
+                    row_level,
+                } => {
+                    stack.push((*list, scope.clone()));
+                    let mut inner = scope.clone();
+                    if let Some(level) = row_level {
+                        let depth =
+                            u32::try_from(scope.len()).expect("BUG: row scope depth exceeds u32");
+                        assert!(
+                                *level == depth,
+                                "BUG: list command row level {level} but converted at scope depth {depth}"
+                            );
+                        inner.push(self.expression_rows(table, *list, &scope));
+                    }
+                    match op {
+                        ListOp::Reduce {
+                            argument: Some(argument),
+                            ..
+                        }
+                        | ListOp::Sort {
+                            argument: Some(argument),
+                            ..
+                        } => stack.push((*argument, inner)),
+                        ListOp::Predicate { expr, .. } => stack.push((*expr, inner)),
+                        ListOp::Find { keys } => {
+                            for key in keys {
+                                stack.push((*key, scope.clone()));
+                            }
+                        }
+                        ListOp::Top { n } => stack.push((*n, scope.clone())),
+                        ListOp::With { rows } => {
+                            for row in rows {
+                                stack.push((*row, scope.clone()));
+                            }
+                        }
+                        ListOp::WithRow { fields, .. } => {
+                            for (_, value) in fields {
+                                stack.push((*value, scope.clone()));
+                            }
+                        }
+                        ListOp::First
+                        | ListOp::Last
+                        | ListOp::Count
+                        | ListOp::Key { .. }
+                        | ListOp::Reduce { argument: None, .. }
+                        | ListOp::Sort { argument: None, .. } => {}
+                    }
+                }
+                ExpressionKind::SpecMember {
+                    base, path, name, ..
+                } => {
+                    for row in self.expression_rows(table, *base, &scope) {
+                        if let Some(read) = self.member_read(row, path, name) {
+                            reads.push(read);
+                        }
+                    }
+                    stack.push((*base, scope.clone()));
+                }
+                kind => kind.for_each_child(|child| stack.push((child, scope.clone()))),
+            }
+        }
+        reads
+    }
+
+    /// Rules of this plan the reads `reads` force, following every read they open.
+    fn forced_rules<'s>(&'s self, mut reads: Vec<ForcedRead<'s>>) -> BTreeSet<RulePath> {
+        let mut edges: BTreeSet<RulePath> = BTreeSet::new();
+        let mut visited: HashSet<(Vec<RowKey>, RowEnd)> = HashSet::new();
+        while let Some(read) = reads.pop() {
+            if !visited.insert((read.at.key(), read.end.clone())) {
+                continue;
+            }
+            let row = read.at.row;
+            let template = self.template_of_row(row);
+            let slots: Vec<DataPath> = match &read.end {
+                RowEnd::Data(path) => vec![path.clone()],
+                RowEnd::Rule(_) => template
+                    .row_end_reads(&read.end)
+                    .into_iter()
+                    .map(|field_read| field_read.slot)
+                    .collect(),
+            };
+            for slot in &slots {
+                if let Some(RowBinding::Deferred { target, hops }) = row.get_binding(template, slot)
+                {
+                    let owner = read.at.scope(*hops);
+                    self.target_read(owner, target, &mut reads, &mut edges);
+                }
+            }
+            if let RowEnd::Rule(rule) = &read.end {
+                self.template_rule_reads(template, rule, &read.at, &mut reads, RuleWalk::Follow);
+            }
+        }
+        edges
+    }
+
+    /// The Show graph through `uses` imports: every import rule the rules of this plan
+    /// reach, read on its instance, with the edges and the unfilled data reads of each.
+    fn reached_imports(&self) -> ShowImports {
+        let mut out = ShowImports::default();
+        let mut pending: Vec<(Located<'_>, RulePath)> = Vec::new();
+        for (rule_path, rule_node) in &self.rules {
+            let (edges, data) =
+                self.show_reads(self.rule_row_reads(rule_node), &mut pending, &mut out);
+            out.edges.insert(rule_path.clone(), edges);
+            out.data_reads.insert(rule_path.clone(), data);
+        }
+        while let Some((at, rule)) = pending.pop() {
+            let path = RulePath::new(
+                at.import_segments()
+                    .expect("BUG: a pending Show rule sits on a `uses` import chain"),
+                rule.rule.clone(),
+            );
+            if out.rules.contains_key(&path) {
+                continue;
+            }
+            let template = self.template_of_row(at.row);
+            out.rules.insert(
+                path.clone(),
+                (at.row.identity.as_ref().clone(), rule.clone()),
+            );
+            let mut reads = Vec::new();
+            self.template_rule_reads(template, &rule, &at, &mut reads, RuleWalk::Show);
+            let (mut edges, data) = self.show_reads(reads, &mut pending, &mut out);
+            out.need_edges.insert(path.clone(), edges.clone());
+            let show_rule = template.show_rules.get(&rule).unwrap_or_else(|| {
+                panic!(
+                    "BUG: rule '{rule}' missing from Show of template '{}'",
+                    template.spec_name
+                )
+            });
+            let mut reads = Vec::new();
+            for dependency in &show_rule.depends_on_rules {
+                let at = if dependency.segments.is_empty() {
+                    at.clone()
+                } else {
+                    let aliases: Vec<String> = dependency
+                        .segments
+                        .iter()
+                        .map(|segment| segment.uses.to_string())
+                        .collect();
+                    self.locate_instance(Some(at.clone()), &aliases)
+                };
+                reads.push(ForcedRead {
+                    at,
+                    end: RowEnd::Rule(RulePath::new(Vec::new(), dependency.rule.clone())),
+                });
+            }
+            let (written, written_data) = self.show_reads(reads, &mut pending, &mut out);
+            assert!(written_data.is_empty(), "BUG: a rule dependency read data");
+            edges.extend(written);
+            out.edges.insert(path.clone(), edges);
+            out.data_reads.insert(path, data);
+        }
+        out
+    }
+
+    /// Show edges and unfilled data reads of the reads `reads`. A rule read on a `uses`
+    /// import chain is an edge to that import rule, queued on `pending`; a rule of this
+    /// plan is an edge; a data read follows its binding or reference to where it ends.
+    /// Reads on list rows follow every read they open, as [`Self::forced_rules`] does.
+    fn show_reads<'s>(
+        &'s self,
+        mut reads: Vec<ForcedRead<'s>>,
+        pending: &mut Vec<(Located<'s>, RulePath)>,
+        out: &mut ShowImports,
+    ) -> (BTreeSet<RulePath>, BTreeSet<DataPath>) {
+        let mut edges: BTreeSet<RulePath> = BTreeSet::new();
+        let mut data: BTreeSet<DataPath> = BTreeSet::new();
+        let mut visited: HashSet<(Vec<RowKey>, RowEnd)> = HashSet::new();
+        let mut landings: Vec<Landing<'s>> = Vec::new();
+        loop {
+            while let Some(landing) = landings.pop() {
+                match landing {
+                    Landing::Row(read) => reads.push(read),
+                    Landing::Plan(RowEnd::Rule(rule)) => {
+                        edges.insert(rule);
+                    }
+                    Landing::Plan(RowEnd::Data(path)) => match self.data.get(&path) {
+                        Some(DataDefinition::Reference { .. }) => {
+                            match self.reference_ends.get(&path).unwrap_or_else(|| {
+                                panic!("BUG: reference '{path}' missing from reference_ends")
+                            }) {
+                                ReferenceEnd::Rule(rule) => landings.push(
+                                    self.target_landing(None, &ReferenceTarget::Rule(rule.clone())),
+                                ),
+                                ReferenceEnd::Promptable(target) => {
+                                    landings.push(self.target_landing(
+                                        None,
+                                        &ReferenceTarget::Data(target.clone()),
+                                    ))
+                                }
+                            }
+                        }
+                        Some(DataDefinition::Import { .. }) => {}
+                        Some(definition) => {
+                            if !definition.is_bound() {
+                                data.insert(path);
+                            }
+                        }
+                        None => panic!("BUG: Show read of data '{path}' missing from the plan"),
+                    },
+                }
+            }
+            let Some(read) = reads.pop() else {
+                break;
+            };
+            if !visited.insert((read.at.key(), read.end.clone())) {
+                continue;
+            }
+            let row = read.at.row;
+            let template = self.template_of_row(row);
+            let segments = read.at.import_segments();
+            match (&read.end, segments) {
+                (RowEnd::Rule(rule), Some(segments)) => {
+                    edges.insert(RulePath::new(segments, rule.rule.clone()));
+                    pending.push((read.at, rule.clone()));
+                }
+                (RowEnd::Rule(rule), None) => {
+                    for field_read in template.row_end_reads(&read.end) {
+                        if let Some(RowBinding::Deferred { target, hops }) =
+                            row.get_binding(template, &field_read.slot)
+                        {
+                            landings.push(self.target_landing(read.at.scope(*hops), target));
+                        }
+                    }
+                    self.template_rule_reads(
+                        template,
+                        rule,
+                        &read.at,
+                        &mut reads,
+                        RuleWalk::Follow,
+                    );
+                }
+                (RowEnd::Data(slot), segments) => {
+                    match row.get_binding(template, slot) {
+                        Some(RowBinding::Deferred { target, hops }) => {
+                            landings.push(self.target_landing(read.at.scope(*hops), target));
+                        }
+                        Some(_) => {}
+                        None => {
+                            let Some(segments) = segments else {
+                                continue;
+                            };
+                            match template.data.get(slot) {
+                                Some(DataDefinition::Reference { .. }) => {
+                                    let target = match template.reference_ends.get(slot).unwrap_or_else(
+                                    || panic!("BUG: reference '{slot}' missing from reference_ends"),
+                                ) {
+                                    ReferenceEnd::Rule(rule) => ReferenceTarget::Rule(rule.clone()),
+                                    ReferenceEnd::Promptable(target) => {
+                                        ReferenceTarget::Data(target.clone())
+                                    }
+                                };
+                                    landings
+                                        .push(self.target_landing(Some(read.at.clone()), &target));
+                                }
+                                Some(DataDefinition::Import { .. }) => {}
+                                Some(definition) => {
+                                    if !definition.is_bound() {
+                                        let path = DataPath {
+                                            segments,
+                                            data: slot.data.clone(),
+                                        };
+                                        out.data
+                                            .insert(path.clone(), row.identity.as_ref().clone());
+                                        data.insert(path);
+                                    }
+                                }
+                                None => panic!(
+                                    "BUG: Show read of '{slot}' missing from template '{}'",
+                                    template.spec_name
+                                ),
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        (edges, data)
+    }
+
+    /// The read `target` makes in context `owner` (`None` for this plan): a rule of
+    /// this plan becomes an edge; any other target is a read on the row it names.
+    fn target_read<'s>(
+        &'s self,
+        owner: Option<Located<'s>>,
+        target: &ReferenceTarget,
+        reads: &mut Vec<ForcedRead<'s>>,
+        edges: &mut BTreeSet<RulePath>,
+    ) {
+        match self.target_landing(owner, target) {
+            Landing::Row(read) => reads.push(read),
+            Landing::Plan(RowEnd::Rule(rule)) => {
+                edges.insert(rule);
+            }
+            Landing::Plan(RowEnd::Data(_)) => {}
+        }
+    }
+
+    /// Where `target`, read in context `owner` (`None` for this plan), lands.
+    fn target_landing<'s>(
+        &'s self,
+        owner: Option<Located<'s>>,
+        target: &ReferenceTarget,
+    ) -> Landing<'s> {
+        let (segments, end) = match target {
+            ReferenceTarget::Rule(rule) => (
+                &rule.segments,
+                RowEnd::Rule(RulePath::new(Vec::new(), rule.rule.clone())),
+            ),
+            ReferenceTarget::Data(path) => (
+                &path.segments,
+                RowEnd::Data(DataPath::local(path.data.clone())),
+            ),
+        };
+        let aliases: Vec<String> = segments
+            .iter()
+            .map(|segment| {
+                assert!(
+                    segment.row.is_none(),
+                    "BUG: reference target hops are `uses` slots, got row hop `{}`",
+                    segment.input_key()
+                );
+                segment.uses.to_string()
+            })
+            .collect();
+        let at = match (owner, aliases.is_empty()) {
+            (None, true) => return Landing::Plan(end),
+            (owner, _) if aliases.is_empty() => owner.expect("BUG: owner checked above"),
+            (owner, _) => self.locate_instance(owner, &aliases),
+        };
+        Landing::Row(ForcedRead { at, end })
+    }
+
+    /// Reads landing on rows while `rule` of `template` evaluates in the context of
+    /// row `at`: every [`NormalFormKind::RowField`] reads rows of the list command at
+    /// its level, and a [`NormalFormKind::SpecMember`] reads the rows its base yields.
+    /// Rule-reference cells walk the referenced rule in the same context.
+    ///
+    /// [`RuleWalk::Show`] stops at rule references instead, reading the rule on `at`, and
+    /// also reads every data slot of `template` the rule reads on `at`: the direct reads
+    /// of one Show rule.
+    fn template_rule_reads<'s>(
+        &'s self,
+        template: &'s ExecutionPlan,
+        rule: &RulePath,
+        at: &Located<'s>,
+        reads: &mut Vec<ForcedRead<'s>>,
+        walk: RuleWalk,
+    ) {
+        let mut rules: Vec<RulePath> = vec![rule.clone()];
+        let mut walked: BTreeSet<RulePath> = BTreeSet::new();
+        let mut visited: HashSet<(NormalFormId, ScopeKey)> = HashSet::new();
+        while let Some(rule) = rules.pop() {
+            if !walked.insert(rule.clone()) {
+                continue;
+            }
+            let root = template
+                .rules
+                .get(&rule)
+                .unwrap_or_else(|| {
+                    panic!(
+                        "BUG: row rule '{rule}' missing from template plan '{}'",
+                        template.spec_name
+                    )
+                })
+                .normal_form;
+            let mut stack: Vec<(NormalFormId, Vec<Vec<Located<'s>>>)> = vec![(root, Vec::new())];
+            while let Some((id, scope)) = stack.pop() {
+                if !visited.insert((id, scope_key(&scope))) {
+                    continue;
+                }
+                let nf = template.normal_form(id);
+                if let Some(target) = &nf.rule_ref {
+                    match walk {
+                        RuleWalk::Follow => rules.push(target.clone()),
+                        RuleWalk::Show => reads.push(ForcedRead {
+                            at: at.clone(),
+                            end: RowEnd::Rule(target.clone()),
+                        }),
+                    }
+                    continue;
+                }
+                match &nf.kind {
+                    NormalFormKind::Leaf(LeafKind::DataPath(path)) if walk == RuleWalk::Show => {
+                        if !matches!(template.data.get(path), Some(DataDefinition::Import { .. })) {
+                            reads.push(ForcedRead {
+                                at: at.clone(),
+                                end: RowEnd::Data(path.clone()),
+                            });
+                        }
+                        if let Some(options) = template.options_rule_of(path) {
+                            reads.push(ForcedRead {
+                                at: at.clone(),
+                                end: RowEnd::Rule(options),
+                            });
+                        }
+                    }
+                    NormalFormKind::RowField { level, end, .. } => {
+                        for row in level_rows(&scope, *level) {
+                            reads.push(ForcedRead {
+                                at: row.clone(),
+                                end: end.clone(),
+                            });
+                        }
+                    }
+                    NormalFormKind::SpecMember { base, row, .. } => {
+                        let (last, hops) = row
+                            .ends
+                            .split_last()
+                            .expect("BUG: a row read has a last end");
+                        for base_row in self.normal_cell_rows(template, *base, at, &scope) {
+                            let mut held = base_row;
+                            for hop in hops {
+                                let RowEnd::Data(slot) = hop else {
+                                    panic!("BUG: a row read hop is a `uses` slot, got {hop:?}");
+                                };
+                                held = self.import_hop(held, slot);
+                            }
+                            reads.push(ForcedRead {
+                                at: held,
+                                end: last.clone(),
+                            });
+                        }
+                        stack.push((*base, scope.clone()));
+                    }
+                    NormalFormKind::ListCommand {
+                        list,
+                        args,
+                        row_level,
+                        ..
+                    } => {
+                        stack.push((*list, scope.clone()));
+                        let mut inner = scope.clone();
+                        if let Some(level) = row_level {
+                            let depth = u32::try_from(scope.len())
+                                .expect("BUG: row scope depth exceeds u32");
+                            assert!(
+                                *level == depth,
+                                "BUG: list command row level {level} but walked at scope depth {depth}"
+                            );
+                            inner.push(self.normal_cell_rows(template, *list, at, &scope));
+                        }
+                        for arg in args {
+                            stack.push((*arg, inner.clone()));
+                        }
+                    }
+                    kind => kind.for_each_child(|child| stack.push((child, scope.clone()))),
+                }
+            }
+        }
+    }
+
+    /// Rows the cell `id` of `template` can yield while it evaluates in the context of
+    /// row `at`, with `scope` the rows of the enclosing list commands. A single row
+    /// picked from a list (`first`, `find`) stands in for all of the list's rows.
+    fn normal_cell_rows<'s>(
+        &'s self,
+        template: &'s ExecutionPlan,
+        id: NormalFormId,
+        at: &Located<'s>,
+        scope: &[Vec<Located<'s>>],
+    ) -> Vec<Located<'s>> {
+        let mut memo: HashMap<NormalFormId, Vec<Located<'s>>> = HashMap::new();
+        let mut stack: Vec<(NormalFormId, bool)> = vec![(id, false)];
+        while let Some((cell, ready)) = stack.pop() {
+            if memo.contains_key(&cell) {
+                continue;
+            }
+            let nf = template.normal_form(cell);
+            let children: Vec<NormalFormId> = if nf.rule_ref.is_some() {
+                Vec::new()
+            } else {
+                match &nf.kind {
+                    NormalFormKind::SpecMember { base, .. } => vec![*base],
+                    NormalFormKind::ListCommand {
+                        list,
+                        op: NormalFormListOp::With,
+                        args,
+                        ..
+                    } => std::iter::once(*list).chain(args.iter().copied()).collect(),
+                    NormalFormKind::ListCommand { list, .. } => vec![*list],
+                    NormalFormKind::Piecewise(arms) => arms.iter().map(|(_, body)| *body).collect(),
+                    _ => Vec::new(),
+                }
+            };
+            if !ready {
+                stack.push((cell, true));
+                stack.extend(children.into_iter().map(|child| (child, false)));
+                continue;
+            }
+            let child_rows = |memo: &HashMap<NormalFormId, Vec<Located<'s>>>| -> Vec<Located<'s>> {
+                children
+                    .iter()
+                    .flat_map(|child| memo[child].iter().cloned())
+                    .collect()
+            };
+            let rows = match (&nf.rule_ref, &nf.kind) {
+                (Some(rule), _) => self.end_rows(at.clone(), &RowEnd::Rule(rule.clone())),
+                (None, NormalFormKind::Leaf(LeafKind::DataPath(path))) => {
+                    self.end_rows(at.clone(), &RowEnd::Data(path.clone()))
+                }
+                (None, NormalFormKind::Leaf(LeafKind::RowValue { level })) => {
+                    level_rows(scope, *level).to_vec()
+                }
+                (None, NormalFormKind::RowField { level, end, .. }) => level_rows(scope, *level)
+                    .iter()
+                    .flat_map(|row| self.end_rows(row.clone(), end))
+                    .collect(),
+                (None, NormalFormKind::SpecMember { row, .. }) => child_rows(&memo)
+                    .into_iter()
+                    .flat_map(|base| self.ends_rows(base, &row.ends))
+                    .collect(),
+                (None, NormalFormKind::ListCommand { .. } | NormalFormKind::Piecewise(_)) => {
+                    child_rows(&memo)
+                }
+                (None, _) => Vec::new(),
+            };
+            memo.insert(cell, rows);
+        }
+        memo.remove(&id)
+            .expect("BUG: the requested cell is resolved last")
+    }
+
+    /// Rows the expression `id` of a rule of this plan can yield, with `scope` the
+    /// rows of the enclosing list commands. A single row picked from a list
+    /// (`first`, `find`) stands in for all of the list's rows.
+    fn expression_rows<'s>(
+        &'s self,
+        table: &ExprTable<ExpressionKind>,
+        id: ExprId,
+        scope: &[Vec<Located<'s>>],
+    ) -> Vec<Located<'s>> {
+        let mut memo: HashMap<ExprId, Vec<Located<'s>>> = HashMap::new();
+        let mut stack: Vec<(ExprId, bool)> = vec![(id, false)];
+        while let Some((at, ready)) = stack.pop() {
+            if memo.contains_key(&at) {
+                continue;
+            }
+            let children: Vec<ExprId> = match table.kind(at) {
+                ExpressionKind::SpecMember { base, .. } => vec![*base],
+                ExpressionKind::ListCommand {
+                    list,
+                    op: ListOp::With { rows },
+                    ..
+                } => std::iter::once(*list).chain(rows.iter().copied()).collect(),
+                ExpressionKind::ListCommand { list, .. } => vec![*list],
+                ExpressionKind::Piecewise(arms) => arms.iter().map(|(_, body)| *body).collect(),
+                _ => Vec::new(),
+            };
+            if !ready {
+                stack.push((at, true));
+                stack.extend(children.into_iter().map(|child| (child, false)));
+                continue;
+            }
+            let child_rows: Vec<Located<'s>> = children
+                .iter()
+                .flat_map(|child| memo[child].iter().cloned())
+                .collect();
+            let rows = match table.kind(at) {
+                ExpressionKind::DataPath(path) => self.plan_slot_rows(path),
+                ExpressionKind::RulePath(rule) => match self.rule_candidates.get(rule) {
+                    Some(candidates) => candidates
+                        .instances
+                        .iter()
+                        .map(|instance| self.locate_instance(None, instance))
+                        .collect(),
+                    None => {
+                        assert!(
+                            self.dropped_rules.contains(rule),
+                            "BUG: rule '{rule}' is linked but has no candidates"
+                        );
+                        Vec::new()
+                    }
+                },
+                ExpressionKind::RowValue { level, .. } => level_rows(scope, *level).to_vec(),
+                ExpressionKind::RowField { level, end, .. } => level_rows(scope, *level)
+                    .iter()
+                    .flat_map(|row| self.end_rows(row.clone(), end))
+                    .collect(),
+                ExpressionKind::SpecMember { path, name, .. } => child_rows
+                    .into_iter()
+                    .flat_map(|base| {
+                        let ends = self.member_ends(base.row, path, name);
+                        match ends {
+                            Some(ends) => self.ends_rows(base, &ends),
+                            None => Vec::new(),
+                        }
+                    })
+                    .collect(),
+                ExpressionKind::ListCommand { .. } | ExpressionKind::Piecewise(_) => child_rows,
+                _ => Vec::new(),
+            };
+            memo.insert(at, rows);
+        }
+        memo.remove(&id)
+            .expect("BUG: the requested expression is resolved last")
+    }
+
+    /// Rows data `path` of this plan holds: its `uses` instance, or the rows its list
+    /// writes.
+    fn plan_slot_rows(&self, path: &DataPath) -> Vec<Located<'_>> {
+        match self.data.get(path) {
+            Some(DataDefinition::Import { row, .. }) => vec![Located::root(row)],
+            Some(DataDefinition::InstanceList { .. }) => self
+                .instance_lists
+                .sources
+                .get(path)
+                .expect("BUG: instance list data has a source")
+                .store
+                .shape_rows()
+                .map(|row| Located::root(row))
+                .collect(),
+            _ => Vec::new(),
+        }
+    }
+
+    /// Ends `path.name` reads on a row of `row`'s spec; `None` when its spec has no
+    /// such member (type checking reports it).
+    fn member_ends(&self, row: &RowInstance, path: &[String], name: &str) -> Option<Vec<RowEnd>> {
+        let parts: Vec<&str> = path
+            .iter()
+            .map(String::as_str)
+            .chain(std::iter::once(name))
+            .collect();
+        let template = self.template_of_row(row);
+        instance_list::row_end_chain(
+            &row.identity,
+            instance_list::RowEndView::Plan(template),
+            &self.instance_lists.templates,
+            &parts,
+        )
+        .map(|chain| chain.into_iter().map(|hop| hop.end).collect())
+    }
+
+    /// The read `path.name` makes on row `at`.
+    fn member_read<'s>(
+        &'s self,
+        at: Located<'s>,
+        path: &[String],
+        name: &str,
+    ) -> Option<ForcedRead<'s>> {
+        let ends = self.member_ends(at.row, path, name)?;
+        let (last, hops) = ends
+            .split_last()
+            .expect("BUG: a member chain has a last end");
+        let mut at = at;
+        for hop in hops {
+            let RowEnd::Data(slot) = hop else {
+                panic!("BUG: a member chain hop is a `uses` slot, got {hop:?}");
+            };
+            at = self.import_hop(at, slot);
+        }
+        Some(ForcedRead {
+            at,
+            end: last.clone(),
+        })
+    }
+
+    /// Rows the chain `ends` yields on row `at`.
+    fn ends_rows<'s>(&'s self, at: Located<'s>, ends: &[RowEnd]) -> Vec<Located<'s>> {
+        let (last, hops) = ends.split_last().expect("BUG: a row read has a last end");
+        let mut at = at;
+        for hop in hops {
+            let RowEnd::Data(slot) = hop else {
+                panic!("BUG: a row read hop is a `uses` slot, got {hop:?}");
+            };
+            at = self.import_hop(at, slot);
+        }
+        self.end_rows(at, last)
+    }
+
+    /// Rows a read of `end` on row `at` yields: the instance of a `uses` slot, the
+    /// rows of a list field, or the instances a spec-valued rule of the row's spec
+    /// returns.
+    fn end_rows<'s>(&'s self, at: Located<'s>, end: &RowEnd) -> Vec<Located<'s>> {
+        let template = self.template_of_row(at.row);
+        match end {
+            RowEnd::Rule(rule) => template
+                .rule_candidates
+                .get(rule)
+                .unwrap_or_else(|| {
+                    panic!(
+                        "BUG: rule '{rule}' of '{}' has no candidate list",
+                        template.spec_name
+                    )
+                })
+                .instances
+                .iter()
+                .map(|instance| self.locate_instance(Some(at.clone()), instance))
+                .collect(),
+            RowEnd::Data(path) => match template.data.get(path) {
+                Some(DataDefinition::Import { .. }) => vec![self.import_hop(at, path)],
+                Some(DataDefinition::InstanceList { .. }) => {
+                    match at.row.get_binding(template, path) {
+                        Some(RowBinding::Rows { rows, hops, .. }) => {
+                            let owner = at.context_at(*hops);
+                            rows.iter()
+                                .map(|row| Located {
+                                    row,
+                                    context: owner.clone(),
+                                })
+                                .collect()
+                        }
+                        Some(RowBinding::Bound(_)) | None => {
+                            let context = at.inside();
+                            template
+                                .instance_lists
+                                .get(path)
+                                .expect("BUG: template instance list has a source")
+                                .store
+                                .shape_rows()
+                                .map(|row| Located {
+                                    row,
+                                    context: context.clone(),
+                                })
+                                .collect()
+                        }
+                        Some(binding) => {
+                            panic!("BUG: list field '{path}' holds {binding:?}")
+                        }
+                    }
+                }
+                _ => Vec::new(),
+            },
+        }
+    }
+
+    /// The instance in `uses` slot `slot` of row `at`: the nested row a consumer wrote,
+    /// or the row the row spec declares.
+    fn import_hop<'s>(&'s self, at: Located<'s>, slot: &DataPath) -> Located<'s> {
+        let template = self.template_of_row(at.row);
+        let row = match at.row.get_binding(template, slot) {
+            Some(RowBinding::Instance(row)) => row.as_ref(),
+            None => match template.data.get(slot) {
+                Some(DataDefinition::Import { row, .. }) => row.as_ref(),
+                other => panic!("BUG: `uses` hop '{slot}' is not a `uses` slot: {other:?}"),
+            },
+            Some(binding) => panic!("BUG: `uses` slot '{slot}' holds {binding:?}"),
+        };
+        Located {
+            row,
+            context: at.inside(),
+        }
+    }
+
+    /// The instance `aliases` names from context `from` (`None` for this plan).
+    fn locate_instance<'s>(&'s self, from: Option<Located<'s>>, aliases: &[String]) -> Located<'s> {
+        let (first, rest) = aliases
+            .split_first()
+            .expect("BUG: an instance has an alias");
+        let first = DataPath::local(first.clone());
+        let mut at = match from {
+            Some(from) => self.import_hop(from, &first),
+            None => match self.data.get(&first) {
+                Some(DataDefinition::Import { row, .. }) => Located::root(row),
+                other => panic!("BUG: instance `{first}` is not a `uses` of the plan: {other:?}"),
+            },
+        };
+        for alias in rest {
+            at = self.import_hop(at, &DataPath::local(alias.clone()));
+        }
+        at
+    }
+
+    /// Template plan of the spec of `row`.
+    fn template_of_row(&self, row: &RowInstance) -> &ExecutionPlan {
+        self.instance_lists
+            .templates
+            .get(&row.identity)
+            .expect("BUG: rows are rows of a planned row spec")
+    }
+
     /// For each [`DataDefinition::Reference`] in `self.data`, follow the chain to
-    /// its end (promptable slot, rule, or import). Cycles among data-target
-    /// references are impossible here because `compute_data_reference_order`
-    /// already rejected them.
+    /// its end (promptable slot or rule). Cycles among data-target references are
+    /// impossible here because `compute_data_reference_order` already rejected them.
     fn compute_reference_ends(&self) -> IndexMap<DataPath, ReferenceEnd> {
         let mut out: IndexMap<DataPath, ReferenceEnd> = IndexMap::new();
         for (path, def) in &self.data {
@@ -1286,43 +2032,37 @@ impl<'a> Graph<'a> {
                 }
             }
         }
-        for (import_path, definition) in &self.data {
-            let DataDefinition::Import {
-                identity, overlay, ..
-            } = definition
-            else {
-                continue;
-            };
-            for (relative, entry) in overlay {
-                let absolute = absolute_import_member_path(import_path, identity, relative);
-                if out.contains_key(&absolute) {
-                    continue;
-                }
-                match entry {
-                    ImportOverlay::Reference {
-                        target: ReferenceTarget::Rule(rule_path),
-                        ..
-                    } => {
-                        out.insert(absolute, ReferenceEnd::Rule(rule_path.clone()));
-                    }
-                    ImportOverlay::Reference {
-                        target: ReferenceTarget::Data(start),
-                        ..
-                    } => {
-                        out.insert(absolute, self.expect_reference_end(start));
-                    }
-                    ImportOverlay::Literal(_) => {}
-                }
-            }
-        }
         out
     }
 
-    /// [`execution_plan::reference_end_on`] for a target planning already validated.
+    /// Where the data path `start` ends: itself when it holds a slot, else the end
+    /// of the reference chain it starts. Every target was validated by planning.
     fn expect_reference_end(&self, start: &DataPath) -> ReferenceEnd {
-        execution_plan::reference_end_on(self, start).unwrap_or_else(|| {
-            panic!("BUG: data-target reference chain from '{start}' ends at missing data")
-        })
+        let mut path = start;
+        for _ in 0..=self.data.len() {
+            match self.data.get(path) {
+                Some(
+                    DataDefinition::Value { .. }
+                    | DataDefinition::TypeDeclaration { .. }
+                    | DataDefinition::InstanceList { .. },
+                ) => return ReferenceEnd::Promptable(path.clone()),
+                Some(DataDefinition::Reference {
+                    target: ReferenceTarget::Rule(rule),
+                    ..
+                }) => return ReferenceEnd::Rule(rule.clone()),
+                Some(DataDefinition::Reference {
+                    target: ReferenceTarget::Data(next),
+                    ..
+                }) => path = next,
+                Some(DataDefinition::Import { .. }) => {
+                    panic!("BUG: data reference chain from '{start}' ends at import '{path}'")
+                }
+                None => {
+                    panic!("BUG: data-target reference chain from '{start}' ends at missing data '{path}'")
+                }
+            }
+        }
+        panic!("BUG: data reference chain from '{start}' outlasts plan data (cycles are rejected)")
     }
 
     /// Compute an order in which data-target references can be evaluated at
@@ -1332,9 +2072,7 @@ impl<'a> Graph<'a> {
     /// already-evaluated target rule's result. Cycles among data-target
     /// references are reported as planning errors.
     fn compute_data_reference_order(&self) -> Result<Vec<DataPath>, Vec<Error>> {
-        // Local DataDefinition::Reference plus named-`uses` overlay data→data edges
-        // (consumer-qualified paths). Overlay refs are not stored in `self.data`.
-        let mut reference_paths: Vec<DataPath> = self
+        let reference_paths: Vec<DataPath> = self
             .data
             .iter()
             .filter_map(|(p, d)| match d {
@@ -1345,34 +2083,6 @@ impl<'a> Graph<'a> {
                 _ => None,
             })
             .collect();
-        let mut overlay_targets: BTreeMap<DataPath, DataPath> = BTreeMap::new();
-        let mut overlay_sources: BTreeMap<DataPath, Source> = BTreeMap::new();
-        for (import_path, definition) in &self.data {
-            let DataDefinition::Import {
-                identity,
-                overlay,
-                source,
-                ..
-            } = definition
-            else {
-                continue;
-            };
-            for (relative, entry) in overlay {
-                let ImportOverlay::Reference {
-                    target: ReferenceTarget::Data(target),
-                    ..
-                } = entry
-                else {
-                    continue;
-                };
-                let absolute = absolute_import_member_path(import_path, identity, relative);
-                if !reference_paths.contains(&absolute) {
-                    reference_paths.push(absolute.clone());
-                }
-                overlay_targets.insert(absolute.clone(), target.clone());
-                overlay_sources.insert(absolute, source.clone());
-            }
-        }
 
         if reference_paths.is_empty() {
             return Ok(Vec::new());
@@ -1387,24 +2097,19 @@ impl<'a> Graph<'a> {
         }
 
         for p in &reference_paths {
-            let target_path =
-                if let Some(DataDefinition::Reference { target, .. }) = self.data.get(p) {
-                    match target {
-                        ReferenceTarget::Data(path) => Some(path.clone()),
-                        ReferenceTarget::Rule(_) => None,
-                    }
-                } else {
-                    overlay_targets.get(p).cloned()
-                };
-            let Some(target_path) = target_path else {
-                continue;
+            let Some(DataDefinition::Reference {
+                target: ReferenceTarget::Data(target_path),
+                ..
+            }) = self.data.get(p)
+            else {
+                unreachable!("BUG: reference path collected above is not a data-target reference");
             };
-            if reference_set.contains(&target_path) {
+            if reference_set.contains(target_path) {
                 *in_degree
                     .get_mut(p)
                     .expect("BUG: reference missing in_degree") += 1;
                 dependents
-                    .get_mut(&target_path)
+                    .get_mut(target_path)
                     .expect("BUG: reference missing dependents list")
                     .push(p.clone());
             }
@@ -1445,220 +2150,462 @@ impl<'a> Graph<'a> {
                 .join(", ");
             let errors: Vec<Error> = cycle_members
                 .iter()
-                .filter_map(|p| {
+                .map(|p| {
                     let source = self
                         .data
                         .get(p)
-                        .map(|entry| entry.source())
-                        .or_else(|| overlay_sources.get(p));
-                    source.map(|source| {
-                        reference_error(
-                            self.main_spec,
-                            source,
-                            format!("Circular data reference ({})", cycle_display),
-                        )
-                    })
+                        .expect("BUG: cycle member collected from self.data")
+                        .source();
+                    reference_error(
+                        self.main_spec,
+                        source,
+                        format!("Circular data reference ({})", cycle_display),
+                    )
                 })
                 .collect();
             return Err(errors);
         }
 
-        // Runtime copy order only includes local DataDefinition::Reference paths.
-        Ok(result
-            .into_iter()
-            .filter(|path| {
-                matches!(
-                    self.data.get(path),
-                    Some(DataDefinition::Reference {
-                        target: ReferenceTarget::Data(_),
-                        ..
-                    })
-                )
-            })
-            .collect())
+        Ok(result)
     }
 
-    /// Candidate instances of spec-valued rules, field targets of `rule.field`,
-    /// and the rule edges those need. Repeats the sort until those edges stop
-    /// growing, so a spec-valued rule field is linked after the rule it reads.
+    /// Cycles among the data bindings of the `uses` instances this plan writes
+    /// (`-> with a: i.b` and `-> with b: i.a`): a chain of data reads through bindings
+    /// and references that returns to a read it already made. Each is an error naming
+    /// the data on the cycle by its path from this plan.
+    fn check_binding_reference_cycles(&self) -> Result<(), Vec<Error>> {
+        enum Step<'s> {
+            Row(Located<'s>, DataPath),
+            Plan(DataPath),
+        }
+        let mut errors = Vec::new();
+        let mut reported: BTreeSet<Vec<String>> = BTreeSet::new();
+        let mut rows: Vec<(Located<'_>, &Source)> = Vec::new();
+        for definition in self.data.values() {
+            if let DataDefinition::Import { row, source } = definition {
+                rows.push((Located::root(row), source));
+            }
+        }
+        while let Some((at, source)) = rows.pop() {
+            let template = self.template_of_row(at.row);
+            for (slot, binding) in at.row.bindings.iter().enumerate() {
+                match binding {
+                    Some(RowBinding::Instance(nested)) => rows.push((
+                        Located {
+                            row: nested,
+                            context: at.inside(),
+                        },
+                        source,
+                    )),
+                    Some(RowBinding::Deferred {
+                        target: ReferenceTarget::Data(_),
+                        ..
+                    }) => {
+                        let (path, _) = template
+                            .data
+                            .get_index(slot)
+                            .expect("BUG: row binding slot is data of its template");
+                        let mut chain: Vec<(Vec<RowKey>, DataPath)> = Vec::new();
+                        let mut names: Vec<String> = Vec::new();
+                        let mut step = Step::Row(at.clone(), path.clone());
+                        loop {
+                            let landing = match step {
+                                Step::Plan(path) => match self.data.get(&path) {
+                                    Some(DataDefinition::Reference {
+                                        target: target @ ReferenceTarget::Data(_),
+                                        ..
+                                    }) => self.target_landing(None, target),
+                                    _ => break,
+                                },
+                                Step::Row(at, slot) => {
+                                    let read = (at.key(), slot.clone());
+                                    if let Some(start) = chain.iter().position(|seen| *seen == read)
+                                    {
+                                        let mut cycle = names[start..].to_vec();
+                                        cycle.sort();
+                                        if reported.insert(cycle.clone()) {
+                                            errors.push(reference_error(
+                                                self.main_spec,
+                                                source,
+                                                format!(
+                                                    "Circular data reference ({})",
+                                                    cycle.join(", ")
+                                                ),
+                                            ));
+                                        }
+                                        break;
+                                    }
+                                    let segments = at.import_segments().expect(
+                                        "BUG: binding cycles walk `uses` rows only: imports, their nested instances, and `uses` hops",
+                                    );
+                                    names.push(
+                                        DataPath::new(segments, slot.data.clone()).input_key(),
+                                    );
+                                    chain.push(read);
+                                    let template = self.template_of_row(at.row);
+                                    match at.row.get_binding(template, &slot) {
+                                        Some(RowBinding::Deferred {
+                                            target: target @ ReferenceTarget::Data(_),
+                                            hops,
+                                        }) => self.target_landing(at.scope(*hops), target),
+                                        Some(_) => break,
+                                        None => match template.reference_ends.get(&slot) {
+                                            Some(ReferenceEnd::Promptable(end)) => self
+                                                .target_landing(
+                                                    Some(at.clone()),
+                                                    &ReferenceTarget::Data(end.clone()),
+                                                ),
+                                            Some(ReferenceEnd::Rule(_)) | None => break,
+                                        },
+                                    }
+                                }
+                            };
+                            step = match landing {
+                                Landing::Row(ForcedRead {
+                                    at,
+                                    end: RowEnd::Data(slot),
+                                }) => Step::Row(at, slot),
+                                Landing::Plan(RowEnd::Data(path)) => Step::Plan(path),
+                                Landing::Row(ForcedRead {
+                                    end: RowEnd::Rule(_),
+                                    ..
+                                })
+                                | Landing::Plan(RowEnd::Rule(_)) => break,
+                            };
+                        }
+                    }
+                    Some(_) | None => {}
+                }
+            }
+        }
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(errors)
+        }
+    }
+
+    /// What every rule can yield as a spec value, and the errors of member reads on
+    /// those values. Repeats until the candidates stop changing: a rule read on a
+    /// self-list row has no edge (the row evaluates it), so its candidates reach the
+    /// reader through the previous pass.
     fn link_spec_values(&mut self) -> Result<Vec<Error>, Vec<Error>> {
         use crate::planning::spec_value::{
-            assert_expression_candidates_linked, expression_candidates, fill_spec_members,
-            rule_under_instance,
+            assert_expression_candidates_linked, spec_member_errors, CandidateScope, CandidateTable,
         };
 
         let rule_paths: HashSet<RulePath> = self.rules.keys().cloned().collect();
         let dropped_rules = self.dropped_rules.clone();
-        // Presence closure cannot borrow `self` while rules are mutably taken below.
-        // Clone data/templates only when named-`uses` peels can matter.
-        let import_presence = self
-            .data
-            .values()
-            .any(|definition| matches!(definition, DataDefinition::Import { .. }))
-            .then(|| (self.data.clone(), self.instance_lists.templates.clone()));
-        let presence_locals = rule_paths.clone();
+        let mut all_rules: BTreeSet<RulePath> = rule_paths.iter().cloned().collect();
+        all_rules.extend(dropped_rules.iter().cloned());
         let presence = move |rule: &RulePath| {
-            if presence_locals.contains(rule) {
+            if rule_paths.contains(rule) {
                 RulePresence::Present
             } else if dropped_rules.contains(rule) {
                 RulePresence::Dropped
-            } else if let Some((data, templates)) = &import_presence {
-                if peel_rule_from(data, templates, rule).is_some() {
-                    // Named `uses` template rule — same as [`Graph::rule_presence`].
-                    RulePresence::Present
-                } else if rule.segments.first().is_some_and(|hop| {
-                    matches!(
-                        data.get(&DataPath::local(hop.uses.clone())),
-                        Some(DataDefinition::Import { .. })
-                    )
-                }) {
-                    RulePresence::Dropped
-                } else {
-                    RulePresence::Absent
-                }
             } else {
                 RulePresence::Absent
             }
         };
+        let order = self.topological_sort()?;
+        let row_end_reads =
+            |identity: &SpecIdentity, end: &RowEnd| self.row_end_reads(identity, end);
+        let mut previous: HashMap<RulePath, SpecCandidates> = HashMap::new();
         loop {
-            let order = self.local_rules_in(&self.topological_sort()?);
-            let mut rule_candidates: HashMap<RulePath, Vec<SpecInstance>> = HashMap::new();
+            let mut rule_candidates = previous.clone();
             let mut member_errors = Vec::new();
-            let mut grew = false;
-
-            for path in order {
-                let mut candidates = Vec::new();
+            for path in &order {
                 let node = self
                     .rules
-                    .get(&path)
+                    .get(path)
                     .expect("BUG: rule from topological sort not in graph");
+                let scope = CandidateScope {
+                    rule_candidates: &rule_candidates,
+                    data: &self.data,
+                    rules: &all_rules,
+                    sources: &self.instance_lists.sources,
+                    rule_presence: &presence,
+                    row_end_reads: &row_end_reads,
+                    self_identity: &self.instance_lists.self_identity,
+                    templates: &self.instance_lists.templates,
+                };
+                let table = CandidateTable::build(&node.expression, &scope);
+                let mut candidates = SpecCandidates::default();
                 for (_, result) in &node.branches {
-                    for candidate in expression_candidates(
-                        node.expression.at(*result),
-                        &rule_candidates,
-                        &self.data,
-                        &self.instance_lists.templates,
-                        &presence,
-                    ) {
-                        if !candidates.contains(&candidate) {
-                            candidates.push(candidate);
-                        }
-                    }
+                    candidates.extend(table.candidates(*result));
                 }
-                rule_candidates.insert(path.clone(), candidates.clone());
-
-                let node = self
-                    .rules
-                    .get_mut(&path)
-                    .expect("BUG: rule from topological sort not in graph");
-                let (extra_deps, branch_errors) = fill_spec_members(
-                    &mut node.expression,
-                    &rule_candidates,
-                    &self.data,
-                    &self.instance_lists.templates,
-                    &presence,
-                );
-                let before = node.depends_on_rules.len();
-                node.depends_on_rules.extend(extra_deps);
-                if !candidates.is_empty() {
-                    let under: Vec<RulePath> = rule_paths
-                        .iter()
-                        .filter(|rule| {
-                            *rule != &path
-                                && candidates
-                                    .iter()
-                                    .any(|instance| rule_under_instance(rule, instance))
-                        })
-                        .cloned()
-                        .collect();
-                    node.depends_on_rules.extend(under);
-                }
-                if node.depends_on_rules.len() != before {
-                    grew = true;
-                }
-                let main_spec = self.main_spec;
-                for (source, message) in branch_errors {
-                    let source = source
-                        .unwrap_or_else(|| panic!("BUG: spec member expression missing source"));
+                for (source, message) in spec_member_errors(&node.expression, &table, &scope) {
+                    let source = source.expect("BUG: spec member expression carries its source");
                     member_errors.push(Error::validation_with_context(
                         message,
                         Some(source),
                         None::<String>,
-                        Some(main_spec),
+                        Some(self.main_spec),
                         None,
                     ));
                 }
+                rule_candidates.insert(path.clone(), candidates);
             }
-            if !grew {
+            if rule_candidates == previous {
+                let scope = CandidateScope {
+                    rule_candidates: &rule_candidates,
+                    data: &self.data,
+                    rules: &all_rules,
+                    sources: &self.instance_lists.sources,
+                    rule_presence: &presence,
+                    row_end_reads: &row_end_reads,
+                    self_identity: &self.instance_lists.self_identity,
+                    templates: &self.instance_lists.templates,
+                };
                 for node in self.rules.values() {
-                    assert_expression_candidates_linked(
-                        node.expression.root(),
-                        &rule_candidates,
-                        &self.data,
-                        &self.instance_lists.templates,
-                        &presence,
-                    );
+                    assert_expression_candidates_linked(&node.expression, &scope);
                 }
                 self.rule_candidates = rule_candidates;
                 return Ok(member_errors);
             }
+            previous = rule_candidates;
         }
     }
 
-    fn local_rules_in(&self, execution_order: &[RulePath]) -> Vec<RulePath> {
-        execution_order
-            .iter()
-            .filter(|path| self.has_local_rule(path))
-            .cloned()
-            .collect()
+    /// Row fields a read of `end` on a row of `identity` touches
+    /// ([`ExecutionPlan::row_end_reads`]); rows of the spec being planned read this
+    /// graph, since their plan is not built yet.
+    fn row_end_reads(&self, identity: &SpecIdentity, end: &RowEnd) -> Vec<RowFieldRead> {
+        match self.instance_lists.row_template_of(identity) {
+            Some(RowTemplate::Plan(template)) => template.row_end_reads(end),
+            Some(RowTemplate::Root) => self.root_row_end_reads(end),
+            None => Vec::new(),
+        }
     }
 
-    /// Dependency order of local rules and the named-`uses` rules they reach. A
-    /// named-`uses` rule depends on the owner rules its site overlays bind
-    /// ([`import_rule_needs`]), so overlay cycles are circular dependencies.
-    fn topological_sort(&self) -> Result<Vec<RulePath>, Vec<Error>> {
-        let mut depends_on: BTreeMap<RulePath, BTreeSet<RulePath>> = BTreeMap::new();
-        let mut pending_imports: Vec<RulePath> = Vec::new();
-        let present_dependencies = |dependencies: &mut dyn Iterator<Item = RulePath>,
-                                    pending_imports: &mut Vec<RulePath>|
-         -> BTreeSet<RulePath> {
-            let mut present = BTreeSet::new();
-            for dependency in dependencies {
-                match self.rule_presence(&dependency) {
-                    RulePresence::Present => {
-                        if !self.has_local_rule(&dependency) {
-                            pending_imports.push(dependency.clone());
-                        }
-                        present.insert(dependency);
-                    }
-                    RulePresence::Dropped => {}
-                    RulePresence::Absent => {
-                        panic!("BUG: rule '{dependency}' neither in graph nor dropped")
-                    }
+    fn root_row_end_reads(&self, end: &RowEnd) -> Vec<RowFieldRead> {
+        let mut reads: Vec<RowFieldRead> = Vec::new();
+        let push = |path: &DataPath, reads: &mut Vec<RowFieldRead>| {
+            if let Some(read) = self.root_row_slot(path) {
+                if !reads.contains(&read) {
+                    reads.push(read);
                 }
             }
-            present
         };
-        for (rule_path, rule_node) in &self.rules {
-            let present = present_dependencies(
-                &mut rule_node.depends_on_rules.iter().cloned(),
-                &mut pending_imports,
-            );
-            depends_on.insert(rule_path.clone(), present);
-        }
-        while let Some(import_path) = pending_imports.pop() {
-            if depends_on.contains_key(&import_path) {
-                continue;
+        let rule_of_data = |path: &DataPath| -> Option<RulePath> {
+            let mut current = path;
+            for _ in 0..=self.data.len() {
+                match self.data.get(current)? {
+                    DataDefinition::Reference {
+                        target: ReferenceTarget::Data(next),
+                        ..
+                    } => current = next,
+                    DataDefinition::Reference {
+                        target: ReferenceTarget::Rule(rule),
+                        ..
+                    } => return Some(rule.clone()),
+                    _ => return None,
+                }
             }
-            let needs = import_rule_needs(self, &import_path);
-            let present = present_dependencies(
-                &mut needs.into_iter().filter_map(|need| match need {
-                    ImportNeed::Rule(rule) => Some(rule),
-                    ImportNeed::Data(_) => None,
-                }),
-                &mut pending_imports,
+            panic!(
+                "BUG: data reference chain from '{path}' outlasts graph data (cycles are rejected)"
+            )
+        };
+        let start_rule = match end {
+            RowEnd::Data(path) => match rule_of_data(path) {
+                Some(rule) => Some(rule),
+                None => {
+                    push(path, &mut reads);
+                    None
+                }
+            },
+            RowEnd::Rule(rule) => Some(rule.clone()),
+        };
+        match start_rule {
+            None => {}
+            Some(rule) => {
+                let mut pending = vec![rule];
+                let mut seen: BTreeSet<RulePath> = BTreeSet::new();
+                while let Some(rule) = pending.pop() {
+                    if !seen.insert(rule.clone()) {
+                        continue;
+                    }
+                    let Some(node) = self.rules.get(&rule) else {
+                        continue;
+                    };
+                    for id in node.expression.table.ids() {
+                        if let ExpressionKind::DataPath(path) = node.expression.table.kind(id) {
+                            push(path, &mut reads);
+                        }
+                    }
+                    pending.extend(node.depends_on_rules.iter().cloned());
+                }
+            }
+        }
+        reads
+    }
+
+    /// The slot a row of this spec supplies when `path` is read on it: the data itself
+    /// or the end of its reference chain, unless the spec binds it. `unbound` when the
+    /// spec gives it no value.
+    fn root_row_slot(&self, path: &DataPath) -> Option<RowFieldRead> {
+        let mut current = path;
+        for _ in 0..=self.data.len() {
+            match self.data.get(current)? {
+                DataDefinition::Reference {
+                    target: ReferenceTarget::Data(next),
+                    local_value: None,
+                    ..
+                } => current = next,
+                DataDefinition::Reference { .. } | DataDefinition::Import { .. } => return None,
+                definition @ (DataDefinition::TypeDeclaration { .. }
+                | DataDefinition::Value { .. }
+                | DataDefinition::InstanceList { .. }) => {
+                    return (!definition.is_bound()).then(|| RowFieldRead {
+                        slot: current.clone(),
+                        unbound: definition.value().is_none(),
+                    });
+                }
+            }
+        }
+        panic!("BUG: data reference chain from '{path}' outlasts graph data (cycles are rejected)")
+    }
+
+    /// Filter `dependencies` to rules that are present.
+    fn present_rule_dependencies(&self, dependencies: Vec<RulePath>) -> BTreeSet<RulePath> {
+        let mut present = BTreeSet::new();
+        for dependency in dependencies {
+            match self.rule_presence(&dependency) {
+                RulePresence::Present => {
+                    present.insert(dependency);
+                }
+                RulePresence::Dropped => {}
+                RulePresence::Absent => {
+                    panic!("BUG: rule '{dependency}' neither in graph nor dropped")
+                }
+            }
+        }
+        present
+    }
+
+    /// The Show graph: every rule of this plan and every `uses` import rule it reaches,
+    /// with their edges, sorted. A cycle through import rules is an error naming every
+    /// rule on it by its path from this plan.
+    fn sort_show_rules(&mut self) -> Result<(), Vec<Error>> {
+        let show_imports = self.reached_imports();
+        let mut edges: BTreeMap<RulePath, BTreeSet<RulePath>> = BTreeMap::new();
+        for (path, node) in &self.rules {
+            let mut rule_edges: BTreeSet<RulePath> = node
+                .depends_on_rules
+                .iter()
+                .filter(|dependency| self.rules.contains_key(*dependency))
+                .cloned()
+                .collect();
+            rule_edges.extend(show_imports.edges.get(path).into_iter().flatten().cloned());
+            edges.insert(path.clone(), rule_edges);
+        }
+        for path in show_imports.rules.keys() {
+            edges.insert(
+                path.clone(),
+                show_imports
+                    .edges
+                    .get(path)
+                    .expect("BUG: reached import rule has Show edges")
+                    .clone(),
             );
-            depends_on.insert(import_path, present);
+        }
+        let mut in_degree: BTreeMap<&RulePath, usize> = BTreeMap::new();
+        let mut dependents: BTreeMap<&RulePath, Vec<&RulePath>> = BTreeMap::new();
+        for (path, dependencies) in &edges {
+            in_degree.insert(path, dependencies.len());
+            for dependency in dependencies {
+                assert!(
+                    edges.contains_key(dependency),
+                    "BUG: Show edge '{path}' -> '{dependency}' leaves the Show rules"
+                );
+                dependents.entry(dependency).or_default().push(path);
+            }
+        }
+        let mut queue: VecDeque<&RulePath> = in_degree
+            .iter()
+            .filter(|(_, degree)| **degree == 0)
+            .map(|(path, _)| *path)
+            .collect();
+        let mut order: Vec<RulePath> = Vec::with_capacity(edges.len());
+        while let Some(path) = queue.pop_front() {
+            for dependent in dependents.get(path).into_iter().flatten() {
+                let degree = in_degree
+                    .get_mut(dependent)
+                    .expect("BUG: Show rule missing from in_degree");
+                *degree -= 1;
+                if *degree == 0 {
+                    queue.push_back(dependent);
+                }
+            }
+            order.push(path.clone());
+        }
+        if order.len() != edges.len() {
+            let missing: Vec<&RulePath> =
+                edges.keys().filter(|path| !order.contains(path)).collect();
+            let rules_involved: String = missing
+                .iter()
+                .map(|path| path.input_key())
+                .collect::<Vec<_>>()
+                .join(", ");
+            let message = format!("Circular dependency (rules: {rules_involved})");
+            return Err(missing
+                .into_iter()
+                .map(|path| {
+                    let source = match self.rules.get(path) {
+                        Some(node) => node.source.clone(),
+                        None => {
+                            let (identity, rule) = show_imports.rules.get(path).expect(
+                                "BUG: Show rule is neither local nor a reached import rule",
+                            );
+                            self.instance_lists
+                                .templates
+                                .get(identity)
+                                .unwrap_or_else(|| {
+                                    panic!(
+                                        "BUG: import rule '{path}' has no template of '{identity}'"
+                                    )
+                                })
+                                .rules
+                                .get(rule)
+                                .unwrap_or_else(|| {
+                                    panic!("BUG: import rule '{path}' missing from its template")
+                                })
+                                .source
+                                .clone()
+                        }
+                    };
+                    Error::validation_with_context(
+                        message.clone(),
+                        Some(source),
+                        None::<String>,
+                        Some(self.main_spec),
+                        None,
+                    )
+                })
+                .collect());
+        }
+        self.show_imports = show_imports;
+        self.show_edges = edges;
+        self.show_order = order;
+        Ok(())
+    }
+
+    /// Dependency order of every rule in the graph.
+    fn topological_sort(&mut self) -> Result<Vec<RulePath>, Vec<Error>> {
+        let mut depends_on: BTreeMap<RulePath, BTreeSet<RulePath>> = BTreeMap::new();
+        let local_deps: Vec<(RulePath, Vec<RulePath>)> = self
+            .rules
+            .iter()
+            .map(|(rule_path, rule_node)| {
+                (
+                    rule_path.clone(),
+                    rule_node.depends_on_rules.iter().cloned().collect(),
+                )
+            })
+            .collect();
+        for (rule_path, dependencies) in local_deps {
+            let present = self.present_rule_dependencies(dependencies);
+            depends_on.insert(rule_path, present);
         }
         let mut in_degree: BTreeMap<RulePath, usize> = BTreeMap::new();
         let mut dependents: BTreeMap<RulePath, Vec<RulePath>> = BTreeMap::new();
@@ -1748,7 +2695,8 @@ pub(crate) struct RuleNode<'a> {
 
     pub depends_on_rules: BTreeSet<RulePath>,
 
-    /// Reads itself on rows of a self-list (`components -> sum components.unit_cost`).
+    /// Named on a self-list row (`components.unit_cost`), by this rule or another.
+    /// Planning twin of eval [`crate::planning::execution_plan::ExecutionPlan::self_row_rules`].
     /// Not an edge in [`Self::depends_on_rules`]: child rows are evaluated first.
     pub recursive: bool,
 
@@ -1815,19 +2763,28 @@ struct GraphBuilder<'a, 'i> {
     context: &'a Context,
     local_types: ResolvedTypesMap<'a>,
     errors: Vec<Error>,
-    nested_template_failed: bool,
+    /// Errors of a nested spec whose template could not be built. When any nested
+    /// spec fails, the build aborts and reports only these: the consumer's own
+    /// follow-on errors are cascading noise (references the failed spec can no
+    /// longer resolve), and the nested errors already name the root cause.
+    nested_errors: Vec<Error>,
+    nested_spec_failed: bool,
     main_spec: &'a LemmaSpec,
-    limits: &'a crate::limits::ResourceLimits,
+    limits: &'a ResourceLimits,
     instance_lists: InstanceLists,
     interners: &'i mut instance_list::PassInterners,
+    /// Local rules named on a self-list row while converting; marked [`RuleNode::recursive`]
+    /// after every rule node exists.
+    self_list_row_rules: BTreeSet<RulePath>,
 }
 
 struct RuleExpressionConversion<'a, 'b> {
     /// Nodes of every expression converted for the rule being added.
     table: ExprTable<ExpressionKind>,
     spec: &'a LemmaSpec,
+    /// Repository `spec` is loaded under.
+    repository: &'b Arc<LemmaRepository>,
     data_map: &'b HashMap<String, &'b LemmaData>,
-    segments: &'b [PathSegment],
     rule_names: &'b HashSet<&'b str>,
     /// Rule being converted. Never a clash for a row field: it cannot read itself.
     rule: &'b str,
@@ -1835,8 +2792,6 @@ struct RuleExpressionConversion<'a, 'b> {
     depends_on_rules: &'b mut BTreeSet<RulePath>,
     /// Instance-list commands enclosing the expression being converted, outermost first.
     row_scopes: Vec<RowScope>,
-    /// The rule reads itself on rows of a self-list.
-    reads_itself_on_rows: bool,
 }
 
 impl RuleExpressionConversion<'_, '_> {
@@ -1852,6 +2807,70 @@ enum Pending<'a> {
     Sem(ExprRef<'a, ExpressionKind>),
     Ast(AstRef<'a>),
     Rule(RulePath),
+}
+
+/// What an identity search looks for in the expressions it walks.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum SearchKind {
+    /// The row spec of the instance list an expression yields.
+    List,
+    /// The row spec of the single row an expression yields (`list -> first`).
+    Row,
+}
+
+/// Where the identity a nested search finds goes.
+enum Continuation<'a> {
+    /// It is the answer of the whole search.
+    Answer,
+    /// The list searched for a `-> first` / `-> last` / `-> find`: its row spec is the
+    /// enclosing row search's answer.
+    RowOfList,
+    /// The row a member is read on: `path.name` of that row is the list the enclosing
+    /// list search is after.
+    Member { path: &'a [String], name: &'a str },
+}
+
+/// One depth-first search with an explicit work stack. Nested searches (the list behind a
+/// `-> first`, the row a member is read on) stack on top of it; the first expression that
+/// yields an identity wins, in source order.
+struct IdentitySearch<'a> {
+    kind: SearchKind,
+    pending: Vec<Pending<'a>>,
+    /// Rules entered by this search and the searches it nests in, per kind.
+    visiting: BTreeSet<(SearchKind, RulePath)>,
+    on_found: Continuation<'a>,
+}
+
+impl<'a> IdentitySearch<'a> {
+    fn new(kind: SearchKind, first: Pending<'a>, on_found: Continuation<'a>) -> Self {
+        Self {
+            kind,
+            pending: vec![first],
+            visiting: BTreeSet::new(),
+            on_found,
+        }
+    }
+
+    fn nested(&self, kind: SearchKind, first: Pending<'a>, on_found: Continuation<'a>) -> Self {
+        Self {
+            kind,
+            pending: vec![first],
+            visiting: self.visiting.clone(),
+            on_found,
+        }
+    }
+
+    /// `false` when `rule` was already entered by this search or an enclosing one.
+    fn enter(&mut self, rule: &RulePath) -> bool {
+        self.visiting.insert((self.kind, rule.clone()))
+    }
+}
+
+/// Outcome of one work item of an [`IdentitySearch`].
+enum SearchStep<'a> {
+    Next,
+    Nested(IdentitySearch<'a>),
+    Found(SpecIdentity),
 }
 
 /// Children converted in the enclosing row scope. List command arguments are not among them:
@@ -1968,9 +2987,10 @@ fn list_command_arguments(
             .iter()
             .map(|key| ListArgument::Enclosing(*key))
             .collect(),
-        ast::ListCommand::First | ast::ListCommand::Last | ast::ListCommand::Count => {
-            VecDeque::new()
-        }
+        ast::ListCommand::First
+        | ast::ListCommand::Last
+        | ast::ListCommand::Count
+        | ast::ListCommand::Key { .. } => VecDeque::new(),
         ast::ListCommand::Sum { argument }
         | ast::ListCommand::Avg { argument }
         | ast::ListCommand::Product { argument }
@@ -1982,21 +3002,20 @@ fn list_command_arguments(
             .collect(),
         ast::ListCommand::Any { form }
         | ast::ListCommand::All { form }
-        | ast::ListCommand::Where { form } => match form {
-            ast::ListPredicate::Value { right, .. } => {
-                VecDeque::from([ListArgument::Enclosing(*right)])
-            }
-            ast::ListPredicate::Instance { expr } => VecDeque::from([ListArgument::InRows(*expr)]),
-        },
+        | ast::ListCommand::Where { form } => {
+            let expr = match form {
+                ast::ListPredicate::Value { expr } | ast::ListPredicate::Instance { expr } => expr,
+            };
+            VecDeque::from([ListArgument::InRows(*expr)])
+        }
         ast::ListCommand::Top { n } => VecDeque::from([ListArgument::Enclosing(*n)]),
         ast::ListCommand::With { rows } => match (rows, row_scope) {
-            (ast::ListWithRows::Values(values), None) => values
+            (ast::ListWithRows::Values(values), None)
+            | (ast::ListWithRows::Values(values), Some(_)) => values
                 .iter()
                 .map(|value| ListArgument::Enclosing(*value))
                 .collect(),
-            (ast::ListWithRows::Values(_), Some(_)) | (ast::ListWithRows::FieldPairs(_), None) => {
-                VecDeque::new()
-            }
+            (ast::ListWithRows::FieldPairs(_), None) => VecDeque::new(),
             (ast::ListWithRows::FieldPairs(pairs), Some(_)) => pairs
                 .iter()
                 .map(|(field, value)| ListArgument::Field {
@@ -2027,49 +3046,95 @@ fn list_predicate_op(
     converted: &mut impl Iterator<Item = ExprId>,
 ) -> ListOp {
     match form {
-        ast::ListPredicate::Value { op, .. } => ListOp::Predicate {
+        ast::ListPredicate::Value { .. } => ListOp::Predicate {
             kind,
-            op: op.clone(),
-            right: next_argument(converted),
+            form: ast::ListPredicateForm::Value,
+            expr: next_argument(converted),
         },
-        ast::ListPredicate::Instance { .. } => ListOp::InstancePredicate {
+        ast::ListPredicate::Instance { .. } => ListOp::Predicate {
             kind,
+            form: ast::ListPredicateForm::Instance,
             expr: next_argument(converted),
         },
     }
 }
 
-/// Spec being converted and its `uses` path in the graph.
+/// Spec being converted.
 struct SourceScope<'s> {
     spec: &'s LemmaSpec,
-    segments: &'s [PathSegment],
 }
 
 /// Outcome of reading a name as a row field inside an instance-list command.
 enum RowFieldLookup {
-    Field(ExpressionKind),
+    /// The [`ExpressionKind::RowField`] read, and the member read on it when the field
+    /// is a `uses` slot read through (`items.sub.doubled`).
+    Field {
+        field: Box<ExpressionKind>,
+        member: Option<(Vec<String>, String)>,
+    },
     NotARowField,
     /// An error was pushed.
     Failed,
 }
 
-/// Rows of one instance-list command: argument names may read their fields.
-#[derive(Clone)]
-struct RowScope {
-    /// Path of the list operand (`menu`, `card`+`menu`) when it is a plain reference.
-    list_path: Option<Vec<String>>,
-    identity: SpecIdentity,
-    template: RowTemplate,
+/// The row field the first hop of `chain` reads on rows of `identity` at `level`, and
+/// the member read through it for the rest of `parts`.
+fn row_field_lookup(
     level: u32,
+    identity: &SpecIdentity,
+    chain: Vec<RowHop>,
+    parts: &[&str],
+    qualifier: Option<Vec<String>>,
+) -> RowFieldLookup {
+    let first = chain
+        .into_iter()
+        .next()
+        .expect("BUG: a row end chain has a first hop");
+    assert_eq!(
+        first.identity, *identity,
+        "BUG: a row field chain starts on the rows it reads"
+    );
+    let member = match parts {
+        [_] => None,
+        [_, through @ .., name] => Some((
+            through.iter().map(|part| (*part).to_string()).collect(),
+            (*name).to_string(),
+        )),
+        [] => unreachable!("BUG: a row field names at least one part"),
+    };
+    RowFieldLookup::Field {
+        field: Box::new(ExpressionKind::RowField {
+            level,
+            identity: first.identity,
+            end: first.end,
+            qualifier,
+        }),
+        member,
+    }
 }
 
-/// Where rows of an instance list read their fields while the consumer is planned.
+/// Rows visible while converting one list command argument.
 #[derive(Clone)]
-enum RowTemplate {
-    /// Row spec planned on its own.
-    Plan(Arc<ExecutionPlan>),
-    /// Self-list: rows are the spec being planned.
-    Root,
+enum RowScope {
+    Value {
+        level: u32,
+        list: ExprId,
+    },
+    Instance {
+        /// Path of the list operand (`menu`, `card`+`menu`) when it is a plain reference.
+        list_path: Option<Vec<String>>,
+        identity: SpecIdentity,
+        template: RowTemplate,
+        level: u32,
+    },
+}
+
+impl RowScope {
+    fn level(&self) -> u32 {
+        match self {
+            Self::Value { level, .. } | Self::Instance { level, .. } => *level,
+        }
+    }
 }
 
 /// A spec whose imports are being resolved into `local_types`. It is finished after its
@@ -2168,12 +3233,256 @@ fn reference_kind_mismatch_message<P: fmt::Display>(
     ))
 }
 
+/// Read-only graph state the stored-row reference kind-check resolves field,
+/// target, and rule types through.
+struct StoredRowKindCheckGraph<'a> {
+    main_spec: &'a LemmaSpec,
+    lists: &'a InstanceLists,
+    data: &'a IndexMap<DataPath, DataDefinition>,
+    rules: &'a BTreeMap<RulePath, RuleNode<'a>>,
+    dropped_rules: &'a BTreeSet<RulePath>,
+    computed_rule_types: &'a HashMap<RulePath, Arc<LemmaType>>,
+}
+
+/// A row whose reference bindings resolve in the plan being built: `depth` instances
+/// below that plan, named `prefix` for messages, with `source` the place that wrote it.
+pub(crate) struct OwnedRow<'r> {
+    pub row: &'r RowInstance,
+    pub depth: u32,
+    pub prefix: Vec<String>,
+    pub source: &'r Source,
+}
+
+/// Calls `f` with every reference binding the plan holding `data` and `lists` wrote,
+/// in plan order: on its `uses` rows and its stored list rows, and on the rows nested
+/// in them. Bindings written inside a row spec belong to that spec's plan.
+pub(crate) fn for_each_owned_reference<'r>(
+    data: &'r IndexMap<DataPath, DataDefinition>,
+    lists: &'r InstanceLists,
+    mut f: impl FnMut(&OwnedRow<'r>, usize, &'r ReferenceTarget),
+) {
+    let mut pending: Vec<OwnedRow<'r>> = Vec::new();
+    for (path, definition) in data {
+        if let DataDefinition::Import { row, source } = definition {
+            pending.push(OwnedRow {
+                row,
+                depth: 0,
+                prefix: vec![path.data.clone()],
+                source,
+            });
+        }
+    }
+    for source in lists.sources.values() {
+        for row in &source.store.rows {
+            pending.push(written_owned_row(row, 0, &[]));
+        }
+    }
+    pending.reverse();
+    while let Some(owned) = pending.pop() {
+        let row = owned.row;
+        let mut nested_rows: Vec<OwnedRow<'r>> = Vec::new();
+        for (slot, binding) in row.bindings.iter().enumerate() {
+            match binding {
+                None | Some(RowBinding::Bound(_)) => {}
+                Some(RowBinding::Rows { rows, hops, .. }) => {
+                    let depth = owned
+                        .depth
+                        .checked_sub(*hops)
+                        .expect("BUG: list rows hop above the plan being built");
+                    for nested in rows {
+                        nested_rows.push(written_owned_row(nested, depth, &owned.prefix));
+                    }
+                }
+                Some(RowBinding::Instance(nested)) => {
+                    let RowOrigin::Import { alias } = &nested.origin else {
+                        unreachable!("BUG: a nested instance binding holds an import row");
+                    };
+                    let mut prefix = owned.prefix.clone();
+                    prefix.push(alias.to_string());
+                    nested_rows.push(OwnedRow {
+                        row: nested,
+                        depth: owned.depth + 1,
+                        prefix,
+                        source: owned.source,
+                    });
+                }
+                Some(RowBinding::Deferred { target, hops }) => {
+                    if *hops == owned.depth {
+                        f(&owned, slot, target);
+                    }
+                }
+            }
+        }
+        pending.extend(nested_rows.into_iter().rev());
+    }
+}
+
+/// Kind-check the reference bindings the plan being built wrote against their template
+/// field types.
+fn check_stored_row_reference_types(graph: &StoredRowKindCheckGraph, errors: &mut Vec<Error>) {
+    for_each_owned_reference(graph.data, graph.lists, |owned, slot, target| {
+        let template = graph
+            .lists
+            .templates
+            .get(&owned.row.identity)
+            .expect("BUG: written rows are rows of a planned row spec");
+        let (field_path, definition) = template
+            .data
+            .get_index(slot)
+            .expect("BUG: row slot is template data");
+        let display_path = DataPath {
+            segments: Vec::new(),
+            data: owned
+                .prefix
+                .iter()
+                .map(String::as_str)
+                .chain(std::iter::once(field_path.data.as_str()))
+                .collect::<Vec<_>>()
+                .join("."),
+        };
+        let lhs = definition
+            .resolved_type_arc()
+            .expect("BUG: row field is typed template data");
+        if lhs.is_undetermined() {
+            return;
+        }
+        let Some((target_type, kind_label)) =
+            reference_target_type(graph, target, &display_path, owned.source, errors)
+        else {
+            return;
+        };
+        if let Some(msg) = reference_kind_mismatch_message(
+            lhs,
+            &target_type,
+            &display_path,
+            &match target {
+                ReferenceTarget::Data(path) => path.to_string(),
+                ReferenceTarget::Rule(rule) => rule.to_string(),
+            },
+            kind_label,
+        ) {
+            errors.push(reference_error(graph.main_spec, owned.source, msg));
+        }
+    });
+}
+
+/// A row written in a list, nested under the row named `holder`.
+fn written_owned_row<'r>(row: &'r RowInstance, depth: u32, holder: &[String]) -> OwnedRow<'r> {
+    let RowOrigin::Written { instance, source } = &row.origin else {
+        unreachable!("BUG: stored rows are written rows");
+    };
+    let mut prefix = holder.to_vec();
+    prefix.extend(instance.prefix.iter().map(PathSegment::input_key));
+    OwnedRow {
+        row,
+        depth,
+        prefix,
+        source,
+    }
+}
+
+/// Type of reference `target` of the plan being built, with its label for messages.
+/// `None` after pushing an error, or when the target rule was dropped.
+fn reference_target_type(
+    graph: &StoredRowKindCheckGraph,
+    target: &ReferenceTarget,
+    display_path: &DataPath,
+    source: &Source,
+    errors: &mut Vec<Error>,
+) -> Option<(Arc<LemmaType>, &'static str)> {
+    let segments = match target {
+        ReferenceTarget::Data(path) => &path.segments,
+        ReferenceTarget::Rule(rule) => &rule.segments,
+    };
+    if !segments.is_empty() {
+        let mut identity: Option<&SpecIdentity> = None;
+        for segment in segments {
+            let slot = DataPath::local(segment.uses.to_string());
+            let data = match identity {
+                None => graph.data,
+                Some(identity) => &graph.lists.templates[identity].data,
+            };
+            let Some(DataDefinition::Import { row, .. }) = data.get(&slot) else {
+                panic!("BUG: reference target hop '{slot}' of {target:?} is not a `uses` slot");
+            };
+            identity = Some(&row.identity);
+        }
+        let template = &graph.lists.templates[identity.expect("BUG: a member target has a hop")];
+        return Some(match target {
+            ReferenceTarget::Data(path) => (
+                instance_list::row_data_type(&template.data, &DataPath::local(path.data.clone())),
+                "target",
+            ),
+            ReferenceTarget::Rule(rule) => (
+                instance_list::row_end_type(
+                    template,
+                    &RowEnd::Rule(RulePath::new(Vec::new(), rule.rule.clone())),
+                ),
+                "target rule",
+            ),
+        });
+    }
+    match target {
+        ReferenceTarget::Data(target_path) => {
+            let Some(entry) = graph.data.get(target_path) else {
+                errors.push(reference_error(
+                    graph.main_spec,
+                    source,
+                    format!(
+                        "Data reference '{}' target '{}' does not exist",
+                        display_path, target_path
+                    ),
+                ));
+                return None;
+            };
+            match entry {
+                DataDefinition::TypeDeclaration { resolved_type, .. }
+                | DataDefinition::Reference { resolved_type, .. }
+                | DataDefinition::InstanceList { resolved_type, .. }
+                | DataDefinition::Value { resolved_type, .. } => {
+                    Some((Arc::clone(resolved_type), "target"))
+                }
+                DataDefinition::Import { .. } => {
+                    errors.push(reference_error(
+                        graph.main_spec,
+                        source,
+                        format!(
+                            "Data reference '{}' target '{}' is a spec reference and cannot carry a value",
+                            display_path, target_path
+                        ),
+                    ));
+                    None
+                }
+            }
+        }
+        ReferenceTarget::Rule(target_rule) => {
+            if let Some(target_type) = graph.computed_rule_types.get(target_rule) {
+                return Some((Arc::clone(target_type), "target rule"));
+            }
+            if graph.rules.contains_key(target_rule) {
+                panic!("BUG: rule '{target_rule}' type not inferred before row reference check")
+            }
+            if !graph.dropped_rules.contains(target_rule) {
+                errors.push(reference_error(
+                    graph.main_spec,
+                    source,
+                    format!(
+                        "Data reference '{}' target rule '{}' does not exist",
+                        display_path, target_rule
+                    ),
+                ));
+            }
+            None
+        }
+    }
+}
+
 /// Type name shown in `-> suggest` constraint errors (the declared type, not the data slot).
 fn constraint_application_type_name(parent: &ParentType, data_name: &str) -> String {
     let mut current = parent;
     loop {
         match current {
-            ParentType::Custom { name } => return name.clone(),
+            ParentType::Custom { name, .. } => return name.clone(),
             ParentType::Qualified { inner, .. }
             | ParentType::Ranged { inner, .. }
             | ParentType::List { inner, .. } => current = inner.as_ref(),
@@ -2206,11 +3515,12 @@ struct ConstraintSuggestionSink<'a> {
 fn apply_constraints_to_spec(
     spec: &LemmaSpec,
     type_name: &str,
-    mut specs: TypeSpecification,
+    data_name: &str,
+    lemma_type: &mut LemmaType,
     constraints: &[Constraint],
-    source: &crate::parsing::source::Source,
+    source: &Source,
     sink: ConstraintSuggestionSink<'_>,
-) -> Result<TypeSpecification, Vec<Error>> {
+) -> Result<(), Vec<Error>> {
     let mut errors = Vec::new();
 
     let mut seen_unit_names: std::collections::HashSet<String> = Default::default();
@@ -2251,7 +3561,7 @@ fn apply_constraints_to_spec(
                 | TypeConstraintCommand::Suggest
                 | TypeConstraintCommand::With
         ) && !(command == TypeConstraintCommand::With
-            && matches!(specs, TypeSpecification::List { .. }))
+            && matches!(lemma_type.specifications, TypeSpecification::List { .. }))
             && !seen_singleton_commands.insert(command)
         {
             errors.push(Error::validation_with_context(
@@ -2283,28 +3593,61 @@ fn apply_constraints_to_spec(
         value: declared_value,
         resolve_unit,
     } = sink;
+    let names = ConstraintNames {
+        type_name,
+        data_name,
+    };
 
-    let mut apply_one = |specs: &mut TypeSpecification,
+    let mut apply_one = |lemma_type: &mut LemmaType,
                          command: TypeConstraintCommand,
                          args: &[CommandArg],
                          declared_suggestion: &mut Option<RawSuggestion>,
                          declared_value: &mut Option<RawSuggestion>| {
         let mut suggestion_before = declared_suggestion.clone();
         let mut value_before = declared_value.clone();
-        match specs.apply_constraint(
-            type_name,
+        let applied = if matches!(
             command,
-            args,
-            &mut suggestion_before,
-            &mut value_before,
-            resolve_unit,
+            TypeConstraintCommand::Option | TypeConstraintCommand::Options
         ) {
+            apply_option_constraint(lemma_type, command, args, resolve_unit, spec)
+        } else if matches!(
+            command,
+            TypeConstraintCommand::Suggest | TypeConstraintCommand::With
+        ) && matches!(lemma_type.specifications, TypeSpecification::Spec { .. })
+        {
+            let target = match command {
+                TypeConstraintCommand::Suggest => &mut suggestion_before,
+                TypeConstraintCommand::With => &mut value_before,
+                _ => unreachable!("BUG: only Suggest or With in this arm"),
+            };
+            apply_spec_member_command(lemma_type, command, args, spec, target)
+        } else if matches!(lemma_type.specifications, TypeSpecification::List { .. })
+            && command == TypeConstraintCommand::With
+        {
+            apply_list_with_rows(
+                lemma_type,
+                names,
+                args,
+                &mut value_before,
+                resolve_unit,
+                spec,
+            )
+        } else {
+            lemma_type.apply_constraint(
+                names,
+                command,
+                args,
+                &mut suggestion_before,
+                &mut value_before,
+                resolve_unit,
+            )
+        };
+        match applied {
             Ok(()) => {
                 *declared_suggestion = suggestion_before;
                 *declared_value = value_before;
             }
             Err(e) => {
-                // Commands fail before writing; specs is unchanged. No success-path clone.
                 errors.push(Error::validation_with_context(
                     format!("Failed to apply constraint '{}': {}", command, e),
                     Some(source.clone()),
@@ -2324,7 +3667,7 @@ fn apply_constraints_to_spec(
             TypeConstraintCommand::Unit | TypeConstraintCommand::Trait
         ) {
             apply_one(
-                &mut specs,
+                lemma_type,
                 command,
                 args,
                 declared_suggestion,
@@ -2340,7 +3683,7 @@ fn apply_constraints_to_spec(
             TypeConstraintCommand::Unit | TypeConstraintCommand::Trait
         ) {
             apply_one(
-                &mut specs,
+                lemma_type,
                 command,
                 args,
                 declared_suggestion,
@@ -2351,7 +3694,7 @@ fn apply_constraints_to_spec(
     if !errors.is_empty() {
         return Err(errors);
     }
-    Ok(specs)
+    Ok(())
 }
 
 /// Every node reachable from the root carries a `source_location`.
@@ -2412,7 +3755,7 @@ impl<'a> Graph<'a> {
         main_spec: &'a LemmaSpec,
         ordered_dependencies: &[discovery::DependencySpec<'a>],
         effective: &EffectiveDate,
-        limits: &'a crate::limits::ResourceLimits,
+        limits: &'a ResourceLimits,
         interners: &mut instance_list::PassInterners,
     ) -> Result<(Graph<'a>, ResolvedSpecTypes), Vec<Error>> {
         let boundary_errors = validate_ast_source_locations(ordered_dependencies);
@@ -2422,7 +3765,26 @@ impl<'a> Graph<'a> {
 
         let mut errors: Vec<Error> = Vec::new();
 
-        let mut type_resolver = TypeResolver::new(context);
+        let mut slices = HashMap::new();
+        for node in ordered_dependencies {
+            match interners
+                .slices
+                .of(context, &node.repository, node.spec, limits)
+            {
+                Ok(version_slices) => {
+                    slices.insert(
+                        SpecVersionKey::of(&node.repository, node.spec),
+                        version_slices,
+                    );
+                }
+                Err(slice_errors) => errors.extend(slice_errors),
+            }
+        }
+        if !errors.is_empty() {
+            return Err(errors);
+        }
+
+        let mut type_resolver = TypeResolver::new(context, slices);
         for node in ordered_dependencies {
             errors.extend(type_resolver.register_all(&node.repository, node.spec));
         }
@@ -2449,15 +3811,17 @@ impl<'a> Graph<'a> {
             rules,
             dropped_rules,
             rule_order: Vec::new(),
-            execution_order: Vec::new(),
             data_reference_order: Vec::new(),
             reference_ends: IndexMap::new(),
             rule_candidates: HashMap::new(),
             main_spec,
             instance_lists,
+            show_imports: ShowImports::default(),
+            show_edges: BTreeMap::new(),
+            show_order: Vec::new(),
         };
 
-        let validation_errors = match graph.validate(&local_types) {
+        let validation_errors = match graph.validate(&local_types, limits) {
             Ok(()) => Vec::new(),
             Err(errors) => errors,
         };
@@ -2478,12 +3842,23 @@ impl<'a> Graph<'a> {
         }
     }
 
-    fn validate(&mut self, resolved_types: &ResolvedTypesMap) -> Result<(), Vec<Error>> {
+    fn validate(
+        &mut self,
+        resolved_types: &ResolvedTypesMap,
+        limits: &ResourceLimits,
+    ) -> Result<(), Vec<Error>> {
         let mut errors = Vec::new();
 
         // Structural checks (no type info needed)
         if let Err(structural_errors) = check_all_rule_references_exist(self) {
             errors.extend(structural_errors);
+        }
+        if let Err(depth_errors) = instance_list::check_instance_list_depths(
+            &self.instance_lists,
+            &self.data,
+            limits.max_list_depth,
+        ) {
+            errors.extend(depth_errors);
         }
         if let Err(collision_errors) = check_data_and_rule_name_collisions(self) {
             errors.extend(collision_errors);
@@ -2501,6 +3876,10 @@ impl<'a> Graph<'a> {
                 return Err(errors);
             }
         };
+        if let Err(circular_errors) = self.check_binding_reference_cycles() {
+            errors.extend(circular_errors);
+            return Err(errors);
+        }
 
         // Phase 1: Resolve data-target reference types now that all data
         // definitions (across all specs) are populated. Rule-target references
@@ -2509,9 +3888,6 @@ impl<'a> Graph<'a> {
             self.resolve_data_reference_types(&reference_order, resolved_types)
         {
             errors.extend(reference_errors);
-        }
-        if let Err(overlay_errors) = self.validate_import_overlay_reference_types() {
-            errors.extend(overlay_errors);
         }
 
         // Resolve every Reference chain end once. Cycles were just rejected.
@@ -2522,8 +3898,9 @@ impl<'a> Graph<'a> {
         // A rule R that reads a data path D where D is `Reference(target: rule T)`
         // must be evaluated AFTER T so the lazy resolver can read T's result.
         // This must happen before topological_sort so cycles through reference
-        // paths are detected.
+        // paths are detected. List row sources contribute the same edges.
         self.add_rule_reference_dependency_edges();
+        self.add_options_rule_dependency_edges();
 
         match self.link_spec_values() {
             Ok(member_errors) => errors.extend(member_errors),
@@ -2533,29 +3910,49 @@ impl<'a> Graph<'a> {
             }
         }
 
-        let execution_order = match self.topological_sort() {
+        // Phase 2b: Inject rule-rule dependency edges for rules a stored list
+        // row forces at evaluation (nested references at materialization,
+        // deferred field references at row-read). Needs `link_spec_values`'s
+        // resolved SpecMember targets; must precede the final sort so cycles
+        // through stored rows are reported here, not hit at evaluation.
+        self.add_stored_row_dependency_edges();
+
+        if let Err(circular_errors) = self.sort_show_rules() {
+            errors.extend(circular_errors);
+            return Err(errors);
+        }
+
+        let rule_order = match self.topological_sort() {
             Ok(order) => order,
             Err(circular_errors) => {
                 errors.extend(circular_errors);
                 return Err(errors);
             }
         };
-        let rule_order = self.local_rules_in(&execution_order);
 
         // Continue to type inference and type checking even when structural
         // checks found errors.  This lets us report structural errors (e.g.
         // missing rule reference) alongside type errors (e.g. branch type
         // mismatch) in a single pass.
 
-        // Phase 3–5 share one infer cache for walk reuse within a phase. Phase 4
-        // mutates rule-target `resolved_type` (constraint merge), so the cache is
-        // cleared before phase 5 re-infers against the merged types.
+        let has_rule_references = self.data.values().any(|def| {
+            matches!(
+                def,
+                DataDefinition::Reference {
+                    target: ReferenceTarget::Rule(_),
+                    ..
+                }
+            )
+        });
         let mut infer_cache = InferExpressionTypeCache::new();
         let (inferred_types, seed_errors) =
             infer_rule_types(self, &rule_order, resolved_types, &mut infer_cache);
         let rule_reference_errors =
             self.resolve_rule_reference_types(&inferred_types, resolved_types);
-        infer_cache.clear();
+        let row_store_reference_errors = self.check_row_store_reference_types(&inferred_types);
+        if has_rule_references {
+            infer_cache.clear();
+        }
         let type_errors = check_rule_types(
             self,
             &rule_order,
@@ -2568,9 +3965,17 @@ impl<'a> Graph<'a> {
         if let Err(errs) = rule_reference_errors {
             errors.extend(errs);
         }
+        if let Err(errs) = row_store_reference_errors {
+            errors.extend(errs);
+        }
         if let Err(errs) = type_errors {
             errors.extend(errs);
         }
+        errors.extend(deferred_signature_errors(
+            self,
+            resolved_types,
+            &inferred_types,
+        ));
 
         if !errors.is_empty() {
             return Err(errors);
@@ -2579,7 +3984,6 @@ impl<'a> Graph<'a> {
         // Phase 6: Apply (only on full success)
         apply_inferred_types(self, inferred_types);
         self.rule_order = rule_order;
-        self.execution_order = execution_order;
         self.data_reference_order = reference_order;
         Ok(())
     }
@@ -2618,7 +4022,7 @@ fn qualified_type_name_from_definition(incoming: &ParsedDataValue) -> Option<&st
         return None;
     };
     match inner.as_ref() {
-        ParentType::Custom { name } => Some(name.as_str()),
+        ParentType::Custom { name, .. } => Some(name.as_str()),
         _ => None,
     }
 }
@@ -2641,10 +4045,10 @@ fn import_spec_ref_for_clash<'a>(
         };
         return std::borrow::Cow::Borrowed(spec_ref);
     }
-    let DataDefinition::Import { identity, .. } = existing else {
+    let DataDefinition::Import { row, .. } = existing else {
         unreachable!("BUG: uses vs data clash but no Import side with recoverable spec_ref");
     };
-    std::borrow::Cow::Owned(ast::SpecRef::same_repository(identity.spec.clone()))
+    std::borrow::Cow::Owned(ast::SpecRef::same_repository(row.identity.spec.clone()))
 }
 
 fn uses_vs_data_duplicate_message(
@@ -2683,7 +4087,7 @@ impl<'a, 'i> GraphBuilder<'a, 'i> {
         main_spec: &'a LemmaSpec,
         effective: &EffectiveDate,
         type_resolver: &TypeResolver<'a>,
-        limits: &'a crate::limits::ResourceLimits,
+        limits: &'a ResourceLimits,
         interners: &'i mut instance_list::PassInterners,
     ) -> Result<GraphBuildOk<'a>, Vec<Error>> {
         let mut builder = GraphBuilder {
@@ -2693,25 +4097,26 @@ impl<'a, 'i> GraphBuilder<'a, 'i> {
             context,
             local_types: Vec::new(),
             errors: Vec::new(),
-            nested_template_failed: false,
+            nested_errors: Vec::new(),
+            nested_spec_failed: false,
             main_spec,
             limits,
-            instance_lists: InstanceLists::new(SpecIdentity::of(repository, main_spec)),
+            instance_lists: InstanceLists::new(SpecIdentity::of(
+                repository,
+                main_spec,
+                effective.clone(),
+            )),
             interners,
+            self_list_row_rules: BTreeSet::new(),
         };
 
-        builder.build_spec(
-            main_spec,
-            repository,
-            Vec::new(),
-            IndexMap::new(),
-            effective,
-            type_resolver,
-        )?;
+        builder.build_spec(main_spec, repository, effective, type_resolver);
 
-        if builder.nested_template_failed {
-            return Err(builder.errors);
+        if builder.nested_spec_failed {
+            return Err(builder.nested_errors);
         }
+
+        builder.mark_self_list_row_rules_recursive();
 
         Ok((
             builder.data,
@@ -2827,8 +4232,7 @@ impl<'a, 'i> GraphBuilder<'a, 'i> {
         };
         let import_alias = &import_row.reference.name;
         let target_label = spec_ref.to_string();
-        let did_you_mean =
-            crate::string_distance::closest_name(field_name, &local_data_field_names(walk_spec));
+        let did_you_mean = closest_name(field_name, &local_data_field_names(walk_spec));
         let message = format!("`{}` has no data field `{}`", walk_spec.name, field_name);
         let mut suggestion = format!(
             "`-> with` on import `{import_alias}` (target {target_label}) must name a data field on `{spec}`",
@@ -2857,28 +4261,19 @@ impl<'a, 'i> GraphBuilder<'a, 'i> {
         reference: &ast::Reference,
         reference_source: &Source,
         containing_spec: &'a LemmaSpec,
-        containing_segments: &[PathSegment],
+        containing_repository: &Arc<LemmaRepository>,
         effective: &EffectiveDate,
     ) -> Option<ReferenceTarget> {
-        let containing_data_map: HashMap<String, LemmaData> = containing_spec
-            .data
-            .iter()
-            .filter(|d| d.reference.is_local())
-            .map(|d| (d.reference.name.clone(), d.clone()))
-            .collect();
-
-        let containing_rule_names: HashSet<&str> = containing_spec
-            .rules
-            .iter()
-            .map(|r| r.name.as_str())
-            .collect();
-
-        let containing_segments = containing_segments.to_vec();
-
         if reference.segments.is_empty() {
-            let is_data = containing_data_map.contains_key(&reference.name);
-            let is_rule = containing_rule_names.contains(reference.name.as_str());
-            if is_data && is_rule {
+            let data = containing_spec
+                .data
+                .iter()
+                .find(|d| d.reference.is_local() && d.reference.name == reference.name);
+            let is_rule = containing_spec
+                .rules
+                .iter()
+                .any(|r| r.name == reference.name);
+            if data.is_some() && is_rule {
                 self.errors.push(self.engine_error(
                     format!(
                         "Reference target '{}' is ambiguous: both a data and a rule in spec '{}'",
@@ -2888,13 +4283,8 @@ impl<'a, 'i> GraphBuilder<'a, 'i> {
                 ));
                 return None;
             }
-            if is_data {
-                if matches!(
-                    containing_data_map
-                        .get(&reference.name)
-                        .map(|data| &data.value),
-                    Some(ParsedDataValue::Import { .. })
-                ) {
+            if let Some(data) = data {
+                if matches!(data.value, ParsedDataValue::Import { .. }) {
                     self.errors.push(self.engine_error(
                         format!(
                             "cannot supply spec instance '{}' as a value",
@@ -2904,16 +4294,15 @@ impl<'a, 'i> GraphBuilder<'a, 'i> {
                     ));
                     return None;
                 }
-                return Some(ReferenceTarget::Data(DataPath {
-                    segments: containing_segments,
-                    data: reference.name.clone(),
-                }));
+                return Some(ReferenceTarget::Data(DataPath::local(
+                    reference.name.clone(),
+                )));
             }
             if is_rule {
-                return Some(ReferenceTarget::Rule(RulePath {
-                    segments: containing_segments,
-                    rule: reference.name.clone(),
-                }));
+                return Some(ReferenceTarget::Rule(RulePath::new(
+                    Vec::new(),
+                    reference.name.clone(),
+                )));
             }
             self.errors.push(self.engine_error(
                 format!(
@@ -2928,22 +4317,17 @@ impl<'a, 'i> GraphBuilder<'a, 'i> {
         let (resolved_segments, target_spec) = self.resolve_path_segments(
             &reference.segments,
             reference_source,
-            containing_data_map,
-            containing_segments,
+            Vec::new(),
             containing_spec,
+            containing_repository,
             effective,
         )?;
 
-        let target_data_names: HashSet<&str> = target_spec
+        let is_data = target_spec
             .data
             .iter()
-            .filter(|d| d.reference.is_local())
-            .map(|d| d.reference.name.as_str())
-            .collect();
-        let target_rule_names: HashSet<&str> =
-            target_spec.rules.iter().map(|r| r.name.as_str()).collect();
-        let is_data = target_data_names.contains(reference.name.as_str());
-        let is_rule = target_rule_names.contains(reference.name.as_str());
+            .any(|d| d.reference.is_local() && d.reference.name == reference.name);
+        let is_rule = target_spec.rules.iter().any(|r| r.name == reference.name);
 
         if is_data && is_rule {
             self.errors.push(self.engine_error(
@@ -2993,10 +4377,11 @@ impl<'a, 'i> GraphBuilder<'a, 'i> {
     }
 
     /// Collect `uses` block bindings (`-> with`) declared on import rows in `spec`.
+    /// Keys are relative to `spec`: `uses kind -> with salary: 1` is `["kind", "salary"]`.
     fn build_data_bindings(
         &mut self,
         spec: &'a LemmaSpec,
-        current_segments: &[PathSegment],
+        spec_repository: &Arc<LemmaRepository>,
         effective: &EffectiveDate,
     ) -> Result<DataBindings, Vec<Error>> {
         let mut bindings: DataBindings = IndexMap::new();
@@ -3017,6 +4402,8 @@ impl<'a, 'i> GraphBuilder<'a, 'i> {
                 let binding_reference =
                     ast::prefix_reference(&import_row.reference.name, &binding.path);
                 let mut walk_spec = spec;
+                let mut walk_repository = Arc::clone(spec_repository);
+                let mut walk_effective = effective.clone();
                 let mut binding_resolved = true;
 
                 for segment in &binding_reference.segments {
@@ -3032,7 +4419,14 @@ impl<'a, 'i> GraphBuilder<'a, 'i> {
 
                     let spec_ref = match &seg_data.value {
                         ParsedDataValue::Import { spec_ref, .. } => spec_ref,
-                        ParsedDataValue::ImportList { .. } => {
+                        ParsedDataValue::Definition { .. }
+                            if self.is_data_instance_list(
+                                seg_data,
+                                walk_spec,
+                                &walk_repository,
+                                &walk_effective,
+                            ) =>
+                        {
                             self.errors.push(Error::validation_with_context(
                                 format!(
                                     "binding `{path}` replaces instance list `{segment}`; supply the whole list through evaluation data",
@@ -3065,14 +4459,17 @@ impl<'a, 'i> GraphBuilder<'a, 'i> {
                         }
                     };
 
-                    let walk_repository = discovery::owning_repository(self.context, walk_spec);
                     walk_spec = match self.resolve_spec_ref(
                         spec_ref,
-                        effective,
+                        &walk_effective,
                         walk_spec,
                         &walk_repository,
                     ) {
-                        Ok((_, arc)) => arc,
+                        Ok((repository, arc)) => {
+                            walk_effective = spec_ref.at(&walk_effective);
+                            walk_repository = repository;
+                            arc
+                        }
                         Err(error) => {
                             self.errors.push(error);
                             binding_resolved = false;
@@ -3098,47 +4495,66 @@ impl<'a, 'i> GraphBuilder<'a, 'i> {
                     continue;
                 }
 
-                if walk_spec.data.iter().any(|field| {
+                let target_is_instance_list = walk_spec.data.iter().any(|field| {
                     field.reference.segments.is_empty()
                         && field.reference.name == binding_reference.name
-                        && matches!(&field.value, ParsedDataValue::ImportList { .. })
-                }) {
-                    self.errors.push(Error::validation_with_context(
-                        format!(
-                            "binding `{path}` replaces instance list `{name}`; supply the whole list through evaluation data",
-                            path = binding_reference,
-                            name = binding_reference.name,
-                        ),
-                        Some(binding.source_location.clone()),
-                        None::<String>,
-                        Some(self.main_spec),
-                        None,
-                    ));
-                    continue;
-                }
+                        && self.is_data_instance_list(
+                            field,
+                            walk_spec,
+                            &walk_repository,
+                            &walk_effective,
+                        )
+                });
 
-                let mut binding_key: Vec<String> = current_segments
-                    .iter()
-                    .map(|segment| segment.uses.clone())
-                    .collect();
-                binding_key.extend(binding_reference.segments.iter().cloned());
+                let mut binding_key: Vec<String> = binding_reference.segments.clone();
                 binding_key.push(binding_reference.name.clone());
 
                 let binding_value = match &binding.rhs {
-                    WithRhs::Literal(value) => BindingValue::Literal(value.clone()),
-                    WithRhs::Reference { target } => {
+                    ast::UsesBindingRhs::Literal(value) => {
+                        if target_is_instance_list {
+                            self.errors.push(Error::validation_with_context(
+                                format!(
+                                    "binding `{path}` replaces instance list `{name}` with a literal; list slots take `uses` aliases",
+                                    path = binding_reference,
+                                    name = binding_reference.name,
+                                ),
+                                Some(binding.source_location.clone()),
+                                None::<String>,
+                                Some(self.main_spec),
+                                None,
+                            ));
+                            continue;
+                        }
+                        BindingValue::Literal(value.clone())
+                    }
+                    ast::UsesBindingRhs::References { targets } if target_is_instance_list => {
+                        BindingValue::InstanceAliases(targets.clone())
+                    }
+                    ast::UsesBindingRhs::References { targets } => {
+                        let [target] = targets.as_slice() else {
+                            self.errors.push(Error::validation_with_context(
+                                format!(
+                                    "binding `{binding_reference}` targets a scalar slot but supplies {} references",
+                                    targets.len()
+                                ),
+                                Some(binding.source_location.clone()),
+                                None::<String>,
+                                Some(self.main_spec),
+                                None,
+                            ));
+                            continue;
+                        };
                         let Some(resolved_target) = self.resolve_reference_target_in_spec(
                             target,
                             &binding.source_location,
                             spec,
-                            current_segments,
+                            spec_repository,
                             effective,
                         ) else {
                             continue;
                         };
                         BindingValue::Reference {
                             target: resolved_target,
-                            constraints: None,
                         }
                     }
                 };
@@ -3167,92 +4583,91 @@ impl<'a, 'i> GraphBuilder<'a, 'i> {
         Ok(bindings)
     }
 
-    /// Apply `-> with` bindings whose key is a slot of this spec, in source order.
-    fn apply_bindings_in_source_order(
-        &mut self,
+    /// `data x: row_spec list` whose element names a loadable Spec (not a value-list type).
+    fn is_data_instance_list(
+        &self,
+        data: &LemmaData,
         current_spec: &LemmaSpec,
-        current_segments: &[PathSegment],
-        bindings: &DataBindings,
-        used_binding_keys: &mut HashSet<Vec<String>>,
-    ) {
-        let prefix: Vec<&str> = current_segments
-            .iter()
-            .map(|segment| segment.uses.as_str())
-            .collect();
-        for (key, (value, source)) in bindings {
-            let Some((name, key_prefix)) = key.split_last() else {
-                continue;
-            };
-            if key_prefix.len() != prefix.len()
-                || key_prefix
-                    .iter()
-                    .zip(&prefix)
-                    .any(|(key_segment, prefix_segment)| key_segment != prefix_segment)
-            {
-                continue;
-            }
-            let path = DataPath {
-                segments: current_segments.to_vec(),
-                data: name.clone(),
-            };
-            let Some(existing) = self.data.get(&path).cloned() else {
-                continue;
-            };
-            used_binding_keys.insert(key.clone());
-            let schema = match &existing {
-                DataDefinition::TypeDeclaration { resolved_type, .. }
-                | DataDefinition::Value { resolved_type, .. }
-                | DataDefinition::Reference { resolved_type, .. } => {
-                    Some(Arc::clone(resolved_type))
-                }
-                DataDefinition::Import { .. } => None,
-                DataDefinition::InstanceList { .. } => unreachable!(
-                    "BUG: binding `{}` onto instance list `{path}` passed build_data_bindings",
-                    key.join(".")
-                ),
-            };
-            self.add_data_from_binding(path, value.clone(), source.clone(), schema, current_spec);
-        }
+        current_repository: &Arc<LemmaRepository>,
+        effective: &EffectiveDate,
+    ) -> bool {
+        let Some(spec_ref) = discovery::data_instance_list_spec_ref(current_spec, data) else {
+            return false;
+        };
+        discovery::resolve_spec_ref_or_self(
+            self.context,
+            &spec_ref,
+            current_repository,
+            current_spec,
+            effective,
+            None,
+        )
+        .is_ok()
     }
 
-    /// Add a single local data to the graph.
-    ///
-    /// Determines the effective value by checking `data_bindings` for an entry at
-    /// the data's path. If a binding exists, uses the bound value; otherwise uses
-    /// the data's own value. Reports an error on duplicate data.
+    /// Reports and returns true when `data_path` is already taken in this spec.
+    fn is_duplicate_data(
+        &mut self,
+        data: &LemmaData,
+        data_path: &DataPath,
+        current_spec: &LemmaSpec,
+    ) -> bool {
+        let Some(existing) = self.data.get(data_path) else {
+            return false;
+        };
+        let (message, suggestion) = if is_uses_vs_data_clash(existing, &data.value) {
+            uses_vs_data_duplicate_message(current_spec, data, existing)
+        } else {
+            (
+                format!(
+                    "The name '{}' is already used for data in this spec.",
+                    data_path.data
+                ),
+                None,
+            )
+        };
+        self.errors.push(Error::validation_with_context(
+            message,
+            Some(data.source_location.clone()),
+            suggestion,
+            Some(self.main_spec),
+            None,
+        ));
+        true
+    }
+
+    /// Add a single scalar data or import marker to the graph. Instance lists are
+    /// opened by the spec frame ([`Self::open_instance_list`]).
     fn add_data(
         &mut self,
         data: &LemmaData,
-        current_segments: &[PathSegment],
         current_spec: &'a LemmaSpec,
+        current_repository: &Arc<LemmaRepository>,
         effective: &EffectiveDate,
     ) {
-        let data_path = DataPath {
-            segments: current_segments.to_vec(),
-            data: data.reference.name.clone(),
-        };
-
-        // Check for duplicates
-        if let Some(existing) = self.data.get(&data_path) {
-            let (message, suggestion) = if is_uses_vs_data_clash(existing, &data.value) {
-                uses_vs_data_duplicate_message(current_spec, data, existing)
-            } else {
-                (
-                    format!(
-                        "The name '{}' is already used for data in this spec.",
-                        data_path.data
-                    ),
-                    None,
-                )
-            };
-            self.errors.push(Error::validation_with_context(
-                message,
-                Some(data.source_location.clone()),
-                suggestion,
-                Some(self.main_spec),
-                None,
-            ));
+        let data_path = DataPath::local(data.reference.name.clone());
+        if self.is_duplicate_data(data, &data_path, current_spec) {
             return;
+        }
+
+        if let ParsedDataValue::Definition {
+            base: Some(ParentType::List { .. }),
+            list,
+            ..
+        } = &data.value
+        {
+            let is_instance =
+                self.is_data_instance_list(data, current_spec, current_repository, effective);
+            if list.is_some() && !is_instance {
+                self.errors.push(Error::validation_with_context(
+                    "value lists are numbered; `-> key` is for instance lists".to_string(),
+                    Some(data.source_location.clone()),
+                    None::<String>,
+                    Some(self.main_spec),
+                    None,
+                ));
+                return;
+            }
         }
 
         let (original_schema_type, original_declared_suggestion, original_declared_value) = if matches!(
@@ -3260,6 +4675,7 @@ impl<'a, 'i> GraphBuilder<'a, 'i> {
             ParsedDataValue::Definition { .. }
         )
             && data.value.definition_needs_type_resolution()
+            && !self.is_data_instance_list(data, current_spec, current_repository, effective)
         {
             let resolved = self
                 .local_types
@@ -3288,6 +4704,16 @@ impl<'a, 'i> GraphBuilder<'a, 'i> {
         let effective_source = data.source_location.clone();
 
         match &data.value {
+            ParsedDataValue::Definition { .. }
+                if self.is_data_instance_list(
+                    data,
+                    current_spec,
+                    current_repository,
+                    effective,
+                ) =>
+            {
+                unreachable!("BUG: instance list '{data_path}' is opened by its spec frame")
+            }
             ParsedDataValue::Definition { .. } if data.value.is_definition_literal_only() => {
                 let ParsedDataValue::Definition {
                     value: Some(value), ..
@@ -3301,6 +4727,7 @@ impl<'a, 'i> GraphBuilder<'a, 'i> {
                     original_schema_type,
                     effective_source,
                     current_spec,
+                    DataOrigin::Declared,
                 );
             }
             ParsedDataValue::Definition { .. } => {
@@ -3361,54 +4788,45 @@ impl<'a, 'i> GraphBuilder<'a, 'i> {
                     },
                 );
             }
-            ParsedDataValue::Import { spec_ref, .. } => {
-                let consumer_repository = discovery::owning_repository(self.context, current_spec);
-                let (resolved_repository, effective_spec) = match self.resolve_spec_ref(
-                    spec_ref,
-                    effective,
-                    current_spec,
-                    &consumer_repository,
-                ) {
-                    Ok(pair) => pair,
-                    Err(e) => {
-                        self.errors.push(e);
-                        return;
-                    }
-                };
-
-                self.data.insert(
-                    data_path,
-                    DataDefinition::Import {
-                        identity: SpecIdentity::of(&resolved_repository, effective_spec),
-                        overlay: IndexMap::new(),
-                        source: effective_source,
-                    },
-                );
-            }
             ParsedDataValue::ImportList { .. } => {
-                self.add_instance_list(data, data_path, current_segments, current_spec, effective);
+                panic!("BUG: uses list is rejected at parse and must not reach planning");
+            }
+            ParsedDataValue::Import { .. } => {
+                unreachable!("BUG: `uses {data_path}` is added as an import row")
             }
         }
     }
 
-    fn add_instance_list(
+    /// `data x: spec list`: validates the slot, resolves its row spec and key, builds
+    /// the row store, checks row keys and installs the slot. Rows are data checked
+    /// against the row spec's template plan; nothing nests under a list.
+    fn plan_instance_list(
         &mut self,
-        data: &LemmaData,
-        data_path: DataPath,
-        current_segments: &[PathSegment],
+        data: &'a LemmaData,
         current_spec: &'a LemmaSpec,
+        current_repository: &Arc<LemmaRepository>,
         effective: &EffectiveDate,
+        bindings: &DataBindings,
     ) {
-        let ParsedDataValue::ImportList { spec_ref, list } = &data.value else {
-            panic!("BUG: add_instance_list on non-list data '{data_path}'");
+        let data_path = DataPath::local(data.reference.name.clone());
+        if self.is_duplicate_data(data, &data_path, current_spec) {
+            return;
+        }
+        let Some(spec_ref) = discovery::data_instance_list_spec_ref(current_spec, data) else {
+            panic!("BUG: plan_instance_list on non-instance-list data '{data_path}'");
+        };
+        let list = match &data.value {
+            ParsedDataValue::Definition {
+                list: Some(list), ..
+            } => list,
+            ParsedDataValue::Definition { list: None, .. } => &EMPTY_INSTANCE_LIST,
+            _ => panic!("BUG: plan_instance_list requires Definition on '{data_path}'"),
         };
         let source = data.source_location.clone();
-        let consumer_repository = discovery::owning_repository(self.context, current_spec);
-        let declaring_owner = SpecIdentity::of(&consumer_repository, current_spec);
         let (row_repository, row_spec) = match discovery::resolve_spec_ref_or_self(
             self.context,
-            spec_ref,
-            &consumer_repository,
+            &spec_ref,
+            current_repository,
             current_spec,
             effective,
             None,
@@ -3419,218 +4837,228 @@ impl<'a, 'i> GraphBuilder<'a, 'i> {
                 return;
             }
         };
-        let identity = SpecIdentity::of(&row_repository, row_spec);
-        let intern_key = instance_list::ListSourceKey {
-            owner: declaring_owner,
-            local: DataPath::local(data_path.data.clone()),
-            element: identity.clone(),
-            at: effective.clone(),
+        let at = spec_ref.at(effective);
+        let Some(identity) = self.identity_at(&row_repository, row_spec, &at) else {
+            return;
         };
 
-        let (key, rows) = if discovery::same_loaded_spec(row_spec, self.main_spec) {
-            assert_eq!(
-                identity, self.instance_lists.self_identity,
-                "BUG: self-list row identity differs from the planned spec's identity"
+        if discovery::same_loaded_spec(row_spec, current_spec) && !list.rows.is_empty() {
+            self.errors.push(self.engine_error(
+                format!(
+                    "`{}` is a list of `{}` inside `{}` itself: it cannot have source rows, \
+                     since every row would hold the same rows forever; rows come from run data",
+                    data_path.data, identity.spec, identity.spec
+                ),
+                &source,
+            ));
+            return;
+        }
+
+        let template = if identity == self.instance_lists.self_identity {
+            assert!(
+                discovery::same_loaded_spec(row_spec, self.main_spec),
+                "BUG: self-list row identity equals the planned spec's identity but is another spec"
             );
-            if !list.rows.is_empty() {
-                self.errors.push(self.engine_error(
-                    format!(
-                        "`{}` is a list of `{}` inside `{}` itself: it cannot have source rows, \
-                         since every row would hold the same rows forever; rows come from run data",
-                        data_path.data, identity.spec, identity.spec
-                    ),
-                    &source,
-                ));
-                return;
-            }
-            match self.instance_list_key(list, &self.data, &identity) {
-                Ok((key, _)) => (key, Arc::new(Vec::new())),
-                Err(errors) => {
-                    self.errors.extend(errors);
-                    return;
-                }
-            }
-        } else if let Some((interned_key, interned_rows)) = self
-            .interners
-            .list_sources
-            .get(&intern_key)
-            .map(|interned| {
-                assert_eq!(
-                    interned.identity, identity,
-                    "BUG: interned list element identity mismatch for owner {} list {}",
-                    intern_key.owner, intern_key.local
-                );
-                (interned.key.clone(), Arc::clone(&interned.rows))
-            })
-        {
-            let Some(template) = self.row_template(
-                &identity,
-                &row_repository,
-                row_spec,
-                &spec_ref.at(effective),
-            ) else {
-                return;
-            };
-            let (expected_key, _) = match self.instance_list_key(list, &template.data, &identity) {
-                Ok(key) => key,
-                Err(errors) => {
-                    self.errors.extend(errors);
-                    return;
-                }
-            };
-            assert_eq!(
-                interned_key, expected_key,
-                "BUG: interned list key mismatch for owner {} list {}",
-                intern_key.owner, intern_key.local
-            );
-            (interned_key, interned_rows)
+            None
         } else {
-            let Some(template) = self.row_template(
-                &identity,
-                &row_repository,
-                row_spec,
-                &spec_ref.at(effective),
-            ) else {
+            match self.row_template(&identity, &row_repository, row_spec, &at) {
+                Some(template) => Some(template),
+                None => return,
+            }
+        };
+        let key = match &template {
+            Some(template) => self.instance_list_key(list, &template.data, &identity),
+            None => self.instance_list_key(list, &self.data, &identity),
+        };
+        let key = match key {
+            Ok(key) => key,
+            Err(errors) => {
+                self.errors.extend(errors);
                 return;
-            };
-            let (key, key_paths) = match self.instance_list_key(list, &template.data, &identity) {
-                Ok(key) => key,
-                Err(errors) => {
-                    self.errors.extend(errors);
-                    return;
-                }
-            };
-            let row_spec = RowSpec {
-                identity: &identity,
-                template: &template,
-            };
-            let rows = self.instance_list_rows(
-                &data_path,
-                list,
-                &row_spec,
-                current_segments,
-                current_spec,
-                effective,
-            );
-            self.check_source_row_keys(&key, &key_paths, &rows, &row_spec, &source);
-            let rows = Arc::new(rows);
-            self.interners.list_sources.insert(
-                intern_key,
-                instance_list::InternedList {
-                    identity: identity.clone(),
-                    key: key.clone(),
-                    rows: Arc::clone(&rows),
-                },
-            );
-            (key, rows)
+            }
+        };
+
+        let store = match &template {
+            Some(template) => {
+                let row_identity = Arc::new(identity.clone());
+                let rows = self.written_rows(
+                    &ListSite {
+                        list_path: &data_path,
+                        identity: &row_identity,
+                        template,
+                        spec: current_spec,
+                        repository: current_repository,
+                        effective,
+                        bindings,
+                    },
+                    list,
+                );
+                self.row_store(rows, &key, &source, template)
+            }
+            None => Arc::new(RowStore::unkeyed(Vec::new())),
         };
 
         let element = Arc::new(LemmaType::primitive(TypeSpecification::Spec {
             spec: identity.clone(),
         }));
-        let resolved_type = Arc::new(LemmaType {
+        let mut resolved_type = LemmaType {
             name: Some(format!("{} list", identity.spec)),
             specifications: TypeSpecification::List {
                 element,
                 key: key.clone(),
+                help: String::new(),
             },
             extends: TypeExtends::Primitive,
-        });
+            options: TypeOptions::default(),
+        };
+        if let ParsedDataValue::Definition {
+            constraints: Some(constraints),
+            ..
+        } = &data.value
+        {
+            let mut declared_suggestion = None;
+            let mut declared_value = None;
+            match apply_constraints_to_spec(
+                current_spec,
+                &data_path.data,
+                &data_path.data,
+                &mut resolved_type,
+                constraints,
+                &source,
+                ConstraintSuggestionSink {
+                    suggestion: &mut declared_suggestion,
+                    value: &mut declared_value,
+                    resolve_unit: None,
+                },
+            ) {
+                Ok(()) => {
+                    if let Some(raw) = declared_value {
+                        self.errors.extend(instance_list_option_errors(
+                            &resolved_type,
+                            &raw,
+                            &source,
+                            current_spec,
+                        ));
+                    }
+                }
+                Err(errors) => self.errors.extend(errors),
+            }
+        }
+        self.reject_spec_option_rows(list);
+        let resolved_type = Arc::new(resolved_type);
         self.data.insert(
             data_path.clone(),
             DataDefinition::InstanceList {
                 resolved_type,
+                origin: DataOrigin::Declared,
                 source,
             },
         );
-        self.instance_lists.sources.insert(
-            data_path,
-            InstanceListSource {
-                identity,
-                key,
-                rows,
-            },
-        );
+        let source = InstanceListSource::new(identity, key, store);
+        self.instance_lists.sources.insert(data_path, source);
+    }
+
+    fn reject_spec_option_rows(&mut self, list: &ast::InstanceListBody) {
+        for row in &list.option_rows {
+            let ast::InstanceListRow::Fields {
+                source_location, ..
+            } = row
+            else {
+                unreachable!("BUG: -> option rows are field rows");
+            };
+            self.errors
+                .push(self.engine_error(SPEC_LIST_HAS_NO_OPTIONS.to_string(), source_location));
+        }
     }
 
     /// Rows of `identity` as instance-list commands read them.
-    fn row_template_of(&self, identity: &SpecIdentity) -> RowTemplate {
-        if *identity == self.instance_lists.self_identity {
-            return RowTemplate::Root;
-        }
-        RowTemplate::Plan(Arc::clone(
-            self.instance_lists
-                .templates
-                .get(identity)
-                .expect("BUG: instance list identity without a template plan"),
-        ))
+    ///
+    /// `None` when the row Spec is not self and was never imported (`uses`), so no
+    /// template plan exists. Callers must report a planning Error — never panicking.
+    fn row_template_of(&self, identity: &SpecIdentity) -> Option<RowTemplate> {
+        self.instance_lists.row_template_of(identity)
+    }
+
+    fn missing_row_template_error(&self, identity: &SpecIdentity, source: &Source) -> Error {
+        self.engine_error(
+            format!(
+                "instance list of `{}` needs `uses {}` before `-> key` or `-> with`",
+                identity.spec, identity.spec
+            ),
+            source,
+        )
     }
 
     /// Top-level main-spec rules (forward refs while converting) then present
-    /// graph rules, each [`RulePath`] once.
-    fn conversion_root_rules(&self) -> Vec<RulePath> {
-        let mut rules = Vec::new();
-        let mut seen = HashSet::new();
+    /// graph rules.
+    fn conversion_root_rules(&self) -> BTreeSet<RulePath> {
+        let mut rules = BTreeSet::new();
         for rule in &self.main_spec.rules {
-            let path = RulePath {
+            rules.insert(RulePath {
                 segments: Vec::new(),
                 rule: rule.name.clone(),
-            };
-            if seen.insert(path.clone()) {
-                rules.push(path);
-            }
+            });
         }
         for path in self.rules.keys() {
-            if seen.insert(path.clone()) {
-                rules.push(path.clone());
-            }
+            rules.insert(path.clone());
         }
         rules
     }
 
-    /// Field `name` on rows read through `template`.
-    fn template_row_end(&self, template: &RowTemplate, name: &str) -> Option<RowEnd> {
+    /// Member `parts` on rows of `identity` read through `template`, hop by hop.
+    fn template_row_chain(
+        &self,
+        identity: &SpecIdentity,
+        template: &RowTemplate,
+        parts: &[&str],
+    ) -> Option<Vec<RowHop>> {
         match template {
-            RowTemplate::Plan(plan) => {
-                instance_list::row_end_of(instance_list::RowEndView::Plan(plan), name)
-            }
+            RowTemplate::Plan(plan) => instance_list::row_end_chain(
+                identity,
+                instance_list::RowEndView::Plan(plan),
+                &self.instance_lists.templates,
+                parts,
+            ),
             RowTemplate::Root => {
-                let owned = self.conversion_root_rules();
-                let rules: Vec<&RulePath> = owned.iter().collect();
-                root_row_end(&self.data, &self.instance_lists.templates, &rules, name)
+                let rules = self.conversion_root_rules();
+                instance_list::row_end_chain(
+                    identity,
+                    instance_list::RowEndView::Root {
+                        data: &self.data,
+                        rules: &rules,
+                    },
+                    &self.instance_lists.templates,
+                    parts,
+                )
             }
         }
     }
 
-    /// Data path of row data `name` read through `template`.
-    fn template_data_path(&self, template: &RowTemplate, name: &str) -> Option<DataPath> {
-        match template {
-            RowTemplate::Plan(plan) => {
-                let parts: Vec<&str> = name.split('.').collect();
-                plan.qualify_data_names(&parts)
+    /// Identity of `spec`, resolved at `at`, in the slice that holds `at`.
+    fn identity_at(
+        &mut self,
+        repository: &Arc<LemmaRepository>,
+        spec: &LemmaSpec,
+        at: &EffectiveDate,
+    ) -> Option<SpecIdentity> {
+        match self
+            .interners
+            .slices
+            .identity_at(self.context, repository, spec, at, self.limits)
+        {
+            Ok(identity) => Some(identity),
+            Err(errors) => {
+                self.nested_errors.extend(errors);
+                self.nested_spec_failed = true;
+                None
             }
-            RowTemplate::Root => match name.split_once('.') {
-                None => self
-                    .data
-                    .keys()
-                    .find(|path| path.input_key() == name)
-                    .cloned(),
-                Some((hop, rest)) => {
-                    let (import, identity, template) =
-                        root_import_hop(&self.data, &self.instance_lists.templates, hop)?;
-                    let parts: Vec<&str> = rest.split('.').collect();
-                    let path = template.qualify_data_names(&parts)?;
-                    Some(absolute_import_member_path(&import, identity, &path))
-                }
-            },
         }
     }
 
     /// Template plan of `identity`, shared pass-wide and recorded on this consumer.
     ///
-    /// `at` is the planning instant for this edge (`spec_ref.at(consumer_effective)`),
-    /// so unpinned transitive imports inside the body resolve at that instant.
-    /// `identity.effective` is the resolved target version's `effective_from`.
+    /// `at` is the planning instant for this edge (`spec_ref.at(consumer_effective)`);
+    /// `identity` is the slice that holds it ([`Self::identity_at`]).
     fn row_template(
         &mut self,
         identity: &SpecIdentity,
@@ -3641,18 +5069,10 @@ impl<'a, 'i> GraphBuilder<'a, 'i> {
         if let Some(template) = self.instance_lists.templates.get(identity) {
             return Some(Arc::clone(template));
         }
-        if let Some(template) = self.interners.spec_templates.get(identity, at) {
+        if let Some(template) = self.interners.spec_templates.get(identity) {
             self.record_template(identity.clone(), Arc::clone(&template));
             return Some(template);
         }
-        let planning_input = match super::planning_input(self.context, row_repository, row_spec) {
-            Ok(planning_input) => planning_input,
-            Err(errors) => {
-                self.errors.extend(errors);
-                self.nested_template_failed = true;
-                return None;
-            }
-        };
         match super::get_or_build_template(
             self.context,
             row_repository,
@@ -3660,15 +5080,18 @@ impl<'a, 'i> GraphBuilder<'a, 'i> {
             at,
             self.limits,
             self.interners,
-            &planning_input,
         ) {
             Ok(template) => {
+                assert_eq!(
+                    template.identity, *identity,
+                    "BUG: the template built at an instant is the plan of the slice that holds it"
+                );
                 self.record_template(identity.clone(), Arc::clone(&template));
                 Some(template)
             }
             Err(errors) => {
-                self.errors.extend(errors);
-                self.nested_template_failed = true;
+                self.nested_errors.extend(errors);
+                self.nested_spec_failed = true;
                 None
             }
         }
@@ -3688,18 +5111,18 @@ impl<'a, 'i> GraphBuilder<'a, 'i> {
             .or_insert(template);
     }
 
-    /// `-> key a, b`: names and template data paths of the key fields.
+    /// `-> key a, b`: names and row-relative data paths of the key fields. `row_data` is
+    /// the row spec's data: a template plan's, or this plan's for a self-list.
     fn instance_list_key(
         &self,
-        list: &ast::UsesList,
+        list: &ast::InstanceListBody,
         row_data: &IndexMap<DataPath, DataDefinition>,
         identity: &SpecIdentity,
-    ) -> Result<(ListKey, Vec<DataPath>), Vec<Error>> {
+    ) -> Result<ListKey, Vec<Error>> {
         let Some(declared) = &list.key else {
-            return Ok((ListKey::Numbered, Vec::new()));
+            return Ok(ListKey::Numbered);
         };
-        let mut names: Vec<String> = Vec::with_capacity(declared.fields.len());
-        let mut paths: Vec<DataPath> = Vec::with_capacity(declared.fields.len());
+        let mut key_fields: Vec<KeyField> = Vec::with_capacity(declared.fields.len());
         let mut errors = Vec::new();
         for field in &declared.fields {
             if !field.segments.is_empty() {
@@ -3712,7 +5135,10 @@ impl<'a, 'i> GraphBuilder<'a, 'i> {
                 ));
                 continue;
             }
-            if names.contains(&field.name) {
+            if key_fields
+                .iter()
+                .any(|key_field| key_field.name == field.name)
+            {
                 errors.push(self.engine_error(
                     format!("`{}` appears twice in `-> key`", field.name),
                     &declared.source_location,
@@ -3745,156 +5171,65 @@ impl<'a, 'i> GraphBuilder<'a, 'i> {
                     continue;
                 }
             }
-            names.push(field.name.clone());
-            paths.push(local);
+            key_fields.push(KeyField {
+                name: field.name.clone(),
+                path: local,
+            });
         }
         if errors.is_empty() {
-            Ok((ListKey::Fields(names), paths))
+            Ok(ListKey::Fields(key_fields))
         } else {
             Err(errors)
         }
     }
-
-    fn instance_list_rows(
+    /// Rows written under `list`. A field row binds the written fields; `-> with ada`
+    /// is written with every binding of `uses ada`.
+    fn written_rows<'r>(
         &mut self,
-        list_path: &DataPath,
-        list: &ast::UsesList,
-        row_spec: &RowSpec<'_>,
-        current_segments: &[PathSegment],
-        current_spec: &'a LemmaSpec,
-        effective: &EffectiveDate,
-    ) -> Vec<SourceRow> {
-        let RowSpec { identity, template } = *row_spec;
+        site: &ListSite<'_, 'a>,
+        list: &'r ast::InstanceListBody,
+    ) -> Vec<Arc<RowInstance>> {
+        let mut written_fields: HashMap<&'r ast::Reference, WrittenField> = HashMap::new();
+        let list_name: Arc<str> = Arc::from(site.list_path.data.as_str());
+        let spec_name: Arc<str> = Arc::from(site.identity.spec.as_str());
+        let repository: Option<Arc<str>> = site.identity.repository.as_deref().map(Arc::from);
+        let row_prefix = |number: usize| {
+            vec![PathSegment::list_row_shared(
+                &list_name,
+                number,
+                &spec_name,
+                repository.as_ref(),
+            )]
+        };
         let mut rows = Vec::new();
+        let mut number = 0;
         for row in &list.rows {
             match row {
-                ast::UsesListRow::Fields { bindings, .. } => {
-                    let mut fields: Vec<(DataPath, DataSource)> =
-                        Vec::with_capacity(bindings.len());
-                    for binding in bindings {
-                        let name = binding.path.to_string();
-                        let parts: Vec<&str> = binding
-                            .path
-                            .segments
-                            .iter()
-                            .map(String::as_str)
-                            .chain(std::iter::once(binding.path.name.as_str()))
-                            .collect();
-                        let Some(path) = template.qualify_data_names(&parts) else {
-                            self.errors.push(self.engine_error(
-                                format!("row field `{name}` is not data on `{}`", identity.spec),
-                                &binding.source_location,
-                            ));
-                            continue;
-                        };
-                        let (body, _, definition) = template
-                            .peel_data(&path)
-                            .expect("BUG: qualified row field path must peel on template");
-                        if fields.iter().any(|(existing, _)| existing == &path) {
-                            self.errors.push(self.engine_error(
-                                format!("row field `{name}` appears twice in one row"),
-                                &binding.source_location,
-                            ));
-                            continue;
-                        }
-                        let Some(field_type) = definition.resolved_type_arc() else {
-                            self.errors.push(self.engine_error(
-                                format!(
-                                    "row field `{name}` is a `uses` instance of `{}`; bind its fields with `{name}.<field>`",
-                                    identity.spec
-                                ),
-                                &binding.source_location,
-                            ));
-                            continue;
-                        };
-                        let source = match &binding.rhs {
-                            WithRhs::Literal(value) => {
-                                match source_row_literal(value, field_type, body) {
-                                    Ok(bound) => DataSource::Literal(bound),
-                                    Err(message) => {
-                                        self.errors.push(self.engine_error(
-                                            format!("row field `{name}`: {message}"),
-                                            &binding.source_location,
-                                        ));
-                                        continue;
-                                    }
-                                }
-                            }
-                            WithRhs::Reference { target } => {
-                                match self.resolve_reference_target_in_spec(
-                                    target,
-                                    &binding.source_location,
-                                    current_spec,
-                                    current_segments,
-                                    effective,
-                                ) {
-                                    Some(ReferenceTarget::Data(consumer)) => {
-                                        let relative = instance_list::owner_relative_reference(
-                                            &consumer,
-                                            current_segments,
-                                        );
-                                        let target_type = self
-                                            .data
-                                            .get(&consumer)
-                                            .and_then(DataDefinition::resolved_type_arc);
-                                        let Some(target_type) = target_type else {
-                                            self.errors.push(self.engine_error(
-                                                format!(
-                                                    "Data reference for row field `{name}` target `{consumer}` does not exist"
-                                                ),
-                                                &binding.source_location,
-                                            ));
-                                            continue;
-                                        };
-                                        if let Some(msg) = reference_kind_mismatch_message(
-                                            field_type.as_ref(),
-                                            target_type.as_ref(),
-                                            &path,
-                                            &relative,
-                                            "target",
-                                        ) {
-                                            self.errors.push(
-                                                self.engine_error(msg, &binding.source_location),
-                                            );
-                                            continue;
-                                        }
-                                        DataSource::Reference(relative)
-                                    }
-                                    Some(ReferenceTarget::Rule(rule)) => {
-                                        self.errors.push(self.engine_error(
-                                            format!(
-                                                "row field `{name}` takes a value or data, not rule `{rule}`"
-                                            ),
-                                            &binding.source_location,
-                                        ));
-                                        continue;
-                                    }
-                                    None => continue,
-                                }
-                            }
-                        };
-                        fields.push((path, source));
+                ast::InstanceListRow::Fields {
+                    bindings: fields,
+                    source_location,
+                } => {
+                    number += 1;
+                    if let Some(row) = self.field_stored_row(
+                        site,
+                        fields,
+                        &mut written_fields,
+                        source_location,
+                        row_prefix(number),
+                    ) {
+                        rows.push(row);
                     }
-                    if fields.len() != bindings.len() {
-                        continue;
-                    }
-                    rows.push(SourceRow { fields });
                 }
-                ast::UsesListRow::Values {
+                ast::InstanceListRow::Values {
                     values,
                     source_location,
                 } => {
                     for value in values {
-                        match self.named_instance_row(
-                            list_path,
-                            value,
-                            row_spec,
-                            current_segments,
-                            current_spec,
-                            source_location,
-                        ) {
-                            Some(row) => rows.push(row),
-                            None => continue,
+                        number += 1;
+                        if let Some(row) =
+                            self.named_stored_row(site, value, source_location, row_prefix(number))
+                        {
+                            rows.push(row);
                         }
                     }
                 }
@@ -3903,24 +5238,172 @@ impl<'a, 'i> GraphBuilder<'a, 'i> {
         rows
     }
 
-    /// `-> with ada`: a row whose every field follows the `uses ada` instance.
-    fn named_instance_row(
+    /// What the written field `path` names on rows of `site`.
+    fn resolve_written_field(
+        &self,
+        site: &ListSite<'_, 'a>,
+        path: &ast::Reference,
+    ) -> WrittenField {
+        let parts: Vec<&str> = path
+            .segments
+            .iter()
+            .map(String::as_str)
+            .chain(std::iter::once(path.name.as_str()))
+            .collect();
+        let Some(chain) = instance_list::row_end_chain(
+            site.identity,
+            instance_list::RowEndView::Plan(site.template),
+            &self.instance_lists.templates,
+            &parts,
+        ) else {
+            return WrittenField::NotData;
+        };
+        let last = chain.last().expect("BUG: a row end chain has a last hop");
+        let RowEnd::Data(data_path) = &last.end else {
+            return WrittenField::NotData;
+        };
+        let template = if chain.len() == 1 {
+            Arc::clone(site.template)
+        } else {
+            self.template_of(&last.identity)
+        };
+        match template
+            .data
+            .get(data_path)
+            .expect("BUG: row end chain data is template data")
+        {
+            DataDefinition::Import { row, .. } => WrittenField::Import {
+                identity: Arc::clone(&row.identity),
+            },
+            DataDefinition::InstanceList { .. } => WrittenField::List,
+            DataDefinition::Value { .. }
+            | DataDefinition::TypeDeclaration { .. }
+            | DataDefinition::Reference { .. } => WrittenField::Value {
+                key: parts.iter().map(|part| (*part).to_string()).collect(),
+            },
+        }
+    }
+
+    /// `-> with name: "Ada", salary: s`: a row whose written fields are bound. A
+    /// dotted field (`item.price`) writes a field of the row spec's `uses item`.
+    /// `written_fields` holds the fields earlier rows of the list resolved.
+    fn field_stored_row<'r>(
         &mut self,
-        list_path: &DataPath,
-        value: &WithRhs,
-        row_spec: &RowSpec<'_>,
-        current_segments: &[PathSegment],
-        current_spec: &LemmaSpec,
+        site: &ListSite<'_, 'a>,
+        fields: &'r [ast::RowBinding],
+        written_fields: &mut HashMap<&'r ast::Reference, WrittenField>,
         source: &Source,
-    ) -> Option<SourceRow> {
-        let RowSpec { identity, template } = *row_spec;
+        prefix: Vec<PathSegment>,
+    ) -> Option<Arc<RowInstance>> {
+        let mut bindings: DataBindings = IndexMap::new();
+        let mut failed = false;
+        for binding in fields {
+            let field = match written_fields.get(&binding.path) {
+                Some(field) => field,
+                None => {
+                    let resolved = self.resolve_written_field(site, &binding.path);
+                    written_fields.entry(&binding.path).or_insert(resolved)
+                }
+            };
+            let key = match field {
+                WrittenField::Value { key } => key,
+                WrittenField::NotData => {
+                    self.errors.push(self.engine_error(
+                        format!(
+                            "row field `{}` is not data on `{}`",
+                            binding.path, site.identity.spec
+                        ),
+                        &binding.source_location,
+                    ));
+                    failed = true;
+                    continue;
+                }
+                WrittenField::Import { identity } => {
+                    let name = &binding.path;
+                    self.errors.push(self.engine_error(
+                        format!(
+                            "row field `{name}` is a `uses` instance of `{}`; bind its fields with `{name}.<field>`",
+                            identity.spec
+                        ),
+                        &binding.source_location,
+                    ));
+                    failed = true;
+                    continue;
+                }
+                WrittenField::List => {
+                    self.errors.push(self.engine_error(
+                        format!(
+                            "row field `{}` is a list on `{}`; a row binds values, not lists",
+                            binding.path, site.identity.spec
+                        ),
+                        &binding.source_location,
+                    ));
+                    failed = true;
+                    continue;
+                }
+            };
+            if bindings.contains_key(key) {
+                self.errors.push(self.engine_error(
+                    format!("row field `{}` appears twice in one row", binding.path),
+                    &binding.source_location,
+                ));
+                failed = true;
+                continue;
+            }
+            let key = key.clone();
+            let value = match &binding.rhs {
+                WithRhs::Literal(value) => BindingValue::Literal(value.clone()),
+                WithRhs::Reference { target } => match self.resolve_reference_target_in_spec(
+                    target,
+                    &binding.source_location,
+                    site.spec,
+                    site.repository,
+                    site.effective,
+                ) {
+                    Some(target) => BindingValue::Reference { target },
+                    None => {
+                        failed = true;
+                        continue;
+                    }
+                },
+            };
+            bindings.insert(key, (value, binding.source_location.clone()));
+        }
+        if failed {
+            return None;
+        }
+        Some(self.binding_row(RowWrite {
+            identity: Arc::clone(site.identity),
+            template: Arc::clone(site.template),
+            origin: RowOrigin::Written {
+                instance: SpecInstance {
+                    prefix: prefix.clone(),
+                },
+                source: source.clone(),
+            },
+            base: vec![None; site.template.data.len()],
+            bindings,
+            prefix,
+            hops: 0,
+        }))
+    }
+
+    /// `-> with ada`: a row written with every binding of `uses ada`.
+    fn named_stored_row(
+        &mut self,
+        site: &ListSite<'_, 'a>,
+        value: &WithRhs,
+        source: &Source,
+        prefix: Vec<PathSegment>,
+    ) -> Option<Arc<RowInstance>> {
+        let list = &site.list_path.data;
         let target = match value {
             WithRhs::Reference { target } if target.segments.is_empty() => target,
             WithRhs::Reference { target } => {
                 self.errors.push(self.engine_error(
                     format!(
-                        "row `{target}` of `{}` must name a `uses` instance of `{}` declared in this spec",
-                        list_path.data, identity.spec
+                        "row `{target}` of `{list}` must name a `uses` instance of `{}` declared in this spec",
+                        site.identity.spec
                     ),
                     source,
                 ));
@@ -3929,173 +5412,164 @@ impl<'a, 'i> GraphBuilder<'a, 'i> {
             WithRhs::Literal(literal) => {
                 self.errors.push(self.engine_error(
                     format!(
-                        "row `{literal}` of `{}` is not a `{}` instance; write `-> with <field>: <value>` for an inline row",
-                        list_path.data, identity.spec
+                        "row `{literal}` of `{list}` is not a `{}` instance; write `-> with <field>: <value>` for an inline row",
+                        site.identity.spec
                     ),
                     source,
                 ));
                 return None;
             }
         };
-        let declared_import = current_spec.data.iter().any(|data| {
-            data.reference.is_local()
-                && data.reference.name == target.name
-                && matches!(data.value, ParsedDataValue::Import { .. })
-        });
-        if !declared_import {
+        let instance_identity = match self.data.get(&DataPath::local(target.name.clone())) {
+            Some(DataDefinition::Import { row, .. }) => Arc::clone(&row.identity),
+            Some(_) | None => {
+                self.errors.push(self.engine_error(
+                    format!(
+                        "row `{target}` of `{list}` is not a `uses` instance of `{}`",
+                        site.identity.spec
+                    ),
+                    source,
+                ));
+                return None;
+            }
+        };
+        if instance_identity != *site.identity {
             self.errors.push(self.engine_error(
                 format!(
-                    "row `{target}` of `{}` is not a `uses` instance of `{}`",
-                    list_path.data, identity.spec
+                    "`{}` is a `{}` instance; rows of `{list}` are `{}`",
+                    target.name, instance_identity, site.identity
                 ),
                 source,
             ));
             return None;
         }
-        let alias_path = DataPath {
-            segments: current_segments.to_vec(),
-            data: target.name.clone(),
-        };
-        let Some(DataDefinition::Import {
+        Some(self.binding_row(RowWrite {
             identity: instance_identity,
-            ..
-        }) = self.data.get(&alias_path)
-        else {
-            // The import itself failed to resolve and already reported an error.
-            return None;
-        };
-        let instance_identity = instance_identity.clone();
-        if instance_identity != *identity {
-            self.errors.push(self.engine_error(
-                format!(
-                    "`{}` is a `{}` instance; rows of `{}` are `{}`",
-                    target.name, instance_identity, list_path.data, identity
-                ),
-                source,
-            ));
-            return None;
-        }
-        let mut prefix = current_segments.to_vec();
-        prefix.push(PathSegment {
-            uses: target.name.clone(),
-            repository: instance_identity.repository.clone(),
-            spec: instance_identity.spec.clone(),
-        });
-        let fields = ExecutionPlan::nested_input_keys(template)
-            .into_iter()
-            .map(|(path, _)| {
-                let mut segments = prefix.clone();
-                segments.extend(path.segments.iter().cloned());
-                let consumer = DataPath {
-                    segments,
-                    data: path.data.clone(),
-                };
-                {
-                    let first = consumer.segments.first().unwrap_or_else(|| {
-                        panic!("BUG: named-instance consumer path '{consumer}' has no uses hop")
-                    });
-                    let body =
-                        first_import_template(&self.data, &self.instance_lists.templates, first)
-                            .unwrap_or_else(|| {
-                                panic!(
-                                    "BUG: instance '{}' of '{identity}' lacks import template",
-                                    target.name
-                                )
-                            });
-                    let rest = DataPath {
-                        segments: consumer.segments[1..].to_vec(),
-                        data: consumer.data.clone(),
-                    };
-                    body.peel_data(&rest).unwrap_or_else(|| {
-                        panic!(
-                            "BUG: instance '{}' of '{identity}' lacks template data '{path}'",
-                            target.name
-                        )
-                    });
-                }
-                // Owner-relative: keep the named-instance hop (`ada.name`), strip only
-                // outer nested `uses` segments so materialize can re-prefix them.
-                (
-                    path,
-                    DataSource::Reference(instance_list::owner_relative_reference(
-                        &consumer,
-                        current_segments,
-                    )),
-                )
-            })
-            .collect();
-        Some(SourceRow { fields })
+            template: Arc::clone(site.template),
+            origin: RowOrigin::Written {
+                instance: SpecInstance {
+                    prefix: prefix.clone(),
+                },
+                source: source.clone(),
+            },
+            base: vec![None; site.template.data.len()],
+            bindings: bindings_under(site.bindings, &target.name),
+            prefix,
+            hops: 0,
+        }))
     }
 
-    /// Source rows of a keyed list: key values are literal and unique.
-    fn check_source_row_keys(
-        &mut self,
-        key: &ListKey,
-        key_paths: &[DataPath],
-        rows: &[SourceRow],
-        row_spec: &RowSpec<'_>,
-        source: &Source,
-    ) {
-        let ListKey::Fields(fields) = key else {
-            return;
-        };
-        let template = row_spec.template;
-        let field_types: Vec<Arc<LemmaType>> = key_paths
-            .iter()
-            .map(|path| {
-                let (_, _, definition) = template
-                    .peel_data(path)
-                    .expect("BUG: key path must peel on template");
-                Arc::clone(
-                    definition
-                        .resolved_type_arc()
-                        .expect("BUG: key path must be typed template data"),
+    /// Row spec identity and template plan of the list at `path` in `template`.
+    fn nested_row_template(
+        &self,
+        template: &ExecutionPlan,
+        path: &DataPath,
+    ) -> (Arc<SpecIdentity>, Arc<ExecutionPlan>) {
+        let source = template
+            .instance_lists
+            .get(path)
+            .unwrap_or_else(|| panic!("BUG: list binding '{path}' is not a list on the row spec"));
+        let plan = match self.row_template_of(&source.identity) {
+            Some(RowTemplate::Plan(plan)) => plan,
+            Some(RowTemplate::Root) => {
+                panic!(
+                    "BUG: copied rows of the root spec need an import cycle, rejected at discovery"
                 )
+            }
+            None => panic!(
+                "BUG: row template of '{}' was planned before its consumers",
+                source.identity.spec
+            ),
+        };
+        (Arc::new(source.identity.clone()), plan)
+    }
+
+    /// Store of `rows`. Key values of a keyed list are written values and unique;
+    /// a list whose keys fail that has an error and an empty index.
+    fn row_store(
+        &mut self,
+        rows: Vec<Arc<RowInstance>>,
+        key: &ListKey,
+        source: &Source,
+        template: &ExecutionPlan,
+    ) -> Arc<RowStore> {
+        let Some(store_key) = self.row_store_key(&rows, key, source, template) else {
+            return Arc::new(RowStore::unkeyed(rows));
+        };
+        match RowStore::keyed(rows, store_key) {
+            Ok(store) => Arc::new(store),
+            Err((message, unkeyed)) => {
+                self.errors.push(self.engine_error(message, source));
+                Arc::new(unkeyed)
+            }
+        }
+    }
+
+    /// Key fields of the keyed list `rows` are written in, when every row writes a value
+    /// for each (or the template has a default). `None` for an unkeyed list, and with an
+    /// error when a row does not write one.
+    fn row_store_key(
+        &mut self,
+        rows: &[Arc<RowInstance>],
+        key: &ListKey,
+        source: &Source,
+        template: &ExecutionPlan,
+    ) -> Option<Vec<StoreKeyField>> {
+        let ListKey::Fields(key_fields) = key else {
+            return None;
+        };
+        let store_key: Vec<StoreKeyField> = key_fields
+            .iter()
+            .map(|key_field| StoreKeyField {
+                name: key_field.name.clone(),
+                slot: template
+                    .data
+                    .get_index_of(&key_field.path)
+                    .expect("BUG: key field is template data"),
+                field_type: instance_list::row_end_type(
+                    template,
+                    &RowEnd::Data(key_field.path.clone()),
+                ),
+                default: instance_list::default_of(&template.data, &key_field.path),
             })
             .collect();
-        let mut keyed: Vec<KeyedRow> = Vec::with_capacity(rows.len());
         for (index, row) in rows.iter().enumerate() {
-            let mut values = Vec::with_capacity(key_paths.len());
-            for ((path, field), field_type) in key_paths.iter().zip(fields).zip(&field_types) {
-                let bound = row
-                    .fields
-                    .iter()
-                    .find(|(row_path, _)| row_path == path)
-                    .map(|(_, row_source)| row_source);
-                match bound {
-                    Some(DataSource::Literal(bound)) => {
-                        values.push(instance_list::typed_from_bound(bound, field_type))
+            for field in &store_key {
+                let name = &field.name;
+                match &row.bindings[field.slot] {
+                    Some(RowBinding::Bound(OperationResult::Value(_))) => {}
+                    Some(RowBinding::Bound(OperationResult::Veto(_))) => {
+                        unreachable!("BUG: stored row literal binding is never a Veto")
                     }
-                    Some(DataSource::Reference(consumer)) => {
+                    Some(RowBinding::Rows { .. } | RowBinding::Instance(_)) => {
+                        unreachable!("BUG: key fields are values, never lists or instances")
+                    }
+                    Some(RowBinding::Deferred { target, .. }) => {
+                        let target = match target {
+                            ReferenceTarget::Data(path) => path.input_key(),
+                            ReferenceTarget::Rule(path) => path.input_key(),
+                        };
                         self.errors.push(self.engine_error(
                             format!(
-                                "key field `{field}` of row {} is `{consumer}`; key values must be written as values",
+                                "key field `{name}` of row {} is `{target}`; key values must be written as values",
                                 index + 1
                             ),
                             source,
                         ));
-                        return;
+                        return None;
                     }
-                    None => match instance_list::template_default(template, path) {
-                        Some(default) => values.push(default),
-                        None => {
-                            self.errors.push(self.engine_error(
-                                format!("row {} has no value for key field `{field}`", index + 1),
-                                source,
-                            ));
-                            return;
-                        }
-                    },
+                    None if field.default.is_some() => {}
+                    None => {
+                        self.errors.push(self.engine_error(
+                            format!("row {} has no value for key field `{name}`", index + 1),
+                            source,
+                        ));
+                        return None;
+                    }
                 }
             }
-            keyed.push(KeyedRow {
-                label: format!("row {}", index + 1),
-                values,
-            });
         }
-        if let Some(message) = instance_list::key_conflict(fields, &keyed) {
-            self.errors.push(self.engine_error(message, source));
-        }
+        Some(store_key)
     }
 
     /// Inserts a literal-value data definition using the given literal.
@@ -4108,7 +5582,37 @@ impl<'a, 'i> GraphBuilder<'a, 'i> {
         declared_schema_type: Option<Arc<LemmaType>>,
         effective_source: Source,
         current_spec: &LemmaSpec,
+        origin: DataOrigin,
     ) {
+        let Some((semantic_value, lemma_type)) =
+            self.literal_to_typed(value, declared_schema_type, &effective_source, current_spec)
+        else {
+            return;
+        };
+        let literal_value = LiteralValue {
+            value: semantic_value,
+        };
+        self.data.insert(
+            data_path,
+            DataDefinition::Value {
+                value: literal_value,
+                resolved_type: lemma_type,
+                origin,
+                source: effective_source,
+            },
+        );
+    }
+
+    /// Converts an AST literal to its semantic value and resolved type, against
+    /// `declared_schema_type` when the slot declares one. Errors are recorded; `None`
+    /// means the literal did not convert.
+    fn literal_to_typed(
+        &mut self,
+        value: &ast::Value,
+        declared_schema_type: Option<Arc<LemmaType>>,
+        effective_source: &Source,
+        current_spec: &LemmaSpec,
+    ) -> Option<(ValueKind, Arc<LemmaType>)> {
         let semantic_value = if let Some(ref schema) = declared_schema_type {
             match value {
                 Value::Range(left, right)
@@ -4126,15 +5630,15 @@ impl<'a, 'i> GraphBuilder<'a, 'i> {
                     let left_lit = match lift_range_endpoint(left, &element, Some(&resolve)) {
                         Ok(lit) => lit,
                         Err(e) => {
-                            self.errors.push(self.engine_error(e, &effective_source));
-                            return;
+                            self.errors.push(self.engine_error(e, effective_source));
+                            return None;
                         }
                     };
                     let right_lit = match lift_range_endpoint(right, &element, Some(&resolve)) {
                         Ok(lit) => lit,
                         Err(e) => {
-                            self.errors.push(self.engine_error(e, &effective_source));
-                            return;
+                            self.errors.push(self.engine_error(e, effective_source));
+                            return None;
                         }
                     };
                     ValueKind::Range(Box::new(left_lit), Box::new(right_lit))
@@ -4145,8 +5649,8 @@ impl<'a, 'i> GraphBuilder<'a, 'i> {
                     {
                         Ok(s) => s,
                         Err(e) => {
-                            self.errors.push(self.engine_error(e, &effective_source));
-                            return;
+                            self.errors.push(self.engine_error(e, effective_source));
+                            return None;
                         }
                     }
                 }
@@ -4158,15 +5662,15 @@ impl<'a, 'i> GraphBuilder<'a, 'i> {
                         Ok(resolved) => resolved,
                         Err(message) => {
                             self.errors
-                                .push(self.engine_error(message, &effective_source));
-                            return;
+                                .push(self.engine_error(message, effective_source));
+                            return None;
                         }
                     };
                     match number_with_unit_to_value_kind(*magnitude, &bare, lt.as_ref()) {
                         Ok(s) => s,
                         Err(e) => {
-                            self.errors.push(self.engine_error(e, &effective_source));
-                            return;
+                            self.errors.push(self.engine_error(e, effective_source));
+                            return None;
                         }
                     }
                 }
@@ -4184,407 +5688,111 @@ impl<'a, 'i> GraphBuilder<'a, 'i> {
                         ) {
                             Ok(s) => s,
                             Err(e) => {
-                                self.errors.push(self.engine_error(e, &effective_source));
-                                return;
+                                self.errors.push(self.engine_error(e, effective_source));
+                                return None;
                             }
                         }
                     }
                     _ => match value_to_semantic(value) {
                         Ok(s) => s,
                         Err(e) => {
-                            self.errors.push(self.engine_error(e, &effective_source));
-                            return;
+                            self.errors.push(self.engine_error(e, effective_source));
+                            return None;
                         }
                     },
                 },
                 _ => match value_to_semantic(value) {
                     Ok(s) => s,
                     Err(e) => {
-                        self.errors.push(self.engine_error(e, &effective_source));
-                        return;
+                        self.errors.push(self.engine_error(e, effective_source));
+                        return None;
                     }
                 },
             }
         };
-        let inferred_type: Arc<LemmaType> = match value {
-            Value::Text(_) => primitive_text_arc().clone(),
-            Value::Number(_) => primitive_number_arc().clone(),
-            Value::NumberWithUnit(_, unit) => match self.resolve_unit_ref(current_spec, unit) {
-                Ok((_, lt)) => lt,
-                Err(message) => {
-                    self.errors
-                        .push(self.engine_error(message, &effective_source));
-                    return;
-                }
-            },
-            Value::Boolean(_) => primitive_boolean_arc().clone(),
-            Value::Date(_) => primitive_date_arc().clone(),
-            Value::Time(_) => primitive_time_arc().clone(),
-            Value::Range(left_v, right_v) => match (left_v.as_ref(), right_v.as_ref()) {
-                (Value::NumberWithUnit(_, _), Value::NumberWithUnit(_, _)) => match &semantic_value
-                {
-                    ValueKind::Range(left, right) => {
-                        let specs = range_type_specification_from_endpoints(
-                                left.lemma_type.as_ref(),
-                                right.lemma_type.as_ref(),
+        let schema_type: Arc<LemmaType> = match declared_schema_type {
+            Some(schema) => schema,
+            None => match value {
+                Value::Text(_) => primitive_text_arc().clone(),
+                Value::Number(_) => primitive_number_arc().clone(),
+                Value::NumberWithUnit(_, unit) => match self.resolve_unit_ref(current_spec, unit) {
+                    Ok((_, lt)) => lt,
+                    Err(message) => {
+                        self.errors
+                            .push(self.engine_error(message, effective_source));
+                        return None;
+                    }
+                },
+                Value::Boolean(_) => primitive_boolean_arc().clone(),
+                Value::Date(_) => primitive_date_arc().clone(),
+                Value::Time(_) => primitive_time_arc().clone(),
+                Value::Range(left_v, right_v) => match (left_v.as_ref(), right_v.as_ref()) {
+                    (Value::NumberWithUnit(_, _), Value::NumberWithUnit(_, _)) => {
+                        match &semantic_value {
+                            ValueKind::Range(left, right) => {
+                                let specs = range_type_specification_from_endpoints(
+                                    left.lemma_type.as_ref(),
+                                    right.lemma_type.as_ref(),
+                                )
+                                .unwrap_or_else(|| {
+                                    unreachable!(
+                                        "BUG: measure/ratio range endpoints must form a range type after resolve"
+                                    )
+                                });
+                                Arc::new(LemmaType::primitive(specs))
+                            }
+                            _ => unreachable!(
+                            "BUG: semantic range literal conversion returned non-range value kind"
+                        ),
+                        }
+                    }
+                    _ => match &semantic_value {
+                        ValueKind::Range(left, right) => {
+                            let endpoint_type = |endpoint: &TypedLiteral| -> Arc<LemmaType> {
+                                match &endpoint.value {
+                                    ValueKind::Number(_) => primitive_number_arc().clone(),
+                                    ValueKind::Date(_) => primitive_date_arc().clone(),
+                                    ValueKind::Time(_) => primitive_time_arc().clone(),
+                                    ValueKind::Ratio(_) => primitive_ratio_arc().clone(),
+                                    ValueKind::Measure(_) => Arc::clone(&endpoint.lemma_type),
+                                    other => unreachable!(
+                                        "BUG: untyped range endpoint kind for insert_literal_data: {other:?}"
+                                    ),
+                                }
+                            };
+                            let specs = range_type_specification_from_endpoints(
+                                endpoint_type(left).as_ref(),
+                                endpoint_type(right).as_ref(),
                             )
                             .unwrap_or_else(|| {
                                 unreachable!(
-                                    "BUG: measure/ratio range endpoints must form a range type after resolve"
+                                    "BUG: attempted to construct a range literal from incompatible endpoint types"
                                 )
                             });
-                        Arc::new(LemmaType::primitive(specs))
-                    }
-                    _ => unreachable!(
-                        "BUG: semantic range literal conversion returned non-range value kind"
-                    ),
-                },
-                _ => match &semantic_value {
-                    ValueKind::Range(left, right) => {
-                        let endpoint_type = |endpoint: &TypedLiteral| -> Arc<LemmaType> {
-                            match &endpoint.value {
-                                ValueKind::Number(_) => primitive_number_arc().clone(),
-                                ValueKind::Date(_) => primitive_date_arc().clone(),
-                                ValueKind::Time(_) => primitive_time_arc().clone(),
-                                ValueKind::Ratio(_) => primitive_ratio_arc().clone(),
-                                ValueKind::Measure(_) => Arc::clone(&endpoint.lemma_type),
-                                other => unreachable!(
-                                    "BUG: untyped range endpoint kind for insert_literal_data: {other:?}"
-                                ),
-                            }
-                        };
-                        let specs = range_type_specification_from_endpoints(
-                            endpoint_type(left).as_ref(),
-                            endpoint_type(right).as_ref(),
-                        )
-                        .unwrap_or_else(|| {
-                            unreachable!(
-                                "BUG: attempted to construct a range literal from incompatible endpoint types"
-                            )
-                        });
-                        Arc::new(LemmaType::primitive(specs))
-                    }
-                    _ => unreachable!(
-                        "BUG: semantic range literal conversion returned non-range value kind"
-                    ),
+                            Arc::new(LemmaType::primitive(specs))
+                        }
+                        _ => unreachable!(
+                            "BUG: semantic range literal conversion returned non-range value kind"
+                        ),
+                    },
                 },
             },
         };
-        let schema_type = declared_schema_type.unwrap_or_else(|| inferred_type.clone());
         let lemma_type = match (value, &semantic_value) {
             (Value::NumberWithUnit(_, unit), ValueKind::Measure(_) | ValueKind::Ratio(_)) => {
                 let bare = match self.resolve_unit_ref(current_spec, unit) {
                     Ok((bare, _)) => bare,
                     Err(message) => {
                         self.errors
-                            .push(self.engine_error(message, &effective_source));
-                        return;
+                            .push(self.engine_error(message, effective_source));
+                        return None;
                     }
                 };
                 Arc::new(schema_type.as_ref().clone().with_unit(bare))
             }
             _ => schema_type,
         };
-        let literal_value = LiteralValue {
-            value: semantic_value,
-        };
-        self.data.insert(
-            data_path,
-            DataDefinition::Value {
-                value: literal_value,
-                resolved_type: lemma_type,
-                source: effective_source,
-            },
-        );
-    }
-
-    /// Ensure the import at `import_path` has a shared template and site overlay.
-    ///
-    /// `at` is the planning instant for this import edge (unpinned transitive resolution).
-    /// Binding keys under the import alias become overlay entries (local to the template);
-    /// missing template slots are planning Errors.
-    fn ensure_import_template_and_overlay(
-        &mut self,
-        import_path: &DataPath,
-        current_segment_names: &[String],
-        bindings: &DataBindings,
-        used_binding_keys: &mut HashSet<Vec<String>>,
-        at: &EffectiveDate,
-    ) {
-        if current_segment_names.len() + 1 > self.limits.max_spec_dependency_depth {
-            self.errors.push(Error::resource_limit_exceeded(
-                "max_spec_dependency_depth",
-                self.limits.max_spec_dependency_depth.to_string(),
-                (current_segment_names.len() + 1).to_string(),
-                format!(
-                    "Import '{}' exceeds the maximum import nesting depth; flatten the import chain",
-                    import_path.input_key()
-                ),
-                None,
-                Some(self.main_spec),
-                None,
-            ));
-            return;
-        }
-
-        let Some(DataDefinition::Import {
-            identity, source, ..
-        }) = self.data.get(import_path)
-        else {
-            return;
-        };
-        let identity = identity.clone();
-        let import_source = source.clone();
-
-        let repo = match &identity.repository {
-            None => self.context.workspace(),
-            Some(name) => match self.context.find_repository(name) {
-                Some(repo) => repo,
-                None => {
-                    self.errors.push(self.engine_error(
-                        format!(
-                            "repository '{name}' not loaded for import '{}'",
-                            identity.spec
-                        ),
-                        &import_source,
-                    ));
-                    return;
-                }
-            },
-        };
-        let version_from = match &identity.effective {
-            EffectiveDate::Origin => None,
-            EffectiveDate::DateTimeValue(datetime) => Some(datetime),
-        };
-        let Some(nested_spec) = self
-            .context
-            .spec_set(&repo, &identity.spec)
-            .and_then(|set| set.get_exact(version_from))
-        else {
-            self.errors.push(self.engine_error(
-                format!(
-                    "spec '{}' at {} not loaded for import",
-                    identity.spec, identity.effective
-                ),
-                &import_source,
-            ));
-            return;
-        };
-
-        let Some(template) = self.row_template(&identity, &repo, nested_spec, at) else {
-            return;
-        };
-
-        self.project_instance_lists_from_template(import_path, &identity, Arc::clone(&template));
-
-        let mut alias_key = current_segment_names.to_vec();
-        alias_key.push(import_path.data.clone());
-
-        let mut overlay = IndexMap::new();
-        for (key, (value, binding_source)) in bindings {
-            if key.len() <= alias_key.len() || key[..alias_key.len()] != alias_key[..] {
-                continue;
-            }
-            let relative: Vec<&str> = key[alias_key.len()..].iter().map(String::as_str).collect();
-            let Some(overlay_path) = template.qualify_data_names(&relative) else {
-                self.errors.push(self.engine_error(
-                    format!(
-                        "No declared data matches with or binding for '{}'",
-                        key.join(".")
-                    ),
-                    binding_source,
-                ));
-                used_binding_keys.insert(key.clone());
-                continue;
-            };
-            let (body, _, definition) = template
-                .peel_data(&overlay_path)
-                .expect("BUG: qualified overlay path must peel on template");
-            if matches!(definition, DataDefinition::Import { .. }) {
-                self.errors.push(self.engine_error(
-                    format!(
-                        "cannot bind import alias '{}' as a value",
-                        overlay_path.input_key()
-                    ),
-                    binding_source,
-                ));
-                used_binding_keys.insert(key.clone());
-                continue;
-            }
-            if matches!(definition, DataDefinition::InstanceList { .. }) {
-                self.errors.push(self.engine_error(
-                    format!(
-                        "binding `{}` replaces instance list `{}`; supply the whole list through evaluation data",
-                        key.join("."),
-                        overlay_path.input_key()
-                    ),
-                    binding_source,
-                ));
-                used_binding_keys.insert(key.clone());
-                continue;
-            }
-            let overlay_entry = match value {
-                BindingValue::Literal(raw) => {
-                    let Some(field_type) = definition.resolved_type_arc() else {
-                        panic!(
-                            "BUG: template data '{}' must be typed for literal overlay",
-                            overlay_path.input_key()
-                        );
-                    };
-                    match source_row_literal(raw, field_type, body) {
-                        Ok(bound) => ImportOverlay::Literal(bound),
-                        Err(message) => {
-                            self.errors.push(self.engine_error(message, binding_source));
-                            used_binding_keys.insert(key.clone());
-                            continue;
-                        }
-                    }
-                }
-                BindingValue::Reference {
-                    target,
-                    constraints,
-                } => ImportOverlay::Reference {
-                    target: target.clone(),
-                    constraints: constraints.clone(),
-                },
-            };
-            overlay.insert(overlay_path, overlay_entry);
-            used_binding_keys.insert(key.clone());
-        }
-
-        let Some(DataDefinition::Import { overlay: slot, .. }) = self.data.get_mut(import_path)
-        else {
-            panic!(
-                "BUG: import '{}' missing after add_data",
-                import_path.input_key()
-            );
-        };
-        *slot = overlay;
-    }
-
-    /// Copy template instance lists onto this consumer under the import alias prefix.
-    /// Rows stay `Arc`-shared; run data never mutates them. Element row plans are
-    /// absorbed through [`Self::record_template`] so `resolve_instance_list` can
-    /// address dotted keys on this consumer.
-    fn project_instance_lists_from_template(
-        &mut self,
-        import_path: &DataPath,
-        identity: &SpecIdentity,
-        template: Arc<ExecutionPlan>,
-    ) {
-        self.record_template(identity.clone(), Arc::clone(&template));
-        let mut prefix = import_path.segments.clone();
-        prefix.push(PathSegment {
-            uses: import_path.data.clone(),
-            repository: identity.repository.clone(),
-            spec: identity.spec.clone(),
-        });
-        for (relative, source) in &template.instance_lists {
-            let absolute = DataPath {
-                segments: {
-                    let mut segments = prefix.clone();
-                    segments.extend(relative.segments.iter().cloned());
-                    segments
-                },
-                data: relative.data.clone(),
-            };
-            if let Some(existing) = self.instance_lists.sources.get(&absolute) {
-                assert!(
-                    Arc::ptr_eq(&existing.rows, &source.rows),
-                    "BUG: projected list '{}' must share the template row Arc",
-                    absolute.input_key()
-                );
-                continue;
-            }
-            let definition = template.data.get(relative).unwrap_or_else(|| {
-                panic!(
-                    "BUG: template instance list '{}' missing from template data",
-                    relative.input_key()
-                )
-            });
-            let DataDefinition::InstanceList {
-                resolved_type,
-                source: def_source,
-            } = definition
-            else {
-                panic!(
-                    "BUG: template instance list '{}' is not DataDefinition::InstanceList",
-                    relative.input_key()
-                );
-            };
-            if !self.instance_lists.templates.contains_key(&source.identity) {
-                if source.identity == template.identity {
-                    self.instance_lists
-                        .templates
-                        .insert(source.identity.clone(), Arc::clone(&template));
-                } else {
-                    let row_plan = template.row_templates.get(&source.identity).unwrap_or_else(|| {
-                        panic!(
-                            "BUG: projected list '{}' element '{}' missing from template row_templates",
-                            relative.input_key(),
-                            source.identity
-                        )
-                    });
-                    self.record_template(source.identity.clone(), Arc::clone(row_plan));
-                }
-            }
-            self.data.insert(
-                absolute.clone(),
-                DataDefinition::InstanceList {
-                    resolved_type: Arc::clone(resolved_type),
-                    source: def_source.clone(),
-                },
-            );
-            self.instance_lists.sources.insert(
-                absolute,
-                InstanceListSource {
-                    identity: source.identity.clone(),
-                    key: source.key.clone(),
-                    rows: Arc::clone(&source.rows),
-                },
-            );
-        }
-    }
-
-    /// Apply a binding override to insert the bound data's definition.
-    /// Bindings are pre-resolved — literal values or reference targets.
-    fn add_data_from_binding(
-        &mut self,
-        data_path: DataPath,
-        binding_value: BindingValue,
-        binding_source: Source,
-        declared_schema_type: Option<Arc<LemmaType>>,
-        current_spec: &LemmaSpec,
-    ) {
-        match binding_value {
-            BindingValue::Literal(value) => {
-                self.insert_literal_data(
-                    data_path,
-                    &value,
-                    declared_schema_type,
-                    binding_source,
-                    current_spec,
-                );
-            }
-            BindingValue::Reference {
-                target,
-                constraints,
-            } => {
-                let provisional_type = declared_schema_type
-                    .unwrap_or_else(|| Arc::new(LemmaType::undetermined_type()));
-                self.data.insert(
-                    data_path,
-                    DataDefinition::Reference {
-                        target,
-                        resolved_type: provisional_type,
-                        local_constraints: constraints,
-                        local_suggestion: None,
-                        local_value: None,
-                        source: binding_source,
-                    },
-                );
-            }
-        }
+        Some((semantic_value, lemma_type))
     }
 
     /// Returns (path_segments, last_resolved_spec) on success.
@@ -4592,31 +5800,31 @@ impl<'a, 'i> GraphBuilder<'a, 'i> {
         &mut self,
         segments: &[String],
         reference_source: &Source,
-        mut current_data_map: HashMap<String, LemmaData>,
         mut path_segments: Vec<PathSegment>,
         mut spec_context: &'a LemmaSpec,
+        spec_context_repository: &Arc<LemmaRepository>,
         effective: &EffectiveDate,
     ) -> Option<(Vec<PathSegment>, &'a LemmaSpec)> {
         let mut last_arc: Option<&LemmaSpec> = None;
+        let mut walk_effective = effective.clone();
+        let mut context_repository = Arc::clone(spec_context_repository);
 
         for segment in segments.iter() {
-            let data_ref =
-                match current_data_map.get(segment) {
-                    Some(f) => f,
-                    None => {
-                        self.errors.push(self.engine_error(
-                            format!("Data '{}' not found", segment),
-                            reference_source,
-                        ));
-                        return None;
-                    }
-                };
+            let Some(data_ref) = spec_context
+                .data
+                .iter()
+                .find(|data| data.reference.is_local() && data.reference.name == *segment)
+            else {
+                self.errors.push(
+                    self.engine_error(format!("Data '{}' not found", segment), reference_source),
+                );
+                return None;
+            };
 
             if let ParsedDataValue::Import { spec_ref, .. } = &data_ref.value {
-                let context_repository = discovery::owning_repository(self.context, spec_context);
                 let (repo, arc) = match self.resolve_spec_ref(
                     spec_ref,
-                    effective,
+                    &walk_effective,
                     spec_context,
                     &context_repository,
                 ) {
@@ -4626,19 +5834,20 @@ impl<'a, 'i> GraphBuilder<'a, 'i> {
                         return None;
                     }
                 };
+                walk_effective = spec_ref.at(&walk_effective);
                 path_segments.push(PathSegment {
-                    uses: segment.clone(),
-                    repository: repo.name.clone(),
-                    spec: arc.name.clone(),
+                    uses: Arc::from(segment.as_str()),
+                    row: None,
+                    repository: repo.name.as_deref().map(Arc::from),
+                    spec: Arc::from(arc.name.as_str()),
                 });
-                current_data_map = arc
-                    .data
-                    .iter()
-                    .map(|f| (f.reference.name.clone(), f.clone()))
-                    .collect();
                 last_arc = Some(arc);
                 spec_context = arc;
-            } else if let ParsedDataValue::ImportList { .. } = &data_ref.value {
+                context_repository = repo;
+            } else if matches!(
+                &data_ref.value,
+                ParsedDataValue::Definition { list: Some(_), .. }
+            ) {
                 self.errors.push(self.engine_error(
                     format!(
                         "`{segment}` is a list: there is no `{segment}.<field>` outside a command argument; \
@@ -4754,8 +5963,10 @@ impl<'a, 'i> GraphBuilder<'a, 'i> {
                 continue;
             }
             match &data.value {
-                ParsedDataValue::Import { spec_ref, .. }
-                | ParsedDataValue::ImportList { spec_ref, .. } => {
+                ParsedDataValue::ImportList { .. } => {
+                    panic!("BUG: uses list is rejected at parse and must not reach planning");
+                }
+                ParsedDataValue::Import { spec_ref, .. } => {
                     let import_effective = spec_ref.at(&frame.effective);
                     match self.resolve_spec_ref(
                         spec_ref,
@@ -4769,7 +5980,33 @@ impl<'a, 'i> GraphBuilder<'a, 'i> {
                         Err(error) => self.errors.push(error),
                     }
                 }
-                _ => {}
+                ParsedDataValue::Definition { .. } => {
+                    let Some(spec_ref) = discovery::data_instance_list_spec_ref(spec, data) else {
+                        continue;
+                    };
+                    let import_effective = spec_ref.at(&frame.effective);
+                    match self.resolve_spec_ref(
+                        &spec_ref,
+                        &import_effective,
+                        spec,
+                        &frame.repository,
+                    ) {
+                        Ok((source_repo, source_arc)) => {
+                            return Some((source_arc, source_repo, import_effective));
+                        }
+                        Err(error) => {
+                            // Instance-list body (`Definition.list`) names a missing Spec:
+                            // surface the resolve Error. Local-type value lists (`money list`
+                            // with no instance body) fall through without Error here.
+                            if matches!(
+                                &data.value,
+                                ParsedDataValue::Definition { list: Some(_), .. }
+                            ) {
+                                self.errors.push(error);
+                            }
+                        }
+                    }
+                }
             }
         }
         None
@@ -4794,180 +6031,549 @@ impl<'a, 'i> GraphBuilder<'a, 'i> {
         }
     }
 
+    /// Plan `spec` as this graph: its data, its `uses` imports, its lists' rows and its
+    /// rules. An import is a row over its spec's template plan, planned on its own;
+    /// nothing of the imported spec is planned here.
     fn build_spec(
         &mut self,
         spec: &'a LemmaSpec,
         spec_repository: &Arc<LemmaRepository>,
-        current_segments: Vec<PathSegment>,
-        data_bindings: DataBindings,
         effective: &EffectiveDate,
         type_resolver: &TypeResolver<'a>,
-    ) -> Result<(), Vec<Error>> {
-        if current_segments.len() > self.limits.max_spec_dependency_depth {
-            return Err(vec![Error::resource_limit_exceeded(
-                "max_spec_dependency_depth",
-                self.limits.max_spec_dependency_depth.to_string(),
-                current_segments.len().to_string(),
-                format!(
-                    "Spec '{}' exceeds the maximum import nesting depth; flatten the import chain",
-                    spec.name
-                ),
-                None,
-                Some(spec),
-                None,
-            )]);
-        }
-
-        if current_segments.is_empty() {
-            self.process_meta_fields(spec);
-        }
-
-        let current_segment_names: Vec<String> =
-            current_segments.iter().map(|s| s.uses.clone()).collect();
-
-        // Step 2: Build data bindings declared in this spec (for passing to referenced specs)
-        let this_spec_bindings = match self.build_data_bindings(spec, &current_segments, effective)
-        {
+    ) {
+        self.process_meta_fields(spec);
+        let bindings = match self.build_data_bindings(spec, spec_repository, effective) {
             Ok(bindings) => bindings,
             Err(errors) => {
                 self.errors.extend(errors);
                 IndexMap::new()
             }
         };
+        if !self.ensure_spec_types_resolved(spec, spec_repository, effective, type_resolver) {
+            return;
+        }
 
-        // Build data_map for rule resolution and other lookups
+        let mut imports: HashMap<String, (Arc<SpecIdentity>, Arc<ExecutionPlan>)> = HashMap::new();
+        for data in &spec.data {
+            if !data.reference.is_local() || !matches!(data.value, ParsedDataValue::Import { .. }) {
+                continue;
+            }
+            if let Some(import) = self.import_template(data, spec, spec_repository, effective) {
+                imports.entry(data.reference.name.clone()).or_insert(import);
+            }
+        }
+        let bindings = self.resolve_instance_alias_bindings(bindings, spec, &imports);
+
+        for data in &spec.data {
+            if !data.reference.is_local()
+                || self.is_data_instance_list(data, spec, spec_repository, effective)
+            {
+                continue;
+            }
+            if matches!(data.value, ParsedDataValue::Import { .. }) {
+                if let Some((identity, template)) = imports.get(&data.reference.name) {
+                    let (identity, template) = (Arc::clone(identity), Arc::clone(template));
+                    self.add_import(data, identity, template, &bindings, spec);
+                }
+                continue;
+            }
+            self.add_data(data, spec, spec_repository, effective);
+        }
+        for data in &spec.data {
+            if data.reference.is_local()
+                && self.is_data_instance_list(data, spec, spec_repository, effective)
+            {
+                self.plan_instance_list(data, spec, spec_repository, effective, &bindings);
+            }
+        }
+
         let data_map: HashMap<String, &LemmaData> = spec
             .data
             .iter()
             .map(|data| (data.reference.name.clone(), data))
             .collect();
-
-        if !self
-            .local_types
-            .iter()
-            .any(|(_, s, _)| discovery::same_loaded_spec(s, spec))
-            && !self.ensure_spec_types_resolved(spec, spec_repository, effective, type_resolver)
-        {
-            return Ok(());
-        }
-
-        let mut effective_bindings = data_bindings.clone();
-        effective_bindings.extend(this_spec_bindings.clone());
-
-        // Step 4: Add local data using effective bindings (caller + this spec)
-        let mut used_binding_keys: HashSet<Vec<String>> = HashSet::new();
-        for data in &spec.data {
-            if !data.reference.is_local() {
-                continue;
-            }
-            if data.value.uses_spec_ref().is_some() {
-                continue;
-            }
-            self.add_data(data, &current_segments, spec, effective);
-        }
-        self.apply_bindings_in_source_order(
-            spec,
-            &current_segments,
-            &effective_bindings,
-            &mut used_binding_keys,
-        );
-
-        for data in &spec.data {
-            if !data.reference.segments.is_empty() {
-                continue;
-            }
-            if let ParsedDataValue::Import { spec_ref, .. } = &data.value {
-                let nested_effective = spec_ref.at(effective);
-                self.add_data(data, &current_segments, spec, effective);
-                let import_path = DataPath {
-                    segments: current_segments.to_vec(),
-                    data: data.reference.name.clone(),
-                };
-                // Merge parent bindings that target this nest, then apply as overlay on the Import.
-                let mut nest_key = current_segment_names.clone();
-                nest_key.push(data.reference.name.clone());
-                let mut combined_bindings = effective_bindings.clone();
-                for (key, value_and_source) in &data_bindings {
-                    if key.len() > nest_key.len()
-                        && key[..nest_key.len()] == nest_key[..]
-                        && !combined_bindings.contains_key(key)
-                    {
-                        combined_bindings.insert(key.clone(), value_and_source.clone());
-                    }
-                }
-                self.ensure_import_template_and_overlay(
-                    &import_path,
-                    &current_segment_names,
-                    &combined_bindings,
-                    &mut used_binding_keys,
-                    &nested_effective,
-                );
-            }
-        }
-
-        for data in &spec.data {
-            if data.reference.is_local()
-                && matches!(&data.value, ParsedDataValue::ImportList { .. })
-            {
-                self.add_data(data, &current_segments, spec, effective);
-            }
-        }
-
-        // Path fills (LHS with segments) must match a declared slot in a nested spec.
-        let expected_key_len = current_segments.len() + 1;
-        for data in &spec.data {
-            if data.reference.segments.is_empty() {
-                continue;
-            }
-            let mut binding_key: Vec<String> = current_segment_names.clone();
-            binding_key.extend(data.reference.segments.iter().cloned());
-            binding_key.push(data.reference.name.clone());
-            if binding_key.len() != expected_key_len {
-                continue;
-            }
-            if used_binding_keys.contains(&binding_key) {
-                continue;
-            }
-            let Some((_, binding_source)) = effective_bindings.get(&binding_key) else {
-                continue;
-            };
-            self.errors.push(self.engine_error(
-                format!(
-                    "No declared data matches with or binding for '{}'",
-                    binding_key.join(".")
-                ),
-                binding_source,
-            ));
-        }
-
         let rule_names: HashSet<&str> = spec.rules.iter().map(|r| r.name.as_str()).collect();
         for rule in &spec.rules {
             self.add_rule(
                 rule,
                 spec,
+                spec_repository,
                 &data_map,
-                &current_segments,
                 &rule_names,
                 effective,
             );
         }
+    }
 
-        Ok(())
+    /// Identity and template plan of the spec `uses` data `data` of `spec` imports.
+    /// `None` when it does not resolve or its template does not plan (errors recorded).
+    fn import_template(
+        &mut self,
+        data: &LemmaData,
+        spec: &'a LemmaSpec,
+        spec_repository: &Arc<LemmaRepository>,
+        effective: &EffectiveDate,
+    ) -> Option<(Arc<SpecIdentity>, Arc<ExecutionPlan>)> {
+        let ParsedDataValue::Import { spec_ref, .. } = &data.value else {
+            unreachable!("BUG: import_template on non-import data");
+        };
+        let (repository, imported) =
+            match self.resolve_spec_ref(spec_ref, effective, spec, spec_repository) {
+                Ok(pair) => pair,
+                Err(error) => {
+                    self.errors.push(error);
+                    return None;
+                }
+            };
+        let at = spec_ref.at(effective);
+        let identity = self.identity_at(&repository, imported, &at)?;
+        let template = self.row_template(&identity, &repository, imported, &at)?;
+        Some((Arc::new(identity), template))
+    }
+
+    /// `uses alias: spec -> with ...`: the import row, its `-> with` bindings written
+    /// over the template's slots.
+    fn add_import(
+        &mut self,
+        data: &LemmaData,
+        identity: Arc<SpecIdentity>,
+        template: Arc<ExecutionPlan>,
+        bindings: &DataBindings,
+        spec: &LemmaSpec,
+    ) {
+        let alias = &data.reference.name;
+        let data_path = DataPath::local(alias.clone());
+        if self.is_duplicate_data(data, &data_path, spec) {
+            return;
+        }
+        let prefix = vec![PathSegment::import(alias, &identity)];
+        let row = self.binding_row(RowWrite {
+            base: vec![None; template.data.len()],
+            identity,
+            template,
+            origin: RowOrigin::Import {
+                alias: Arc::from(alias.as_str()),
+            },
+            bindings: bindings_under(bindings, alias),
+            prefix,
+            hops: 0,
+        });
+        self.data.insert(
+            data_path,
+            DataDefinition::Import {
+                row,
+                source: data.source_location.clone(),
+            },
+        );
+    }
+
+    /// The row `write` describes, with every row its bindings hold. A list binding's
+    /// copies are rows owned by the writing plan; a binding through a nested `uses`
+    /// (`-> with j.x: 2`) writes over that import's row, held as [`RowBinding::Instance`].
+    /// A binding that does not type is an error and leaves its slot as the base has it.
+    fn binding_row(&mut self, write: RowWrite) -> Arc<RowInstance> {
+        /// A list binding of template slot `slot`, filled by the rows of its copies.
+        struct PendingList {
+            slot: usize,
+            rows: Vec<Arc<RowInstance>>,
+            row_type: Arc<LemmaType>,
+            key: ListKey,
+            template: Arc<ExecutionPlan>,
+            source: Source,
+        }
+
+        struct Pending {
+            identity: Arc<SpecIdentity>,
+            origin: RowOrigin,
+            hops: u32,
+            bindings: Vec<Option<RowBinding>>,
+            lists: Vec<PendingList>,
+            /// Row and slot that holds this row.
+            parent: Option<(usize, usize)>,
+        }
+
+        let mut pending: Vec<Pending> = Vec::new();
+        let mut writes: Vec<(RowWrite, Option<(usize, usize)>)> = vec![(write, None)];
+        while let Some((write, parent)) = writes.pop() {
+            let row = pending.len();
+            let mut bindings = write.base;
+            let mut lists = Vec::new();
+            let mut nested: IndexMap<String, DataBindings> = IndexMap::new();
+            for (key, (value, source)) in &write.bindings {
+                let (name, rest) = key.split_first().expect("BUG: binding key is never empty");
+                let path = DataPath::local(name.clone());
+                let (slot, _, definition) =
+                    write.template.data.get_full(&path).unwrap_or_else(|| {
+                        panic!(
+                            "BUG: binding `{}` is not data of `{}`",
+                            key.join("."),
+                            write.template.identity.spec
+                        )
+                    });
+                if !rest.is_empty() {
+                    assert!(
+                        matches!(definition, DataDefinition::Import { .. }),
+                        "BUG: binding `{}` steps through `{name}`, which is not a `uses`",
+                        key.join(".")
+                    );
+                    nested
+                        .entry(name.clone())
+                        .or_default()
+                        .insert(rest.to_vec(), (value.clone(), source.clone()));
+                    continue;
+                }
+                if matches!(definition, DataDefinition::Import { .. }) {
+                    let bound = write
+                        .prefix
+                        .iter()
+                        .map(PathSegment::input_key)
+                        .chain(std::iter::once(name.clone()))
+                        .collect::<Vec<_>>()
+                        .join(".");
+                    self.errors.push(self.engine_error(
+                        format!("cannot bind import alias '{bound}' as a value"),
+                        source,
+                    ));
+                    continue;
+                }
+                match value {
+                    BindingValue::Literal(literal) => {
+                        let field_type = definition
+                            .resolved_type_arc()
+                            .expect("BUG: a value slot of a template plan is typed");
+                        match source_row_literal(literal, field_type, &write.template) {
+                            Ok(bound) => {
+                                bindings[slot] =
+                                    Some(RowBinding::Bound(OperationResult::from_bound(bound)));
+                            }
+                            Err(message) => {
+                                self.errors.push(self.engine_error(message, source));
+                            }
+                        }
+                    }
+                    BindingValue::Reference { target, .. } => {
+                        bindings[slot] = Some(RowBinding::Deferred {
+                            target: target.clone(),
+                            hops: write.hops,
+                        });
+                    }
+                    BindingValue::InstanceRows(copies) => {
+                        let (nested_identity, nested_template) =
+                            self.nested_row_template(&write.template, &path);
+                        let row_type = Arc::new(LemmaType::primitive(TypeSpecification::Spec {
+                            spec: nested_identity.as_ref().clone(),
+                        }));
+                        lists.push(PendingList {
+                            slot,
+                            rows: Vec::new(),
+                            row_type,
+                            key: write
+                                .template
+                                .instance_lists
+                                .get(&path)
+                                .expect(
+                                    "BUG: a list binding slot is an instance list of its template",
+                                )
+                                .key
+                                .clone(),
+                            template: Arc::clone(&nested_template),
+                            source: source.clone(),
+                        });
+                        let list_name: Arc<str> = Arc::from(name.as_str());
+                        let spec_name: Arc<str> = Arc::from(nested_identity.spec.as_str());
+                        let repository: Option<Arc<str>> =
+                            nested_identity.repository.as_deref().map(Arc::from);
+                        for (index, copy) in copies.iter().enumerate() {
+                            if copy.identity != *nested_identity {
+                                self.errors.push(self.engine_error(
+                                    format!(
+                                        "`{}` is a `{}` instance; rows of `{name}` are `{}`",
+                                        copy.name, copy.identity, nested_identity
+                                    ),
+                                    &copy.source,
+                                ));
+                                continue;
+                            }
+                            let segment = PathSegment::list_row_shared(
+                                &list_name,
+                                index + 1,
+                                &spec_name,
+                                repository.as_ref(),
+                            );
+                            let prefix: Vec<PathSegment> =
+                                write.prefix.iter().cloned().chain([segment]).collect();
+                            writes.push((
+                                RowWrite {
+                                    identity: Arc::clone(&nested_identity),
+                                    base: vec![None; nested_template.data.len()],
+                                    template: Arc::clone(&nested_template),
+                                    origin: RowOrigin::Written {
+                                        instance: SpecInstance {
+                                            prefix: prefix.clone(),
+                                        },
+                                        source: copy.source.clone(),
+                                    },
+                                    bindings: copy.bindings.clone(),
+                                    prefix,
+                                    hops: 0,
+                                },
+                                Some((row, slot)),
+                            ));
+                        }
+                    }
+                    BindingValue::InstanceAliases(_) => unreachable!(
+                        "BUG: instance aliases are resolved to rows before rows are built"
+                    ),
+                }
+            }
+            for (name, sub) in nested {
+                let path = DataPath::local(name.clone());
+                let (slot, _, definition) = write
+                    .template
+                    .data
+                    .get_full(&path)
+                    .expect("BUG: nested binding slot is template data");
+                let DataDefinition::Import {
+                    row: template_row, ..
+                } = definition
+                else {
+                    unreachable!("BUG: nested binding slot is a `uses`");
+                };
+                let base = match &bindings[slot] {
+                    Some(RowBinding::Instance(written)) => written.bindings.to_vec(),
+                    None => template_row.bindings.to_vec(),
+                    Some(other) => panic!("BUG: `uses` slot `{name}` holds {other:?}"),
+                };
+                let identity = Arc::clone(&template_row.identity);
+                let template = self.template_of(&identity);
+                let prefix: Vec<PathSegment> = write
+                    .prefix
+                    .iter()
+                    .cloned()
+                    .chain([PathSegment::import(&name, &identity)])
+                    .collect();
+                writes.push((
+                    RowWrite {
+                        identity,
+                        template,
+                        origin: template_row.origin.clone(),
+                        base,
+                        bindings: sub,
+                        prefix,
+                        hops: write.hops + 1,
+                    },
+                    Some((row, slot)),
+                ));
+            }
+            pending.push(Pending {
+                identity: write.identity,
+                origin: write.origin,
+                hops: write.hops,
+                bindings,
+                lists,
+                parent,
+            });
+        }
+
+        // Rows complete last to first: every row completes before the row holding it,
+        // and each list's rows arrive in order.
+        loop {
+            let row = pending.pop().expect("BUG: the written row is pending");
+            let mut bindings = row.bindings;
+            for list in row.lists {
+                let rows =
+                    match self.row_store_key(&list.rows, &list.key, &list.source, &list.template) {
+                        None => list.rows,
+                        Some(store_key) => match RowStore::keyed(list.rows, store_key) {
+                            Ok(store) => store.rows,
+                            Err((message, unkeyed)) => {
+                                self.errors.push(self.engine_error(message, &list.source));
+                                unkeyed.rows
+                            }
+                        },
+                    };
+                bindings[list.slot] = Some(RowBinding::Rows {
+                    rows,
+                    row_type: list.row_type,
+                    hops: row.hops,
+                });
+            }
+            let built = Arc::new(RowInstance {
+                identity: row.identity,
+                origin: row.origin,
+                bindings: bindings.into(),
+            });
+            let Some((holder, slot)) = row.parent else {
+                assert!(
+                    pending.is_empty(),
+                    "BUG: only the written row has no holder"
+                );
+                return built;
+            };
+            let holder = &mut pending[holder];
+            match holder.lists.iter_mut().find(|list| list.slot == slot) {
+                Some(list) => list.rows.push(built),
+                None => holder.bindings[slot] = Some(RowBinding::Instance(built)),
+            }
+        }
+    }
+
+    /// Template plan of `identity`, recorded on this graph with a template that imports it.
+    fn template_of(&self, identity: &SpecIdentity) -> Arc<ExecutionPlan> {
+        Arc::clone(
+            self.instance_lists
+                .templates
+                .get(identity)
+                .unwrap_or_else(|| {
+                    panic!(
+                        "BUG: template of `{identity}` is recorded with the template importing it"
+                    )
+                }),
+        )
+    }
+
+    /// Replace every [`BindingValue::InstanceAliases`] by the row copies it names: one
+    /// per alias, each a `uses` instance of `spec` with all of that instance's bindings.
+    ///
+    /// A copied instance's own list bindings name aliases too (`root -> with children:
+    /// mid_node`, `mid_node -> with children: leaf`), so aliases are resolved in
+    /// dependency order and each copy takes the resolved bindings of its alias. An alias
+    /// that reaches itself is a planning error: no row can hold itself.
+    fn resolve_instance_alias_bindings(
+        &mut self,
+        bindings: DataBindings,
+        spec: &LemmaSpec,
+        imports: &HashMap<String, (Arc<SpecIdentity>, Arc<ExecutionPlan>)>,
+    ) -> DataBindings {
+        let mut resolved_aliases: HashMap<String, DataBindings> = HashMap::new();
+        let mut visiting: Vec<String> = Vec::new();
+        // `true` once the alias's dependencies are on the stack above it.
+        let mut stack: Vec<(String, bool)> = aliases_named(&bindings)
+            .into_iter()
+            .rev()
+            .map(|alias| (alias, false))
+            .collect();
+        while let Some((alias, entered)) = stack.last().cloned() {
+            if entered {
+                stack.pop();
+                visiting.pop();
+                let own = bindings_under(&bindings, &alias);
+                let resolved = self.resolve_alias_layer(own, spec, imports, &resolved_aliases);
+                resolved_aliases.insert(alias, resolved);
+                continue;
+            }
+            if resolved_aliases.contains_key(&alias) {
+                stack.pop();
+                continue;
+            }
+            if visiting.contains(&alias) {
+                let chain: Vec<&str> = visiting
+                    .iter()
+                    .skip_while(|seen| **seen != alias)
+                    .map(String::as_str)
+                    .chain(std::iter::once(alias.as_str()))
+                    .collect();
+                let source = alias_binding_source(&bindings, &alias)
+                    .expect("BUG: an alias on the resolution stack is named by a binding");
+                self.errors.push(self.engine_error(
+                    format!(
+                        "Circular instance-list source wiring: {}",
+                        chain.join(" -> ")
+                    ),
+                    &source,
+                ));
+                resolved_aliases.insert(alias, IndexMap::new());
+                stack.pop();
+                continue;
+            }
+            stack.last_mut().expect("BUG: stack top cloned above").1 = true;
+            visiting.push(alias.clone());
+            let dependencies = aliases_named(&bindings_under(&bindings, &alias));
+            for dependency in dependencies.into_iter().rev() {
+                if !resolved_aliases.contains_key(&dependency) {
+                    stack.push((dependency, false));
+                }
+            }
+        }
+        self.resolve_alias_layer(bindings, spec, imports, &resolved_aliases)
+    }
+
+    /// One binding map with its [`BindingValue::InstanceAliases`] replaced, each alias
+    /// taking its bindings from `resolved_aliases`.
+    fn resolve_alias_layer(
+        &mut self,
+        bindings: DataBindings,
+        spec: &LemmaSpec,
+        imports: &HashMap<String, (Arc<SpecIdentity>, Arc<ExecutionPlan>)>,
+        resolved_aliases: &HashMap<String, DataBindings>,
+    ) -> DataBindings {
+        let mut resolved: DataBindings = IndexMap::with_capacity(bindings.len());
+        for (key, (value, source)) in bindings {
+            let BindingValue::InstanceAliases(aliases) = &value else {
+                resolved.insert(key, (value, source));
+                continue;
+            };
+            let mut rows = Vec::with_capacity(aliases.len());
+            let mut failed = false;
+            for alias in aliases {
+                let is_local_import = alias.segments.is_empty()
+                    && spec.data.iter().any(|data| {
+                        data.reference.is_local()
+                            && data.reference.name == alias.name
+                            && matches!(data.value, ParsedDataValue::Import { .. })
+                    });
+                if !is_local_import {
+                    let slot = key.last().expect("BUG: binding key is never empty");
+                    self.errors.push(self.engine_error(
+                        format!(
+                            "binding `{}` replaces instance list `{slot}` with `{alias}`, which is not a `uses` instance of `{}`; list slots take `uses` aliases",
+                            key.join("."),
+                            spec.name
+                        ),
+                        &source,
+                    ));
+                    failed = true;
+                    continue;
+                }
+                let Some((identity, _)) = imports.get(&alias.name) else {
+                    // The alias's import did not resolve: its error is recorded.
+                    failed = true;
+                    continue;
+                };
+                let alias_bindings = resolved_aliases
+                    .get(&alias.name)
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "BUG: alias `{}` named by a binding was not resolved",
+                            alias.name
+                        )
+                    })
+                    .clone();
+                rows.push(RowCopy {
+                    identity: identity.as_ref().clone(),
+                    name: alias.name.clone(),
+                    bindings: alias_bindings,
+                    source: source.clone(),
+                });
+            }
+            if failed {
+                continue;
+            }
+            resolved.insert(key, (BindingValue::InstanceRows(rows), source));
+        }
+        resolved
     }
 
     fn add_rule(
         &mut self,
         rule: &LemmaRule,
         current_spec: &'a LemmaSpec,
+        current_repository: &Arc<LemmaRepository>,
         data_map: &HashMap<String, &LemmaData>,
-        current_segments: &[PathSegment],
         rule_names: &HashSet<&str>,
         effective: &EffectiveDate,
     ) {
-        let rule_path = RulePath {
-            segments: current_segments.to_vec(),
-            rule: rule.name.clone(),
-        };
+        let rule_path = RulePath::new(Vec::new(), rule.name.clone());
 
         if self.rules.contains_key(&rule_path) {
             let rule_source = &rule.source_location;
@@ -4988,14 +6594,13 @@ impl<'a, 'i> GraphBuilder<'a, 'i> {
         let mut convert_ctx = RuleExpressionConversion {
             table: ExprTable::with_capacity(ast_nodes + piecewise_nodes),
             spec: current_spec,
+            repository: current_repository,
             data_map,
-            segments: current_segments,
             rule_names,
             rule: &rule.name,
             effective,
             depends_on_rules: &mut depends_on_rules,
             row_scopes: Vec::new(),
-            reads_itself_on_rows: false,
         };
 
         let mut scratch = ConvertScratch {
@@ -5046,19 +6651,37 @@ impl<'a, 'i> GraphBuilder<'a, 'i> {
             convert_ctx.push(ExpressionKind::Piecewise(arms), default_source)
         };
 
-        let recursive = convert_ctx.reads_itself_on_rows;
         let expression = ExprTree::new(std::mem::take(&mut convert_ctx.table), root);
         let rule_node = RuleNode {
             expression,
             branches,
             source: rule.source_location.clone(),
             depends_on_rules,
-            recursive,
+            recursive: false,
             rule_type: Arc::new(LemmaType::veto_type()),
             spec: current_spec,
         };
 
         self.rules.insert(rule_path, rule_node);
+    }
+
+    /// [`RuleNode::recursive`] for every local rule named on a self-list row during conversion.
+    fn mark_self_list_row_rules_recursive(&mut self) {
+        let targets: Vec<RulePath> = self.self_list_row_rules.iter().cloned().collect();
+        for path in targets {
+            if self.rules.contains_key(&path) {
+                self.rules
+                    .get_mut(&path)
+                    .expect("BUG: self-list row rule missing from graph after contains_key")
+                    .recursive = true;
+            } else if self.dropped_rules.contains(&path) {
+                continue;
+            } else {
+                panic!(
+                    "BUG: self-list row rule '{path}' neither in graph nor dropped after conversion"
+                )
+            }
+        }
     }
 
     fn drop_unconverted_rule(&mut self, rule_path: RulePath, errors_before: usize) {
@@ -5148,7 +6771,7 @@ impl<'a, 'i> GraphBuilder<'a, 'i> {
     /// Pushes the frame that converts the arguments of the list command at `node`, whose list
     /// operand converted to `list`.
     fn start_list_command<'t>(
-        &self,
+        &mut self,
         node: AstRef<'t>,
         list: ExprId,
         ctx: &RuleExpressionConversion<'a, '_>,
@@ -5165,30 +6788,48 @@ impl<'a, 'i> GraphBuilder<'a, 'i> {
             .source()
             .expect("BUG: AST expression missing source location")
             .clone();
-        let row_scope = self
-            .instance_list_identity(
+        let level = u32::try_from(ctx.row_scopes.len()).expect("BUG: row scope depth exceeds u32");
+        let value_predicate = matches!(
+            command,
+            ast::ListCommand::Any {
+                form: ast::ListPredicate::Value { .. }
+            } | ast::ListCommand::All {
+                form: ast::ListPredicate::Value { .. }
+            } | ast::ListCommand::Where {
+                form: ast::ListPredicate::Value { .. }
+            }
+        );
+        let mut missing_row_template = false;
+        let row_scope = if value_predicate {
+            Some(RowScope::Value { level, list })
+        } else {
+            self.instance_list_identity(
                 ExprRef {
                     table: &ctx.table,
                     id: list,
                 },
                 ctx.spec,
-                ctx.segments,
             )
-            .map(|identity| {
-                let template = self.row_template_of(&identity);
+            .and_then(|identity| {
+                let Some(template) = self.row_template_of(&identity) else {
+                    self.errors
+                        .push(self.missing_row_template_error(&identity, &source));
+                    missing_row_template = true;
+                    return None;
+                };
                 let list_path = match node.child(*list_source).kind() {
                     ast::ExpressionKind::Reference(reference) => Some(reference.full_path()),
                     _ => None,
                 };
-                RowScope {
+                Some(RowScope::Instance {
                     list_path,
                     identity,
                     template,
-                    level: u32::try_from(ctx.row_scopes.len())
-                        .expect("BUG: row scope depth exceeds u32"),
-                }
-            });
-        let row_level = row_scope.as_ref().map(|scope| scope.level);
+                    level,
+                })
+            })
+        };
+        let row_level = row_scope.as_ref().map(RowScope::level);
         let pending = list_command_arguments(command, &row_scope);
         frames.push(ConvertFrame::List(Box::new(ListCommandBuild {
             node,
@@ -5199,7 +6840,7 @@ impl<'a, 'i> GraphBuilder<'a, 'i> {
             pending,
             converted: Vec::new(),
             fields: Vec::new(),
-            failed: false,
+            failed: missing_row_template,
         })));
     }
 
@@ -5285,15 +6926,46 @@ impl<'a, 'i> GraphBuilder<'a, 'i> {
             .expect("BUG: AST expression missing source location");
         let source = expr.source().cloned();
         match expr.kind() {
+            ast::ExpressionKind::ImplicitRowValue => {
+                let scope = ctx
+                    .row_scopes
+                    .iter()
+                    .rev()
+                    .find_map(|scope| match scope {
+                        RowScope::Value { level, list } => Some((*level, *list)),
+                        RowScope::Instance { .. } => None,
+                    })
+                    .expect("BUG: implicit row value converted outside a value predicate");
+                Some(ctx.push(
+                    ExpressionKind::RowValue {
+                        level: scope.0,
+                        list: scope.1,
+                    },
+                    source,
+                ))
+            }
             ast::ExpressionKind::Reference(r) => {
                 let expr_source = expr_src;
                 if !ctx.row_scopes.is_empty() {
                     match self.resolve_row_field(r, expr_source, ctx) {
-                        RowFieldLookup::Field(kind) => {
-                            if let ExpressionKind::RowField { identity, end, .. } = &kind {
-                                self.note_row_end_read(identity, end, ctx);
-                            }
-                            return Some(ctx.push(kind, source.clone()));
+                        RowFieldLookup::Field { field, member } => {
+                            let ExpressionKind::RowField { identity, end, .. } = field.as_ref()
+                            else {
+                                unreachable!("BUG: a row field lookup holds a RowField read");
+                            };
+                            self.note_row_end_read(identity, end);
+                            let field = ctx.push(*field, source.clone());
+                            let Some((path, name)) = member else {
+                                return Some(field);
+                            };
+                            return Some(ctx.push(
+                                ExpressionKind::SpecMember {
+                                    base: field,
+                                    path,
+                                    name,
+                                },
+                                source.clone(),
+                            ));
                         }
                         RowFieldLookup::Failed => return None,
                         RowFieldLookup::NotARowField => {}
@@ -5301,10 +6973,7 @@ impl<'a, 'i> GraphBuilder<'a, 'i> {
                 }
                 if let Some((head, rest)) = r.segments.split_first() {
                     if ctx.rule_names.contains(head.as_str()) && !ctx.data_map.contains_key(head) {
-                        let base = RulePath {
-                            segments: ctx.segments.to_vec(),
-                            rule: head.clone(),
-                        };
+                        let base = RulePath::new(Vec::new(), head.clone());
                         ctx.depends_on_rules.insert(base.clone());
                         let base = ctx.push(ExpressionKind::RulePath(base), source.clone());
                         self.note_row_member_read(base, rest, &r.name, ctx);
@@ -5313,29 +6982,23 @@ impl<'a, 'i> GraphBuilder<'a, 'i> {
                                 base,
                                 path: rest.to_vec(),
                                 name: r.name.clone(),
-                                targets: Vec::new(),
                             },
                             source.clone(),
                         ));
                     }
                 }
-                let (segments, target_arc_opt) = if r.segments.is_empty() {
-                    (ctx.segments.to_vec(), None)
+                let target_arc_opt = if r.segments.is_empty() {
+                    None
                 } else {
-                    let data_map_owned: HashMap<String, LemmaData> = ctx
-                        .data_map
-                        .iter()
-                        .map(|(k, v)| (k.clone(), (*v).clone()))
-                        .collect();
-                    let (segs, arc) = self.resolve_path_segments(
+                    let (_, arc) = self.resolve_path_segments(
                         &r.segments,
                         expr_source,
-                        data_map_owned,
-                        ctx.segments.to_vec(),
+                        Vec::new(),
                         ctx.spec,
+                        ctx.repository,
                         ctx.effective,
                     )?;
-                    (segs, Some(arc))
+                    Some(arc)
                 };
 
                 let (is_data, is_rule, target_spec_name_opt) = match &target_arc_opt {
@@ -5367,36 +7030,30 @@ impl<'a, 'i> GraphBuilder<'a, 'i> {
                     ));
                     return None;
                 }
+                if (is_data || is_rule) && !r.segments.is_empty() {
+                    let (head, rest) = r
+                        .segments
+                        .split_first()
+                        .expect("BUG: segments checked non-empty");
+                    let base = ctx.push(
+                        ExpressionKind::DataPath(DataPath::local(head.clone())),
+                        source.clone(),
+                    );
+                    return Some(ctx.push(
+                        ExpressionKind::SpecMember {
+                            base,
+                            path: rest.to_vec(),
+                            name: r.name.clone(),
+                        },
+                        source.clone(),
+                    ));
+                }
                 if is_data {
-                    let data_path = DataPath {
-                        segments,
-                        data: r.name.clone(),
-                    };
-                    if let Some(DataDefinition::Import { identity, .. }) = self.data.get(&data_path)
-                    {
-                        let mut prefix = data_path.segments.clone();
-                        prefix.push(PathSegment {
-                            uses: data_path.data.clone(),
-                            repository: identity.repository.clone(),
-                            spec: identity.spec.clone(),
-                        });
-                        let typed = TypedLiteral {
-                            value: ValueKind::Spec(SpecValue::Fixed(SpecInstance { prefix })),
-                            lemma_type: Arc::new(LemmaType::primitive(TypeSpecification::Spec {
-                                spec: identity.clone(),
-                            })),
-                        };
-                        return Some(
-                            ctx.push(ExpressionKind::Literal(Box::new(typed)), source.clone()),
-                        );
-                    }
+                    let data_path = DataPath::local(r.name.clone());
                     return Some(ctx.push(ExpressionKind::DataPath(data_path), source.clone()));
                 }
                 if is_rule {
-                    let rule_path = RulePath {
-                        segments,
-                        rule: r.name.clone(),
-                    };
+                    let rule_path = RulePath::new(Vec::new(), r.name.clone());
                     ctx.depends_on_rules.insert(rule_path.clone());
                     return Some(ctx.push(ExpressionKind::RulePath(rule_path), source.clone()));
                 }
@@ -5408,9 +7065,18 @@ impl<'a, 'i> GraphBuilder<'a, 'i> {
                 None
             }
 
-            ast::ExpressionKind::LogicalAnd { steps, .. } => {
+            ast::ExpressionKind::Logical {
+                connective, steps, ..
+            } => {
                 let (first, steps) = convert_chain_steps(steps, children);
-                Some(ctx.push(ExpressionKind::LogicalAnd { first, steps }, source))
+                Some(ctx.push(
+                    ExpressionKind::Logical {
+                        connective: *connective,
+                        first,
+                        steps,
+                    },
+                    source,
+                ))
             }
 
             ast::ExpressionKind::Arithmetic { steps, .. } => {
@@ -5474,6 +7140,22 @@ impl<'a, 'i> GraphBuilder<'a, 'i> {
                 let converted_operand = one(children);
                 Some(ctx.push(
                     ExpressionKind::MathematicalComputation(op.clone(), converted_operand),
+                    source,
+                ))
+            }
+
+            ast::ExpressionKind::StepRounding { mode, .. } => {
+                let mut children = children.iter();
+                let operand = *children
+                    .next()
+                    .expect("BUG: step rounding always has an operand");
+                let step = children.next().copied();
+                Some(ctx.push(
+                    ExpressionKind::StepRounding {
+                        operand,
+                        mode: *mode,
+                        step,
+                    },
                     source,
                 ))
             }
@@ -5677,7 +7359,6 @@ impl<'a, 'i> GraphBuilder<'a, 'i> {
                         base: converted_base,
                         path: path.segments.clone(),
                         name: path.name.clone(),
-                        targets: Vec::new(),
                     },
                     source,
                 ))
@@ -5687,133 +7368,333 @@ impl<'a, 'i> GraphBuilder<'a, 'i> {
 
     /// Row spec of the rows a converted list expression yields, when it is an instance list.
     ///
-    /// `spec` at `segments` is the spec being converted: its rules that are not converted
+    /// `spec` is the spec being converted: its rules that are not converted
     /// yet are read from source.
     fn instance_list_identity(
         &self,
         list: ExprRef<'_, ExpressionKind>,
         spec: &LemmaSpec,
-        segments: &[PathSegment],
     ) -> Option<SpecIdentity> {
-        let scope = SourceScope { spec, segments };
-        self.instance_list_identity_guarded(list, &scope, &mut BTreeSet::new())
+        let scope = SourceScope { spec };
+        self.search_identity(
+            IdentitySearch::new(SearchKind::List, Pending::Sem(list), Continuation::Answer),
+            &scope,
+        )
     }
 
-    /// Depth-first search over pipeline commands, rule bodies and conditional arms, with an
-    /// explicit work stack. The first arm that yields an identity wins, in source order.
-    fn instance_list_identity_guarded(
-        &self,
-        list: ExprRef<'_, ExpressionKind>,
-        scope: &SourceScope<'_>,
-        visiting: &mut BTreeSet<RulePath>,
-    ) -> Option<SpecIdentity> {
-        self.instance_list_identity_walk(vec![Pending::Sem(list)], scope, visiting)
-    }
-
-    fn instance_list_identity_walk<'e>(
+    /// Row spec of the single row a converted expression yields (`list -> first`), when
+    /// it picks a row of an instance list.
+    fn row_value_identity<'e>(
         &'e self,
-        mut pending: Vec<Pending<'e>>,
+        expression: ExprRef<'e, ExpressionKind>,
         scope: &SourceScope<'e>,
-        visiting: &mut BTreeSet<RulePath>,
     ) -> Option<SpecIdentity> {
-        while let Some(item) = pending.pop() {
-            let identity = match item {
-                Pending::Sem(list) => match list.kind() {
-                    ExpressionKind::DataPath(path) => self.instance_list_data_identity(path),
-                    ExpressionKind::ListCommand {
-                        list: inner, op, ..
-                    } => match op {
-                        ListOp::Predicate {
-                            kind: ListPredKind::Where,
-                            ..
-                        }
-                        | ListOp::InstancePredicate {
-                            kind: ListPredKind::Where,
-                            ..
-                        }
-                        | ListOp::Sort { .. }
-                        | ListOp::Top { .. }
-                        | ListOp::With { .. }
-                        | ListOp::WithRow { .. } => {
-                            pending.push(Pending::Sem(list.child(*inner)));
-                            None
-                        }
-                        ListOp::Predicate { .. }
-                        | ListOp::InstancePredicate { .. }
-                        | ListOp::First
-                        | ListOp::Last
-                        | ListOp::Count
-                        | ListOp::Find { .. }
-                        | ListOp::Reduce { .. } => None,
-                    },
-                    ExpressionKind::RulePath(rule) => {
-                        pending.push(Pending::Rule(rule.clone()));
-                        None
-                    }
-                    ExpressionKind::Piecewise(arms) => {
-                        for (_, result) in arms.iter().rev() {
-                            pending.push(Pending::Sem(list.child(*result)));
-                        }
-                        None
-                    }
-                    _ => None,
-                },
-                Pending::Ast(expr) => match expr.kind() {
-                    ast::ExpressionKind::Reference(reference) if reference.segments.is_empty() => {
-                        let is_data = scope.spec.data.iter().any(|data| {
-                            data.reference.is_local() && data.reference.name == reference.name
+        self.search_identity(
+            IdentitySearch::new(
+                SearchKind::Row,
+                Pending::Sem(expression),
+                Continuation::Answer,
+            ),
+            scope,
+        )
+    }
+
+    /// Runs `root` and the searches it nests, depth-first with explicit stacks. A search
+    /// that runs out of work yields nothing to its parent, which goes on with its own work.
+    fn search_identity<'e>(
+        &'e self,
+        root: IdentitySearch<'e>,
+        scope: &SourceScope<'e>,
+    ) -> Option<SpecIdentity> {
+        let mut searches = vec![root];
+        while let Some(search) = searches.last_mut() {
+            let Some(item) = search.pending.pop() else {
+                searches.pop();
+                continue;
+            };
+            let step = match search.kind {
+                SearchKind::List => self.list_identity_step(item, scope, search),
+                SearchKind::Row => self.row_identity_step(item, scope, search),
+            };
+            let mut found = match step {
+                SearchStep::Next => continue,
+                SearchStep::Nested(nested) => {
+                    searches.push(nested);
+                    continue;
+                }
+                SearchStep::Found(identity) => identity,
+            };
+            loop {
+                let done = searches
+                    .pop()
+                    .expect("BUG: the search that found an identity is on the stack");
+                match done.on_found {
+                    Continuation::Answer => return Some(found),
+                    Continuation::RowOfList => {}
+                    Continuation::Member { path, name } => {
+                        let parent = searches
+                            .last_mut()
+                            .expect("BUG: a member search nests in a list search");
+                        let chain = self.row_template_of(&found).and_then(|template| {
+                            let mut parts: Vec<&str> = path.iter().map(String::as_str).collect();
+                            parts.push(name);
+                            self.template_row_chain(&found, &template, &parts)
                         });
-                        if is_data {
-                            self.instance_list_data_identity(&DataPath {
-                                segments: scope.segments.to_vec(),
-                                data: reference.name.clone(),
-                            })
-                        } else {
-                            pending.push(Pending::Rule(RulePath {
-                                segments: scope.segments.to_vec(),
-                                rule: reference.name.clone(),
-                            }));
-                            None
+                        match chain.and_then(|chain| {
+                            let last = chain.last().expect("BUG: a row end chain has a last hop");
+                            self.row_end_list_identity(
+                                &last.identity,
+                                &last.end,
+                                &mut parent.pending,
+                            )
+                        }) {
+                            Some(identity) => found = identity,
+                            None => break,
                         }
-                    }
-                    ast::ExpressionKind::ListCommand {
-                        list,
-                        command:
-                            ast::ListCommand::Where { .. }
-                            | ast::ListCommand::Sort { .. }
-                            | ast::ListCommand::Top { .. }
-                            | ast::ListCommand::With { .. },
-                    } => {
-                        pending.push(Pending::Ast(expr.child(*list)));
-                        None
-                    }
-                    _ => None,
-                },
-                Pending::Rule(rule) => {
-                    if !visiting.insert(rule.clone()) {
-                        None
-                    } else if let Some(node) = self.rules.get(&rule) {
-                        if let Some((_, body)) = node.branches.first() {
-                            pending.push(Pending::Sem(node.expression.at(*body)));
-                        }
-                        None
-                    } else if rule.segments.as_slice() != scope.segments {
-                        None
-                    } else {
-                        if let Some(source_rule) =
-                            scope.spec.rules.iter().find(|r| r.name == rule.rule)
-                        {
-                            pending.push(Pending::Ast(source_rule.expression.root()));
-                        }
-                        None
                     }
                 }
-            };
-            if identity.is_some() {
-                return identity;
             }
         }
         None
+    }
+
+    /// One work item of a [`SearchKind::List`] search: pipeline commands that keep the row
+    /// spec, rule bodies, conditional arms and member reads on a row.
+    fn list_identity_step<'e>(
+        &'e self,
+        item: Pending<'e>,
+        scope: &SourceScope<'e>,
+        search: &mut IdentitySearch<'e>,
+    ) -> SearchStep<'e> {
+        let identity = match item {
+            Pending::Sem(list) => match list.kind() {
+                ExpressionKind::DataPath(path) => self.instance_list_data_identity(path),
+                ExpressionKind::Literal(literal) => match &literal.lemma_type.specifications {
+                    TypeSpecification::List { element, .. } => match &element.specifications {
+                        TypeSpecification::Spec { spec } => Some(spec.clone()),
+                        _ => None,
+                    },
+                    _ => None,
+                },
+                ExpressionKind::ListCommand {
+                    list: inner, op, ..
+                } => match op {
+                    ListOp::Predicate {
+                        kind: ListPredKind::Where,
+                        ..
+                    }
+                    | ListOp::Sort { .. }
+                    | ListOp::Top { .. }
+                    | ListOp::With { .. }
+                    | ListOp::WithRow { .. }
+                    | ListOp::Key { .. } => {
+                        search.pending.push(Pending::Sem(list.child(*inner)));
+                        None
+                    }
+                    ListOp::Predicate { .. }
+                    | ListOp::First
+                    | ListOp::Last
+                    | ListOp::Count
+                    | ListOp::Find { .. }
+                    | ListOp::Reduce { .. } => None,
+                },
+                ExpressionKind::RulePath(rule) => {
+                    search.pending.push(Pending::Rule(rule.clone()));
+                    None
+                }
+                ExpressionKind::Piecewise(arms) => {
+                    for (_, result) in arms.iter().rev() {
+                        search.pending.push(Pending::Sem(list.child(*result)));
+                    }
+                    None
+                }
+                ExpressionKind::RowField { identity, end, .. } => {
+                    self.row_end_list_identity(identity, end, &mut search.pending)
+                }
+                ExpressionKind::SpecMember {
+                    base, path, name, ..
+                } => {
+                    return SearchStep::Nested(search.nested(
+                        SearchKind::Row,
+                        Pending::Sem(list.child(*base)),
+                        Continuation::Member { path, name },
+                    ));
+                }
+                _ => None,
+            },
+            Pending::Ast(expr) => match expr.kind() {
+                ast::ExpressionKind::Reference(reference) if reference.segments.is_empty() => {
+                    let is_data = scope.spec.data.iter().any(|data| {
+                        data.reference.is_local() && data.reference.name == reference.name
+                    });
+                    if is_data {
+                        self.instance_list_data_identity(&DataPath::local(reference.name.clone()))
+                    } else {
+                        search.pending.push(Pending::Rule(RulePath::new(
+                            Vec::new(),
+                            reference.name.clone(),
+                        )));
+                        None
+                    }
+                }
+                ast::ExpressionKind::ListCommand {
+                    list,
+                    command:
+                        ast::ListCommand::Where { .. }
+                        | ast::ListCommand::Sort { .. }
+                        | ast::ListCommand::Top { .. }
+                        | ast::ListCommand::With { .. }
+                        | ast::ListCommand::Key { .. },
+                } => {
+                    search.pending.push(Pending::Ast(expr.child(*list)));
+                    None
+                }
+                _ => None,
+            },
+            Pending::Rule(rule) => {
+                if !search.enter(&rule) {
+                    None
+                } else if let Some(node) = self.rules.get(&rule) {
+                    if let Some((_, body)) = node.branches.first() {
+                        search.pending.push(Pending::Sem(node.expression.at(*body)));
+                    }
+                    None
+                } else if !rule.segments.is_empty() {
+                    None
+                } else {
+                    if let Some(source_rule) = scope.spec.rules.iter().find(|r| r.name == rule.rule)
+                    {
+                        search
+                            .pending
+                            .push(Pending::Ast(source_rule.expression.root()));
+                    }
+                    None
+                }
+            }
+        };
+        match identity {
+            Some(identity) => SearchStep::Found(identity),
+            None => SearchStep::Next,
+        }
+    }
+
+    /// One work item of a [`SearchKind::Row`] search: `-> first` / `-> last` / `-> find`
+    /// hand the list to a nested list search; rule bodies and conditional arms are followed.
+    fn row_identity_step<'e>(
+        &'e self,
+        item: Pending<'e>,
+        scope: &SourceScope<'e>,
+        search: &mut IdentitySearch<'e>,
+    ) -> SearchStep<'e> {
+        match item {
+            Pending::Sem(expression) => match expression.kind() {
+                ExpressionKind::ListCommand {
+                    list,
+                    op: ListOp::First | ListOp::Last | ListOp::Find { .. },
+                    ..
+                } => SearchStep::Nested(search.nested(
+                    SearchKind::List,
+                    Pending::Sem(expression.child(*list)),
+                    Continuation::RowOfList,
+                )),
+                ExpressionKind::RulePath(rule) => {
+                    search.pending.push(Pending::Rule(rule.clone()));
+                    SearchStep::Next
+                }
+                ExpressionKind::Piecewise(arms) => {
+                    for (_, result) in arms.iter().rev() {
+                        search.pending.push(Pending::Sem(expression.child(*result)));
+                    }
+                    SearchStep::Next
+                }
+                ExpressionKind::DataPath(path) => match self.data.get(path) {
+                    Some(DataDefinition::Import { row, .. }) => {
+                        SearchStep::Found(row.identity.as_ref().clone())
+                    }
+                    _ => SearchStep::Next,
+                },
+                _ => SearchStep::Next,
+            },
+            Pending::Ast(expr) => match expr.kind() {
+                ast::ExpressionKind::Reference(reference) if reference.segments.is_empty() => {
+                    search.pending.push(Pending::Rule(RulePath::new(
+                        Vec::new(),
+                        reference.name.clone(),
+                    )));
+                    SearchStep::Next
+                }
+                ast::ExpressionKind::ListCommand {
+                    list,
+                    command:
+                        ast::ListCommand::First | ast::ListCommand::Last | ast::ListCommand::Find { .. },
+                } => SearchStep::Nested(search.nested(
+                    SearchKind::List,
+                    Pending::Ast(expr.child(*list)),
+                    Continuation::RowOfList,
+                )),
+                _ => SearchStep::Next,
+            },
+            Pending::Rule(rule) => {
+                if !search.enter(&rule) {
+                } else if let Some(node) = self.rules.get(&rule) {
+                    for (_, body) in node.branches.iter().rev() {
+                        search.pending.push(Pending::Sem(node.expression.at(*body)));
+                    }
+                } else if rule.segments.is_empty() {
+                    if let Some(source_rule) = scope.spec.rules.iter().find(|r| r.name == rule.rule)
+                    {
+                        for unless in source_rule.unless_clauses.iter().rev() {
+                            search.pending.push(Pending::Ast(unless.result.root()));
+                        }
+                        search
+                            .pending
+                            .push(Pending::Ast(source_rule.expression.root()));
+                    }
+                }
+                SearchStep::Next
+            }
+        }
+    }
+
+    /// Row spec of the instance list field `end` names on rows of `identity`. A local
+    /// rule of the spec being planned is searched through `pending`.
+    fn row_end_list_identity<'e>(
+        &'e self,
+        identity: &SpecIdentity,
+        end: &RowEnd,
+        pending: &mut Vec<Pending<'e>>,
+    ) -> Option<SpecIdentity> {
+        let own_rows = *identity == self.instance_lists.self_identity;
+        let lemma_type: &LemmaType = match end {
+            RowEnd::Data(field) if own_rows => self.data.get(field)?.resolved_type_arc()?,
+            RowEnd::Data(field) => self
+                .instance_lists
+                .templates
+                .get(identity)?
+                .data
+                .get(field)?
+                .resolved_type_arc()?,
+            RowEnd::Rule(rule) if own_rows => {
+                pending.push(Pending::Rule(rule.clone()));
+                return None;
+            }
+            RowEnd::Rule(rule) => {
+                &self
+                    .instance_lists
+                    .templates
+                    .get(identity)?
+                    .rules
+                    .get(rule)?
+                    .rule_type
+            }
+        };
+        if !lemma_type.is_list() {
+            return None;
+        }
+        lemma_type
+            .list_element_lemma_type()
+            .spec_identity()
+            .cloned()
     }
 
     fn instance_list_data_identity(&self, path: &DataPath) -> Option<SpecIdentity> {
@@ -5828,172 +7709,60 @@ impl<'a, 'i> GraphBuilder<'a, 'i> {
     }
 
     /// `base.path.name` where `base` may be a row of a self-list: a rule read there is
-    /// recursion or an ordering edge, as for [`ExpressionKind::RowField`].
+    /// recursion through the list, as for [`ExpressionKind::RowField`].
     fn note_row_member_read(
-        &self,
+        &mut self,
         base: ExprId,
         path: &[String],
         name: &str,
         ctx: &mut RuleExpressionConversion<'a, '_>,
     ) {
-        let scope = SourceScope {
-            spec: ctx.spec,
-            segments: ctx.segments,
-        };
+        let scope = SourceScope { spec: ctx.spec };
         let base = ExprRef {
             table: &ctx.table,
             id: base,
         };
-        let Some(identity) = self.row_value_identity(base, &scope, &mut BTreeSet::new()) else {
+        let Some(identity) = self.row_value_identity(base, &scope) else {
             return;
         };
         if identity != self.instance_lists.self_identity {
             return;
         }
-        let mut key = path.join(".");
-        if !key.is_empty() {
-            key.push('.');
-        }
-        key.push_str(name);
-        if let Some(end) = self.template_row_end(&RowTemplate::Root, &key) {
-            self.note_row_end_read(&identity, &end, ctx);
+        let mut parts: Vec<&str> = path.iter().map(String::as_str).collect();
+        parts.push(name);
+        if let Some(chain) = self.template_row_chain(&identity, &RowTemplate::Root, &parts) {
+            let first = chain.first().expect("BUG: a row end chain has a first hop");
+            self.note_row_end_read(&first.identity, &first.end);
         }
     }
 
     /// A row field read of a self-list: Rule ends and data that reference a rule
-    /// both order typing and mark recursion.
-    fn note_row_end_read(
-        &self,
-        identity: &SpecIdentity,
-        end: &RowEnd,
-        ctx: &mut RuleExpressionConversion<'a, '_>,
-    ) {
+    /// mark the target recursive. Never a same-instance dependency edge.
+    fn note_row_end_read(&mut self, identity: &SpecIdentity, end: &RowEnd) {
         match end {
-            RowEnd::Rule(rule) => self.note_row_rule_read(identity, rule, ctx),
+            RowEnd::Rule(rule) => self.note_row_rule_read(identity, rule),
             RowEnd::Data(path) => {
                 if let Some(DataDefinition::Reference {
                     target: ReferenceTarget::Rule(rule),
                     ..
                 }) = self.data.get(path)
                 {
-                    self.note_row_rule_read(identity, rule, ctx);
+                    let rule = rule.clone();
+                    self.note_row_rule_read(identity, &rule);
                 }
             }
         }
     }
 
-    /// Row spec of the single row a converted expression yields (`list -> first`), when
-    /// it picks a row of an instance list. Depth-first over rule bodies and conditional arms
-    /// with an explicit work stack.
-    fn row_value_identity<'e>(
-        &'e self,
-        expression: ExprRef<'e, ExpressionKind>,
-        scope: &SourceScope<'e>,
-        visiting: &mut BTreeSet<RulePath>,
-    ) -> Option<SpecIdentity> {
-        let mut pending = vec![Pending::Sem(expression)];
-        while let Some(item) = pending.pop() {
-            let identity = match item {
-                Pending::Sem(expression) => match expression.kind() {
-                    ExpressionKind::ListCommand {
-                        list,
-                        op: ListOp::First | ListOp::Last | ListOp::Find { .. },
-                        ..
-                    } => self.instance_list_identity_guarded(
-                        expression.child(*list),
-                        scope,
-                        &mut BTreeSet::new(),
-                    ),
-                    ExpressionKind::RulePath(rule) => {
-                        pending.push(Pending::Rule(rule.clone()));
-                        None
-                    }
-                    ExpressionKind::Piecewise(arms) => {
-                        for (_, result) in arms.iter().rev() {
-                            pending.push(Pending::Sem(expression.child(*result)));
-                        }
-                        None
-                    }
-                    _ => None,
-                },
-                Pending::Ast(expr) => match expr.kind() {
-                    ast::ExpressionKind::Reference(reference) if reference.segments.is_empty() => {
-                        pending.push(Pending::Rule(RulePath {
-                            segments: scope.segments.to_vec(),
-                            rule: reference.name.clone(),
-                        }));
-                        None
-                    }
-                    ast::ExpressionKind::ListCommand {
-                        list,
-                        command:
-                            ast::ListCommand::First
-                            | ast::ListCommand::Last
-                            | ast::ListCommand::Find { .. },
-                    } => self.instance_list_identity_from_source(
-                        expr.child(*list),
-                        scope,
-                        &mut BTreeSet::new(),
-                    ),
-                    _ => None,
-                },
-                Pending::Rule(rule) => {
-                    if !visiting.insert(rule.clone()) {
-                        None
-                    } else if let Some(node) = self.rules.get(&rule) {
-                        for (_, body) in node.branches.iter().rev() {
-                            pending.push(Pending::Sem(node.expression.at(*body)));
-                        }
-                        None
-                    } else if rule.segments.as_slice() != scope.segments {
-                        None
-                    } else {
-                        if let Some(source_rule) =
-                            scope.spec.rules.iter().find(|r| r.name == rule.rule)
-                        {
-                            for unless in source_rule.unless_clauses.iter().rev() {
-                                pending.push(Pending::Ast(unless.result.root()));
-                            }
-                            pending.push(Pending::Ast(source_rule.expression.root()));
-                        }
-                        None
-                    }
-                }
-            };
-            if identity.is_some() {
-                return identity;
-            }
-        }
-        None
-    }
-
-    /// [`Self::instance_list_identity_guarded`] on a rule body that is not converted yet.
-    fn instance_list_identity_from_source(
-        &self,
-        expression: AstRef<'_>,
-        scope: &SourceScope<'_>,
-        visiting: &mut BTreeSet<RulePath>,
-    ) -> Option<SpecIdentity> {
-        self.instance_list_identity_walk(vec![Pending::Ast(expression)], scope, visiting)
-    }
-
-    /// Rule `rule` read on a row of `identity`. On a self-list row it is the rule being
-    /// converted (recursion through the list) or an ordering edge: its type must be
-    /// known before this rule is typed.
-    fn note_row_rule_read(
-        &self,
-        identity: &SpecIdentity,
-        rule: &RulePath,
-        ctx: &mut RuleExpressionConversion<'a, '_>,
-    ) {
+    /// Rule `rule` read on a row of `identity`. On a self-list row this names a child-row
+    /// field (a rule of this plan, under its own hops or an import's), never a
+    /// same-instance [`RuleNode::depends_on_rules`] edge. The target is marked
+    /// [`RuleNode::recursive`] after conversion.
+    fn note_row_rule_read(&mut self, identity: &SpecIdentity, rule: &RulePath) {
         if *identity != self.instance_lists.self_identity {
             return;
         }
-        if rule.segments.is_empty() && ctx.segments.is_empty() && rule.rule == ctx.rule {
-            ctx.reads_itself_on_rows = true;
-        } else {
-            ctx.depends_on_rules.insert(rule.clone());
-        }
+        self.self_list_row_rules.insert(rule.clone());
     }
 
     /// Resolve `r` as a field of a row of an enclosing instance-list command.
@@ -6005,7 +7774,16 @@ impl<'a, 'i> GraphBuilder<'a, 'i> {
     ) -> RowFieldLookup {
         let written = r.full_path();
         for scope in ctx.row_scopes.iter().rev() {
-            let Some(list_path) = &scope.list_path else {
+            let RowScope::Instance {
+                list_path,
+                identity,
+                template,
+                level,
+            } = scope
+            else {
+                continue;
+            };
+            let Some(list_path) = list_path else {
                 continue;
             };
             let Some(rest_parts) = written.strip_prefix(list_path.as_slice()) else {
@@ -6014,44 +7792,45 @@ impl<'a, 'i> GraphBuilder<'a, 'i> {
             if rest_parts.is_empty() {
                 continue;
             }
-            let rest = rest_parts.join(".");
+            let rest: Vec<&str> = rest_parts.iter().map(String::as_str).collect();
             let list_name = list_path.join(".");
-            return match self.template_row_end(&scope.template, &rest) {
-                Some(end) => RowFieldLookup::Field(ExpressionKind::RowField {
-                    level: scope.level,
-                    identity: scope.identity.clone(),
-                    end,
-                }),
+            return match self.template_row_chain(identity, template, &rest) {
+                Some(chain) => {
+                    row_field_lookup(*level, identity, chain, &rest, Some(list_path.clone()))
+                }
                 None => {
-                    let message = if match &scope.template {
-                        RowTemplate::Root => instance_list::is_row_import(&self.data, &rest),
-                        RowTemplate::Plan(plan) => instance_list::is_row_import(&plan.data, &rest),
-                    } {
-                        format!(
-                            "`{rest}` is a `uses` instance on rows of `{list_name}`; read a field of it (`{list_name}.{rest}.<field>`), not the instance"
-                        )
-                    } else {
-                        format!(
-                            "no data or rule `{rest}` on rows of `{list_name}` (`{}`)",
-                            scope.identity.spec
-                        )
-                    };
+                    let rest_display = rest.join(".");
+                    let message = format!(
+                        "no data, rule or uses `{rest_display}` on rows of `{list_name}` (`{}`)",
+                        identity.spec
+                    );
                     self.errors.push(self.engine_error(message, source));
                     RowFieldLookup::Failed
                 }
             };
         }
-        let field = r.to_string();
-        let row_matches: Vec<(&RowScope, RowEnd)> = ctx
+        let field_parts: Vec<&str> = r
+            .segments
+            .iter()
+            .map(String::as_str)
+            .chain(std::iter::once(r.name.as_str()))
+            .collect();
+        let row_matches: Vec<(&RowScope, Vec<RowHop>)> = ctx
             .row_scopes
             .iter()
             .rev()
             .filter_map(|scope| {
-                self.template_row_end(&scope.template, &field)
-                    .map(|end| (scope, end))
+                let RowScope::Instance {
+                    template, identity, ..
+                } = scope
+                else {
+                    return None;
+                };
+                self.template_row_chain(identity, template, &field_parts)
+                    .map(|chain| (scope, chain))
             })
             .collect();
-        let Some((scope, end)) = row_matches.first() else {
+        let Some((scope, chain)) = row_matches.first() else {
             return RowFieldLookup::NotARowField;
         };
         let head = r.segments.first().unwrap_or(&r.name);
@@ -6063,16 +7842,32 @@ impl<'a, 'i> GraphBuilder<'a, 'i> {
                 owners.push(format!("on `{}`", ctx.spec.name));
             }
             for (other, _) in &row_matches {
-                owners.push(match &other.list_path {
+                let RowScope::Instance {
+                    list_path,
+                    identity,
+                    ..
+                } = other
+                else {
+                    unreachable!("BUG: row matches contain only instance scopes")
+                };
+                owners.push(match list_path {
                     Some(path) => format!("on rows of `{}`", path.join(".")),
-                    None => format!("on `{}` rows", other.identity.spec),
+                    None => format!("on `{}` rows", identity.spec),
                 });
             }
-            let qualifier = scope
-                .list_path
+            let RowScope::Instance {
+                list_path,
+                identity,
+                ..
+            } = scope
+            else {
+                unreachable!("BUG: row match is an instance scope")
+            };
+            let qualifier = list_path
                 .as_ref()
                 .map(|path| path.join("."))
-                .unwrap_or_else(|| scope.identity.spec.clone());
+                .unwrap_or_else(|| identity.spec.clone());
+            let field = field_parts.join(".");
             self.errors.push(self.engine_error(
                 format!(
                     "`{field}` exists {}; write `{qualifier}.{field}`",
@@ -6082,11 +7877,13 @@ impl<'a, 'i> GraphBuilder<'a, 'i> {
             ));
             return RowFieldLookup::Failed;
         }
-        RowFieldLookup::Field(ExpressionKind::RowField {
-            level: scope.level,
-            identity: scope.identity.clone(),
-            end: end.clone(),
-        })
+        let RowScope::Instance {
+            identity, level, ..
+        } = scope
+        else {
+            unreachable!("BUG: row match is an instance scope")
+        };
+        row_field_lookup(*level, identity, chain.clone(), &field_parts, None)
     }
 
     fn convert_list_type_expression(
@@ -6105,13 +7902,57 @@ impl<'a, 'i> GraphBuilder<'a, 'i> {
             .iter()
             .find(|(written, _)| written == element)
             .expect("BUG: rule list types resolved with the spec's types");
+        let list_type = Arc::clone(list_type);
+        let source = expr
+            .source()
+            .expect("BUG: AST expression missing source location");
+        if let TypeSpecification::List { element: row, .. } = &list_type.specifications {
+            if let TypeSpecification::Spec { spec: identity } = &row.specifications {
+                // Rows this rule builds (`item list -> with ...`) run their rules in a
+                // row context of the row spec's template, which `uses item` in this
+                // spec brings in; without it, row commands report the missing `uses`.
+                if *identity != self.instance_lists.self_identity && self.imports_in_scope(identity)
+                {
+                    let spec_ref = discovery::list_element_spec_ref(ctx.spec, element)
+                        .expect("BUG: a rule list type of spec rows names the row spec");
+                    let (row_repository, row_spec) = match discovery::resolve_spec_ref_or_self(
+                        self.context,
+                        &spec_ref,
+                        ctx.repository,
+                        ctx.spec,
+                        ctx.effective,
+                        Some(source.clone()),
+                    ) {
+                        Ok(pair) => pair,
+                        Err(error) => {
+                            self.errors.push(error);
+                            return None;
+                        }
+                    };
+                    let at = spec_ref.at(ctx.effective);
+                    let resolved = self.identity_at(&row_repository, row_spec, &at)?;
+                    assert_eq!(
+                        resolved, *identity,
+                        "BUG: rule list type `{element}` resolved to another slice than its type"
+                    );
+                    self.row_template(identity, &row_repository, row_spec, &at)?;
+                }
+            }
+        }
         Some(ctx.push(
             ExpressionKind::Literal(Box::new(TypedLiteral {
-                value: ValueKind::List(Vec::new()),
-                lemma_type: Arc::clone(list_type),
+                value: ValueKind::List(Vec::new().into()),
+                lemma_type: list_type,
             })),
-            expr.source().cloned(),
+            Some(source.clone()),
         ))
+    }
+
+    /// Whether the spec being planned has a `uses` of `identity`.
+    fn imports_in_scope(&self, identity: &SpecIdentity) -> bool {
+        self.data.values().any(|definition| {
+            matches!(definition, DataDefinition::Import { row, .. } if *row.identity == *identity)
+        })
     }
 
     /// Path of the data field that `-> with` row field `name` names. Records the error and
@@ -6121,12 +7962,24 @@ impl<'a, 'i> GraphBuilder<'a, 'i> {
             .row_scope
             .as_ref()
             .expect("BUG: field arguments are queued only with a row scope");
-        let Some(path) = self.template_data_path(&scope.template, name) else {
+        let RowScope::Instance {
+            template, identity, ..
+        } = scope
+        else {
+            panic!("BUG: field arguments are queued only for instance rows")
+        };
+        let field = self
+            .template_row_chain(identity, template, &[name])
+            .and_then(|chain| match chain.as_slice() {
+                [RowHop {
+                    end: RowEnd::Data(path),
+                    ..
+                }] => Some(path.clone()),
+                _ => None,
+            });
+        let Some(path) = field else {
             self.errors.push(self.engine_error(
-                format!(
-                    "row field `{name}` is not data on `{}`",
-                    scope.identity.spec
-                ),
+                format!("row field `{name}` is not data on `{}`", identity.spec),
                 &build.source,
             ));
             return None;
@@ -6203,36 +8056,132 @@ impl<'a, 'i> GraphBuilder<'a, 'i> {
                 (ast::ListWithRows::Values(_), None) => Some(ListOp::With {
                     rows: converted.collect(),
                 }),
-                (ast::ListWithRows::Values(_), Some(scope)) => {
-                    self.errors.push(self.engine_error(
-                        format!(
-                            "`-> with <instance>` appends named instances on a `uses` list declaration; on a `{}` list in a rule, write `-> with <field>: <value>` for an inline row",
-                            scope.identity.spec
-                        ),
-                        source,
-                    ));
-                    None
+                (ast::ListWithRows::Values(_), Some(_)) => {
+                    // Named `uses` instances as rows: converted operands are Spec values.
+                    (!failed).then_some(ListOp::With {
+                        rows: converted.collect(),
+                    })
                 }
                 (ast::ListWithRows::FieldPairs(_), None) => {
-                    self.errors.push(self.engine_error(
-                        "`-> with field: value` appends a row to an instance list; this is a value list, write `-> with <value>`",
-                        source,
-                    ));
+                    if !failed {
+                        self.errors.push(self.engine_error(
+                            "`-> with field: value` appends a row to an instance list; this is a value list, write `-> with <value>`",
+                            source,
+                        ));
+                    }
                     None
                 }
-                (ast::ListWithRows::FieldPairs(_), Some(_)) => {
-                    (!failed).then_some(ListOp::WithRow { fields })
+                (ast::ListWithRows::FieldPairs(_), Some(scope)) => {
+                    let RowScope::Instance { identity, .. } = scope else {
+                        unreachable!(
+                            "BUG: `-> with field: value` converted under a value-list scope"
+                        )
+                    };
+                    (!failed).then_some(ListOp::WithRow {
+                        identity: identity.clone(),
+                        fields,
+                    })
                 }
             },
+            ast::ListCommand::Key { fields } => {
+                let paths: Vec<DataPath> = fields
+                    .iter()
+                    .map(|field| DataPath {
+                        segments: Vec::new(),
+                        data: field.to_string(),
+                    })
+                    .collect();
+                Some(ListOp::Key { fields: paths })
+            }
         }
     }
 }
 
-/// Row spec of an instance list: its identity and template plan.
-#[derive(Clone, Copy)]
-struct RowSpec<'t> {
-    identity: &'t SpecIdentity,
-    template: &'t ExecutionPlan,
+static EMPTY_INSTANCE_LIST: ast::InstanceListBody = ast::InstanceListBody {
+    key: None,
+    rows: Vec::new(),
+    option_rows: Vec::new(),
+};
+
+/// What a written row field path names on the list's row spec.
+enum WrittenField {
+    /// A value field; `key` is its binding key.
+    Value {
+        key: Vec<String>,
+    },
+    NotData,
+    /// A `uses` instance of `identity`, bound field by field.
+    Import {
+        identity: Arc<SpecIdentity>,
+    },
+    List,
+}
+
+/// The `data x: spec list` whose rows are being built, in the spec that declares it.
+struct ListSite<'s, 'a> {
+    list_path: &'s DataPath,
+    /// Row spec identity, shared by the rows.
+    identity: &'s Arc<SpecIdentity>,
+    /// Row spec template: names and types of row fields.
+    template: &'s Arc<ExecutionPlan>,
+    spec: &'a LemmaSpec,
+    /// Repository the declaring spec is loaded under.
+    repository: &'s Arc<LemmaRepository>,
+    effective: &'s EffectiveDate,
+    /// Bindings of the declaring spec, aliases resolved (relative keys).
+    bindings: &'s DataBindings,
+}
+
+/// One row written by the plan being built: `bindings` (keys relative to the row)
+/// written over `base`, the slots the row has before them.
+struct RowWrite {
+    identity: Arc<SpecIdentity>,
+    template: Arc<ExecutionPlan>,
+    origin: RowOrigin,
+    base: Vec<Option<RowBinding>>,
+    bindings: DataBindings,
+    /// Hops naming the row from the writing plan (`i`, `staff.2`, `i.j`); rows of its
+    /// list bindings are named under it.
+    prefix: Vec<PathSegment>,
+    /// Instances between the row's owner and the writing plan.
+    hops: u32,
+}
+
+/// Aliases named by the [`BindingValue::InstanceAliases`] values of `bindings`, in
+/// binding order, each once.
+fn aliases_named(bindings: &DataBindings) -> Vec<String> {
+    let mut names: Vec<String> = Vec::new();
+    for (value, _) in bindings.values() {
+        let BindingValue::InstanceAliases(aliases) = value else {
+            continue;
+        };
+        for alias in aliases {
+            if !names.contains(&alias.name) {
+                names.push(alias.name.clone());
+            }
+        }
+    }
+    names
+}
+
+/// Source of the first binding whose [`BindingValue::InstanceAliases`] names `alias`.
+fn alias_binding_source(bindings: &DataBindings, alias: &str) -> Option<Source> {
+    bindings.values().find_map(|(value, source)| match value {
+        BindingValue::InstanceAliases(aliases) if aliases.iter().any(|a| a.name == alias) => {
+            Some(source.clone())
+        }
+        _ => None,
+    })
+}
+
+/// Bindings under `alias` with the alias hop stripped: what the import `alias` and a
+/// copy of it are written with.
+fn bindings_under(bindings: &DataBindings, alias: &str) -> DataBindings {
+    bindings
+        .iter()
+        .filter(|(key, _)| key.len() > 1 && key[0] == alias)
+        .map(|(key, value)| (key[1..].to_vec(), value.clone()))
+        .collect()
 }
 
 /// Literal source-row value read against the template field type.
@@ -6241,18 +8190,27 @@ fn source_row_literal(
     field_type: &Arc<LemmaType>,
     template: &ExecutionPlan,
 ) -> Result<BoundValueKind, String> {
-    let typed = crate::evaluation::evaluate_data::typed_literal_from_parsed(
+    source_row_literal_in(
         value,
         field_type,
         template.expression_unit_index(),
         &template.resolved_types.resolved,
-    )?;
+    )
+}
+
+fn source_row_literal_in(
+    value: &Value,
+    field_type: &Arc<LemmaType>,
+    unit_index: &UnitIndex,
+    named_types: &IndexMap<String, Arc<LemmaType>>,
+) -> Result<BoundValueKind, String> {
+    let typed = typed_literal_from_parsed(value, field_type, unit_index, named_types)?;
     execution_plan::validate_value_against_type(
         typed.lemma_type.as_ref(),
         &LiteralValue {
             value: typed.value.clone(),
         },
-        template.expression_unit_index(),
+        unit_index,
     )?;
     Ok(BoundValueKind {
         value: typed.value,
@@ -6300,6 +8258,7 @@ fn arithmetic_scope<'b>(resolved_types: &'b ResolvedTypesMap, graph: &Graph) -> 
     MeasureScope {
         unit_index: &types.unit_index,
         signature_index: &types.signature_index,
+        named_types: &types.resolved,
     }
 }
 
@@ -6351,9 +8310,9 @@ fn anonymous_rule_boundary_error(
 // Phase 1: Pure type inference (no validation, no error collection)
 // =============================================================================
 
-/// `RulePresence::Dropped` here means a nested template already recorded a planning error
-/// for the rule (see `Graph::rule_presence`). The dependent gets an undetermined type; the
-/// error is reported once, from the template.
+/// `RulePresence::Dropped` here means conversion already recorded a planning error for
+/// the rule (see `Graph::rule_presence`). The dependent gets an undetermined type; the
+/// error is reported once.
 fn inferred_or_dropped(
     graph: &Graph,
     computed_rule_types: &HashMap<RulePath, Arc<LemmaType>>,
@@ -6364,18 +8323,8 @@ fn inferred_or_dropped(
     }
     match graph.rule_presence(rule_path) {
         RulePresence::Dropped => Arc::new(LemmaType::undetermined_type()),
-        RulePresence::Present if graph.has_local_rule(rule_path) => {
-            panic!("BUG: rule type not inferred before dependent in topological order")
-        }
         RulePresence::Present => {
-            let (plan, local) =
-                peel_rule_from(&graph.data, &graph.instance_lists.templates, rule_path)
-                    .expect("BUG: Present import rule must peel");
-            let executable = plan
-                .rules
-                .get(local)
-                .expect("BUG: peeled import rule missing from template plan");
-            Arc::clone(&executable.rule_type)
+            panic!("BUG: rule type not inferred before dependent in topological order")
         }
         RulePresence::Absent => {
             panic!("BUG: rule '{rule_path}' neither in graph nor dropped")
@@ -6398,6 +8347,9 @@ fn infer_expression_type(
         .tables
         .entry(key)
         .or_insert_with(|| Vec::with_capacity(expression.table.len()));
+    if types.is_empty() {
+        cache.typed.push(key);
+    }
     for index in types.len()..=expression.id.index() {
         let node = expression.child(ExprId::from_index(index));
         let lemma_type =
@@ -6438,11 +8390,11 @@ fn infer_expression_type_uncached(
             inferred_or_dropped(graph, computed_rule_types, rule_path)
         }
 
-        ExpressionKind::LogicalAnd { first, steps } => steps.iter().fold(
+        ExpressionKind::Logical { first, steps, .. } => steps.iter().fold(
             cached_expression_type(cache, expression.child(*first)),
             |left_type, step| {
                 let right_type = cached_expression_type(cache, expression.child(step.operand));
-                logical_and_type(&left_type, &right_type)
+                logical_connective_type(&left_type, &right_type)
             },
         ),
 
@@ -6462,8 +8414,9 @@ fn infer_expression_type_uncached(
             steps.iter().fold(
                 cached_expression_type(cache, expression.child(*first)),
                 |left_type, step| {
-                    let right_type = cached_expression_type(cache, expression.child(step.operand));
-                    compute_arithmetic_result_type(left_type, &step.op, right_type, &scope)
+                    let right = expression.child(step.operand);
+                    let right_type = cached_expression_type(cache, right);
+                    arithmetic_step_type(left_type, &step.op, right, right_type, &scope)
                 },
             )
         }
@@ -6477,6 +8430,12 @@ fn infer_expression_type_uncached(
             let operand_type = cached_expression_type(cache, expression.child(*operand));
             math_op_type(op, &operand_type, &arithmetic_scope(resolved_types, graph))
         }
+
+        ExpressionKind::StepRounding { operand, step, .. } => step_rounding_type(
+            &cached_expression_type(cache, expression.child(*operand)),
+            step.map(|step| cached_expression_type(cache, expression.child(step)))
+                .as_ref(),
+        ),
 
         ExpressionKind::RangeBound(_, operand) => {
             let operand_type = cached_expression_type(cache, expression.child(*operand));
@@ -6533,12 +8492,7 @@ fn infer_expression_type_uncached(
             past_future_range_type(&offset_type)
         }
 
-        ExpressionKind::SpecMember {
-            base,
-            path,
-            name,
-            targets,
-        } => {
+        ExpressionKind::SpecMember { base, path, name } => {
             let base_type = cached_expression_type(cache, expression.child(*base));
             if base_type.vetoed() {
                 return Arc::new(LemmaType::veto_type());
@@ -6546,17 +8500,18 @@ fn infer_expression_type_uncached(
             if !base_type.is_spec() {
                 return Arc::new(LemmaType::undetermined_type());
             }
-            if !targets.is_empty() {
-                return spec_member_type(targets, graph, computed_rule_types);
-            }
             match row_member_end(graph, &base_type, path, name) {
                 Some((fields, end)) => fields.end_type(&end, computed_rule_types),
                 None => Arc::new(LemmaType::undetermined_type()),
             }
         }
 
-        ExpressionKind::RowField { identity, end, .. } => {
-            row_fields(graph, identity).end_type(end, computed_rule_types)
+        ExpressionKind::RowField { identity, end, .. } => row_fields(graph, identity)
+            .map(|fields| fields.end_type(end, computed_rule_types))
+            .unwrap_or_else(|| Arc::new(LemmaType::undetermined_type())),
+        ExpressionKind::RowValue { list, .. } => {
+            let list_type = cached_expression_type(cache, expression.child(*list));
+            list_element_type(&list_type, graph, resolved_types)
         }
 
         ExpressionKind::Piecewise(arms) => {
@@ -6603,20 +8558,33 @@ enum RowFields<'g> {
 }
 
 impl<'g> RowFields<'g> {
-    fn end(&self, name: &str) -> Option<RowEnd> {
+    /// Member `parts` on rows of `identity` (the rows these fields are of), hop by hop.
+    fn chain(
+        &self,
+        graph: &Graph<'_>,
+        identity: &SpecIdentity,
+        parts: &[&str],
+    ) -> Option<Vec<RowHop>> {
+        let templates = &graph.instance_lists().templates;
         match self {
-            RowFields::Plan(plan) => {
-                instance_list::row_end_of(instance_list::RowEndView::Plan(plan), name)
-            }
-            RowFields::Root(graph) => {
+            RowFields::Plan(plan) => instance_list::row_end_chain(
+                identity,
+                instance_list::RowEndView::Plan(plan),
+                templates,
+                parts,
+            ),
+            RowFields::Root(root) => {
                 // Typing runs after conversion; present rules only (not main_spec
                 // forward refs). Membership matches the completed plan.
-                let rules: Vec<&RulePath> = graph.rules().keys().collect();
-                root_row_end(
-                    graph.data(),
-                    &graph.instance_lists().templates,
-                    &rules,
-                    name,
+                let rules: BTreeSet<RulePath> = root.rules().keys().cloned().collect();
+                instance_list::row_end_chain(
+                    identity,
+                    instance_list::RowEndView::Root {
+                        data: root.data(),
+                        rules: &rules,
+                    },
+                    templates,
+                    parts,
                 )
             }
         }
@@ -6632,35 +8600,14 @@ impl<'g> RowFields<'g> {
         match (self, end) {
             (RowFields::Plan(plan), _) => instance_list::row_end_type(plan, end),
             (RowFields::Root(graph), RowEnd::Data(path)) => {
-                if path.segments.is_empty() {
-                    if let Some(DataDefinition::Reference {
-                        target: ReferenceTarget::Rule(rule),
-                        ..
-                    }) = graph.data().get(path)
-                    {
-                        return inferred_or_dropped(graph, computed_rule_types, rule);
-                    }
-                    return instance_list::row_data_type(
-                        graph.data(),
-                        &graph.instance_lists().templates,
-                        path,
-                    );
-                }
-                let (_, _, definition) = graph
-                    .peel_data(path)
-                    .expect("BUG: root row field path must peel");
-                if let DataDefinition::Reference {
+                if let Some(DataDefinition::Reference {
                     target: ReferenceTarget::Rule(rule),
                     ..
-                } = definition
+                }) = graph.data().get(path)
                 {
                     return inferred_or_dropped(graph, computed_rule_types, rule);
                 }
-                Arc::clone(
-                    definition
-                        .resolved_type_arc()
-                        .expect("BUG: peeled root row data must be typed"),
-                )
+                instance_list::row_data_type(graph.data(), path)
             }
             (RowFields::Root(graph), RowEnd::Rule(rule)) => {
                 inferred_or_dropped(graph, computed_rule_types, rule)
@@ -6670,48 +8617,27 @@ impl<'g> RowFields<'g> {
 
     fn default(&self, path: &DataPath) -> Option<TypedLiteral> {
         match self {
-            RowFields::Plan(plan) => instance_list::template_default(plan, path),
-            RowFields::Root(graph) => {
-                if path.segments.is_empty() {
-                    instance_list::template_default_local(graph.data(), path)
-                } else {
-                    let (_, _, definition) = graph
-                        .peel_data(path)
-                        .expect("BUG: root row default path must peel");
-                    let lemma_type = definition
-                        .resolved_type_arc()
-                        .expect("BUG: key field must be typed data");
-                    if let Some(bound) = definition.bound_value() {
-                        return Some(instance_list::typed_from_bound(bound, lemma_type));
-                    }
-                    definition
-                        .value()
-                        .map(|literal| crate::planning::semantics::TypedLiteral {
-                            value: literal.value,
-                            lemma_type: Arc::clone(lemma_type),
-                        })
-                }
-            }
+            RowFields::Plan(plan) => instance_list::default_of(&plan.data, path),
+            RowFields::Root(graph) => instance_list::default_of(graph.data(), path),
         }
     }
 }
 
 /// Fields of rows of row spec `identity`. Every instance-list identity has a template
 /// plan, except a self-list's, whose rows are the spec being typed.
-fn row_fields<'g>(graph: &'g Graph<'g>, identity: &SpecIdentity) -> RowFields<'g> {
+fn row_fields<'g>(graph: &'g Graph<'g>, identity: &SpecIdentity) -> Option<RowFields<'g>> {
     if *identity == graph.instance_lists().self_identity {
-        return RowFields::Root(graph);
+        return Some(RowFields::Root(graph));
     }
-    RowFields::Plan(
-        graph
-            .instance_lists()
-            .templates
-            .get(identity)
-            .unwrap_or_else(|| panic!("BUG: no template plan for row spec '{identity}'")),
-    )
+    graph
+        .instance_lists()
+        .templates
+        .get(identity)
+        .map(|plan| RowFields::Plan(plan.as_ref()))
 }
 
-/// Row field `path.name` read on a base of spec type that yields instance-list rows.
+/// Member `path.name` read on a base of spec type: the fields of the spec of the last
+/// hop and the end read there.
 fn row_member_end<'g>(
     graph: &'g Graph<'g>,
     base_type: &LemmaType,
@@ -6726,39 +8652,17 @@ fn row_member_end<'g>(
     if !is_row {
         return None;
     }
-    let fields = row_fields(graph, identity);
-    let mut key = path.join(".");
-    if !key.is_empty() {
-        key.push('.');
-    }
-    key.push_str(name);
-    fields.end(&key).map(|end| (fields, end))
-}
-
-/// Whether `path.name` on a row of `base_type` names a `uses` instance of the row spec.
-fn row_member_import(
-    graph: &Graph<'_>,
-    base_type: &LemmaType,
-    path: &[String],
-    name: &str,
-) -> bool {
-    let TypeSpecification::Spec { spec: identity } = &base_type.specifications else {
-        return false;
-    };
-    let is_row = *identity == graph.instance_lists().self_identity
-        || graph.instance_lists().templates.contains_key(identity);
-    if !is_row {
-        return false;
-    }
-    let mut key = path.join(".");
-    if !key.is_empty() {
-        key.push('.');
-    }
-    key.push_str(name);
-    match row_fields(graph, identity) {
-        RowFields::Plan(plan) => instance_list::is_row_import(&plan.data, &key),
-        RowFields::Root(graph) => instance_list::is_row_import(graph.data(), &key),
-    }
+    let fields = row_fields(graph, identity)
+        .expect("BUG: row member identity already checked for a template");
+    let mut parts: Vec<&str> = path.iter().map(String::as_str).collect();
+    parts.push(name);
+    let last = fields
+        .chain(graph, identity, &parts)?
+        .pop()
+        .expect("BUG: a row end chain has a last hop");
+    let fields = row_fields(graph, &last.identity)
+        .expect("BUG: every hop of a row end chain has template fields");
+    Some((fields, last.end))
 }
 
 fn infer_list_command_type(
@@ -6791,13 +8695,15 @@ fn infer_list_command_type(
         ListOp::Sort {
             argument: Some(_), ..
         } if !instance_rows => return Arc::new(LemmaType::undetermined_type()),
-        ListOp::Predicate { kind, .. } | ListOp::InstancePredicate { kind, .. } => match kind {
+        ListOp::Predicate { kind, .. } => match kind {
             ListPredKind::Any | ListPredKind::All => ListCommandResultKind::BooleanPredicate,
             ListPredKind::Where => ListCommandResultKind::KeepList,
         },
-        ListOp::Sort { .. } | ListOp::Top { .. } | ListOp::With { .. } | ListOp::WithRow { .. } => {
-            ListCommandResultKind::KeepList
-        }
+        ListOp::Sort { .. }
+        | ListOp::Top { .. }
+        | ListOp::With { .. }
+        | ListOp::WithRow { .. }
+        | ListOp::Key { .. } => ListCommandResultKind::KeepList,
     };
     let first_argument = match op {
         ListOp::Reduce {
@@ -6806,12 +8712,17 @@ fn infer_list_command_type(
         } => Some(cached_expression_type(cache, node.child(*argument))),
         _ => None,
     };
-    list_command_result_type(
+    let result = list_command_result_type(
         &list_type,
         kind,
         first_argument.as_ref(),
         &arithmetic_scope(resolved_types, graph),
-    )
+    );
+    if let ListOp::Key { fields } = op {
+        refine_list_key_type(&result, fields)
+    } else {
+        result
+    }
 }
 
 fn list_element_type(
@@ -6826,7 +8737,8 @@ fn list_element_type(
 }
 
 /// Infer the type of a data reference without producing errors.
-/// Returns `LemmaType::undetermined_type()` when the data cannot be found or is a spec reference.
+/// Returns `LemmaType::undetermined_type()` when the data cannot be found. A `uses` slot
+/// is an instance of its spec.
 ///
 /// For rule-target references the reference's stored `resolved_type` is still
 /// the LHS-only placeholder (or fully `undetermined`) at the time
@@ -6838,10 +8750,10 @@ fn infer_data_type(
     graph: &Graph,
     computed_rule_types: &HashMap<RulePath, Arc<LemmaType>>,
 ) -> Arc<LemmaType> {
-    let Some(lookup) = graph.lookup_data(data_path) else {
+    let Some(definition) = graph.data().get(data_path) else {
         return Arc::new(LemmaType::undetermined_type());
     };
-    match lookup.definition() {
+    match definition {
         DataDefinition::Value { resolved_type, .. } => Arc::clone(resolved_type),
         DataDefinition::TypeDeclaration { resolved_type, .. } => Arc::clone(resolved_type),
         DataDefinition::Reference {
@@ -6857,25 +8769,10 @@ fn infer_data_type(
         }
         DataDefinition::Reference { resolved_type, .. }
         | DataDefinition::InstanceList { resolved_type, .. } => Arc::clone(resolved_type),
-        DataDefinition::Import { .. } => Arc::new(LemmaType::undetermined_type()),
-    }
-}
-
-/// Walk an expression tree, find every `DataPath` that ends at a rule in
-/// `reference_ends`, and accumulate that rule into `out`. Used by
-/// [`Graph::add_rule_reference_dependency_edges`] to inject rule-rule
-/// dependency edges so `topological_sort` orders the target rule before any
-/// consumer of the reference data path.
-fn collect_rule_reference_dependencies(
-    expression: &Expression,
-    reference_ends: &IndexMap<DataPath, ReferenceEnd>,
-    out: &mut BTreeSet<RulePath>,
-) {
-    for node in expression.table.nodes() {
-        if let ExpressionKind::DataPath(path) = &node.kind {
-            if let Some(ReferenceEnd::Rule(target_rule)) = reference_ends.get(path) {
-                out.insert(target_rule.clone());
-            }
+        DataDefinition::Import { row, .. } => {
+            Arc::new(LemmaType::primitive(TypeSpecification::Spec {
+                spec: row.identity.as_ref().clone(),
+            }))
         }
     }
 }
@@ -6894,8 +8791,9 @@ fn engine_error_at_graph(graph: &Graph, source: &Source, message: impl Into<Stri
     )
 }
 
-fn check_logical_and_operands(
+fn check_logical_operands(
     graph: &Graph,
+    connective: ast::LogicalConnective,
     left_type: &LemmaType,
     right_type: &LemmaType,
     source: &Source,
@@ -6908,7 +8806,8 @@ fn check_logical_and_operands(
             graph,
             source,
             format!(
-                "Logical AND requires boolean left operand, got {}",
+                "Logical {} requires boolean left operand, got {}",
+                connective.keyword().to_ascii_uppercase(),
                 left_type
             ),
         )]);
@@ -6918,7 +8817,8 @@ fn check_logical_and_operands(
             graph,
             source,
             format!(
-                "Logical AND requires boolean right operand, got {}",
+                "Logical {} requires boolean right operand, got {}",
+                connective.keyword().to_ascii_uppercase(),
                 right_type
             ),
         )]);
@@ -6946,42 +8846,6 @@ fn check_logical_operand(
     } else {
         Ok(())
     }
-}
-
-fn spec_member_end_type(
-    end: &SpecMemberEnd,
-    graph: &Graph,
-    computed_rule_types: &HashMap<RulePath, Arc<LemmaType>>,
-) -> Arc<LemmaType> {
-    match end {
-        SpecMemberEnd::Rule(path) => inferred_or_dropped(graph, computed_rule_types, path),
-        SpecMemberEnd::Data(path) => infer_data_type(path, graph, computed_rule_types),
-        SpecMemberEnd::Instance { identity, .. } => {
-            Arc::new(LemmaType::primitive(TypeSpecification::Spec {
-                spec: identity.clone(),
-            }))
-        }
-    }
-}
-
-fn spec_member_type(
-    targets: &[SpecMemberTarget],
-    graph: &Graph,
-    computed_rule_types: &HashMap<RulePath, Arc<LemmaType>>,
-) -> Arc<LemmaType> {
-    let mut chosen: Option<Arc<LemmaType>> = None;
-    for target in targets {
-        let member_type = spec_member_end_type(&target.end, graph, computed_rule_types);
-        if member_type.vetoed() || member_type.is_undetermined() {
-            continue;
-        }
-        match &chosen {
-            None => chosen = Some(member_type),
-            Some(existing) if existing.same_value_type(member_type.as_ref()) => {}
-            Some(_) => return Arc::new(LemmaType::undetermined_type()),
-        }
-    }
-    chosen.unwrap_or_else(|| Arc::new(LemmaType::undetermined_type()))
 }
 
 fn spec_value_not_operable(
@@ -7115,6 +8979,17 @@ fn check_comparison_types(
     }
 
     if left_type.is_measure() && right_type.is_measure() {
+        if left_type.is_anonymous_measure() || right_type.is_anonymous_measure() {
+            return Err(vec![engine_error_at_graph(
+                graph,
+                source,
+                format!(
+                    "Cannot compare anonymous measures {} and {}.",
+                    left_type.name(),
+                    right_type.name()
+                ),
+            )]);
+        }
         let same_decomposition = match (
             left_type.measure_type_decomposition(),
             right_type.measure_type_decomposition(),
@@ -7175,7 +9050,7 @@ fn arithmetic_literal_zero_divisor_planning_errors(
 
     if let ExpressionKind::Literal(literal) = right.kind() {
         if let ValueKind::Number(number) = &literal.value {
-            if crate::computation::rational::rational_is_zero(number) {
+            if rational_is_zero(number) {
                 return Err(vec![engine_error_at_graph(
                     graph,
                     source,
@@ -7186,6 +9061,88 @@ fn arithmetic_literal_zero_divisor_planning_errors(
     }
 
     Ok(())
+}
+
+enum IntegerExponent {
+    NotLiteral,
+    Value(i32),
+    OutOfRange,
+}
+
+fn integer_exponent_literal(expr: ExprRef<'_, ExpressionKind>) -> IntegerExponent {
+    let ExpressionKind::Literal(literal) = expr.kind() else {
+        return IntegerExponent::NotLiteral;
+    };
+    let ValueKind::Number(number) = &literal.value else {
+        return IntegerExponent::NotLiteral;
+    };
+    if !number.is_integer() {
+        return IntegerExponent::NotLiteral;
+    }
+    match number.numer_to_i32() {
+        Some(exponent) => IntegerExponent::Value(exponent),
+        None => IntegerExponent::OutOfRange,
+    }
+}
+
+/// Result type of one arithmetic step. A measure to an integer literal uses
+/// [`quantity_integer_power_type`]; every other pair uses the shared kernel.
+fn arithmetic_step_type(
+    left_type: Arc<LemmaType>,
+    op: &ArithmeticComputation,
+    right: ExprRef<'_, ExpressionKind>,
+    right_type: Arc<LemmaType>,
+    scope: &MeasureScope<'_>,
+) -> Arc<LemmaType> {
+    if *op == ArithmeticComputation::Power && left_type.is_measure() {
+        match integer_exponent_literal(right) {
+            IntegerExponent::Value(exponent) => {
+                if measure_power_scale(left_type.as_ref(), exponent).is_none() {
+                    return Arc::new(LemmaType::undetermined_type());
+                }
+                return quantity_integer_power_type(&left_type, exponent, scope);
+            }
+            IntegerExponent::OutOfRange => return Arc::new(LemmaType::undetermined_type()),
+            IntegerExponent::NotLiteral => {}
+        }
+    }
+    compute_arithmetic_result_type(left_type, op, right_type, scope)
+}
+
+fn measure_power_scale(left: &LemmaType, exponent: i32) -> Option<BaseMeasureVector> {
+    let decomposition = left
+        .measure_type_decomposition()
+        .expect("BUG: measure power requires a resolved decomposition");
+    scale_decomposition(decomposition, exponent)
+}
+
+fn measure_power_cap_error(
+    graph: &Graph,
+    left_type: &LemmaType,
+    op: &ArithmeticComputation,
+    right: ExprRef<'_, ExpressionKind>,
+    source: &Source,
+) -> Option<Error> {
+    if *op != ArithmeticComputation::Power || !left_type.is_measure() {
+        return None;
+    }
+    let overflow = match integer_exponent_literal(right) {
+        IntegerExponent::OutOfRange => true,
+        IntegerExponent::Value(exponent) => measure_power_scale(left_type, exponent).is_none(),
+        IntegerExponent::NotLiteral => false,
+    };
+    if !overflow {
+        return None;
+    }
+    Some(engine_error_at_graph(
+        graph,
+        source,
+        format!(
+            "Cannot apply '^' to {} and number: a resulting unit exponent exceeds the maximum of {}.",
+            left_type.name(),
+            MAX_UNIT_EXPONENT
+        ),
+    ))
 }
 
 fn arithmetic_power_exponent_planning_errors(
@@ -7259,6 +9216,10 @@ fn arithmetic_plan_time_exactness_planning_errors(
     } else {
         Err(errors)
     }
+}
+
+fn operand_forbids_modulo(ty: &LemmaType) -> bool {
+    ty.is_ratio() || ty.is_measure() || ty.is_duration_like() || ty.is_calendar_like()
 }
 
 fn check_arithmetic_types(
@@ -7427,7 +9388,7 @@ fn check_arithmetic_types(
                         operator,
                         left_type.name(),
                         right_type.name(),
-                        crate::limits::MAX_UNIT_EXPONENT
+                        MAX_UNIT_EXPONENT
                     ),
                 )]);
             }
@@ -7546,6 +9507,22 @@ fn check_arithmetic_types(
         )]);
     }
 
+    // `mod` is numbers only. This is before the same-base success return, because
+    // two ratios share a base type and would otherwise never reach the Modulo arm.
+    if matches!(operator, ArithmeticComputation::Modulo)
+        && (operand_forbids_modulo(left_type) || operand_forbids_modulo(right_type))
+    {
+        return Err(vec![engine_error_at_graph(
+            graph,
+            source,
+            format!(
+                "Cannot apply modulo to {} and {}. `mod` is defined for numbers only.",
+                left_type.name(),
+                right_type.name()
+            ),
+        )]);
+    }
+
     // Operator-specific constraints (same base type is always allowed)
     if left_type.has_same_base_type(right_type) {
         return Ok(());
@@ -7625,21 +9602,7 @@ fn check_arithmetic_types(
             };
             left_ok && right_ok
         }
-        ArithmeticComputation::Modulo => {
-            // Measure % Ratio is rejected: ratio is dimensionless-fractional, not a meaningful
-            // modulus for a dimensioned value.
-            if left_type.is_measure() && right_type.is_ratio() {
-                return Err(vec![engine_error_at_graph(
-                    graph,
-                    source,
-                    format!(
-                        "Cannot apply modulo to {} with a ratio. Use a number divisor.",
-                        left_type.name()
-                    ),
-                )]);
-            }
-            right_type.is_number() || right_type.is_ratio()
-        }
+        ArithmeticComputation::Modulo => left_type.is_number() && right_type.is_number(),
     };
 
     if !allowed {
@@ -7658,19 +9621,142 @@ fn check_arithmetic_types(
     Ok(())
 }
 
-fn has_explicit_unit(source: ExprRef<'_, ExpressionKind>) -> bool {
-    match source.kind() {
-        ExpressionKind::Literal(lit) => match &lit.value {
-            ValueKind::Measure(_) => {
-                let sig = lit.lemma_type.measure_runtime_signature();
-                sig.len() == 1 && sig[0].1 == 1 && !sig[0].0.is_empty()
-            }
-            ValueKind::Ratio(_) => lit.lemma_type.ratio_primary_unit().is_some(),
-            _ => false,
-        },
-        ExpressionKind::UnitConversion(_, SemanticConversionTarget::Unit { .. }) => true,
+fn literal_has_explicit_unit(lit: &semantics::TypedLiteral) -> bool {
+    match &lit.value {
+        ValueKind::Measure(_) => {
+            let sig = lit.lemma_type.measure_runtime_signature();
+            sig.len() == 1 && sig[0].1 == 1 && !sig[0].0.is_empty()
+        }
+        ValueKind::Ratio(_) => lit.lemma_type.ratio_primary_unit().is_some(),
         _ => false,
     }
+}
+
+fn has_explicit_unit(source: ExprRef<'_, ExpressionKind>) -> bool {
+    match source.kind() {
+        ExpressionKind::Literal(lit) => literal_has_explicit_unit(lit),
+        ExpressionKind::UnitConversion(_, SemanticConversionTarget::Unit { .. }) => true,
+        ExpressionKind::StepRounding {
+            step: Some(step), ..
+        } => match source.child(*step).kind() {
+            ExpressionKind::Literal(lit) => literal_has_explicit_unit(lit),
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
+/// `operand -> round` needs a number. `operand -> round step` needs a positive literal step
+/// of the operand's kind.
+fn check_step_rounding(
+    graph: &Graph,
+    mode: semantics::RoundingMode,
+    operand: ExprRef<'_, ExpressionKind>,
+    operand_type: &LemmaType,
+    step: Option<ExprRef<'_, ExpressionKind>>,
+    step_type: Option<&Arc<LemmaType>>,
+    source: &Source,
+) -> Result<(), Vec<Error>> {
+    if operand_type.vetoed() || operand_type.is_undetermined() {
+        return Ok(());
+    }
+    let Some(step) = step else {
+        if operand_type.is_number() {
+            return Ok(());
+        }
+        let label = expression_suggestion_label(operand);
+        if operand_type.is_anonymous_measure() {
+            let decomposition = operand_type
+                .measure_type_decomposition()
+                .expect("BUG: anonymous measure carries a decomposition");
+            return Err(vec![engine_error_at_graph(
+                graph,
+                source,
+                format!(
+                    "Cannot use '{mode}' on '{label}'. Round to a step instead: write \
+                     '{label} -> {mode}' followed by a step in a unit with dimensions {decomposition:?}"
+                ),
+            )]);
+        }
+        if operand_type.is_measure() || operand_type.is_ratio() {
+            let kind = if operand_type.is_measure() {
+                "measure"
+            } else {
+                "ratio"
+            };
+            let unit = first_unit_suggestion(operand_type);
+            return Err(vec![engine_error_at_graph(
+                graph,
+                source,
+                format!(
+                    "Cannot use '{mode}' on {kind} '{}'. Round to a step instead, for example \
+                     '{label} -> {mode} 1 {unit}'",
+                    operand_type.name()
+                ),
+            )]);
+        }
+        return Err(vec![engine_error_at_graph(
+            graph,
+            source,
+            format!(
+                "Cannot use '{mode}' on {}; write '{label} -> {mode}' only for a number, \
+                 or give a step of the same kind",
+                operand_type.name()
+            ),
+        )]);
+    };
+    let step_type = step_type
+        .expect("BUG: step carries a type when present")
+        .as_ref();
+    if step_type.vetoed() || step_type.is_undetermined() {
+        return Ok(());
+    }
+    let ExpressionKind::Literal(literal) = step.kind() else {
+        return Err(vec![engine_error_at_graph(
+            graph,
+            source,
+            format!(
+                "The step of '-> {mode}' must be a literal, not '{}'",
+                expression_suggestion_label(step)
+            ),
+        )]);
+    };
+    if !step_rounding_compatible(operand_type, step_type) {
+        let hint = match (
+            operand_type.is_anonymous_measure(),
+            operand_type.measure_unit_names(),
+        ) {
+            (false, Some(units)) if !units.is_empty() => format!(
+                ". Write the step in a unit of {}, for example '-> {mode} 1 {}'",
+                operand_type.name(),
+                units[0]
+            ),
+            _ => String::new(),
+        };
+        return Err(vec![engine_error_at_graph(
+            graph,
+            source,
+            format!(
+                "Cannot round {} to a step of {}{hint}",
+                operand_type.name(),
+                step_type.name()
+            ),
+        )]);
+    }
+    let positive = match &literal.value {
+        ValueKind::Number(step) | ValueKind::Ratio(step) | ValueKind::Measure(step) => {
+            step.numer_is_positive()
+        }
+        other => unreachable!("BUG: step type is number, ratio or measure, got {other:?}"),
+    };
+    if !positive {
+        return Err(vec![engine_error_at_graph(
+            graph,
+            source,
+            format!("The step of '-> {mode}' must be greater than zero"),
+        )]);
+    }
+    Ok(())
 }
 
 enum SuggestionPiece<'a> {
@@ -7715,6 +9801,13 @@ fn suggestion_label(mut pending: Vec<SuggestionPiece<'_>>) -> String {
             Piece::Node(node) => match node.kind() {
                 ExpressionKind::DataPath(p) => out.push_str(&p.data),
                 ExpressionKind::RulePath(p) => out.push_str(&p.rule),
+                ExpressionKind::SpecMember { base, path, name } => {
+                    pending.push(Piece::Text(format!(".{name}")));
+                    for segment in path.iter().rev() {
+                        pending.push(Piece::Text(format!(".{segment}")));
+                    }
+                    pending.push(Piece::Node(node.child(*base)));
+                }
                 ExpressionKind::Arithmetic { first, steps } => {
                     arithmetic_chain_pieces(node, *first, steps, &mut pending);
                 }
@@ -7736,6 +9829,7 @@ fn suggestion_label(mut pending: Vec<SuggestionPiece<'_>>) -> String {
 fn first_unit_suggestion(source_type: &LemmaType) -> String {
     source_type
         .measure_unit_names()
+        .or_else(|| source_type.ratio_unit_names())
         .and_then(|names| names.first().map(|u| (*u).to_string()))
         .unwrap_or_else(|| "<unit>".to_string())
 }
@@ -7845,8 +9939,7 @@ fn check_unit_conversion_types(
             owning_type,
         } => {
             if source_type.is_number() {
-                if crate::computation::units::owning_type_declares_unit_name(owning_type, unit_name)
-                {
+                if owning_type_declares_unit_name(owning_type, unit_name) {
                     return Ok(());
                 }
                 return Err(vec![engine_error_at_graph(
@@ -7896,8 +9989,7 @@ fn check_unit_conversion_types(
                 )]);
             }
             if source_type.is_calendar_like() {
-                if crate::computation::units::owning_type_declares_unit_name(owning_type, unit_name)
-                {
+                if owning_type_declares_unit_name(owning_type, unit_name) {
                     return Ok(());
                 }
                 return Err(vec![engine_error_at_graph(
@@ -7909,8 +10001,7 @@ fn check_unit_conversion_types(
             if source_type.is_ratio() {
                 // Target unit comes from the resolved owner (builtin percent/permille or
                 // an in-scope custom). Source need not declare that unit; builtins bridge.
-                if crate::computation::units::owning_type_declares_unit_name(owning_type, unit_name)
-                {
+                if owning_type_declares_unit_name(owning_type, unit_name) {
                     return Ok(());
                 }
                 let valid = match &owning_type.specifications {
@@ -8050,8 +10141,8 @@ fn check_mathematical_operand(
     if operand_type.is_number() {
         return Ok(());
     }
-    if operand_type.is_measure()
-        && crate::computation::mathematical_computation_preserves_measure_magnitude(op)
+    if (operand_type.is_measure() || operand_type.is_ratio())
+        && mathematical_computation_applies_to_magnitude(op)
     {
         return Ok(());
     }
@@ -8121,33 +10212,20 @@ fn check_data_and_rule_name_collisions(graph: &Graph) -> Result<(), Vec<Error>> 
     }
 }
 
-/// Check that a data reference is valid (exists and is not a bare spec reference).
+/// Check that a data reference names data of this spec. A `uses` slot is the instance.
 fn check_data_reference(
     data_path: &DataPath,
     graph: &Graph,
     data_source: &Source,
 ) -> Result<(), Vec<Error>> {
-    let Some(lookup) = graph.lookup_data(data_path) else {
-        return Err(vec![engine_error_at_graph(
-            graph,
-            data_source,
-            format!("Unknown data reference '{}'", data_path),
-        )]);
-    };
-    match lookup.definition() {
-        DataDefinition::Value { .. }
-        | DataDefinition::TypeDeclaration { .. }
-        | DataDefinition::InstanceList { .. }
-        | DataDefinition::Reference { .. } => Ok(()),
-        DataDefinition::Import { .. } => Err(vec![engine_error_at_graph(
-            graph,
-            lookup.definition().source(),
-            format!(
-                "Cannot compute type for spec reference data '{}'",
-                data_path
-            ),
-        )]),
+    if graph.data().contains_key(data_path) {
+        return Ok(());
     }
+    Err(vec![engine_error_at_graph(
+        graph,
+        data_source,
+        format!("Unknown data reference '{}'", data_path),
+    )])
 }
 
 /// One step of a type check over an expression tree.
@@ -8275,12 +10353,7 @@ fn check_steps(
 
         ExpressionKind::RulePath(_) => {}
 
-        ExpressionKind::SpecMember {
-            base,
-            targets,
-            name,
-            path,
-        } => {
+        ExpressionKind::SpecMember { base, name, path } => {
             let expr_source = expression
                 .source()
                 .expect("BUG: expression missing source in check_expression");
@@ -8292,7 +10365,6 @@ fn check_steps(
                 resolved_types,
                 cache,
             );
-            let row_end = row_member_end(graph, &base_type, path, name);
             if !base_type.is_spec() && !base_type.is_undetermined() && !base_type.vetoed() {
                 let message = match expression.child(*base).kind() {
                     ExpressionKind::RulePath(rule) => {
@@ -8304,62 +10376,26 @@ fn check_steps(
                     ),
                 };
                 checks.push(engine_error_at_graph(graph, expr_source, message));
-            } else if targets.is_empty() && base_type.is_spec() && row_end.is_none() {
-                let message = if row_member_import(graph, &base_type, path, name) {
+            } else if base_type.is_spec() && row_member_end(graph, &base_type, path, name).is_none()
+            {
+                checks.push(engine_error_at_graph(
+                    graph,
+                    expr_source,
                     format!(
-                        "`{name}` is a `uses` instance of {}; read a field of it (`{name}.<field>`), not the instance",
+                        "no data, rule or uses '{name}' on spec {}",
                         base_type.name()
-                    )
-                } else {
-                    format!("no data or rule '{name}' on spec {}", base_type.name())
-                };
-                checks.push(engine_error_at_graph(graph, expr_source, message));
-            } else if targets.len() > 1 {
-                let first = spec_member_end_type(&targets[0].end, graph, inferred_types);
-                for target in targets.iter().skip(1) {
-                    let other = spec_member_end_type(&target.end, graph, inferred_types);
-                    if !first.vetoed()
-                        && !other.vetoed()
-                        && !first.is_undetermined()
-                        && !other.is_undetermined()
-                        && !first.same_value_type(other.as_ref())
-                    {
-                        checks.push(engine_error_at_graph(
-                            graph,
-                            expr_source,
-                            format!(
-                                "field '{name}' has type {} on one instance and {} on another",
-                                first.name(),
-                                other.name()
-                            ),
-                        ));
-                        break;
-                    }
-                }
-            }
-            if let (Some((fields, end)), Some(target)) = (&row_end, targets.first()) {
-                let row_type = fields.end_type(end, inferred_types);
-                let fixed_type = spec_member_end_type(&target.end, graph, inferred_types);
-                if !fixed_type.vetoed()
-                    && !fixed_type.is_undetermined()
-                    && !row_type.same_value_type(fixed_type.as_ref())
-                {
-                    checks.push(engine_error_at_graph(
-                        graph,
-                        expr_source,
-                        format!(
-                            "field '{name}' has type {} on a row and {} on an instance",
-                            row_type.name(),
-                            fixed_type.name()
-                        ),
-                    ));
-                }
+                    ),
+                ));
             }
         }
 
-        ExpressionKind::RowField { .. } => {}
+        ExpressionKind::RowField { .. } | ExpressionKind::RowValue { .. } => {}
 
-        ExpressionKind::LogicalAnd { first, steps } => {
+        ExpressionKind::Logical {
+            connective,
+            first,
+            steps,
+        } => {
             checks.visit(first);
             let mut left_type = infer_expression_type(
                 expression.child(*first),
@@ -8377,13 +10413,14 @@ fn check_steps(
                     resolved_types,
                     cache,
                 );
-                checks.collect(check_logical_and_operands(
+                checks.collect(check_logical_operands(
                     graph,
+                    *connective,
                     &left_type,
                     &right_type,
                     &step.source_location,
                 ));
-                left_type = logical_and_type(&left_type, &right_type);
+                left_type = logical_connective_type(&left_type, &right_type);
             }
         }
 
@@ -8621,15 +10658,21 @@ fn check_steps(
                         operator,
                         expr_source,
                     ));
+                    if let Some(error) = measure_power_cap_error(
+                        graph,
+                        &left_type,
+                        operator,
+                        expression.child(*right),
+                        expr_source,
+                    ) {
+                        checks.push(error);
+                    }
                 }
-                let right_type = infer_expression_type(
-                    expression.child(step.operand),
-                    graph,
-                    inferred_types,
-                    resolved_types,
-                    cache,
-                );
-                left_type = compute_arithmetic_result_type(left_type, &step.op, right_type, &scope);
+                let right_expr = expression.child(step.operand);
+                let right_type =
+                    infer_expression_type(right_expr, graph, inferred_types, resolved_types, cache);
+                left_type =
+                    arithmetic_step_type(left_type, operator, right_expr, right_type, &scope);
             }
         }
 
@@ -8674,6 +10717,45 @@ fn check_steps(
                 graph,
                 op,
                 &operand_type,
+                expr_source,
+            ));
+        }
+
+        ExpressionKind::StepRounding {
+            operand,
+            mode,
+            step,
+        } => {
+            checks.visit(operand);
+            if let Some(step) = step {
+                checks.visit(step);
+            }
+            let operand_type = infer_expression_type(
+                expression.child(*operand),
+                graph,
+                inferred_types,
+                resolved_types,
+                cache,
+            );
+            let step_type = step.map(|step| {
+                infer_expression_type(
+                    expression.child(step),
+                    graph,
+                    inferred_types,
+                    resolved_types,
+                    cache,
+                )
+            });
+            let expr_source = expression
+                .source()
+                .expect("BUG: expression missing source in check_expression");
+            checks.collect(check_step_rounding(
+                graph,
+                *mode,
+                expression.child(*operand),
+                &operand_type,
+                step.map(|step| expression.child(step)),
+                step_type.as_ref(),
                 expr_source,
             ));
         }
@@ -8957,7 +11039,7 @@ fn check_list_op(
         resolved_types,
         ..
     } = *typing;
-    if let TypeSpecification::List { element, key } = &list_type.specifications {
+    if let TypeSpecification::List { element, key, .. } = &list_type.specifications {
         if let TypeSpecification::Spec { spec: identity } = &element.specifications {
             return check_instance_list_op(op, node, list, identity, key, typing, source);
         }
@@ -8990,15 +11072,16 @@ fn check_list_op(
                 ));
             }
         }
-        ListOp::Predicate { right, .. } => checks.visit(right),
-        ListOp::InstancePredicate { expr, .. } => {
+        ListOp::Predicate { form, expr, .. } => {
             checks.visit(expr);
-            checks.push(engine_error_at_graph(
-                graph,
-                source,
-                "value-list `any`/`all`/`where` take a comparison (`>= 100 eur`), not a field expression"
-                    .to_string(),
-            ));
+            if *form == ast::ListPredicateForm::Instance {
+                checks.push(engine_error_at_graph(
+                    graph,
+                    source,
+                    "value-list `any`/`all`/`where` take a comparison (`>= 100 eur`), not a field expression"
+                        .to_string(),
+                ));
+            }
         }
         ListOp::Sort { argument, .. } => {
             if let Some(argument) = argument {
@@ -9028,6 +11111,13 @@ fn check_list_op(
         }
         ListOp::WithRow { .. } => {
             unreachable!("BUG: `-> with field: value` converted on a value list")
+        }
+        ListOp::Key { .. } => {
+            checks.push(engine_error_at_graph(
+                graph,
+                source,
+                "`-> key` is for instance lists".to_string(),
+            ));
         }
     }
     if list_type.is_list() {
@@ -9095,7 +11185,7 @@ fn check_list_element_op(
     source: &Source,
 ) -> Result<(), Vec<Error>> {
     let graph = typing.graph;
-    if element_type.is_undetermined() || element_type.vetoed() || element_type.is_spec() {
+    if element_type.is_undetermined() || element_type.vetoed() {
         return Ok(());
     }
     let error = |message: String| Err(vec![engine_error_at_graph(graph, source, message)]);
@@ -9132,15 +11222,18 @@ fn check_list_element_op(
             "`sort` needs ordered rows (number, measure, ratio, date, time), got {}",
             element_type.name()
         )),
-        ListOp::Predicate { op, right, .. } => {
-            let right_type = typing.infer(node.child(*right));
-            match op {
-                RowCondition::Compare(comparison) => {
-                    check_comparison_types(graph, element_type, comparison, &right_type, source)
-                }
-                RowCondition::In => {
-                    check_range_containment_types(graph, element_type, &right_type, source)
-                }
+        ListOp::Predicate { expr, .. } => {
+            let predicate_type = typing.infer(node.child(*expr));
+            if predicate_type.is_boolean()
+                || predicate_type.is_undetermined()
+                || predicate_type.vetoed()
+            {
+                Ok(())
+            } else {
+                error(format!(
+                    "list predicate needs a boolean expression, got {}",
+                    predicate_type.name()
+                ))
             }
         }
         ListOp::Find { keys } if keys.len() == 1 => {
@@ -9193,7 +11286,17 @@ fn check_instance_list_op(
 ) -> Vec<CheckStep> {
     let mut steps = Vec::new();
     let mut checks = CheckSteps::new(&mut steps);
-    let template = row_fields(typing.graph, identity);
+    let Some(template) = row_fields(typing.graph, identity) else {
+        checks.collect(Err(vec![typing.error(
+            source,
+            format!(
+                "instance list of `{}` needs `uses {}` before `-> key` or `-> with`",
+                identity.spec, identity.spec
+            ),
+        )]));
+        checks.finish();
+        return steps;
+    };
     let row_spec = &identity.spec;
     match op {
         ListOp::First | ListOp::Last | ListOp::Count => {}
@@ -9252,18 +11355,17 @@ fn check_instance_list_op(
                 ));
             }
         },
-        ListOp::Predicate { kind, right, .. } => {
-            checks.visit(right);
-            checks.collect(Err(vec![typing.error(
-                source,
-                format!(
-                    "`{}` on `{row_spec}` rows takes a row expression such as `price > 3 eur`, not a bare comparison",
-                    kind.keyword()
-                ),
-            )]));
-        }
-        ListOp::InstancePredicate { kind, expr } => {
+        ListOp::Predicate { kind, form, expr } => {
             checks.visit(expr);
+            if *form == ast::ListPredicateForm::Value {
+                checks.collect(Err(vec![typing.error(
+                    source,
+                    format!(
+                        "`{}` on `{row_spec}` rows takes a row expression such as `price > 3 eur`, not a bare comparison",
+                        kind.keyword()
+                    ),
+                )]));
+            }
             let condition_type = typing.infer(node.child(*expr));
             if !condition_type.is_boolean()
                 && !condition_type.is_undetermined()
@@ -9293,13 +11395,32 @@ fn check_instance_list_op(
         ListOp::With { rows } => {
             for row in rows {
                 checks.visit(row);
+                let value_type = typing.infer(node.child(*row));
+                if value_type.is_undetermined() || value_type.vetoed() {
+                    continue;
+                }
+                let ok = match &value_type.specifications {
+                    TypeSpecification::Spec { spec } if spec == identity => true,
+                    TypeSpecification::List { element, .. } => {
+                        matches!(
+                            &element.specifications,
+                            TypeSpecification::Spec { spec } if spec == identity
+                        )
+                    }
+                    _ => false,
+                };
+                if !ok {
+                    checks.collect(Err(vec![typing.error(
+                        source,
+                        format!(
+                            "`-> with` on `{row_spec}` rows takes `field: value` pairs, a `{row_spec}` instance, or a `{row_spec}` list"
+                        ),
+                    )]));
+                }
             }
-            checks.collect(Err(vec![typing.error(
-                source,
-                format!("`-> with` on `{row_spec}` rows takes `field: value` pairs"),
-            )]));
         }
-        ListOp::WithRow { fields } => {
+        ListOp::WithRow { fields, .. } => {
+            let mut fields_typed = true;
             for (path, value) in fields {
                 checks.visit(value);
                 let field_type =
@@ -9309,6 +11430,7 @@ fn check_instance_list_op(
                     && !value_type.vetoed()
                     && !field_type.same_value_type(value_type.as_ref())
                 {
+                    fields_typed = false;
                     checks.collect(Err(vec![typing.error(
                         source,
                         format!(
@@ -9321,29 +11443,105 @@ fn check_instance_list_op(
                 }
             }
             if let ListKey::Fields(key_fields) = key {
-                for field in key_fields {
-                    let path = match template.end(field) {
-                        Some(RowEnd::Data(path)) => path,
-                        other => {
-                            panic!("BUG: key field '{field}' must be template data, got {other:?}")
-                        }
-                    };
-                    let written = fields.iter().any(|(written, _)| *written == path);
-                    if !written && template.default(&path).is_none() {
+                for key_field in key_fields {
+                    let path = &key_field.path;
+                    let written = fields.iter().any(|(written, _)| *written == *path);
+                    if !written && template.default(path).is_none() {
                         checks.collect(Err(vec![typing.error(
                             source,
-                            format!("`-> with` row must set key field `{field}`"),
+                            format!("`-> with` row must set key field `{}`", key_field.name),
                         )]));
                     }
                 }
             }
-            checks.collect(check_appended_row_key(
-                list, node, fields, key, typing, source,
-            ));
+            if fields_typed {
+                checks.collect(check_appended_row_key(
+                    list, node, fields, key, typing, source,
+                ));
+            }
+        }
+        ListOp::Key { fields } => {
+            checks.collect(check_key_list_spine(list, typing, source));
+            for path in fields {
+                assert!(
+                    path.segments.is_empty(),
+                    "BUG: `-> key` fields are names of the row spec"
+                );
+                let chain = template.chain(typing.graph, identity, &[path.data.as_str()]);
+                let end = chain.as_deref().map(|chain| match chain {
+                    [hop] => &hop.end,
+                    _ => unreachable!("BUG: a one-part chain has one hop"),
+                });
+                let row_data = match &template {
+                    RowFields::Plan(plan) => &plan.data,
+                    RowFields::Root(graph) => graph.data(),
+                };
+                match end {
+                    Some(RowEnd::Data(data))
+                        if matches!(row_data.get(data), Some(DataDefinition::Import { .. })) =>
+                    {
+                        checks.collect(Err(vec![typing.error(
+                            source,
+                            format!(
+                                "`-> key` field `{}` must be data on `{row_spec}`, not a uses instance",
+                                path.input_key()
+                            ),
+                        )]))
+                    }
+                    Some(RowEnd::Data(_)) => {}
+                    Some(RowEnd::Rule(_)) => checks.collect(Err(vec![typing.error(
+                        source,
+                        format!(
+                            "`-> key` field `{}` must be data on `{row_spec}`, not a rule",
+                            path.input_key()
+                        ),
+                    )])),
+                    None => checks.collect(Err(vec![typing.error(
+                        source,
+                        format!(
+                            "`-> key` field `{}` is not a member of `{row_spec}`",
+                            path.input_key()
+                        ),
+                    )])),
+                }
+            }
         }
     }
     checks.finish();
     steps
+}
+
+/// `-> key` may only refine a bare list / prior `key`-free construction spine.
+/// It must not follow `with` or a query command, and must not appear twice.
+fn check_key_list_spine(
+    list: ExprRef<'_, ExpressionKind>,
+    typing: &TypingScope<'_>,
+    source: &Source,
+) -> Result<(), Vec<Error>> {
+    match list.kind() {
+        ExpressionKind::ListCommand { op, .. } => match op {
+            ListOp::Key { .. } => Err(vec![typing.error(
+                source,
+                "`-> key` appears twice; list every key field in one `-> key`",
+            )]),
+            ListOp::With { .. } | ListOp::WithRow { .. } => Err(vec![typing.error(
+                source,
+                "`-> key` must come before the first `-> with`",
+            )]),
+            ListOp::Predicate { .. }
+            | ListOp::Sort { .. }
+            | ListOp::Top { .. }
+            | ListOp::Reduce { .. }
+            | ListOp::Find { .. }
+            | ListOp::First
+            | ListOp::Last
+            | ListOp::Count => Err(vec![typing.error(
+                source,
+                "`-> key` declares list addressing; write it on the list before query commands such as `where`",
+            )]),
+        },
+        _ => Ok(()),
+    }
 }
 
 /// `-> find` on instance rows: one row number on a numbered list, one value per key field otherwise.
@@ -9375,7 +11573,7 @@ fn check_instance_find(
                 ),
             )]);
         }
-        ListKey::Fields(fields) => fields,
+        ListKey::Fields(fields) => fields.as_slice(),
     };
     if keys.len() != fields.len() {
         return Err(vec![typing.error(
@@ -9383,17 +11581,19 @@ fn check_instance_find(
             format!(
                 "`-> find` takes {} key fields ({}), got {}",
                 fields.len(),
-                fields.join(", "),
+                fields
+                    .iter()
+                    .map(|field| field.name.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", "),
                 keys.len()
             ),
         )]);
     }
     let mut errors = Vec::new();
-    for (key_expression, field) in keys.iter().zip(fields) {
+    for (key_expression, key_field) in keys.iter().zip(fields) {
         let key_expression = node.child(*key_expression);
-        let end = template
-            .end(field)
-            .expect("BUG: key field must be data of the template");
+        let end = RowEnd::Data(key_field.path.clone());
         let field_type = template.end_type(&end, typing.inferred_types);
         let key_type = typing.infer(key_expression);
         let result = if field_type.is_range() {
@@ -9411,7 +11611,8 @@ fn check_instance_find(
             errors.push(typing.error(
                 source,
                 format!(
-                    "key field `{field}` is {}, got {}: {}",
+                    "key field `{}` is {}, got {}: {}",
+                    key_field.name,
                     field_type.name(),
                     key_type.name(),
                     found
@@ -9437,7 +11638,15 @@ fn branch_type_label(lemma_type: &LemmaType) -> String {
         TypeSpecification::List {
             key: ListKey::Fields(fields),
             ..
-        } => format!("{} (key {})", lemma_type.name(), fields.join(", ")),
+        } => format!(
+            "{} (key {})",
+            lemma_type.name(),
+            fields
+                .iter()
+                .map(|field| field.name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
         TypeSpecification::List {
             key: ListKey::Numbered,
             ..
@@ -9463,13 +11672,12 @@ fn check_appended_row_key(
     let Some(list_source) = typing.graph.instance_lists().sources.get(list_path) else {
         return Ok(());
     };
-    let template = row_fields(typing.graph, &list_source.identity);
+    let Some(template) = row_fields(typing.graph, &list_source.identity) else {
+        return Ok(());
+    };
     let key_paths: Vec<DataPath> = key_fields
         .iter()
-        .map(|field| match template.end(field) {
-            Some(RowEnd::Data(path)) => path,
-            other => panic!("BUG: key field '{field}' must be template data, got {other:?}"),
-        })
+        .map(|key_field| key_field.path.clone())
         .collect();
     let mut appended = Vec::with_capacity(key_paths.len());
     for path in &key_paths {
@@ -9487,36 +11695,39 @@ fn check_appended_row_key(
         };
         appended.push(value);
     }
-    let mut keyed: Vec<KeyedRow> = Vec::with_capacity(list_source.rows.len() + 1);
-    for (index, row) in list_source.rows.iter().enumerate() {
-        let mut values = Vec::with_capacity(key_paths.len());
-        for path in &key_paths {
-            let field_type = template.end_type(&RowEnd::Data(path.clone()), typing.inferred_types);
-            let bound = row.fields.iter().find(|(field, _)| field == path);
-            let value = match bound {
-                Some((_, DataSource::Literal(bound))) => {
-                    instance_list::typed_from_bound(bound, &field_type)
-                }
-                Some((_, DataSource::Reference(_))) => return Ok(()),
-                None => match template.default(path) {
-                    Some(default) => default,
-                    None => return Ok(()),
-                },
-            };
-            values.push(value);
-        }
-        keyed.push(KeyedRow {
-            label: format!("row {}", index + 1),
-            values,
-        });
+    let store = &list_source.store;
+    if store.key.is_empty() {
+        // The store's keys failed to check, which is an error already.
+        return Ok(());
     }
-    keyed.push(KeyedRow {
-        label: "the appended row".to_string(),
-        values: appended,
+    let stored = store.rows.len();
+    let key_of = |row: usize| {
+        if row == stored {
+            appended.clone()
+        } else {
+            store.key_values(row)
+        }
+    };
+    let built = KeyIndex::build(store.key_names(), stored + 1, |row, field| {
+        if row == stored {
+            &appended[field].value
+        } else {
+            store.key_value(row, field)
+        }
     });
-    match instance_list::key_conflict(key_fields, &keyed) {
-        Some(message) => Err(vec![typing.error(source, message)]),
-        None => Ok(()),
+    match built {
+        Ok(_) => Ok(()),
+        Err((fields, conflict)) => {
+            let message = conflict.message(&fields, |row| {
+                let label = if row == stored {
+                    "the appended row".to_string()
+                } else {
+                    format!("row {}", row + 1)
+                };
+                (label, key_of(row))
+            });
+            Err(vec![typing.error(source, message)])
+        }
     }
 }
 
@@ -9788,46 +11999,61 @@ fn infer_rule_types(
 ) -> (HashMap<RulePath, Arc<LemmaType>>, Vec<Error>) {
     let mut computed_types: HashMap<RulePath, Arc<LemmaType>> = HashMap::new();
     let mut errors = Vec::new();
+    let mut seeds: HashMap<RulePath, Arc<LemmaType>> = HashMap::new();
 
+    // 1. On-demand seed every recursive rule (and any locals their seeds name).
     for rule_path in rule_order {
         let rule_node = graph
             .rules()
             .get(rule_path)
             .expect("BUG: rule from topological sort not in graph");
-        let branches = &rule_node.branches;
-
-        if branches.is_empty() {
+        if !rule_node.recursive || rule_node.branches.is_empty() {
             continue;
         }
-
-        let seed = if rule_node.recursive {
-            match recursive_rule_seed(rule_path, graph, &mut computed_types, resolved_types, cache)
-            {
-                Ok(seed) => Some(seed),
-                Err(message) => {
-                    errors.push(reference_error(graph.main_spec, &rule_node.source, message));
-                    computed_types
-                        .insert(rule_path.clone(), Arc::new(LemmaType::undetermined_type()));
-                    continue;
-                }
+        ensure_seed(rule_path, graph, &mut computed_types, resolved_types, cache);
+        match computed_types.get(rule_path) {
+            Some(seed) if !seed.vetoed() && !seed.is_undetermined() => {
+                seeds.insert(rule_path.clone(), Arc::clone(seed));
             }
-        } else {
-            None
-        };
+            _ => {
+                errors.push(reference_error(
+                    graph.main_spec,
+                    &rule_node.source,
+                    format!(
+                        "recursive rule `{}` needs a non-recursive part to determine its type",
+                        rule_path.rule
+                    ),
+                ));
+                computed_types.insert(rule_path.clone(), Arc::new(LemmaType::undetermined_type()));
+            }
+        }
+        cache.clear();
+    }
 
-        let body_types = branches.iter().map(|(_, result)| {
-            infer_expression_type(
-                rule_node.expression.at(*result),
-                graph,
-                &computed_types,
-                resolved_types,
-                cache,
-            )
-        });
-        let rule_type = piecewise_type(body_types);
-        if let Some(seed) = seed {
+    // 2. Infer every rule in same-instance topo (recursive full bodies against seeds).
+    // `written_at` is the write count after a rule's type was last written, `inferred_at`
+    // the write count when a rule was inferred; pass-1 entries were written at 0.
+    let mut writes = 0usize;
+    let mut written_at: HashMap<&RulePath, usize> = HashMap::new();
+    let mut inferred_at: HashMap<&RulePath, usize> = HashMap::new();
+    let mut overwrote_pass_one_entry = false;
+    for rule_path in rule_order {
+        let rule_node = graph
+            .rules()
+            .get(rule_path)
+            .expect("BUG: rule from topological sort not in graph");
+        if rule_node.branches.is_empty() {
+            continue;
+        }
+        if rule_node.recursive && !seeds.contains_key(rule_path) {
+            continue;
+        }
+        inferred_at.insert(rule_path, writes);
+        let rule_type =
+            infer_rule_body_type(rule_node, graph, &computed_types, resolved_types, cache);
+        if let Some(seed) = seeds.get(rule_path) {
             let determined = !rule_type.vetoed() && !rule_type.is_undetermined();
-            if determined && !rule_type.same_value_type(&seed) {
+            if determined && !rule_type.same_value_type(seed) {
                 errors.push(reference_error(
                     graph.main_spec,
                     &rule_node.source,
@@ -9840,30 +12066,66 @@ fn infer_rule_types(
                 ));
             }
         }
-        computed_types.insert(rule_path.clone(), rule_type);
+        writes += 1;
+        written_at.insert(rule_path, writes);
+        if computed_types
+            .insert(rule_path.clone(), rule_type)
+            .is_some()
+        {
+            overwrote_pass_one_entry = true;
+        }
+    }
+
+    // 3. Re-infer non-recursive rules against full recursive types (not seeds). A rule's
+    // type is a function of the rule types it reads; it changes only if one of them was
+    // written after the rule was inferred. In pass 2 a rule reads only types already
+    // written, so that needs a pass-1 entry that pass 2 overwrote later.
+    if overwrote_pass_one_entry {
+        for rule_path in rule_order {
+            let rule_node = graph
+                .rules()
+                .get(rule_path)
+                .expect("BUG: rule from topological sort not in graph");
+            if rule_node.recursive || rule_node.branches.is_empty() {
+                continue;
+            }
+            let inferred = *inferred_at
+                .get(rule_path)
+                .expect("BUG: pass 2 inferred every non-recursive rule with branches");
+            let read_a_later_write = rule_node
+                .branches
+                .iter()
+                .flat_map(|(_, result)| {
+                    local_rule_names_in(rule_node.expression.at(*result), graph)
+                })
+                .any(|read| written_at.get(&read).is_some_and(|at| *at > inferred));
+            if !read_a_later_write {
+                continue;
+            }
+            cache.clear();
+            let rule_type =
+                infer_rule_body_type(rule_node, graph, &computed_types, resolved_types, cache);
+            if computed_types.get(rule_path) != Some(&rule_type) {
+                writes += 1;
+                written_at.insert(rule_path, writes);
+                computed_types.insert(rule_path.clone(), rule_type);
+            }
+        }
+        cache.clear();
     }
 
     (computed_types, errors)
 }
 
-/// Type of recursive rule `rule_path` from the parts of its body that do not read it
-/// on rows: `own + components -> sum(total)` is the type of `own`. Leaves the seed in
-/// `computed_types` and clears the inference cache, so the full body is inferred
-/// against it.
-fn recursive_rule_seed(
-    rule_path: &RulePath,
+fn infer_rule_body_type(
+    rule_node: &RuleNode<'_>,
     graph: &Graph,
-    computed_types: &mut HashMap<RulePath, Arc<LemmaType>>,
+    computed_types: &HashMap<RulePath, Arc<LemmaType>>,
     resolved_types: &ResolvedTypesMap,
     cache: &mut InferExpressionTypeCache,
-) -> Result<Arc<LemmaType>, String> {
-    let rule_node = graph
-        .rules()
-        .get(rule_path)
-        .expect("BUG: recursive rule not in graph");
-    computed_types.insert(rule_path.clone(), Arc::new(LemmaType::undetermined_type()));
-    let seed = rule_node.branches.iter().find_map(|(_, result)| {
-        seed_type(
+) -> Arc<LemmaType> {
+    let body_types = rule_node.branches.iter().map(|(_, result)| {
+        infer_expression_type(
             rule_node.expression.at(*result),
             graph,
             computed_types,
@@ -9871,15 +12133,79 @@ fn recursive_rule_seed(
             cache,
         )
     });
-    cache.clear();
-    let seed = seed.ok_or_else(|| {
-        format!(
-            "recursive rule `{}` needs a non-recursive part to determine its type",
-            rule_path.rule
-        )
-    })?;
-    computed_types.insert(rule_path.clone(), Arc::clone(&seed));
-    Ok(seed)
+    piecewise_type(body_types, &arithmetic_scope(resolved_types, graph))
+}
+
+/// Seed of `rule` from its non-recursive parts. Inserts a placeholder while visiting so
+/// mutual row recursion does not loop; replaces it when a concrete seed is found.
+fn ensure_seed(
+    rule: &RulePath,
+    graph: &Graph,
+    computed_types: &mut HashMap<RulePath, Arc<LemmaType>>,
+    resolved_types: &ResolvedTypesMap,
+    cache: &mut InferExpressionTypeCache,
+) {
+    if computed_types.contains_key(rule) {
+        return;
+    }
+    if !graph.rules().contains_key(rule) {
+        return;
+    }
+    let mut reachable = Vec::new();
+    let mut queued = HashSet::new();
+    let mut pending = VecDeque::from([rule.clone()]);
+    queued.insert(rule.clone());
+    while let Some(path) = pending.pop_front() {
+        let node = graph
+            .rules()
+            .get(&path)
+            .expect("BUG: local rule missing from graph in ensure_seed");
+        reachable.push(path);
+        for (_, result) in &node.branches {
+            for dependency in local_rule_names_in(node.expression.at(*result), graph) {
+                if queued.insert(dependency.clone()) {
+                    pending.push_back(dependency);
+                }
+            }
+        }
+    }
+    for path in &reachable {
+        computed_types
+            .entry(path.clone())
+            .or_insert_with(|| Arc::new(LemmaType::undetermined_type()));
+    }
+    loop {
+        let mut changed = false;
+        for path in &reachable {
+            let current = computed_types
+                .get(path)
+                .expect("BUG: reachable seed rule missing placeholder");
+            if !current.vetoed() && !current.is_undetermined() {
+                continue;
+            }
+            let node = graph
+                .rules()
+                .get(path)
+                .expect("BUG: reachable seed rule missing from graph");
+            cache.clear();
+            let seed = node.branches.iter().find_map(|(_, result)| {
+                seed_type(
+                    node.expression.at(*result),
+                    graph,
+                    computed_types,
+                    resolved_types,
+                    cache,
+                )
+            });
+            if let Some(seed) = seed {
+                computed_types.insert(path.clone(), seed);
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
 }
 
 /// Type `expression` has whatever the recursive rule being seeded (typed undetermined
@@ -9893,17 +12219,99 @@ fn seed_type(
 ) -> Option<Arc<LemmaType>> {
     let mut pending = vec![expression];
     while let Some(node) = pending.pop() {
-        let inferred = infer_expression_type(node, graph, computed_types, resolved_types, cache);
-        if !inferred.vetoed() && !inferred.is_undetermined() {
-            return Some(inferred);
-        }
         let (fixed, children) = seed_candidates(node);
-        if fixed.is_some() {
-            return fixed;
+        if let Some(fixed) = fixed {
+            return Some(fixed);
         }
-        pending.extend(children.into_iter().rev().map(|id| node.child(id)));
+        if !children.is_empty() {
+            // Expand before full infer: helpers in `own + children_cost` may be untyped.
+            pending.extend(children.into_iter().rev().map(|id| node.child(id)));
+            continue;
+        }
+        match node.kind() {
+            ExpressionKind::RulePath(rule) => {
+                if let Some(lemma_type) = computed_types.get(rule) {
+                    if !lemma_type.vetoed() && !lemma_type.is_undetermined() {
+                        return Some(Arc::clone(lemma_type));
+                    }
+                }
+            }
+            _ => {
+                let inferred =
+                    infer_expression_type(node, graph, computed_types, resolved_types, cache);
+                if !inferred.vetoed() && !inferred.is_undetermined() {
+                    return Some(inferred);
+                }
+            }
+        }
     }
     None
+}
+
+/// Local rules that `node` and its table prefix name (operands precede parents).
+fn local_rule_names_in(node: ExprRef<'_, ExpressionKind>, graph: &Graph<'_>) -> Vec<RulePath> {
+    let mut out = Vec::new();
+    for index in 0..=node.id.index() {
+        let child = node.child(ExprId::from_index(index));
+        match child.kind() {
+            ExpressionKind::RulePath(rule) => {
+                if graph.rules().contains_key(rule) {
+                    out.push(rule.clone());
+                }
+            }
+            ExpressionKind::RowField { end, .. } => {
+                push_local_rule_from_row_end(graph, end, &mut out);
+            }
+            ExpressionKind::SpecMember { path, name, .. } => {
+                let identity = &graph.instance_lists().self_identity;
+                if let Some(fields) = row_fields(graph, identity) {
+                    let mut parts: Vec<&str> = path.iter().map(String::as_str).collect();
+                    parts.push(name);
+                    if let Some([hop]) = fields.chain(graph, identity, &parts).as_deref() {
+                        push_local_rule_from_row_end(graph, &hop.end, &mut out);
+                    }
+                }
+            }
+            ExpressionKind::DataPath(path) => {
+                if let Some(ReferenceEnd::Rule(rule)) = graph.reference_ends().get(path) {
+                    if graph.rules().contains_key(rule) {
+                        out.push(rule.clone());
+                    }
+                } else if let Some(DataDefinition::Reference {
+                    target: ReferenceTarget::Rule(rule),
+                    ..
+                }) = graph.data().get(path)
+                {
+                    if graph.rules().contains_key(rule) {
+                        out.push(rule.clone());
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+fn push_local_rule_from_row_end(graph: &Graph<'_>, end: &RowEnd, out: &mut Vec<RulePath>) {
+    match end {
+        RowEnd::Rule(rule) => {
+            if graph.rules().contains_key(rule) {
+                out.push(rule.clone());
+            }
+        }
+        RowEnd::Data(path) => {
+            if let Some(DataDefinition::Reference {
+                target: ReferenceTarget::Rule(rule),
+                ..
+            }) = graph.data().get(path)
+            {
+                if graph.rules().contains_key(rule) {
+                    out.push(rule.clone());
+                }
+            }
+        }
+    }
 }
 
 /// The type a node's kind fixes without looking inside, and otherwise the children whose
@@ -9926,13 +12334,13 @@ fn seed_candidates(node: ExprRef<'_, ExpressionKind>) -> (Option<Arc<LemmaType>>
             )
         }
         ExpressionKind::Comparison(..)
-        | ExpressionKind::LogicalAnd { .. }
+        | ExpressionKind::Logical { .. }
         | ExpressionKind::LogicalNegation(..) => {
             (Some(primitive_boolean_arc().clone()), Vec::new())
         }
         ExpressionKind::ListCommand { op, .. } => match op {
             ListOp::Count => (Some(primitive_number_arc().clone()), Vec::new()),
-            ListOp::Predicate { kind, .. } | ListOp::InstancePredicate { kind, .. } => match kind {
+            ListOp::Predicate { kind, .. } => match kind {
                 ListPredKind::Any | ListPredKind::All => {
                     (Some(primitive_boolean_arc().clone()), Vec::new())
                 }
@@ -9950,14 +12358,7 @@ fn seed_candidates(node: ExprRef<'_, ExpressionKind>) -> (Option<Arc<LemmaType>>
 }
 
 /// Unit name -> (owning type name when local to the spec, decomposition, factor).
-type UnitDecompLookup = HashMap<
-    String,
-    (
-        Option<String>,
-        BaseMeasureVector,
-        crate::computation::rational::RationalInteger,
-    ),
->;
+type UnitDecompLookup = HashMap<String, (Option<String>, BaseMeasureVector, RationalInteger)>;
 
 fn local_owner_name(owner: &PlanningOwner) -> Option<String> {
     match owner {
@@ -10111,16 +12512,24 @@ fn sort_derived_measure_types_for_resolution(
 /// owning unit name and type. An ambiguity (the same canonical key matched by two units in
 /// distinct types) is a planning error: the spec must rename one of the units or change
 /// its factor decomposition so it is unique.
+pub(crate) struct SignatureIndexBuild {
+    pub index: SignatureIndex,
+    pub deferred_cross_type: Vec<(String, BaseMeasureVector)>,
+}
+
 pub(crate) fn build_signature_index(
     spec_name: &str,
     unit_index: &UnitIndex,
-) -> Result<crate::computation::arithmetic::SignatureIndex, Error> {
+    already_resolved: &ResolvedTypesMap<'_>,
+) -> Result<SignatureIndexBuild, Error> {
     use crate::computation::arithmetic::SignatureIndex;
     let mut signature_index: SignatureIndex = SignatureIndex::new();
-    let mut sorted_units: Vec<_> = unit_index.iter_entries().collect();
+    let mut deferred_cross_type = Vec::new();
+    let mut sorted_units: Vec<_> = unit_index.iter_owners().collect();
     sorted_units.sort_by_key(|(name, _)| *name);
-    for (unit_name, lemma_type) in sorted_units {
+    for (unit_name, owner) in sorted_units {
         let unit_name = unit_name.to_string();
+        let lemma_type = owner.lemma_type();
         let TypeSpecification::Measure { units, .. } = &lemma_type.specifications else {
             continue;
         };
@@ -10136,6 +12545,9 @@ pub(crate) fn build_signature_index(
                 None::<String>,
             )
         })?;
+        if lemma_type.measure_type_decomposition().is_none() {
+            continue;
+        }
         // Identity signatures `[(name, 1)]` collide when the same bare name has
         // multiple owners. Skip those; keep unique identities so expand can
         // promote compounds that reduce to a single unique unit (e.g. eur).
@@ -10143,25 +12555,44 @@ pub(crate) fn build_signature_index(
             continue;
         }
         let owning_type_name = lemma_type.name.clone().unwrap_or_default();
-        let signature = unit.derived_measure_factors.clone();
+        let signature = if owner.import_path().is_empty() {
+            resolved_signature_key(
+                &unit.derived_measure_factors,
+                &unit_name,
+                lemma_type,
+                unit_index,
+            )
+        } else if let Some(key) = imported_signature_key(already_resolved, &unit_name, lemma_type) {
+            key
+        } else if measure_unit_is_simple(unit) {
+            // Declaring spec skipped this identity because the name had several
+            // owners there. Here it is unique, and the key is the unit's own family.
+            resolved_signature_key(
+                &unit.derived_measure_factors,
+                &unit_name,
+                lemma_type,
+                unit_index,
+            )
+        } else {
+            // Same type, same signature: the index keeps one slot, under the
+            // sibling unit that was inserted last (`square_meter` for `acre`).
+            continue;
+        };
         match signature_index.get(&signature) {
             Some((existing_unit_name, existing_owning_type))
                 if existing_owning_type.name() != lemma_type.name() =>
             {
                 let existing_type_name = existing_owning_type.name.clone().unwrap_or_default();
-                return Err(Error::validation(
+                let decomposition = lemma_type
+                    .measure_type_decomposition()
+                    .expect("BUG: indexed measure unit has no decomposition")
+                    .clone();
+                deferred_cross_type.push((
                     format!(
-                        "In spec '{}': ambiguous unit signature {:?}: matched by '{}' in type '{}' and '{}' in type '{}'. \
-                         Rename one or differentiate factors.",
-                        spec_name,
-                        signature,
-                        existing_unit_name,
-                        existing_type_name,
-                        unit_name,
-                        owning_type_name,
+                        "In spec '{spec_name}': ambiguous unit signature {signature:?}: matched by '{existing_unit_name}' in type '{existing_type_name}' and '{unit_name}' in type '{owning_type_name}'. \
+                         Rename one or differentiate factors."
                     ),
-                    None::<Source>,
-                    None::<String>,
+                    decomposition,
                 ));
             }
             _ => {
@@ -10169,7 +12600,103 @@ pub(crate) fn build_signature_index(
             }
         }
     }
-    Ok(signature_index)
+    Ok(SignatureIndexBuild {
+        index: signature_index,
+        deferred_cross_type,
+    })
+}
+
+fn resolved_signature_key(
+    factors: &[(String, i32)],
+    unit_name: &str,
+    lemma_type: &LemmaType,
+    unit_index: &UnitIndex,
+) -> Vec<SignatureFactor> {
+    use crate::computation::arithmetic::SignatureFactor;
+    let mut key = Vec::with_capacity(factors.len());
+    for (factor_name, exponent) in factors {
+        let (name, family) = if factor_name == unit_name {
+            (
+                factor_name.clone(),
+                lemma_type
+                    .measure_family()
+                    .expect("BUG: indexed measure unit has no family")
+                    .clone(),
+            )
+        } else {
+            let (bare, owner) = unit_index.resolve_owner(factor_name).unwrap_or_else(|err| {
+                panic!(
+                    "BUG: compound factor '{factor_name}' on unit '{unit_name}' must resolve: {err}"
+                )
+            });
+            (
+                bare,
+                owner
+                    .lemma_type()
+                    .measure_family()
+                    .expect("BUG: resolved factor owner is not a named measure")
+                    .clone(),
+            )
+        };
+        key.push(SignatureFactor {
+            name,
+            family,
+            exponent: *exponent,
+        });
+    }
+    key.sort_by(|left, right| {
+        (&left.family, left.name.as_str(), left.exponent).cmp(&(
+            &right.family,
+            right.name.as_str(),
+            right.exponent,
+        ))
+    });
+    key
+}
+
+/// Key already built for this unit by the spec that declared it.
+/// The imported owner holds the same `LemmaType` allocation as that index entry.
+fn imported_signature_key(
+    already_resolved: &ResolvedTypesMap<'_>,
+    unit_name: &str,
+    lemma_type: &Arc<LemmaType>,
+) -> Option<Vec<SignatureFactor>> {
+    for (_, _, types) in already_resolved {
+        for (key, (name, owner)) in &types.signature_index {
+            if name == unit_name && Arc::ptr_eq(owner, lemma_type) {
+                return Some(key.clone());
+            }
+        }
+    }
+    None
+}
+
+fn deferred_signature_errors(
+    graph: &Graph<'_>,
+    resolved_types: &ResolvedTypesMap,
+    inferred: &HashMap<RulePath, Arc<LemmaType>>,
+) -> Vec<Error> {
+    let Some(types) = resolved_types.iter().find_map(|(_, spec, types)| {
+        discovery::same_loaded_spec(spec, graph.main_spec()).then_some(types)
+    }) else {
+        return Vec::new();
+    };
+    let mut errors = Vec::new();
+    for (message, decomposition) in &types.deferred_signature_collisions {
+        let produced = inferred.values().any(|lemma_type| {
+            lemma_type.is_anonymous_measure()
+                && lemma_type.measure_type_decomposition() == Some(decomposition)
+        });
+        if produced {
+            continue;
+        }
+        errors.push(Error::validation(
+            message.clone(),
+            None::<Source>,
+            None::<String>,
+        ));
+    }
+    errors
 }
 
 /// Rebuild [`MeasureRange`] (and other range) specs for `ParentType::Ranged` declarations
@@ -10301,10 +12828,12 @@ fn apply_deferred_named_range_constraints(
             unit_index,
             named_types: resolved,
         };
+        let mut updated = lemma_type.as_ref().clone();
         match apply_constraints_to_spec(
             spec,
             &constraint_application_type_name(&def.parent, type_name),
-            lemma_type.specifications.clone(),
+            type_name,
+            &mut updated,
             constraints,
             &def.source,
             ConstraintSuggestionSink {
@@ -10313,9 +12842,7 @@ fn apply_deferred_named_range_constraints(
                 resolve_unit: Some(&resolve),
             },
         ) {
-            Ok(updated_specs) => {
-                let mut updated = lemma_type.as_ref().clone();
-                updated.specifications = updated_specs;
+            Ok(()) => {
                 let updated_arc = Arc::new(updated);
                 if let Some(raw) = declared_suggestion {
                     match bound_value_kind_from_raw_suggestion(
@@ -10484,7 +13011,7 @@ fn lookup_leaf_parent_type(
                 lemma_type,
             ))
         }
-        ParentType::Custom { name } => {
+        ParentType::Custom { name, .. } => {
             if let Some((parent_type, parent_suggestion, parent_value)) =
                 resolved.get(name.as_str())
             {
@@ -10571,6 +13098,24 @@ fn lookup_leaf_parent_type(
                         None,
                     )]);
                 }
+                if resolver
+                    .context
+                    .spec_set(resolver.registered_repository(spec), name)
+                    .is_some()
+                {
+                    return Err(vec![Error::validation_with_context(
+                        format!(
+                            "Unknown parent '{parent}' for {site}: '{name}' is a spec, not a name in spec '{}'. Only the local names of `uses` lines exist inside a spec",
+                            spec.name
+                        ),
+                        Some(source.clone()),
+                        Some(format!(
+                            "Add `uses {name}`, or write the local name of the `uses` line that imports '{name}'."
+                        )),
+                        Some(spec),
+                        None,
+                    )]);
+                }
                 return Err(vec![Error::validation_with_context(
                     format!(
                         "Unknown parent '{parent}' for {site}. Parent must be defined before use. Valid primitive types are: boolean, measure, number, ratio, text, date, time"
@@ -10593,13 +13138,28 @@ fn lookup_leaf_parent_type(
             )])
         }
         ParentType::Qualified { spec_alias, inner } => {
-            let Some(spec_ref) = spec.data.iter().find_map(|row| {
+            let spec_ref = spec.data.iter().find_map(|row| {
                 if row.reference.segments.is_empty() && row.reference.name == *spec_alias {
-                    row.value.uses_spec_ref()
+                    row.value
+                        .uses_spec_ref()
+                        .cloned()
+                        .or_else(|| discovery::data_instance_list_spec_ref(spec, row))
                 } else {
                     None
                 }
-            }) else {
+            });
+            let Some(spec_ref) = spec_ref else {
+                if spec.rules.iter().any(|rule| rule.name == *spec_alias) {
+                    return Err(vec![Error::validation_with_context(
+                        format!(
+                            "'{spec_alias}' is a local rule, not a type path. Row fields in type position name a `uses` import or a `data` instance list, not a rule."
+                        ),
+                        Some(source.clone()),
+                        None::<String>,
+                        Some(spec),
+                        None,
+                    )]);
+                }
                 return Err(vec![Error::validation_with_context(
                     format!("'{spec_alias}' is not a `uses` import alias in this spec"),
                     Some(source.clone()),
@@ -10611,7 +13171,7 @@ fn lookup_leaf_parent_type(
                 )]);
             };
             let (_, target_spec) =
-                match resolver.resolve_spec_for_import(spec, spec_ref, source, at) {
+                match resolver.resolve_spec_for_import(spec, &spec_ref, source, at) {
                     Ok(import_pair) => import_pair,
                     Err(error) => return Err(vec![error]),
                 };
@@ -10625,7 +13185,7 @@ fn lookup_leaf_parent_type(
                         lemma_type,
                     ))
                 }
-                ParentType::Custom { name } => {
+                ParentType::Custom { name, .. } => {
                     let Some(resolved_spec_types) = already_resolved
                         .iter()
                         .find(|(_, imported, _)| discovery::same_loaded_spec(imported, target_spec))
@@ -10734,7 +13294,7 @@ fn topo_sort_type_names(
     let mut dependents: Vec<Vec<usize>> = vec![Vec::new(); type_count];
     for (child_index, type_name) in type_names.iter().enumerate() {
         let custom_parent = match element_parent_type(&data_defs[type_name].parent) {
-            ParentType::Custom { name } => Some(name.as_str()),
+            ParentType::Custom { name, .. } => Some(name.as_str()),
             _ => None,
         };
         let Some(parent_name) = custom_parent else {
@@ -10808,7 +13368,7 @@ fn partition_list_type_names(
     loop {
         let before = list_names.len();
         for (name, def) in data_defs {
-            if let ParentType::Custom { name: parent } = element_parent_type(&def.parent) {
+            if let ParentType::Custom { name: parent, .. } = element_parent_type(&def.parent) {
                 if list_names.contains(parent) {
                     list_names.insert(name.clone());
                 }
@@ -10830,7 +13390,7 @@ type TypeMap = IndexMap<String, Arc<LemmaType>>;
 
 fn resolve_measure_decompositions(
     spec_name: &str,
-    this_spec: &SpecIdentity,
+    this_spec: &SpecVersionKey,
     mut resolved: TypeMap,
     unit_index: &PlanningUnitIndex,
     type_sources: &HashMap<String, Source>,
@@ -11035,12 +13595,12 @@ fn resolve_measure_decompositions(
 
         let mut resolved_type_decomp: Option<BaseMeasureVector> = already_resolved_body;
         let mut unit_errors: Vec<Error> = Vec::new();
-        let mut resolved_unit_factors: Vec<Option<crate::computation::rational::RationalInteger>> =
+        let mut resolved_unit_factors: Vec<Option<RationalInteger>> =
             vec![None; units_snapshot.len()];
         let mut resolve_to_simple: Vec<bool> = vec![false; units_snapshot.len()];
 
         for (unit_idx, unit) in units_snapshot.iter().enumerate() {
-            if crate::planning::semantics::calendar_unit_factor(&unit.name).is_some()
+            if calendar_unit_factor(&unit.name).is_some()
                 && !resolved[type_name].has_trait_calendar()
             {
                 unit_errors.push(Error::validation(
@@ -11100,6 +13660,32 @@ fn resolve_measure_decompositions(
                 type_source.as_ref(),
             ) {
                 Ok((unit_decomp, derived_factor)) => {
+                    if let [(referenced, 1)] = unit.derived_measure_factors.as_slice() {
+                        let (bare_name, owner) = unit_index
+                            .resolve_owner(referenced, &resolved)
+                            .unwrap_or_else(|err| {
+                                panic!(
+                                    "BUG: factor '{referenced}' resolved for its conversion but not for its owner: {err}"
+                                )
+                            });
+                        let owning_type = owner.lemma_type(&resolved);
+                        let owner_family = owning_type
+                            .measure_family()
+                            .expect("BUG: resolved unit owner is not a named measure");
+                        let declaring_family = resolved[type_name]
+                            .measure_family()
+                            .expect("BUG: declaring measure has no family");
+                        if owner_family != declaring_family {
+                            unit_errors.push(Error::validation(
+                                format!(
+                                    "In spec '{spec_name}': unit '{}' in measure type '{type_name}' cannot use a single unit from another measure. '{bare_name}' belongs to '{}'.",
+                                    unit.name, owner_family.name
+                                ),
+                                type_source.clone(),
+                                None::<String>,
+                            ));
+                        }
+                    }
                     // Same-family scale (`workday: 8 hour` on duration): resolved decomp matches
                     // the declaring type's declared decomp → simple identity + expanded factor.
                     if unit_decomp == declared_measure_decomposition(resolved[type_name].as_ref()) {
@@ -11206,6 +13792,7 @@ fn finalize_lemma_measure_magnitudes(
         name,
         mut specifications,
         extends,
+        options,
     } = lemma_type;
     semantics::finalize_measure_unit_constraint_magnitudes(
         &mut specifications,
@@ -11216,6 +13803,7 @@ fn finalize_lemma_measure_magnitudes(
         name,
         specifications,
         extends,
+        options,
     })
 }
 
@@ -11296,7 +13884,7 @@ fn reserved_calendar_units_in_measure(lemma_type: &LemmaType) -> Vec<String> {
     };
     units
         .iter()
-        .filter(|u| crate::planning::semantics::calendar_unit_factor(&u.name).is_some())
+        .filter(|u| calendar_unit_factor(&u.name).is_some())
         .map(|u| u.name.clone())
         .collect()
 }
@@ -11325,13 +13913,7 @@ fn resolve_compound_unit(
     unit_index: &PlanningUnitIndex,
     resolved: &IndexMap<String, Arc<LemmaType>>,
     source: Option<&Source>,
-) -> Result<
-    (
-        BaseMeasureVector,
-        crate::computation::rational::RationalInteger,
-    ),
-    Error,
-> {
+) -> Result<(BaseMeasureVector, RationalInteger), Error> {
     use crate::computation::bigint::BigInt;
     use crate::computation::rational::{checked_mul, checked_pow_integer};
 
@@ -11452,7 +14034,7 @@ fn overflow_to_validation_error(
     unit_name: &str,
     declaring_type_name: &str,
     measure_ref: &str,
-    failure: crate::computation::rational::NumericFailure,
+    failure: NumericFailure,
     source: Option<&Source>,
 ) -> Error {
     Error::validation(
@@ -11477,7 +14059,7 @@ fn unit_exponent_limit_error(
             spec_name,
             unit_name,
             declaring_type_name,
-            crate::limits::MAX_UNIT_EXPONENT
+            MAX_UNIT_EXPONENT
         ),
         source.cloned(),
         None::<String>,
@@ -11492,7 +14074,7 @@ fn accumulate(
 ) -> Option<()> {
     let entry = result.entry(dim.clone()).or_insert(0);
     *entry = entry.checked_add(value)?;
-    if entry.unsigned_abs() > crate::limits::MAX_UNIT_EXPONENT.unsigned_abs() {
+    if entry.unsigned_abs() > MAX_UNIT_EXPONENT.unsigned_abs() {
         return None;
     }
     if *entry == 0 {
@@ -11539,13 +14121,17 @@ mod tests {
             .and_then(|ss| ss.get_exact(main_spec.effective_from()))
             .expect("main_spec must be in all_specs");
         let limits = Box::leak(Box::new(crate::ResourceLimits::default()));
-        let ordered_dependencies =
-            discovery::discover_dependency_order(ctx, main_spec_ref, &effective, limits).map_err(
-                |e| match e {
-                    discovery::DependencyDiscoveryError::Cycle(es)
-                    | discovery::DependencyDiscoveryError::Other(es) => es,
-                },
-            )?;
+        let ordered_dependencies = discovery::discover_dependency_order(
+            ctx,
+            &repository,
+            main_spec_ref,
+            &effective,
+            limits,
+        )
+        .map_err(|e| match e {
+            discovery::DependencyDiscoveryError::Cycle(es)
+            | discovery::DependencyDiscoveryError::Other(es) => es,
+        })?;
         let ordered_dependencies = Box::leak(Box::new(ordered_dependencies));
         let mut interners = instance_list::PassInterners::default();
         match Graph::build(
@@ -11576,6 +14162,8 @@ mod tests {
                 base: None,
                 constraints: None,
                 value: Some(value),
+
+                list: None,
             },
             source_location: test_source(),
         }
@@ -11597,6 +14185,8 @@ mod tests {
                 base: None,
                 constraints: None,
                 value: Some(Value::Number(2.into())),
+
+                list: None,
             },
             source_location: test_source(),
         });
@@ -12147,6 +14737,8 @@ rule landed_cost_per_kg:
                     }),
                     constraints: None,
                     value: None,
+
+                    list: None,
                 },
                 source_location: type_source.clone(),
             })
@@ -12158,6 +14750,8 @@ rule landed_cost_per_kg:
                     }),
                     constraints: None,
                     value: None,
+
+                    list: None,
                 },
                 source_location: type_source,
             });
@@ -12181,6 +14775,8 @@ rule landed_cost_per_kg:
                     }),
                     constraints: None,
                     value: None,
+
+                    list: None,
                 },
                 source_location: type_source_b.clone(),
             })
@@ -12192,6 +14788,8 @@ rule landed_cost_per_kg:
                     }),
                     constraints: None,
                     value: None,
+
+                    list: None,
                 },
                 source_location: type_source_b,
             });
@@ -12235,21 +14833,20 @@ rule result: m.x"#;
         let consumer = specs.iter().find(|d| d.name == "consumer").unwrap();
 
         let graph = build_graph(consumer, &specs).unwrap();
-        let data_path = DataPath {
-            segments: vec![PathSegment {
-                uses: "m".to_string(),
-                repository: None,
-                spec: "myspec".to_string(),
-            }],
-            data: "x".to_string(),
+        let Some(DataDefinition::Import { row, .. }) = graph.data.get(&DataPath::local("m".into()))
+        else {
+            panic!("`m` is an import slot of the consumer graph");
         };
+        assert_eq!(row.identity.spec, "myspec");
         assert!(
-            !graph.data.contains_key(&data_path),
-            "scalar nested data stays on the template; consumer holds the Import marker only"
-        );
-        assert!(
-            matches!(graph.lookup_data(&data_path), Some(DataLookup::Import(_))),
-            "Ref should peel to myspec.x"
+            matches!(
+                graph
+                    .template_of_row(row)
+                    .data
+                    .get(&DataPath::local("x".into())),
+                Some(DataDefinition::Value { .. })
+            ),
+            "`m` reads `x` of the one `myspec` template"
         );
     }
 
@@ -12301,35 +14898,22 @@ rule r: i.x
             segments: Vec::new(),
             data: "i".to_string(),
         };
-        match graph.data().get(&alias_path) {
-            Some(DataDefinition::Import { identity, .. }) => {
-                assert_eq!(identity.spec, "inner");
-            }
-            other => panic!(
+        let Some(DataDefinition::Import { row, .. }) = graph.data().get(&alias_path) else {
+            panic!(
                 "alias path 'i' must be DataDefinition::Import, got {:?}",
-                other
-            ),
-        }
-
-        let nested_path = DataPath {
-            segments: vec![PathSegment {
-                uses: "i".to_string(),
-                repository: None,
-                spec: "inner".to_string(),
-            }],
-            data: "x".to_string(),
+                graph.data().get(&alias_path)
+            );
         };
+        assert_eq!(row.identity.spec, "inner");
+        assert!(matches!(row.origin, RowOrigin::Import { ref alias } if alias.as_ref() == "i"));
         assert!(
-            !graph.data().contains_key(&nested_path),
-            "scalar nested data stays on the template; consumer holds the Import marker only"
+            row.bindings.iter().all(Option::is_none),
+            "`uses i: inner` without `-> with` binds no slot of the import row"
         );
-        let peeled = graph
-            .lookup_data(&nested_path)
-            .expect("nested data i.x must peel to the inner template field");
         assert!(
-            matches!(peeled, DataLookup::Import(_)),
-            "i.x must resolve through the import template, got {:?}",
-            peeled.definition()
+            graph.data().keys().all(|path| path.segments.is_empty()),
+            "the consumer graph holds its own data only, got {:?}",
+            graph.data().keys().collect::<Vec<_>>()
         );
     }
 
@@ -12421,7 +15005,7 @@ rule r: i.x
                     spec_refs.push(s);
                 }
             }
-            let mut resolver = TypeResolver::new(ctx);
+            let mut resolver = TypeResolver::new(ctx, HashMap::new());
             for spec in &spec_refs {
                 resolver.register_all(&repository, spec);
             }
@@ -12468,7 +15052,7 @@ rule r: i.x
         #[test]
         fn test_register_data_type_def() {
             let (ctx, spec) = context_with_test_spec();
-            let mut resolver = TypeResolver::new(ctx);
+            let mut resolver = TypeResolver::new(ctx, HashMap::new());
             let ftd = DataTypeDef {
                 parent: ParentType::Primitive {
                     primitive: PrimitiveKind::Number,
@@ -12518,7 +15102,7 @@ rule r: i.x
                 bound_literal: None,
             };
 
-            let result = resolver.register_type(spec, ftd);
+            let result = resolver.register_type(&ctx.workspace(), spec, ftd);
             assert!(result.is_ok());
             let resolved = resolver
                 .resolve_and_validate(spec, &EffectiveDate::Origin, &Vec::new())
@@ -12529,7 +15113,7 @@ rule r: i.x
         #[test]
         fn test_register_duplicate_type_fails() {
             let (ctx, spec) = context_with_test_spec();
-            let mut resolver = TypeResolver::new(ctx);
+            let mut resolver = TypeResolver::new(ctx, HashMap::new());
             let ftd = DataTypeDef {
                 parent: ParentType::Primitive {
                     primitive: PrimitiveKind::Number,
@@ -12547,15 +15131,18 @@ rule r: i.x
                 name: "money".to_string(),
                 bound_literal: None,
             };
-            resolver.register_type(spec, ftd.clone()).unwrap();
-            let result = resolver.register_type(spec, ftd);
+            let repository = ctx.workspace();
+            resolver
+                .register_type(&repository, spec, ftd.clone())
+                .unwrap();
+            let result = resolver.register_type(&repository, spec, ftd);
             assert!(result.is_err());
         }
 
         #[test]
         fn test_resolve_custom_type_from_primitive() {
             let (ctx, spec) = context_with_test_spec();
-            let mut resolver = TypeResolver::new(ctx);
+            let mut resolver = TypeResolver::new(ctx, HashMap::new());
             let ftd = DataTypeDef {
                 parent: ParentType::Primitive {
                     primitive: PrimitiveKind::Number,
@@ -12574,7 +15161,7 @@ rule r: i.x
                 bound_literal: None,
             };
 
-            resolver.register_type(spec, ftd).unwrap();
+            resolver.register_type(&ctx.workspace(), spec, ftd).unwrap();
             let resolved = resolver
                 .resolve_and_validate(spec, &EffectiveDate::Origin, &Vec::new())
                 .unwrap();
@@ -12646,7 +15233,7 @@ rule r: i.x
         fn test_type_definition_with_multiple_commands() {
             let (resolver, spec) = resolver_single_spec(
                 r#"spec test
-    data money: measure -> decimals 2 -> unit eur: 1.0 -> unit usd: 1.18"#,
+    data money: measure -> unit eur: 1.0 -> unit usd: 1.18 -> minimum 0 eur"#,
             );
 
             let resolved_types = resolver
@@ -12655,10 +15242,8 @@ rule r: i.x
             let money_type = resolved_types.resolved.get("money").unwrap();
 
             match &money_type.specifications {
-                TypeSpecification::Measure {
-                    decimals, units, ..
-                } => {
-                    assert_eq!(*decimals, Some(2));
+                TypeSpecification::Measure { minimum, units, .. } => {
+                    assert_eq!(minimum.as_ref().map(|(_, unit)| unit.as_str()), Some("eur"));
                     assert_eq!(units.len(), 2);
                     assert!(units.iter().any(|u| u.name == "eur"));
                     assert!(units.iter().any(|u| u.name == "usd"));
@@ -12711,47 +15296,41 @@ rule r: i.x
         }
 
         #[test]
-        fn test_measure_type_decimals_only() {
+        fn test_measure_type_rejects_decimals() {
             let (resolver, spec) = resolver_single_spec(
                 r#"spec test
     data weight: measure -> unit kg: 1 -> decimals 3"#,
             );
 
-            let resolved_types = resolver
+            let errors = resolver
                 .resolve_and_validate(spec, &EffectiveDate::Origin, &Vec::new())
-                .unwrap();
-            let weight_type = resolved_types.resolved.get("weight").unwrap();
-
-            match &weight_type.specifications {
-                TypeSpecification::Measure { decimals, .. } => {
-                    assert_eq!(*decimals, Some(3));
-                }
-                _ => panic!("Expected Measure type with decimals 3"),
-            }
+                .expect_err("decimals on a measure must be a planning error");
+            let messages: Vec<String> = errors.iter().map(|e| e.to_string()).collect();
+            assert!(
+                messages.iter().any(|m| m.contains(
+                    "'decimals' is not valid on measure type 'weight': precision depends on the unit. Round in a rule instead, for example 'weight -> round 0.001 kg'."
+                )),
+                "got: {messages:?}"
+            );
         }
 
         #[test]
-        fn test_ratio_type_accepts_optional_decimals_command() {
+        fn test_ratio_type_rejects_decimals() {
             let (resolver, spec) = resolver_single_spec(
                 r#"spec test
     data ratio_type: ratio -> decimals 2"#,
             );
 
-            let resolved_types = resolver
+            let errors = resolver
                 .resolve_and_validate(spec, &EffectiveDate::Origin, &Vec::new())
-                .unwrap();
-            let ratio_type = resolved_types.resolved.get("ratio_type").unwrap();
-
-            match &ratio_type.specifications {
-                TypeSpecification::Ratio { decimals, .. } => {
-                    assert_eq!(
-                        *decimals,
-                        Some(2),
-                        "ratio type should accept decimals command"
-                    );
-                }
-                _ => panic!("Expected Ratio type with decimals 2"),
-            }
+                .expect_err("decimals on a ratio must be a planning error");
+            let messages: Vec<String> = errors.iter().map(|e| e.to_string()).collect();
+            assert!(
+                messages.iter().any(|m| m.contains(
+                    "'decimals' is not valid on ratio type 'ratio_type': precision depends on the unit. Round in a rule instead, for example 'ratio_type -> round 0.01 percent'."
+                )),
+                "got: {messages:?}"
+            );
         }
 
         #[test]
@@ -13679,7 +16258,17 @@ rule r: i.x
         ) -> TypeSpecification {
             let mut suggestion: Option<RawSuggestion> = None;
             specs
-                .apply_constraint("test", command, args, &mut suggestion, &mut None, None)
+                .apply_constraint(
+                    ConstraintNames {
+                        type_name: "test",
+                        data_name: "test",
+                    },
+                    command,
+                    args,
+                    &mut suggestion,
+                    &mut None,
+                    None,
+                )
                 .unwrap();
             specs
         }
@@ -13799,7 +16388,10 @@ rule r: i.x
         fn text_minimum_command_is_rejected() {
             let mut specs = TypeSpecification::text();
             let res = specs.apply_constraint(
-                "test",
+                ConstraintNames {
+                    type_name: "test",
+                    data_name: "test",
+                },
                 TypeConstraintCommand::Minimum,
                 &[number_arg(5)],
                 &mut None,
@@ -13816,7 +16408,10 @@ rule r: i.x
         fn text_maximum_command_is_rejected() {
             let mut specs = TypeSpecification::text();
             let res = specs.apply_constraint(
-                "test",
+                ConstraintNames {
+                    type_name: "test",
+                    data_name: "test",
+                },
                 TypeConstraintCommand::Maximum,
                 &[number_arg(5)],
                 &mut None,
@@ -13831,16 +16426,27 @@ rule r: i.x
 
         #[test]
         fn validate_text_default_not_in_options() {
-            let specs = TypeSpecification::Text {
+            let mut lemma_type = LemmaType::primitive(TypeSpecification::Text {
                 length: None,
-                options: vec!["red".to_string(), "blue".to_string()],
                 help: String::new(),
-            };
-            let default = BoundValueKind::unbound(ValueKind::Text("green".to_string()));
+            });
+            lemma_type.options.values = vec![
+                crate::planning::semantics::OptionValue {
+                    value: crate::planning::semantics::BoundValueKind::unbound(ValueKind::Text(
+                        Arc::from("red"),
+                    )),
+                },
+                crate::planning::semantics::OptionValue {
+                    value: crate::planning::semantics::BoundValueKind::unbound(ValueKind::Text(
+                        Arc::from("blue"),
+                    )),
+                },
+            ];
+            let default = BoundValueKind::unbound(ValueKind::Text(Arc::from("green")));
 
             let src = test_source();
-            let errors = validate_type_specifications(
-                &specs,
+            let errors = validate_type_options(
+                &lemma_type,
                 Some(&default),
                 "suggestion",
                 "test",
@@ -13849,9 +16455,10 @@ rule r: i.x
                 &UnitIndex::new(),
             );
             assert_eq!(errors.len(), 1);
-            assert!(errors[0]
-                .to_string()
-                .contains("suggestion value 'green' is not in allowed options"));
+            assert!(
+                errors[0].to_string().contains("green")
+                    && errors[0].to_string().contains("allowed options")
+            );
         }
 
         #[test]
@@ -13859,7 +16466,6 @@ rule r: i.x
             let specs = TypeSpecification::Ratio {
                 minimum: Some(rational_new(2, 1)),
                 maximum: Some(rational_new(1, 1)),
-                decimals: None,
                 units: crate::planning::semantics::RatioUnits::new(),
                 unit: None,
                 help: String::new(),
@@ -13985,7 +16591,6 @@ rule r: i.x
             let spec = TypeSpecification::Measure {
                 minimum: Some((too_large, "eur".to_string())),
                 maximum: None,
-                decimals: None,
                 units: MeasureUnits(vec![crate::literals::MeasureUnit {
                     name: "eur".to_string(),
                     factor: rational_one(),
@@ -14033,7 +16638,6 @@ rule r: i.x
             let spec = TypeSpecification::Measure {
                 minimum: None,
                 maximum: Some((too_large, "eur".to_string())),
-                decimals: None,
                 units: MeasureUnits(vec![crate::literals::MeasureUnit {
                     name: "eur".to_string(),
                     factor: rational_one(),
@@ -14077,7 +16681,6 @@ rule r: i.x
             let spec = TypeSpecification::Measure {
                 minimum: None,
                 maximum: None,
-                decimals: None,
                 units: MeasureUnits(vec![crate::literals::MeasureUnit {
                     name: "eur".to_string(),
                     factor: rational_one(),
@@ -14129,7 +16732,6 @@ rule r: i.x
                 specifications: TypeSpecification::Measure {
                     minimum: None,
                     maximum: None,
-                    decimals: None,
                     units: MeasureUnits(vec![crate::literals::MeasureUnit {
                         name: "eur".to_string(),
                         factor: rational_new(1, 1),
@@ -14144,6 +16746,7 @@ rule r: i.x
                     unit: None,
                     help: String::new(),
                 },
+                options: TypeOptions::default(),
             });
 
             let literal = TypedLiteral {
@@ -14168,9 +16771,17 @@ rule r: i.x
             use crate::parsing::source::{Source, SourceType};
             use crate::planning::semantics::tests::primitive_measure_arc;
 
-            let ctx = Box::leak(Box::new(Context::new()));
-            let resolver = TypeResolver::new(ctx);
-            let spec = LemmaSpec::new("t".to_string());
+            let mut ctx = Context::new();
+            let repository = ctx.workspace();
+            ctx.insert_spec(Arc::clone(&repository), LemmaSpec::new("t".to_string()))
+                .unwrap();
+            let ctx: &'static Context = Box::leak(Box::new(ctx));
+            let mut resolver = TypeResolver::new(ctx, HashMap::new());
+            let spec = ctx
+                .spec_set(&ctx.workspace(), "t")
+                .and_then(|ss| ss.get_exact(None))
+                .expect("inserted");
+            assert!(resolver.register_all(&ctx.workspace(), spec).is_empty());
             let source = Source::new(
                 SourceType::Volatile,
                 Span {
@@ -14185,9 +16796,7 @@ rule r: i.x
                 "band".to_string(),
                 DataTypeDef {
                     parent: ParentType::Ranged {
-                        inner: Box::new(ParentType::Custom {
-                            name: "ghost".to_string(),
-                        }),
+                        inner: Box::new(ParentType::custom("ghost")),
                     },
                     constraints: None,
                     source: source.clone(),
@@ -14203,7 +16812,7 @@ rule r: i.x
 
             let errors = refresh_named_range_specs(
                 &resolver,
-                &spec,
+                spec,
                 &data_defs,
                 &mut resolved_types,
                 &already_resolved,
@@ -14223,7 +16832,7 @@ rule r: i.x
             );
         }
 
-        fn apply_n_text_options(option_count: usize) -> TypeSpecification {
+        fn apply_n_text_options(option_count: usize) -> LemmaType {
             let spec = LemmaSpec::new("wide_options".to_string());
             let source = test_source();
             let constraints: Vec<Constraint> = (0..option_count)
@@ -14239,10 +16848,12 @@ rule r: i.x
                 .collect();
             let mut suggestion = None;
             let mut value = None;
+            let mut lemma_type = LemmaType::primitive(TypeSpecification::text());
             apply_constraints_to_spec(
                 &spec,
                 "code",
-                TypeSpecification::text(),
+                "code",
+                &mut lemma_type,
                 &constraints,
                 &source,
                 ConstraintSuggestionSink {
@@ -14251,18 +16862,14 @@ rule r: i.x
                     resolve_unit: None,
                 },
             )
-            .expect("options must apply")
+            .expect("options must apply");
+            lemma_type
         }
 
         #[test]
         fn apply_constraints_many_text_options_preserve_count() {
             for count in [16_usize, 64] {
-                match apply_n_text_options(count) {
-                    TypeSpecification::Text { options, .. } => {
-                        assert_eq!(options.len(), count);
-                    }
-                    other => panic!("expected Text, got {other:?}"),
-                }
+                assert_eq!(apply_n_text_options(count).options.values.len(), count);
             }
         }
     }
@@ -14353,7 +16960,7 @@ rule r: i.x
                 .get_exact(None)
                 .expect("lemma units spec");
 
-            let mut resolver = TypeResolver::new(ctx);
+            let mut resolver = TypeResolver::new(ctx, HashMap::new());
             for spec in [units, worker] {
                 resolver
                     .register_all(&alpha_repo, spec)
@@ -14449,7 +17056,6 @@ rule r: i.x
                 TypeSpecification::Measure {
                     minimum: None,
                     maximum: None,
-                    decimals: None,
                     units: MeasureUnits(vec![
                         MeasureUnit {
                             name: "gram".to_string(),
@@ -14492,6 +17098,7 @@ rule r: i.x
                     .range_from_element()
                     .expect("BUG: weight measure defines MeasureRange"),
                 extends: weight.extends.clone(),
+                options: TypeOptions::default(),
             })
         }
 
@@ -14509,7 +17116,6 @@ rule r: i.x
                 TypeSpecification::Measure {
                     minimum: None,
                     maximum: None,
-                    decimals: None,
                     units: MeasureUnits(vec![MeasureUnit {
                         name: "month".to_string(),
                         factor: rational_one(),
@@ -14634,9 +17240,11 @@ rule r: i.x
             let gram = weight_measure_type();
             let unit_index = UnitIndex::new();
             let signature_index = crate::computation::arithmetic::SignatureIndex::new();
+            let named = IndexMap::new();
             let scope = MeasureScope {
                 unit_index: &unit_index,
                 signature_index: &signature_index,
+                named_types: &named,
             };
             let result = compute_arithmetic_result_type(
                 weight_range,
@@ -14656,9 +17264,11 @@ rule r: i.x
             let gram = weight_measure_type();
             let unit_index = UnitIndex::new();
             let signature_index = crate::computation::arithmetic::SignatureIndex::new();
+            let named = IndexMap::new();
             let scope = MeasureScope {
                 unit_index: &unit_index,
                 signature_index: &signature_index,
+                named_types: &named,
             };
             let result = compute_arithmetic_result_type(
                 weight_range,
@@ -14678,9 +17288,11 @@ rule r: i.x
             let duration = duration_like_measure_type();
             let unit_index = UnitIndex::new();
             let signature_index = crate::computation::arithmetic::SignatureIndex::new();
+            let named = IndexMap::new();
             let scope = MeasureScope {
                 unit_index: &unit_index,
                 signature_index: &signature_index,
+                named_types: &named,
             };
             let result = compute_arithmetic_result_type(
                 date_range,
@@ -14699,9 +17311,11 @@ rule r: i.x
             let calendar = calendar_like_measure_type();
             let unit_index = UnitIndex::new();
             let signature_index = crate::computation::arithmetic::SignatureIndex::new();
+            let named = IndexMap::new();
             let scope = MeasureScope {
                 unit_index: &unit_index,
                 signature_index: &signature_index,
+                named_types: &named,
             };
             let result = compute_arithmetic_result_type(
                 date_range,
@@ -14720,11 +17334,10 @@ rule r: i.x
 
 /// Fully resolved types for a single spec.
 /// After resolution, all imports are inlined — specs are independent.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default)]
 pub struct ResolvedSpecTypes {
     /// Resolved [`LemmaType`] for each **data type row name** declared in this spec (`data name: …`).
     /// Planning-only: includes measure units and post-`resolve_measure_decompositions` decomposition.
-    #[serde(with = "crate::snapshot::shared::arc_index_map")]
     pub resolved: IndexMap<String, Arc<LemmaType>>,
 
     /// Declared default per named type (e.g. `type rate: ratio -> suggest 50%`).
@@ -14753,15 +17366,18 @@ pub struct ResolvedSpecTypes {
 
     /// List types written in this spec's rules (`money list -> with ...`), keyed by the
     /// written type, in order of first appearance.
-    #[serde(with = "crate::snapshot::shared::arc_pair_vec")]
     pub(crate) rule_list_types: Vec<(ParentType, Arc<LemmaType>)>,
 
     /// Expression-scope units. One declarer per bare unit name; qualify with Type.unit or alias.Type.unit.
     /// Binding aliases never appear as index keys.
     pub unit_index: crate::planning::unit_index::UnitIndex,
 
+    /// Cross-type unit-signature collisions. Emitted after rules are typed, unless a
+    /// rule result is already the anonymous measure of that decomposition.
+    pub(crate) deferred_signature_collisions:
+        Vec<(String, crate::planning::semantics::BaseMeasureVector)>,
+
     /// Names of unit owners until [`PlanningUnitIndex::bind`] after magnitudes.
-    #[serde(skip)]
     planning_unit_index: PlanningUnitIndex,
 
     /// Reverse index: canonical-form unit signature → (unit_name, owning type).
@@ -14793,6 +17409,8 @@ pub(crate) struct TypeResolver<'a> {
     /// downstream code (`add_data`) relies on every type-resolving data row
     /// being present in the resolved type map.
     specs_with_failed_registration: Vec<&'a LemmaSpec>,
+    /// Slices of every spec version in the dependency order of the graph being built.
+    slices: HashMap<SpecVersionKey, Arc<instance_list::VersionSlices>>,
 }
 
 /// Parent type used for measure-family lookup, unwrapping [`ParentType::Ranged`].
@@ -14885,76 +17503,98 @@ fn inferred_parent_type_from_literal(value: &ast::Value) -> Result<ParentType, S
 }
 
 impl<'a> TypeResolver<'a> {
-    pub fn new(context: &'a Context) -> Self {
+    pub fn new(
+        context: &'a Context,
+        slices: HashMap<SpecVersionKey, Arc<instance_list::VersionSlices>>,
+    ) -> Self {
         TypeResolver {
             data_types: Vec::new(),
             context,
             all_registered_specs: Vec::new(),
             specs_with_failed_registration: Vec::new(),
+            slices,
         }
     }
 
-    /// `data x: some_spec list` names a spec where a type belongs; suggest `uses`.
-    fn spec_list_error(
+    /// Identity of `spec`, resolved at `at`, in the slice that holds `at`.
+    fn identity_at(
         &self,
+        repository: &LemmaRepository,
         spec: &LemmaSpec,
-        declared_name: &str,
-        parent: &ParentType,
-        source: &Source,
-    ) -> Option<Error> {
-        let name = self.list_of_spec_name(spec, parent)?;
-        Some(Error::validation_with_context(
-            format!(
-                "'{name}' names a spec. Declare an instance list with `uses {declared_name}: {name} list`"
-            ),
-            Some(source.clone()),
-            None::<String>,
-            Some(spec),
-            None,
-        ))
+        at: &EffectiveDate,
+    ) -> SpecIdentity {
+        self.slices
+            .get(&SpecVersionKey::of(repository, spec))
+            .expect("BUG: a spec type resolution reaches is in the graph's dependency order")
+            .identity_at(repository, spec, at)
     }
 
-    /// [`Self::spec_list_error`] for a list type written in a rule.
-    fn rule_spec_list_error(
+    /// Spec-element `name list` written in a rule: list type with Spec element (numbered key;
+    /// `-> key` refines the key during conversion).
+    fn rule_spec_element_list_type(
         &self,
         spec: &LemmaSpec,
         parent: &ParentType,
         source: &Source,
-    ) -> Option<Error> {
-        let name = self.list_of_spec_name(spec, parent)?;
-        Some(Error::validation_with_context(
-            format!(
-                "'{name}' names a spec. Instance lists are declared as data with `uses`, not built in a rule"
-            ),
+        at: &EffectiveDate,
+    ) -> Option<Arc<LemmaType>> {
+        let (name, spec_ref) = Self::list_of_spec_name(spec, parent)?;
+        let (row_repository, row_spec) = match discovery::resolve_spec_ref_or_self(
+            self.context,
+            &spec_ref,
+            self.registered_repository(spec),
+            spec,
+            at,
             Some(source.clone()),
-            None::<String>,
-            Some(spec),
-            None,
-        ))
+        ) {
+            Ok(pair) => pair,
+            Err(_) => return None,
+        };
+        let identity = self.identity_at(&row_repository, row_spec, &spec_ref.at(at));
+        let element = Arc::new(LemmaType::primitive(TypeSpecification::Spec {
+            spec: identity,
+        }));
+        Some(Arc::new(LemmaType {
+            name: Some(format!("{name} list")),
+            specifications: TypeSpecification::List {
+                element,
+                key: ListKey::Numbered,
+                help: String::new(),
+            },
+            extends: TypeExtends::Primitive,
+            options: TypeOptions::default(),
+        }))
     }
 
-    /// `name` when `parent` is `name list` and `name` is a spec in `spec`'s repository.
-    fn list_of_spec_name<'p>(&self, spec: &LemmaSpec, parent: &'p ParentType) -> Option<&'p str> {
+    /// `name` and its row spec when `parent` is `name list` of spec rows: `name` is a local
+    /// name of a `uses` line (`uses tb: tax_bracket` then `data brackets: tb list`) or the
+    /// spec's own name ([`discovery::list_element_spec_ref`]).
+    fn list_of_spec_name<'p>(
+        spec: &LemmaSpec,
+        parent: &'p ParentType,
+    ) -> Option<(&'p str, ast::SpecRef)> {
         let ParentType::List { inner } = parent else {
             return None;
         };
         let ParentType::Custom { name } = inner.as_ref() else {
             return None;
         };
-        self.names_spec_in_repository_of(spec, name)
-            .then_some(name.as_str())
-    }
-
-    /// Whether `name` is a spec in the repository that holds `spec`.
-    fn names_spec_in_repository_of(&self, spec: &LemmaSpec, name: &str) -> bool {
-        let repository = discovery::owning_repository(self.context, spec);
-        self.context.spec_set(&repository, name).is_some()
+        discovery::list_element_spec_ref(spec, inner).map(|spec_ref| (name.as_str(), spec_ref))
     }
 
     pub fn is_registered(&self, spec: &LemmaSpec) -> bool {
         self.all_registered_specs
             .iter()
             .any(|(_, s)| discovery::same_loaded_spec(s, spec))
+    }
+
+    /// Repository `spec` was registered under by [`Self::register_all`].
+    fn registered_repository(&self, spec: &LemmaSpec) -> &Arc<LemmaRepository> {
+        self.all_registered_specs
+            .iter()
+            .find(|(_, registered)| discovery::same_loaded_spec(registered, spec))
+            .map(|(repository, _)| repository)
+            .expect("BUG: types are resolved only for specs registered with their repository")
     }
 
     /// Record that a type-declaring data row of `spec` could not be registered.
@@ -14984,14 +17624,7 @@ impl<'a> TypeResolver<'a> {
         repository: &Arc<LemmaRepository>,
         spec: &'a LemmaSpec,
     ) -> Vec<Error> {
-        if !self
-            .all_registered_specs
-            .iter()
-            .any(|(_, s)| discovery::same_loaded_spec(s, spec))
-        {
-            self.all_registered_specs
-                .push((Arc::clone(repository), spec));
-        }
+        self.record_repository(repository, spec);
 
         let mut errors = Vec::new();
         for data in &spec.data {
@@ -15000,6 +17633,7 @@ impl<'a> TypeResolver<'a> {
                     base,
                     constraints,
                     value,
+                    list: _,
                 } => {
                     if matches!(
                         (base.as_ref(), constraints.as_ref(), value.as_ref()),
@@ -15039,6 +17673,11 @@ impl<'a> TypeResolver<'a> {
                             continue;
                         }
                     };
+                    // Spec-element instance lists become DataDefinition::InstanceList in
+                    // add_instance_list; they are not named types in the type registry.
+                    if Self::list_of_spec_name(spec, &parent).is_some() {
+                        continue;
+                    }
                     let ftd = DataTypeDef {
                         parent,
                         constraints: constraints.clone(),
@@ -15046,7 +17685,7 @@ impl<'a> TypeResolver<'a> {
                         name: name.clone(),
                         bound_literal: value.clone(),
                     };
-                    if let Err(e) = self.register_type(spec, ftd) {
+                    if let Err(e) = self.register_type(repository, spec, ftd) {
                         errors.push(e);
                     }
                 }
@@ -15056,8 +17695,25 @@ impl<'a> TypeResolver<'a> {
         errors
     }
 
-    /// Register a type from a data declaration.
-    pub fn register_type(&mut self, spec: &'a LemmaSpec, def: DataTypeDef) -> Result<(), Error> {
+    fn record_repository(&mut self, repository: &Arc<LemmaRepository>, spec: &'a LemmaSpec) {
+        if !self
+            .all_registered_specs
+            .iter()
+            .any(|(_, s)| discovery::same_loaded_spec(s, spec))
+        {
+            self.all_registered_specs
+                .push((Arc::clone(repository), spec));
+        }
+    }
+
+    /// Register a type from a data declaration of `spec`, loaded under `repository`.
+    pub fn register_type(
+        &mut self,
+        repository: &Arc<LemmaRepository>,
+        spec: &'a LemmaSpec,
+        def: DataTypeDef,
+    ) -> Result<(), Error> {
+        self.record_repository(repository, spec);
         let spec_types = if let Some(pos) = self
             .data_types
             .iter()
@@ -15122,7 +17778,7 @@ impl<'a> TypeResolver<'a> {
             .collect();
 
         // Run the decomposition pass to populate `BaseMeasureVector` on all Measure types.
-        let this_spec = SpecIdentity::of(&discovery::owning_repository(self.context, spec), spec);
+        let this_spec = SpecVersionKey::of(self.registered_repository(spec), spec);
         let (new_resolved, decomp_errors) = resolve_measure_decompositions(
             &spec.name,
             &this_spec,
@@ -15223,8 +17879,11 @@ impl<'a> TypeResolver<'a> {
         resolved_types.unit_index = std::mem::take(&mut resolved_types.planning_unit_index)
             .bind(&resolved_types.resolved, &this_spec);
 
-        match build_signature_index(&spec.name, &resolved_types.unit_index) {
-            Ok(index) => resolved_types.signature_index = index,
+        match build_signature_index(&spec.name, &resolved_types.unit_index, already_resolved) {
+            Ok(built) => {
+                resolved_types.signature_index = built.index;
+                resolved_types.deferred_signature_collisions = built.deferred_cross_type;
+            }
             Err(error) => errors.push(error),
         }
 
@@ -15327,6 +17986,24 @@ impl<'a> TypeResolver<'a> {
                 &resolved_types.unit_index,
             );
             errors.append(&mut fill_errors);
+            errors.extend(validate_type_options(
+                lemma_type,
+                resolved_types.declared_suggestions.get(type_name),
+                "suggestion",
+                type_name,
+                &source,
+                Some(spec),
+                &resolved_types.unit_index,
+            ));
+            errors.extend(validate_type_options(
+                lemma_type,
+                resolved_types.declared_values.get(type_name),
+                "with",
+                type_name,
+                &source,
+                Some(spec),
+                &resolved_types.unit_index,
+            ));
         }
 
         for (type_name, lemma_type) in &resolved_types.resolved {
@@ -15532,10 +18209,17 @@ impl<'a> TypeResolver<'a> {
                         .rule_list_types
                         .push((element.clone(), lemma_type));
                 }
-                Err(lookup_errors) => match self.rule_spec_list_error(spec, element, source) {
-                    Some(error) => errors.push(error),
-                    None => errors.extend(lookup_errors),
-                },
+                Err(lookup_errors) => {
+                    if let Some(list_type) =
+                        self.rule_spec_element_list_type(spec, element, source, at)
+                    {
+                        resolved_types
+                            .rule_list_types
+                            .push((element.clone(), list_type));
+                    } else {
+                        errors.extend(lookup_errors);
+                    }
+                }
             }
         }
         if errors.is_empty() {
@@ -15568,43 +18252,43 @@ impl<'a> TypeResolver<'a> {
             site: TypeUseSite::DataDefinition,
         };
         let (parent_specs, parent_suggestion, parent_value, parent_type) =
-            lookup_parent_type(&scope, parent).map_err(|errors| {
-                self.spec_list_error(spec, type_name, parent, &ftd.source)
-                    .map_or(errors, |error| vec![error])
-            })?;
+            lookup_parent_type(&scope, parent)?;
 
         let mut declared_suggestion = parent_suggestion;
         let mut declared_value = parent_value;
-        let final_specs = if should_defer_ranged_constraints(parent) {
-            parent_specs
-        } else if let Some(constraints) = &constraints {
-            let resolve_unit = UnitTokenResolver::Search(
-                already_resolved
-                    .iter()
-                    .map(|(_, _, rts)| (&rts.unit_index, &rts.resolved))
-                    .collect(),
-            );
-            apply_constraints_to_spec(
-                spec,
-                &constraint_application_type_name(parent, type_name),
-                parent_specs,
-                constraints,
-                &ftd.source,
-                ConstraintSuggestionSink {
-                    suggestion: &mut declared_suggestion,
-                    value: &mut declared_value,
-                    resolve_unit: Some(&resolve_unit),
-                },
-            )?
-        } else {
-            parent_specs
-        };
+        let mut final_type = (*parent_type).clone();
+        final_type.specifications = parent_specs;
+        if !should_defer_ranged_constraints(parent) {
+            if let Some(constraints) = &constraints {
+                let resolve_unit = UnitTokenResolver::Search(
+                    already_resolved
+                        .iter()
+                        .map(|(_, _, rts)| (&rts.unit_index, &rts.resolved))
+                        .collect(),
+                );
+                apply_constraints_to_spec(
+                    spec,
+                    &constraint_application_type_name(parent, type_name),
+                    type_name,
+                    &mut final_type,
+                    constraints,
+                    &ftd.source,
+                    ConstraintSuggestionSink {
+                        suggestion: &mut declared_suggestion,
+                        value: &mut declared_value,
+                        resolve_unit: Some(&resolve_unit),
+                    },
+                )?;
+            }
+        }
+        let final_specs = final_type.specifications;
+        let final_options = final_type.options;
 
         if matches!(&final_specs, TypeSpecification::List { .. }) && declared_value.is_none() {
             declared_value = Some(RawSuggestion::List(Vec::new()));
         }
 
-        let this_spec = SpecIdentity::of(&discovery::owning_repository(self.context, spec), spec);
+        let this_spec = SpecVersionKey::of(self.registered_repository(spec), spec);
         let family = match (element_parent_type(parent), parent_type.family()) {
             (ParentType::Primitive { .. }, _) | (_, None) => {
                 TypeFamily::declared_in(&this_spec, type_name)
@@ -15653,6 +18337,7 @@ impl<'a> TypeResolver<'a> {
             name: Some(type_name.to_string()),
             specifications: final_specs,
             extends,
+            options: final_options,
         });
         Ok((lemma_type, declared_suggestion, declared_value))
     }
@@ -15758,15 +18443,22 @@ impl<'a> TypeResolver<'a> {
         }
 
         for data_row in &spec.data {
-            let Some(spec_ref) = data_row.value.uses_spec_ref() else {
-                continue;
-            };
             let import_alias = data_row.reference.name.clone();
-            let import_target = match &data_row.value {
-                ParsedDataValue::ImportList { .. } => {
-                    self.resolve_list_spec_for_import(spec, spec_ref, &data_row.source_location, at)
+            let import_target = if let Some(spec_ref) = data_row.value.uses_spec_ref() {
+                self.resolve_spec_for_import(spec, spec_ref, &data_row.source_location, at)
+            } else if let Some(spec_ref) = discovery::data_instance_list_spec_ref(spec, data_row) {
+                let ParsedDataValue::Definition {
+                    base: Some(parent), ..
+                } = &data_row.value
+                else {
+                    continue;
+                };
+                if Self::list_of_spec_name(spec, parent).is_none() {
+                    continue;
                 }
-                _ => self.resolve_spec_for_import(spec, spec_ref, &data_row.source_location, at),
+                self.resolve_list_spec_for_import(spec, &spec_ref, &data_row.source_location, at)
+            } else {
+                continue;
             };
             let (_, imported_spec) = match import_target {
                 Ok(import_pair) => import_pair,
@@ -15845,6 +18537,7 @@ impl<'a> TypeResolver<'a> {
                 unit_index: UnitIndex::new(),
                 planning_unit_index: unit_index,
                 signature_index: crate::computation::arithmetic::SignatureIndex::new(),
+                deferred_signature_collisions: Vec::new(),
             },
             list_type_names,
         ))
@@ -15860,14 +18553,14 @@ impl<'a> TypeResolver<'a> {
         discovery::resolve_spec_ref(
             self.context,
             from,
-            &discovery::owning_repository(self.context, spec),
+            self.registered_repository(spec),
             spec,
             at,
             Some(import_site.clone()),
         )
     }
 
-    /// [`Self::resolve_spec_for_import`] for `uses x: s list`, where `s` may be `spec` itself.
+    /// [`Self::resolve_spec_for_import`] for `data x: s list`, where `s` may be `spec` itself.
     fn resolve_list_spec_for_import(
         &self,
         spec: &LemmaSpec,
@@ -15878,7 +18571,7 @@ impl<'a> TypeResolver<'a> {
         discovery::resolve_spec_ref_or_self(
             self.context,
             from,
-            &discovery::owning_repository(self.context, spec),
+            self.registered_repository(spec),
             spec,
             at,
             Some(import_site.clone()),
@@ -15934,6 +18627,7 @@ impl<'a> TypeResolver<'a> {
     ) -> Result<Option<BTreeSet<String>>, Error> {
         let ParentType::Custom {
             name: parent_type_name,
+            ..
         } = inner
         else {
             return Ok(None);
@@ -16062,6 +18756,116 @@ impl<'a> TypeResolver<'a> {
 // Validation (formerly validation.rs)
 // ============================================================================
 
+fn instance_list_option_errors(
+    lemma_type: &LemmaType,
+    raw: &RawSuggestion,
+    source: &Source,
+    spec: &LemmaSpec,
+) -> Vec<Error> {
+    let owner = match &lemma_type.specifications {
+        TypeSpecification::List { element, .. } => element.as_ref(),
+        _ => lemma_type,
+    };
+    let mut values = Vec::new();
+    let mut errors = Vec::new();
+    if let Err(message) = collect_raw_values(raw, &mut values) {
+        errors.push(Error::validation_with_context(
+            message,
+            Some(source.clone()),
+            None::<String>,
+            Some(spec),
+            None,
+        ));
+        return errors;
+    }
+    for value in values {
+        if let Err(message) = owner.reject_disallowed(&value) {
+            errors.push(Error::validation_with_context(
+                message,
+                Some(source.clone()),
+                None::<String>,
+                Some(spec),
+                None,
+            ));
+        }
+    }
+    errors
+}
+
+fn collect_raw_values(raw: &RawSuggestion, out: &mut Vec<ValueKind>) -> Result<(), String> {
+    let mut pending = vec![raw];
+    while let Some(current) = pending.pop() {
+        match current {
+            RawSuggestion::Value(value) => out.push(value.clone()),
+            RawSuggestion::List(rows) => {
+                for row in rows.iter().rev() {
+                    pending.push(row);
+                }
+            }
+            RawSuggestion::Measure { .. } | RawSuggestion::UnitBound { .. } => {
+                return Err(
+                    "an instance-list option row is a value, not a measure bound still awaiting a unit"
+                        .to_string(),
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_type_options(
+    lemma_type: &LemmaType,
+    declared_default: Option<&BoundValueKind>,
+    default_label: &str,
+    type_name: &str,
+    source: &Source,
+    spec_context: Option<&LemmaSpec>,
+    unit_index: &UnitIndex,
+) -> Vec<Error> {
+    let owner = match &lemma_type.specifications {
+        TypeSpecification::List { element, .. } if !element.options.is_empty() => element.as_ref(),
+        _ => lemma_type,
+    };
+    let mut errors = Vec::new();
+    let mut bare = owner.clone();
+    bare.options = TypeOptions::default();
+    for option in &owner.options.values {
+        let literal = LiteralValue {
+            value: option.value.value.clone(),
+        };
+        if let Err(message) =
+            execution_plan::validate_value_against_type(&bare, &literal, unit_index)
+        {
+            errors.push(Error::validation_with_context(
+                format!(
+                    "Type '{type_name}' option '{}': {message}",
+                    owner.display_bound(&option.value)
+                ),
+                Some(source.clone()),
+                None::<String>,
+                spec_context,
+                None,
+            ));
+        }
+    }
+    if let Some(default) = declared_default {
+        if let Err(message) = execution_plan::validate_value_against_type(
+            lemma_type,
+            &default.to_literal(),
+            unit_index,
+        ) {
+            errors.push(Error::validation_with_context(
+                format!("Type '{type_name}' {default_label} value {message}"),
+                Some(source.clone()),
+                None::<String>,
+                spec_context,
+                None,
+            ));
+        }
+    }
+    errors
+}
+
 /// Validate that TypeSpecification constraints are internally consistent.
 ///
 /// Checks range, decimals, length, unit, and option constraints, and
@@ -16088,7 +18892,6 @@ pub fn validate_type_specifications(
         TypeSpecification::Measure {
             minimum,
             maximum,
-            decimals,
             units,
             ..
         } => {
@@ -16147,22 +18950,6 @@ pub fn validate_type_specifications(
                             None,
                         ));
                     }
-                }
-            }
-
-            // Validate decimals range (0-28 is rust_decimal limit)
-            if let Some(d) = decimals {
-                if *d > 28 {
-                    errors.push(Error::validation_with_context(
-                        format!(
-                            "Type '{}' has invalid decimals value: {}. Must be between 0 and 28",
-                            type_name, d
-                        ),
-                        Some(source.clone()),
-                        None::<String>,
-                        spec_context,
-                        None,
-                    ));
                 }
             }
 
@@ -16344,26 +19131,9 @@ pub fn validate_type_specifications(
         TypeSpecification::Ratio {
             minimum,
             maximum,
-            decimals,
             units,
             ..
         } => {
-            // Validate decimals range (0-28 is rust_decimal limit)
-            if let Some(d) = decimals {
-                if *d > 28 {
-                    errors.push(Error::validation_with_context(
-                        format!(
-                            "Type '{}' has invalid decimals value: {}. Must be between 0 and 28",
-                            type_name, d
-                        ),
-                        Some(source.clone()),
-                        None::<String>,
-                        spec_context,
-                        None,
-                    ));
-                }
-            }
-
             // Validate range consistency
             if let (Some(min), Some(max)) = (minimum, maximum) {
                 match min.try_cmp(max) {
@@ -16502,9 +19272,7 @@ pub fn validate_type_specifications(
             }
         }
 
-        TypeSpecification::Text {
-            length, options, ..
-        } => {
+        TypeSpecification::Text { length, .. } => {
             if let Some(ValueKind::Text(def)) = declared_default {
                 let def_len = def.len();
 
@@ -16518,18 +19286,6 @@ pub fn validate_type_specifications(
                             None,
                         ));
                     }
-                }
-                if !options.is_empty() && !options.contains(def) {
-                    errors.push(Error::validation_with_context(
-                        format!(
-                            "Type '{}' {default_label} value '{}' is not in allowed options: {:?}",
-                            type_name, def, options
-                        ),
-                        Some(source.clone()),
-                        None::<String>,
-                        spec_context,
-                        None,
-                    ));
                 }
             }
         }

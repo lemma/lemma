@@ -57,7 +57,8 @@ data salary: measure
 rule bonus:
   salary * 10%
 spec payroll
-uses staff: employee list
+uses employee
+data staff: employee list
   -> with name: "Ada", salary: 9000 eur
   -> with name: "Grace", salary: 9500 eur
   -> with name: "Edsger", salary: 8000 eur
@@ -114,7 +115,8 @@ fn missing_expression_on_instance_list_is_error() {
 spec employee
 data salary: number
 spec payroll
-uses staff: employee list
+uses employee
+data staff: employee list
 rule total:
   staff -> sum
 "#,
@@ -140,12 +142,21 @@ rule nonempty:
 }
 
 #[test]
-fn sum_minus_is_binary_after_sum() {
-    let engine = load_ok(&format!(
+fn minus_after_sum_needs_parentheses_around_the_command() {
+    let error = load_parse_err(&format!(
         r#"
 {fares}
 rule leftover:
   fares -> sum - 5 eur
+"#,
+        fares = fares_spec()
+    ));
+    assert_contains(&error, "found '-' after `-> sum`");
+    let engine = load_ok(&format!(
+        r#"
+{fares}
+rule leftover:
+  (fares -> sum) - 5 eur
 "#,
         fares = fares_spec()
     ));
@@ -164,13 +175,14 @@ data qty: number
 data price: measure
   -> unit eur: 1.00
 spec order
-uses lines: line list
+uses line
+data lines: line list
   -> with qty: 2, price: 3 eur
   -> with qty: 1, price: 4 eur
 rule total:
   lines -> sum(qty * price)
 rule doubled:
-  lines -> sum(qty * price) * 2
+  (lines -> sum(qty * price)) * 2
 "#,
     );
     let response = evaluate(&engine, "order", data(&[]));
@@ -224,12 +236,8 @@ rule mid_n:
 }
 
 #[test]
-fn value_list_and_or_not_in_condition_is_error() {
-    for condition in [
-        "where > 0 and < 10",
-        "where(> 0 and < 10)",
-        "where (> 0 and < 10)",
-    ] {
+fn value_list_bare_compound_condition_is_error() {
+    for condition in ["where > 0 and < 10", "where > 0 or < 10"] {
         let err = load_parse_err(&format!(
             r#"
 spec fares_card
@@ -311,7 +319,8 @@ fn non_boolean_condition_is_error() {
 spec employee
 data salary: number
 spec payroll
-uses staff: employee list
+uses employee
+data staff: employee list
 rule bad:
   staff -> where salary
 "#,
@@ -351,6 +360,31 @@ rule dearest: fares -> max
 }
 
 #[test]
+fn empty_list_compound_or_predicate_identities() {
+    let engine = load_ok(
+        r#"
+spec person
+data adult: boolean
+data guardian: boolean
+
+spec sample
+uses person
+data fares: number list
+data people: person list
+rule any_fare: fares -> any(> 5 or is 3)
+rule all_fare: fares -> all(> 5 or is 3)
+rule any_person: people -> any(adult or guardian)
+rule all_person: people -> all(adult or guardian)
+"#,
+    );
+    let response = evaluate(&engine, "sample", data(&[]));
+    assert_eq!(value(&response, "any_fare"), "false");
+    assert_eq!(value(&response, "all_fare"), "true");
+    assert_eq!(value(&response, "any_person"), "false");
+    assert_eq!(value(&response, "all_person"), "true");
+}
+
+#[test]
 fn empty_product_guarded_by_count() {
     let engine = load_ok(
         r#"
@@ -386,7 +420,8 @@ rule bonus:
   unless name is "Ada" then veto "ada missing bonus"
   unless name is "Grace" then veto "grace missing bonus"
 spec payroll
-uses staff: employee list
+uses employee
+data staff: employee list
   -> with name: "Ada", salary: 9000 eur
   -> with name: "Grace", salary: 9500 eur
 rule total:
@@ -429,7 +464,8 @@ data salary: measure
 rule bonus:
   veto "no bonus"
 spec payroll
-uses staff: employee list
+uses employee
+data staff: employee list
   -> with name: "Ada", salary: 9000 eur
 rule n:
   staff -> count
@@ -543,7 +579,8 @@ data name: text
 data age: number
 data salary: number
 spec payroll
-uses staff: employee list
+uses employee
+data staff: employee list
   -> with name: "Ada", age: 40, salary: 9
   -> with name: "Grace", age: 30, salary: 9
   -> with name: "Edsger", age: 20, salary: 8
@@ -568,7 +605,8 @@ spec employee
 data name: text
 data salary: number
 spec payroll
-uses staff: employee list
+uses employee
+data staff: employee list
   -> with name: "Ada", salary: 9
   -> with name: "Grace", salary: 9
 rule top_one:
@@ -590,7 +628,7 @@ fn name_clash_requires_list_qualifier() {
 spec part
 data money: measure
   -> unit eur: 1.00
-uses components: part list
+data components: part list
 data quantity: number
 data unit_cost: money
 rule total:
@@ -610,7 +648,8 @@ data sku: text
 spec order
 data price_factor: number
   -> with 2
-uses lines: line list
+uses line
+data lines: line list
   -> with qty: 3, sku: "latte"
 rule total:
   lines -> sum(qty * price_factor)
@@ -626,7 +665,8 @@ fn list_name_inside_argument_is_current_row() {
 spec employee
 data bonus: number
 spec payroll
-uses staff: employee list
+uses employee
+data staff: employee list
   -> with bonus: 10
   -> with bonus: 20
 rule total:
@@ -648,7 +688,8 @@ data drink: text
   -> options "espresso", "latte"
 data price: number
 spec coffee_order
-uses menu: menu_item list
+uses menu_item
+data menu: menu_item list
   -> key drink
 rule n:
   menu -> count
@@ -682,4 +723,97 @@ rule ranked:
     let second = value(&evaluate(&engine, "fares_card", data(&[])), "ranked");
     assert_eq!(first, second);
     assert_eq!(first, "120 eur");
+}
+
+fn assert_only_errors(errors: &str, expected: &[&str]) {
+    let lines: Vec<&str> = errors.lines().collect();
+    assert_eq!(
+        lines.len(),
+        expected.len(),
+        "expected exactly {expected:?}, got:\n{errors}"
+    );
+    for (line, needle) in lines.iter().zip(expected) {
+        assert_contains(line, needle);
+    }
+}
+
+#[test]
+fn row_rule_of_a_failed_row_spec_reports_only_the_row_spec_error() {
+    let errors = load_planning_err(
+        r#"
+spec item
+data price: number
+rule broken:
+  price + true
+
+spec order
+uses item
+data items: item list
+rule total:
+  items -> sum broken
+"#,
+    );
+    assert_only_errors(&errors, &["Cannot apply '+' to price and boolean"]);
+}
+
+#[test]
+fn call_form_row_rule_of_a_failed_row_spec_reports_only_the_row_spec_error() {
+    let errors = load_planning_err(
+        r#"
+spec item
+data price: measure
+  -> unit eur: 1
+  -> unit cent: 0.01
+rule rounded:
+  price * 2 -> round
+
+spec order
+uses item
+data items: item list
+data quantity: number
+rule total:
+  (items -> sum(rounded)) * quantity
+"#,
+    );
+    assert_only_errors(
+        &errors,
+        &["Cannot use 'round' on measure 'price'. Round to a step instead"],
+    );
+}
+
+#[test]
+fn row_rules_through_two_failed_row_specs_report_only_the_innermost_error() {
+    let errors = load_planning_err(
+        r#"
+spec supply
+data cost: measure
+  -> unit eur: 1
+rule cost_price:
+  cost * 2 -> ceil
+
+spec ingredient
+uses supply
+data source: supply list
+data share: ratio
+rule contribution:
+  source -> sum cost_price
+rule weighted:
+  contribution * share
+rule portion:
+  share * 2
+
+spec ingredient_costs
+uses ingredient
+data ingredients: ingredient list
+data weight: number
+rule costs:
+  (ingredients -> sum(weighted)) * weight
+rule total_portion:
+  ingredients -> sum portion
+"#,
+    );
+    assert_only_errors(
+        &errors,
+        &["Cannot use 'ceil' on measure 'cost'. Round to a step instead"],
+    );
 }

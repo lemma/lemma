@@ -1067,7 +1067,8 @@ fn explanation_rule_names(nodes: &[ExplanationNode]) -> Vec<String> {
                 names.push(name.rule.clone());
             }
             ExplanationNode::Compose { operands, .. }
-            | ExplanationNode::Conversion { operands, .. } => {
+            | ExplanationNode::Conversion { operands, .. }
+            | ExplanationNode::ListCommand { operands, .. } => {
                 for child in operands {
                     walk(child, names);
                 }
@@ -1812,6 +1813,93 @@ rule r: i.half + 1
         missing(&nested, "r"),
         &["i.slot"],
         "nested uses arm must pin qualified missing key"
+    );
+}
+
+const TWO_HOP_LOOKUP: &str = r#"
+spec table
+data code: text
+rule lookup: code
+
+spec header
+uses message_type_table: table
+rule lookup: message_type_table.lookup
+
+spec message
+uses h: header
+rule via: h.lookup
+"#;
+
+/// Two-hop ImportRule: veto key and missing_data list must both be
+/// `h.message_type_table.code` (issue 98 attach shape).
+#[test]
+fn g6_two_hop_import_rule_attach_invariant() {
+    let mut engine = Engine::new();
+    load(&mut engine, TWO_HOP_LOOKUP);
+    for explain in [false, true] {
+        let response = run(
+            &engine,
+            "message",
+            IndexMap::new(),
+            Some(&["via".to_string()]),
+            explain,
+        );
+        assert_attach_invariant(&response);
+        let via = rule(&response, "via");
+        assert!(via.is_missing_data(), "via must be MissingData");
+        assert_eq!(
+            via.missing_data(),
+            &["h.message_type_table.code"],
+            "explain={explain}"
+        );
+        assert_eq!(
+            via.veto_reason.as_deref(),
+            Some("Required data 'h.message_type_table.code' was not provided."),
+            "explain={explain}"
+        );
+    }
+}
+
+/// Owner declaring a local `data code` must not steal the nested field's qualify.
+#[test]
+fn g6b_two_hop_import_rule_name_collision_still_qualifies() {
+    let mut engine = Engine::new();
+    load(
+        &mut engine,
+        r#"
+spec table
+data code: text
+rule lookup: code
+
+spec header
+uses message_type_table: table
+rule lookup: message_type_table.lookup
+
+spec message
+data code: text
+uses h: header
+rule via: h.lookup
+"#,
+    );
+    let response = run(
+        &engine,
+        "message",
+        IndexMap::new(),
+        Some(&["via".to_string()]),
+        false,
+    );
+    assert_attach_invariant(&response);
+    let via = rule(&response, "via");
+    assert!(via.is_missing_data());
+    assert_eq!(
+        via.missing_data(),
+        &["h.message_type_table.code"],
+        "owner-local data code must not collapse nested MissingData to code"
+    );
+    assert!(
+        !via.missing_data().iter().any(|key| key == "code"),
+        "must not report owner-local code: {:?}",
+        via.missing_data()
     );
 }
 

@@ -248,7 +248,6 @@ pub enum TypeSpecification {
         minimum: Option<NamedBound>,
         #[serde(default)]
         maximum: Option<NamedBound>,
-        decimals: Option<u8>,
         units: Vec<MeasureUnit>,
         #[serde(default)]
         traits: Vec<MeasureTrait>,
@@ -282,7 +281,6 @@ pub enum TypeSpecification {
         minimum: Option<Decimal>,
         #[serde(default)]
         maximum: Option<Decimal>,
-        decimals: Option<u8>,
         units: Vec<RatioUnit>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         unit: Option<String>,
@@ -375,7 +373,9 @@ impl From<&crate::planning::semantics::ListKey> for ListKey {
     fn from(key: &crate::planning::semantics::ListKey) -> Self {
         match key {
             crate::planning::semantics::ListKey::Numbered => Self::Numbered,
-            crate::planning::semantics::ListKey::Fields(fields) => Self::Fields(fields.clone()),
+            crate::planning::semantics::ListKey::Fields(fields) => {
+                Self::Fields(fields.iter().map(|field| field.name.clone()).collect())
+            }
         }
     }
 }
@@ -384,7 +384,7 @@ impl From<&DomainTypeSpecification> for TypeSpecification {
     fn from(spec: &DomainTypeSpecification) -> Self {
         let mut list_keys = Vec::new();
         let mut leaf = spec;
-        while let DomainTypeSpecification::List { element, key } = leaf {
+        while let DomainTypeSpecification::List { element, key, .. } = leaf {
             list_keys.push(ListKey::from(key));
             leaf = &element.specifications;
         }
@@ -406,7 +406,6 @@ impl TypeSpecification {
             DomainTypeSpecification::Measure {
                 minimum,
                 maximum,
-                decimals,
                 units,
                 traits,
                 decomposition,
@@ -415,7 +414,6 @@ impl TypeSpecification {
             } => Self::Measure {
                 minimum: optional_named_bound(minimum),
                 maximum: optional_named_bound(maximum),
-                decimals: *decimals,
                 units: measure_units_from(units),
                 traits: traits.iter().copied().map(MeasureTrait::from).collect(),
                 decomposition: optional_decomposition_from(decomposition),
@@ -449,14 +447,12 @@ impl TypeSpecification {
             DomainTypeSpecification::Ratio {
                 minimum,
                 maximum,
-                decimals,
                 units,
                 unit,
                 help,
             } => Self::Ratio {
                 minimum: optional_decimal_bound(minimum),
                 maximum: optional_decimal_bound(maximum),
-                decimals: *decimals,
                 units: ratio_units_from(units),
                 unit: unit.clone(),
                 help: help.clone(),
@@ -476,13 +472,9 @@ impl TypeSpecification {
                 units: ratio_units_from(units),
                 help: help.clone(),
             },
-            DomainTypeSpecification::Text {
-                length,
-                options,
-                help,
-            } => Self::Text {
+            DomainTypeSpecification::Text { length, help } => Self::Text {
                 length: *length,
-                options: options.clone(),
+                options: Vec::new(),
                 help: help.clone(),
             },
             DomainTypeSpecification::Date {
@@ -572,9 +564,21 @@ pub struct LemmaType {
 
 impl From<&DomainLemmaType> for LemmaType {
     fn from(lemma_type: &DomainLemmaType) -> Self {
+        let mut specifications = TypeSpecification::from(&lemma_type.specifications);
+        if let TypeSpecification::Text { options, .. } = &mut specifications {
+            *options = lemma_type
+                .options_for_check()
+                .values
+                .iter()
+                .filter_map(|option| match &option.value.value {
+                    crate::planning::semantics::ValueKind::Text(text) => Some(text.to_string()),
+                    _ => None,
+                })
+                .collect();
+        }
         Self {
             name: lemma_type.name.clone(),
-            specifications: TypeSpecification::from(&lemma_type.specifications),
+            specifications,
             extends: TypeExtends::from(&lemma_type.extends),
         }
     }

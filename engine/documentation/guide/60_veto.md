@@ -5,7 +5,7 @@ Veto is like Rust's `Err`: rule has **no value** and propagates to dependents. U
 | Situation | Use |
 |-----------|-----|
 | Out-of-range (negative score, age above 120) | `-> minimum` / `-> maximum` on `data` |
-| Closed choice list | `-> option` on `data` |
+| Closed option list | `-> option` on `data` |
 | Normal business "no" | `false` or `no` |
 | Lookup / no mapped result | default `veto` + `unless` arm per known case |
 | Test veto without propagating | `x is veto` (returns boolean) |
@@ -27,7 +27,6 @@ spec coffee_pricing
 
 data money: measure
   -> unit eur: 1.00
-  -> decimals 2
 
 data drink: text
   -> option "espresso"

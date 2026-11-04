@@ -1,4 +1,4 @@
 total: 6 eur
 └─ menu -> sum price
-   ["espresso"] price: 2.5 eur
-   ["latte"] price: 3.5 eur
+   ├─ drink: espresso, price: 2.5 eur
+   └─ drink: latte,    price: 3.5 eur

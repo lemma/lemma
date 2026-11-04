@@ -38,23 +38,44 @@
       "operands": [{ "type": "veto", "message": "surcharge unavailable" }]
     },
     {
-      "type": "filter",
-      "condition": "enabled",
-      "matched": 1,
-      "total": 2,
-      "children": [
+      "type": "list_command",
+      "expression": "items -> where enabled -> sum cost",
+      "stage": "sum cost",
+      "op": "sum",
+      "operands": [
         {
-          "type": "row",
-          "number": 2,
-          "fields": [
+          "type": "filter",
+          "condition": "enabled",
+          "matched": 1,
+          "total": 2,
+          "children": [
             {
-              "type": "rule_ref",
-              "id": 0,
-              "name": "cost",
-              "result": "200.00 eur",
-              "measure": { "eur": "200.00" }
+              "type": "row",
+              "number": 2,
+              "fields": [
+                {
+                  "type": "rule_ref",
+                  "id": 0,
+                  "name": "cost",
+                  "result": "200.00 eur",
+                  "measure": { "eur": "200.00" }
+                }
+              ]
             }
           ]
+        }
+      ]
+    },
+    {
+      "type": "list_command",
+      "expression": "row list -> key name",
+      "stage": "key name",
+      "op": "key",
+      "operands": [
+        {
+          "type": "compose",
+          "expression": "row list",
+          "operands": []
         }
       ]
     }

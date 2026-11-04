@@ -35,7 +35,7 @@ pub fn rational_from_parsed_decimal(decimal: Decimal) -> Result<RationalInteger,
 /// (e.g., `meter/second` produces `[("meter", 1), ("second", -1)]`). Empty for base units.
 /// `decomposition` is the dimensional decomposition vector, populated during the planning
 /// decomposition pass. It is empty until that pass completes.
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct MeasureUnit {
     pub name: String,
     /// Conversion factor: 1 of this unit equals `value` canonical units.
@@ -129,8 +129,7 @@ impl MeasureUnit {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(transparent)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct MeasureUnits(pub Vec<MeasureUnit>);
 
 impl MeasureUnits {
@@ -203,7 +202,7 @@ impl<'a> IntoIterator for &'a MeasureUnits {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct RatioUnit {
     pub name: String,
     pub value: RationalInteger,
@@ -266,8 +265,7 @@ impl RatioUnit {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(transparent)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct RatioUnits(pub Vec<RatioUnit>);
 
 impl RatioUnits {
@@ -323,7 +321,7 @@ impl<'a> IntoIterator for &'a RatioUnits {
 // Literal value types
 // -----------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum BooleanValue {
     True,
@@ -692,33 +690,15 @@ impl fmt::Display for DateTimeValue {
     }
 }
 
-/// Postcard / in-process serde for [`Decimal`]: mantissa + scale (no strings, no floats).
-///
-/// JSON API types in `lemma::api` use `serde-with-str` instead. Do not put this on
-/// JSON-facing DTOs.
-pub mod decimal_binary_serde {
-    use rust_decimal::Decimal;
-    use serde::{Deserialize, Deserializer, Serialize, Serializer};
-
-    pub fn serialize<S: Serializer>(value: &Decimal, serializer: S) -> Result<S::Ok, S::Error> {
-        (value.mantissa(), value.scale()).serialize(serializer)
-    }
-
-    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Decimal, D::Error> {
-        let (mantissa, scale): (i128, u32) = Deserialize::deserialize(deserializer)?;
-        Decimal::try_from_i128_with_scale(mantissa, scale).map_err(serde::de::Error::custom)
-    }
-}
-
 /// Literal value data (no type information). Single source of truth in literals.
 ///
 /// `NumberWithUnit` is type-agnostic at parse time (`10 eur` and `50%` share this shape).
 /// Planning resolves ratio vs measure via the unit index and target [`TypeSpecification`].
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Value {
-    Number(#[serde(with = "decimal_binary_serde")] Decimal),
-    NumberWithUnit(#[serde(with = "decimal_binary_serde")] Decimal, String),
+    Number(Decimal),
+    NumberWithUnit(Decimal, String),
     Text(String),
     Date(DateTimeValue),
     Time(TimeValue),

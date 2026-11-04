@@ -52,7 +52,7 @@ impl ValueKind {
                     .try_to_decimal()
                     .expect("BUG: planned ratio must convert to decimal"),
             },
-            DomainValueKind::Text(text) => Self::Text(text.clone()),
+            DomainValueKind::Text(text) => Self::Text(text.to_string()),
             DomainValueKind::Date(date) => Self::Date(date.clone()),
             DomainValueKind::Time(time) => Self::Time(time.clone()),
             DomainValueKind::Boolean(flag) => Self::Boolean(*flag),

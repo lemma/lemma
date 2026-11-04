@@ -1,4 +1,6 @@
 payment_allowed: true
-├─ payment_method is not cash
-│  └─ payment_method: credit
-└─ payment_method is credit
+├─ payment_method is cash and is_fragile is false
+│  └─ is_fragile
+└─ payment_method is not credit and is_express is false
+   ├─ payment_method: credit
+   └─ is_express

@@ -245,7 +245,6 @@ mod tests {
             TypeSpecification::Measure {
                 minimum: None,
                 maximum: None,
-                decimals: None,
                 units,
                 traits: Vec::new(),
                 decomposition: None,

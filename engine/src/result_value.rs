@@ -88,7 +88,7 @@ pub struct RuleResultValue {
     /// data slot of that instance, keyed relative to that spec.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub spec: Option<Box<SpecResult>>,
-    /// Set when the value is a row of an instance list.
+    /// Set when the value is an instance-list row or a `uses` instance projected from one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub row: Option<RowReference>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -123,7 +123,8 @@ pub struct SpecResult {
     pub rules: IndexMap<String, SpecRuleResult>,
 }
 
-/// A row of an instance list. Its data and rules are `Response.rows[index]`.
+/// An instance-list row or a `uses` instance projected from one.
+/// Its data and rules are `Response.rows[index]`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RowReference {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -131,8 +132,12 @@ pub struct RowReference {
     pub spec: String,
     /// Resolved row's effective date. Empty when the row is the origin row.
     pub effective: String,
-    /// Row path relative to the spec holding this value (`lines.2`, `components.1`).
-    pub instance: String,
+    /// Row path relative to the spec holding this value (`lines.2`, `lines.2.item`).
+    /// Present for a row with a data path (evaluation-data rows). An appended row
+    /// (`-> with`) has no path; its identity is its place in the list, and a value
+    /// bound inside it carries only its row-relative path (`item`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instance: Option<String>,
     pub index: usize,
 }
 
@@ -486,7 +491,7 @@ fn scalar_result_value(
             let decimal = rational
                 .try_to_decimal()
                 .map_err(map_numeric_to_rule_result_value_failure)?;
-            let api_decimal = format_decimal_for_api(decimal, result_type.decimal_places());
+            let api_decimal = format_decimal_for_api(decimal);
             let display_string = decimal_to_display_str(&decimal);
             Ok(RuleResultValue {
                 result: Some(display_string),
@@ -515,13 +520,29 @@ fn scalar_result_value(
         ValueKind::List(_) => {
             unreachable!("BUG: list must be handled by result_value_from_literal")
         }
+        ValueKind::Spec(SpecValue::Row(key)) => match key.segments() {
+            Some(path) => Ok(RuleResultValue {
+                result: Some(key.to_string()),
+                spec: Some(Box::new(SpecResult {
+                    repository: key.row.identity.repository.clone(),
+                    spec: key.row.identity.spec.clone(),
+                    effective: key.row.identity.effective.to_string(),
+                    instance: key.to_string(),
+                    path: path.iter().map(crate::api::PathSegment::from).collect(),
+                    data: IndexMap::new(),
+                    rules: IndexMap::new(),
+                })),
+                ..RuleResultValue::default()
+            }),
+            None => Ok(RuleResultValue {
+                result: Some(value.to_string()),
+                ..RuleResultValue::default()
+            }),
+        },
         ValueKind::Spec(SpecValue::Fixed(instance)) => {
-            let identity = result_type.spec_identity().unwrap_or_else(|| {
-                panic!(
-                    "BUG: spec value whose type is not a spec ({})",
-                    result_type.name()
-                )
-            });
+            let identity = result_type
+                .spec_identity()
+                .expect("BUG: spec value whose type is not a spec");
             Ok(RuleResultValue {
                 result: Some(instance.to_string()),
                 spec: Some(Box::new(SpecResult {
@@ -540,10 +561,6 @@ fn scalar_result_value(
                 ..RuleResultValue::default()
             })
         }
-        ValueKind::Spec(SpecValue::Row(row)) => Ok(RuleResultValue {
-            result: Some(row.origin.to_string()),
-            ..RuleResultValue::default()
-        }),
     }
 }
 
@@ -551,7 +568,7 @@ fn scalar_result_value_non_numeric(result: Option<String>, value: &ValueKind) ->
     match value {
         ValueKind::Text(s) => RuleResultValue {
             result,
-            text: Some(s.clone()),
+            text: Some(s.to_string()),
             ..RuleResultValue::default()
         },
         ValueKind::Date(d) => RuleResultValue {
@@ -631,7 +648,7 @@ impl RuleResultValue {
         if let Some(row) = &self.row {
             panic!(
                 "BUG: list row '{}' cannot be rebuilt from its API value",
-                row.instance
+                row.instance.as_deref().unwrap_or("<appended>")
             );
         }
         if let Some(spec) = &self.spec {
@@ -645,9 +662,10 @@ impl RuleResultValue {
                     .path
                     .iter()
                     .map(|segment| crate::planning::semantics::PathSegment {
-                        uses: segment.uses.clone(),
-                        repository: segment.repository.clone(),
-                        spec: segment.spec.clone(),
+                        uses: Arc::from(segment.uses.as_str()),
+                        row: segment.row,
+                        repository: segment.repository.as_deref().map(Arc::from),
+                        spec: Arc::from(segment.spec.as_str()),
                     })
                     .collect(),
             })));
@@ -685,11 +703,11 @@ impl RuleResultValue {
             let left = range.from.to_literal(&left_type);
             let right = range.to.to_literal(&right_type);
             return LiteralValue::range(
-                crate::planning::semantics::TypedLiteral {
+                TypedLiteral {
                     value: left.value,
                     lemma_type: Arc::new(left_type),
                 },
-                crate::planning::semantics::TypedLiteral {
+                TypedLiteral {
                     value: right.value,
                     lemma_type: Arc::new(right_type),
                 },

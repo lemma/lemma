@@ -55,13 +55,14 @@ data drink: text
   -> options "espresso", "latte"
 data price: measure
   -> unit eur: 1.00
-  -> decimals 2
+
 spec coffee_order
-uses menu: menu_item list
+uses menu_item
+data menu: menu_item list
   -> key drink
   -> with drink: "espresso", price: 2.50 eur
   -> with drink: "latte", price: 3.50 eur
-data ordered: menu.drink
+data ordered: menu_item.drink
 rule selected_drink:
   menu -> find ordered
 rule total:
@@ -77,7 +78,7 @@ rule total:
             ),
             "total"
         ),
-        "2.50 eur"
+        "2.5 eur"
     );
 }
 
@@ -93,10 +94,11 @@ data money: measure
 data band: weight range
 data price: money
 spec parcel
-uses rates: rate list
+uses rate
+data rates: rate list
   -> key band
   -> with band: 0 kilogram...2 kilogram, price: 4.95 eur
-data parcel_weight: rates.weight
+data parcel_weight: rate.weight
 rule shipping:
   (rates -> find parcel_weight).price
 "#,
@@ -122,11 +124,12 @@ spec menu_item
 data drink: text
 data price: measure
   -> unit eur: 1.00
-  -> decimals 2
+
 spec coffee_order
 uses featured: menu_item
   -> with drink: "mocha", price: 4.00 eur
-uses menu: menu_item list
+uses menu_item
+data menu: menu_item list
   -> key drink
   -> with drink: "espresso", price: 2.50 eur
 data ordered: text
@@ -146,7 +149,7 @@ rule price:
             ("special", crate::lists::boolean(true)),
         ]),
     );
-    assert_eq!(value(&response, "price"), "4.00 eur");
+    assert_eq!(value(&response, "price"), "4 eur");
 }
 
 #[test]
@@ -160,7 +163,8 @@ data name: text
 spec coffee_order
 uses featured: employee
   -> with name: "Ada"
-uses menu: menu_item list
+uses menu_item
+data menu: menu_item list
   -> with drink: "espresso"
 data special: boolean
 rule selected:
@@ -179,10 +183,12 @@ spec rate
 data band: text
 data price: number
 spec parcel
-uses standard_rates: rate list
+uses rate
+data standard_rates: rate list
   -> key band
   -> with band: "light", price: 1
-uses express_rates: rate list
+uses rate
+data express_rates: rate list
   -> with band: "light", price: 2
 data express: boolean
 rule rates:
@@ -205,7 +211,8 @@ rule bonus:
   salary * 10%
   unless salary < 0 eur then veto "negative salary"
 spec payroll
-uses staff: employee list
+uses employee
+data staff: employee list
   -> with name: "Ada", salary: 9000 eur
   -> with name: "Neg", salary: -1 eur
 rule names:

@@ -52,12 +52,19 @@ fn rule_type(response: &lemma::Response, rule: &str) -> Arc<lemma::LemmaType> {
     Arc::clone(&rr.rule.rule_type)
 }
 
+fn declared_minimum(lemma_type: &lemma::LemmaType) -> Option<String> {
+    lemma_type
+        .specifications
+        .minimum_decimal()
+        .map(|minimum| minimum.to_string())
+}
+
 #[test]
 fn bare_eur_binds_money_not_price() {
     let response = load_and_run(
         r#"spec test
 data money: measure -> unit eur: 1
-data price: money -> decimals 2
+data price: money -> minimum 1 eur
 rule bare: 5 eur
 rule qualified: 5 price.eur
 "#,
@@ -65,12 +72,15 @@ rule qualified: 5 price.eur
     );
 
     assert_eq!(rule_type(&response, "bare").name(), "money");
-    assert_eq!(rule_type(&response, "bare").decimal_places(), None);
+    assert_eq!(declared_minimum(&rule_type(&response, "bare")), None);
     assert_eq!(response.results["bare"].result().unwrap(), "5 eur");
 
     assert_eq!(rule_type(&response, "qualified").name(), "price");
-    assert_eq!(rule_type(&response, "qualified").decimal_places(), Some(2));
-    assert_eq!(response.results["qualified"].result().unwrap(), "5.00 eur");
+    assert_eq!(
+        declared_minimum(&rule_type(&response, "qualified")).as_deref(),
+        Some("1")
+    );
+    assert_eq!(response.results["qualified"].result().unwrap(), "5 eur");
 }
 
 #[test]
@@ -78,7 +88,7 @@ fn cast_as_price_eur_binds_price() {
     let response = load_and_run(
         r#"spec test
 data money: measure -> unit eur: 1
-data price: money -> decimals 2
+data price: money -> minimum 1 eur
 data x: 10 eur
 rule r: x as price.eur
 "#,
@@ -86,7 +96,10 @@ rule r: x as price.eur
     );
 
     assert_eq!(rule_type(&response, "r").name(), "price");
-    assert_eq!(rule_type(&response, "r").decimal_places(), Some(2));
+    assert_eq!(
+        declared_minimum(&rule_type(&response, "r")).as_deref(),
+        Some("1")
+    );
 }
 
 #[test]
@@ -94,14 +107,17 @@ fn bare_eur_cast_as_extension() {
     let response = load_and_run(
         r#"spec test
 data money_a: measure -> unit eur: 1
-data money_b: money_a -> decimals 2
+data money_b: money_a -> minimum 1 eur
 rule r: 5 eur as money_b.eur
 "#,
         "test",
     );
 
     assert_eq!(rule_type(&response, "r").name(), "money_b");
-    assert_eq!(rule_type(&response, "r").decimal_places(), Some(2));
+    assert_eq!(
+        declared_minimum(&rule_type(&response, "r")).as_deref(),
+        Some("1")
+    );
 }
 
 #[test]
@@ -109,7 +125,7 @@ fn bare_kilogram_binds_stdlib_mass() {
     let response = load_and_run(
         r#"spec test
 uses lemma units
-data weight: units.mass -> decimals 2
+data weight: units.mass -> minimum 1 kilogram
 rule bare: 5 kilogram
 rule qualified: 5 weight.kilogram
 "#,
@@ -117,13 +133,16 @@ rule qualified: 5 weight.kilogram
     );
 
     assert_eq!(rule_type(&response, "bare").name(), "mass");
-    assert_eq!(rule_type(&response, "bare").decimal_places(), None);
+    assert_eq!(declared_minimum(&rule_type(&response, "bare")), None);
 
     assert_eq!(rule_type(&response, "qualified").name(), "weight");
-    assert_eq!(rule_type(&response, "qualified").decimal_places(), Some(2));
+    assert_eq!(
+        declared_minimum(&rule_type(&response, "qualified")).as_deref(),
+        Some("1")
+    );
     assert_eq!(
         response.results["qualified"].result().unwrap(),
-        "5.00 kilogram"
+        "5 kilogram"
     );
 }
 
@@ -150,14 +169,14 @@ fn units_mass_kilogram_binds_stdlib_mass() {
     let response = load_and_run(
         r#"spec test
 uses lemma units
-data weight: units.mass -> decimals 2
+data weight: units.mass -> minimum 1 kilogram
 rule r: 5 units.mass.kilogram
 "#,
         "test",
     );
 
     assert_eq!(rule_type(&response, "r").name(), "mass");
-    assert_eq!(rule_type(&response, "r").decimal_places(), None);
+    assert_eq!(declared_minimum(&rule_type(&response, "r")), None);
 }
 
 #[test]

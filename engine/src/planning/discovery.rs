@@ -1,8 +1,9 @@
 use crate::engine::Context;
 use crate::parsing::arena::ExprRef;
 use crate::parsing::ast::{
-    DataValue, DateTimeValue, EffectiveDate, ExpressionKind, LemmaData, LemmaRepository, LemmaSpec,
-    ParentType, Reference, RepositoryQualifier, SpecRef, UsesListRow, WithRhs,
+    DataValue, DateTimeValue, EffectiveDate, ExpressionKind, InstanceListRow, LemmaData,
+    LemmaRepository, LemmaSpec, ParentType, Reference, RepositoryQualifier, SpecRef,
+    UsesBindingRhs, WithRhs,
 };
 use crate::parsing::source::Source;
 use crate::planning::semantics::{DataDefinition, LemmaType};
@@ -40,67 +41,29 @@ pub(crate) struct ResolvedSpecRef {
     pub effective: Option<DateTimeValue>,
 }
 
-/// Expands same-spec [`DataValue::Import`] (`uses`) aliases for bare names, then resolves
-/// a parsed [`SpecRef`] against the active [`Context`].
+/// Resolves the repository qualifier of a [`SpecRef`] that names a spec against the
+/// active [`Context`].
 ///
 /// Same-repository references (no explicit repository qualifier) leave
 /// [`ResolvedSpecRef::repository`] as `None`. Explicit qualifiers resolve to interned
 /// repositories as `Some(...)`.
 ///
-/// When a bare name matches a top-level [`DataValue::Import`] (`uses` alias), the returned
-/// [`SpecRef`] (second tuple element) is that import's target [`SpecRef`].
-pub(crate) fn resolve_spec_ref_after_expanding_uses_aliases(
+/// `spec_ref` always names a spec: a `uses` target, or the row spec a list element stands
+/// for ([`list_element_spec_ref`]). Local names never reach resolution.
+pub(crate) fn resolve_spec_ref_repository(
     context: &Context,
     spec_ref: &SpecRef,
     ref_source: Option<&Source>,
     consumer_name: &str,
     spec_context: Option<&LemmaSpec>,
-) -> Result<(ResolvedSpecRef, SpecRef), Error> {
-    let effective_ref = if spec_ref.repository.is_some() {
-        spec_ref.clone()
-    } else if let Some(consumer) = &spec_context {
-        let mut expanded: Option<SpecRef> = None;
-        for d in &consumer.data {
-            if !d.reference.segments.is_empty() {
-                continue;
-            }
-            if d.reference.name != spec_ref.name {
-                continue;
-            }
-            let Some(inner) = d.value.uses_spec_ref() else {
-                continue;
-            };
-            if spec_ref.effective.is_some()
-                && (inner.name != spec_ref.name
-                    || inner.repository != spec_ref.repository
-                    || inner.effective != spec_ref.effective)
-            {
-                return Err(Error::validation_with_context(
-                    format!(
-                        "This reference pins an effective date on `{}`, which is only a `uses` import alias in this spec. Put the effective date on the matching `uses` line (for example `uses {}: <target_spec> <datetime>`).",
-                        spec_ref.name, spec_ref.name
-                    ),
-                    ref_source.cloned(),
-                    None::<String>,
-                    spec_context,
-                    None,
-                ));
-            }
-            expanded = Some(inner.clone());
-            break;
-        }
-        expanded.unwrap_or_else(|| spec_ref.clone())
-    } else {
-        spec_ref.clone()
-    };
-
-    let resolved_repository = match &effective_ref.repository {
+) -> Result<ResolvedSpecRef, Error> {
+    let resolved_repository = match &spec_ref.repository {
         None => None,
         Some(qualifier) => {
             let Some(arc) = context.find_repository(&qualifier.name) else {
                 return Err(unknown_repository_qualifier_error(
                     qualifier,
-                    &effective_ref,
+                    spec_ref,
                     ref_source,
                     consumer_name,
                     spec_context,
@@ -109,14 +72,11 @@ pub(crate) fn resolve_spec_ref_after_expanding_uses_aliases(
             Some(arc)
         }
     };
-    Ok((
-        ResolvedSpecRef {
-            repository: resolved_repository,
-            name: effective_ref.name.clone(),
-            effective: effective_ref.effective.clone(),
-        },
-        effective_ref,
-    ))
+    Ok(ResolvedSpecRef {
+        repository: resolved_repository,
+        name: spec_ref.name.clone(),
+        effective: spec_ref.effective.clone(),
+    })
 }
 
 fn unknown_repository_qualifier_error(
@@ -202,7 +162,7 @@ pub(crate) fn resolve_spec_ref<'a>(
 }
 
 /// [`resolve_spec_ref`] that also resolves to `consumer_spec` itself: the row spec
-/// of a self-list (`uses components: part list` inside `spec part`).
+/// of a self-list (`data components: part list` inside `spec part`).
 pub(crate) fn resolve_spec_ref_or_self<'a>(
     context: &'a Context,
     spec_ref: &SpecRef,
@@ -212,7 +172,7 @@ pub(crate) fn resolve_spec_ref_or_self<'a>(
     ref_source: Option<Source>,
 ) -> Result<(Arc<LemmaRepository>, &'a LemmaSpec), Error> {
     let consumer_name = consumer_spec.name.as_str();
-    let (resolved, effective_ref) = resolve_spec_ref_after_expanding_uses_aliases(
+    let resolved = resolve_spec_ref_repository(
         context,
         spec_ref,
         ref_source.as_ref(),
@@ -223,14 +183,14 @@ pub(crate) fn resolve_spec_ref_or_self<'a>(
         Some(explicit) => Arc::clone(explicit),
         None => Arc::clone(consumer_repository),
     };
-    let instant = effective_ref.at(effective);
-    let Some(spec_set) = context.spec_set(&repository_arc, effective_ref.name.as_str()) else {
+    let instant = spec_ref.at(effective);
+    let Some(spec_set) = context.spec_set(&repository_arc, spec_ref.name.as_str()) else {
         let (message, suggestion) = format_missing_spec_ref(
             consumer_name,
             &repository_arc,
-            effective_ref.name.as_str(),
-            effective_ref.repository.as_ref(),
-            &effective_ref.effective,
+            spec_ref.name.as_str(),
+            spec_ref.repository.as_ref(),
+            &spec_ref.effective,
             &instant,
             context,
         );
@@ -243,7 +203,7 @@ pub(crate) fn resolve_spec_ref_or_self<'a>(
         ));
     };
 
-    let spec = if let Some(pin) = effective_ref.effective.as_ref() {
+    let spec = if let Some(pin) = spec_ref.effective.as_ref() {
         if let Some(exact) = spec_set.get_exact(Some(pin)) {
             Some(exact)
         } else {
@@ -257,9 +217,9 @@ pub(crate) fn resolve_spec_ref_or_self<'a>(
         let (message, suggestion) = format_missing_spec_ref(
             consumer_name,
             &repository_arc,
-            effective_ref.name.as_str(),
-            effective_ref.repository.as_ref(),
-            &effective_ref.effective,
+            spec_ref.name.as_str(),
+            spec_ref.repository.as_ref(),
+            &spec_ref.effective,
             &instant,
             context,
         );
@@ -275,7 +235,47 @@ pub(crate) fn resolve_spec_ref_or_self<'a>(
     Ok((repository_arc, spec))
 }
 
-/// Whether `data` of `spec` is a self-list: `uses x: spec list` whose row spec is `spec` itself.
+/// Row spec of the instance list `data` of `spec` (`data items: item list`), per
+/// [`list_element_spec_ref`]. `None` when `data` is no list of spec rows.
+pub(crate) fn data_instance_list_spec_ref(spec: &LemmaSpec, data: &LemmaData) -> Option<SpecRef> {
+    let DataValue::Definition {
+        base: Some(ParentType::List { inner }),
+        ..
+    } = &data.value
+    else {
+        return None;
+    };
+    list_element_spec_ref(spec, inner)
+}
+
+/// Row spec a list element written in `spec` stands for (`data staff: e list`, or
+/// `e list` in a rule). Inside a spec only local names exist: the element is the local
+/// name of a top-level `uses` line, which gives that line's target, or the spec's own
+/// name, which gives the spec itself (a self-list). `None` for any other name: the list
+/// holds values of a type.
+pub(crate) fn list_element_spec_ref(spec: &LemmaSpec, element: &ParentType) -> Option<SpecRef> {
+    let mut current = element;
+    let name = loop {
+        match current {
+            ParentType::Custom { name } => break name,
+            ParentType::Qualified { .. } | ParentType::Primitive { .. } => return None,
+            ParentType::Ranged { inner } | ParentType::List { inner } => current = inner,
+        }
+    };
+    let import = spec.data.iter().find_map(|data| {
+        (data.reference.segments.is_empty() && data.reference.name == *name)
+            .then(|| data.value.uses_spec_ref())
+            .flatten()
+    });
+    match import {
+        Some(target) => Some(target.clone()),
+        None => name
+            .eq_ignore_ascii_case(&spec.name)
+            .then(|| SpecRef::same_repository(name.clone())),
+    }
+}
+
+/// Whether `data` of `spec` is a self-list: `data x: spec list` whose row spec is `spec` itself.
 pub(crate) fn is_self_list(
     context: &Context,
     data: &LemmaData,
@@ -283,10 +283,10 @@ pub(crate) fn is_self_list(
     spec_repository: &Arc<LemmaRepository>,
     effective: &EffectiveDate,
 ) -> bool {
-    let DataValue::ImportList { spec_ref, .. } = &data.value else {
+    let Some(spec_ref) = data_instance_list_spec_ref(spec, data) else {
         return false;
     };
-    resolve_spec_ref_or_self(context, spec_ref, spec_repository, spec, effective, None)
+    resolve_spec_ref_or_self(context, &spec_ref, spec_repository, spec, effective, None)
         .is_ok_and(|(_, row_spec)| same_loaded_spec(row_spec, spec))
 }
 
@@ -387,8 +387,8 @@ pub(crate) struct DependencyEdge {
 pub(crate) enum DependencyEdgeOrigin {
     /// `uses alias: dep`
     Uses,
-    /// `uses alias: dep list`
-    UsesList,
+    /// `data alias: dep list`
+    InstanceList,
 }
 
 impl DependencyEdge {
@@ -412,14 +412,14 @@ pub(crate) fn dependency_edges(
 
     let mut push_edge =
         |spec_ref: &SpecRef, source: &Source, alias: &str, origin: DependencyEdgeOrigin| {
-            match resolve_spec_ref_after_expanding_uses_aliases(
+            match resolve_spec_ref_repository(
                 context,
                 spec_ref,
                 Some(source),
                 spec.name.as_str(),
                 Some(spec),
             ) {
-                Ok((resolved, effective_ref)) => {
+                Ok(resolved) => {
                     let dep_repository = match &resolved.repository {
                         Some(r) => Arc::clone(r),
                         None => Arc::clone(consumer_repository),
@@ -427,7 +427,7 @@ pub(crate) fn dependency_edges(
                     out.push(DependencyEdge {
                         dep_repository,
                         dep_name: resolved.name,
-                        explicit_repository_qualifier: effective_ref.repository.clone(),
+                        explicit_repository_qualifier: spec_ref.repository.clone(),
                         explicit_effective: resolved.effective,
                         source: source.clone(),
                         alias: alias.to_string(),
@@ -448,12 +448,18 @@ pub(crate) fn dependency_edges(
                     DependencyEdgeOrigin::Uses,
                 );
             }
-            DataValue::ImportList { spec_ref, .. } => {
+            DataValue::Definition {
+                base: Some(ParentType::List { .. }),
+                ..
+            } => {
+                let Some(spec_ref) = data_instance_list_spec_ref(spec, data) else {
+                    continue;
+                };
                 push_edge(
-                    spec_ref,
+                    &spec_ref,
                     &data.source_location,
                     &data.reference.name,
-                    DependencyEdgeOrigin::UsesList,
+                    DependencyEdgeOrigin::InstanceList,
                 );
             }
             _ => {}
@@ -667,14 +673,37 @@ fn alias_reads(spec: &LemmaSpec, alias: &str) -> AliasReads {
             continue;
         }
         match &data.value {
-            DataValue::Definition {
-                base: Some(base), ..
-            } => {
-                if let Some(type_name) = qualified_type_read(base, alias) {
-                    reads.types.insert(type_name.to_string());
+            DataValue::Definition { base, list, .. } => {
+                if let Some(base) = base {
+                    if let Some(type_name) = qualified_type_read(base, alias) {
+                        reads.types.insert(type_name.to_string());
+                    }
+                }
+                if let Some(list) = list {
+                    if data.reference.name == alias {
+                        reads.whole = true;
+                    }
+                    for row in &list.rows {
+                        let rhs_values: Vec<&WithRhs> = match row {
+                            InstanceListRow::Fields { bindings, .. } => {
+                                bindings.iter().map(|binding| &binding.rhs).collect()
+                            }
+                            InstanceListRow::Values { values, .. } => values.iter().collect(),
+                        };
+                        for rhs in rhs_values {
+                            if let WithRhs::Reference { target } = rhs {
+                                collect_alias_reference_read(target, alias, &mut reads.members);
+                                if target.segments.is_empty() && target.name == alias {
+                                    reads.whole = true;
+                                }
+                            }
+                        }
+                    }
                 }
             }
-            DataValue::Definition { base: None, .. } => {}
+            DataValue::ImportList { .. } => {
+                panic!("BUG: uses list is rejected at parse and must not reach planning");
+            }
             DataValue::Import { bindings, .. } => {
                 for binding in bindings {
                     if data.reference.name == alias {
@@ -682,24 +711,8 @@ fn alias_reads(spec: &LemmaSpec, alias: &str) -> AliasReads {
                             .members
                             .insert(member_key(&binding.path.segments, &binding.path.name));
                     }
-                    if let WithRhs::Reference { target } = &binding.rhs {
-                        collect_alias_reference_read(target, alias, &mut reads.members);
-                    }
-                }
-            }
-            DataValue::ImportList { list, .. } => {
-                if data.reference.name == alias {
-                    reads.whole = true;
-                }
-                for row in &list.rows {
-                    let rhs_values: Vec<&WithRhs> = match row {
-                        UsesListRow::Fields { bindings, .. } => {
-                            bindings.iter().map(|binding| &binding.rhs).collect()
-                        }
-                        UsesListRow::Values { values, .. } => values.iter().collect(),
-                    };
-                    for rhs in rhs_values {
-                        if let WithRhs::Reference { target } = rhs {
+                    if let UsesBindingRhs::References { targets } = &binding.rhs {
+                        for target in targets {
                             collect_alias_reference_read(target, alias, &mut reads.members);
                             if target.segments.is_empty() && target.name == alias {
                                 reads.whole = true;
@@ -756,7 +769,7 @@ fn qualified_type_read<'p>(base: &'p ParentType, alias: &str) -> Option<&'p str>
         match current {
             ParentType::Qualified { spec_alias, inner } if spec_alias == alias => {
                 return match inner.as_ref() {
-                    ParentType::Custom { name } => Some(name.as_str()),
+                    ParentType::Custom { name, .. } => Some(name.as_str()),
                     ParentType::Primitive { .. }
                     | ParentType::Qualified { .. }
                     | ParentType::Ranged { .. }
@@ -878,7 +891,7 @@ pub fn validate_dependency_interfaces<'a>(
                     continue;
                 }
                 // A self-list's rows are typed by the consumer's own slice.
-                if edge.origin == DependencyEdgeOrigin::UsesList
+                if edge.origin == DependencyEdgeOrigin::InstanceList
                     && Arc::ptr_eq(&edge.dep_repository, &consumer_repository)
                     && crate::parsing::ast::ascii_lowercase_logical_name(edge.dep_name.clone())
                         == crate::parsing::ast::ascii_lowercase_logical_name(
@@ -949,24 +962,38 @@ pub fn validate_dependency_interfaces<'a>(
                     saw_overlapping_plan = true;
 
                     let mut observed: Vec<(MemberKind, String, &LemmaType)> = Vec::new();
-                    for (path, data) in &plan.data {
-                        let Some(lemma_type) = data.schema_type() else {
-                            continue;
-                        };
-                        if matches!(data, DataDefinition::Reference { .. }) {
-                            continue;
+                    let mut levels: Vec<(String, &crate::planning::ExecutionPlan)> =
+                        vec![(String::new(), plan.as_ref())];
+                    while let Some((prefix, level)) = levels.pop() {
+                        for (path, data) in &level.data {
+                            let input_key = format!("{prefix}{}", path.input_key());
+                            if let DataDefinition::Import { row, .. } = data {
+                                let nested = format!("{input_key}.");
+                                if reads.whole
+                                    || reads
+                                        .members
+                                        .iter()
+                                        .any(|member| member.starts_with(&nested))
+                                {
+                                    levels.push((nested, plan.row_template(&row.identity)));
+                                }
+                                continue;
+                            }
+                            let Some(lemma_type) = data.schema_type() else {
+                                continue;
+                            };
+                            if matches!(data, DataDefinition::Reference { .. }) {
+                                continue;
+                            }
+                            if reads.whole || reads.members.contains(&input_key) {
+                                observed.push((MemberKind::Data, input_key, lemma_type));
+                            }
                         }
-                        let input_key = path.input_key();
-                        if reads.whole || reads.members.contains(&input_key) {
-                            observed.push((MemberKind::Data, input_key, lemma_type));
-                        }
-                    }
-                    for rule in plan.rules.values() {
-                        let key = rule.path.input_key();
-                        let named =
-                            rule.path.segments.is_empty() && reads.members.contains(rule.name());
-                        if reads.whole || named {
-                            observed.push((MemberKind::Rule, key, rule.rule_type.as_ref()));
+                        for rule in level.rules.values() {
+                            let key = format!("{prefix}{}", rule.path.input_key());
+                            if reads.whole || reads.members.contains(&key) {
+                                observed.push((MemberKind::Rule, key, rule.rule_type.as_ref()));
+                            }
                         }
                     }
                     for (type_name, lemma_type) in &plan.resolved_types.resolved {
@@ -1069,11 +1096,11 @@ pub(crate) enum DependencyDiscoveryError {
 /// and deduplicated by Context-owned row identity (`same_loaded_spec`).
 pub(crate) fn discover_dependency_order<'a>(
     context: &'a Context,
+    root_repository: &Arc<LemmaRepository>,
     root: &'a LemmaSpec,
     effective: &EffectiveDate,
     limits: &crate::limits::ResourceLimits,
 ) -> Result<Vec<DependencySpec<'a>>, DependencyDiscoveryError> {
-    let root_repository = owning_repository(context, root);
     let mut discovery = DependencyDiscovery {
         context,
         limits,
@@ -1082,7 +1109,7 @@ pub(crate) fn discover_dependency_order<'a>(
         errors: Vec::new(),
         visited: Vec::new(),
     };
-    discovery.visit(root, &root_repository, effective, 0);
+    discovery.visit(root, root_repository, effective, 0);
     let DependencyDiscovery {
         nodes,
         edges,
@@ -1106,21 +1133,6 @@ struct DependencyDiscovery<'a, 'l> {
     errors: Vec<Error>,
     /// Visited: (repo name key, loaded name, loaded effective_from, resolution instant).
     visited: Vec<(Option<String>, String, EffectiveDate, EffectiveDate)>,
-}
-
-/// The repository `Arc` that owns `spec` in `context`. Same-repository references resolve
-/// against it. Planning only sees specs loaded into `context`.
-pub(crate) fn owning_repository(context: &Context, spec: &LemmaSpec) -> Arc<LemmaRepository> {
-    context
-        .repositories()
-        .iter()
-        .find(|(_, inner)| {
-            inner
-                .get(&spec.name)
-                .is_some_and(|set| set.iter_specs().any(|p| same_loaded_spec(p, spec)))
-        })
-        .map(|(repository, _)| Arc::clone(repository))
-        .expect("BUG: planned spec must be loaded in context")
 }
 
 fn visit_key(
@@ -1281,38 +1293,66 @@ impl<'a, 'l> DependencyDiscovery<'a, 'l> {
     ) -> Option<(&'a LemmaSpec, Arc<LemmaRepository>, EffectiveDate)> {
         let context = self.context;
         for edge in frame.edges.by_ref() {
-            let dep_effective = edge
-                .explicit_effective
-                .clone()
-                .map_or_else(|| frame.effective.clone(), EffectiveDate::DateTimeValue);
-
-            let resolve = match edge.origin {
-                DependencyEdgeOrigin::UsesList => resolve_spec_ref_or_self,
-                DependencyEdgeOrigin::Uses => resolve_spec_ref,
-            };
-            let dependency = match resolve(
+            match resolve_dependency_edge(
                 context,
-                &edge.as_spec_ref(),
+                &edge,
                 &frame.repository,
                 frame.spec,
                 &frame.effective,
-                Some(edge.source.clone()),
             ) {
-                Ok((_, dependency)) => dependency,
-                Err(error) => {
-                    self.errors.push(error);
-                    continue;
+                Ok(Some(dependency)) => {
+                    frame.awaiting = Some(dependency.spec);
+                    return Some((dependency.spec, dependency.repository, dependency.at));
                 }
-            };
-            if same_loaded_spec(dependency, frame.spec) {
-                continue;
+                Ok(None) => {}
+                Err(error) => self.errors.push(error),
             }
-
-            frame.awaiting = Some(dependency);
-            return Some((dependency, Arc::clone(&edge.dep_repository), dep_effective));
         }
         None
     }
+}
+
+/// The spec version an edge of `consumer` reaches when `consumer` is resolved at
+/// `consumer_effective`, and the instant it is read at.
+pub(crate) struct ResolvedDependencyEdge<'a> {
+    pub repository: Arc<LemmaRepository>,
+    pub spec: &'a LemmaSpec,
+    pub at: EffectiveDate,
+}
+
+/// Resolve `edge` of `consumer`: at its pin when it has one, else at `consumer_effective`.
+/// `None` for an edge back to `consumer` itself (a self-list).
+pub(crate) fn resolve_dependency_edge<'a>(
+    context: &'a Context,
+    edge: &DependencyEdge,
+    consumer_repository: &Arc<LemmaRepository>,
+    consumer: &LemmaSpec,
+    consumer_effective: &EffectiveDate,
+) -> Result<Option<ResolvedDependencyEdge<'a>>, Error> {
+    let at = edge
+        .explicit_effective
+        .clone()
+        .map_or_else(|| consumer_effective.clone(), EffectiveDate::DateTimeValue);
+    let resolve = match edge.origin {
+        DependencyEdgeOrigin::InstanceList => resolve_spec_ref_or_self,
+        DependencyEdgeOrigin::Uses => resolve_spec_ref,
+    };
+    let (_, dependency) = resolve(
+        context,
+        &edge.as_spec_ref(),
+        consumer_repository,
+        consumer,
+        consumer_effective,
+        Some(edge.source.clone()),
+    )?;
+    if same_loaded_spec(dependency, consumer) {
+        return Ok(None);
+    }
+    Ok(Some(ResolvedDependencyEdge {
+        repository: Arc::clone(&edge.dep_repository),
+        spec: dependency,
+        at,
+    }))
 }
 
 /// Kahn's topological sort over an index-based edge list.
@@ -1452,12 +1492,12 @@ mod tests {
             AstDataValue::Definition {
                 base: Some(ParentType::Qualified {
                     spec_alias: "iso".into(),
-                    inner: Box::new(ParentType::Custom {
-                        name: "code".into(),
-                    }),
+                    inner: Box::new(ParentType::custom("code")),
                 }),
                 constraints: None,
                 value: None,
+
+                list: None,
             },
             dummy_source(),
         ));
@@ -1528,6 +1568,7 @@ mod tests {
         let errs = discovery_errors(
             discover_dependency_order(
                 &ctx,
+                &repository,
                 consumer,
                 &effective,
                 &crate::ResourceLimits::default(),
@@ -1572,6 +1613,7 @@ mod tests {
         let errs = discovery_errors(
             discover_dependency_order(
                 &ctx,
+                &repository,
                 consumer,
                 &effective,
                 &crate::ResourceLimits::default(),
@@ -1633,6 +1675,7 @@ mod tests {
         let errs = discovery_errors(
             discover_dependency_order(
                 &ctx,
+                &repository,
                 consumer,
                 &effective,
                 &crate::ResourceLimits::default(),
@@ -1663,6 +1706,7 @@ mod tests {
         let errs = discovery_errors(
             discover_dependency_order(
                 &ctx,
+                &repository,
                 consumer,
                 &effective,
                 &crate::ResourceLimits::default(),
@@ -1678,7 +1722,7 @@ mod tests {
     }
 
     #[test]
-    fn resolve_spec_ref_expands_bare_from_uses_alias() {
+    fn list_element_through_a_local_name_is_that_uses_target() {
         let mut ctx = Context::new();
         let iso_repo = registry_iso_repository();
         let workspace = ctx.workspace();
@@ -1688,29 +1732,43 @@ mod tests {
         ctx.insert_spec(Arc::clone(&workspace), consumer.clone())
             .unwrap();
 
-        let effective = EffectiveDate::DateTimeValue(date(2024, 6, 1));
-        let resolved = resolve_spec_ref(
-            &ctx,
-            &SpecRef {
-                name: "iso".into(),
-                repository: None,
-                effective: None,
-                repository_span: None,
-                target_span: None,
-            },
-            &workspace,
-            &consumer,
-            &effective,
-            None,
-        )
-        .expect("alpha2 via uses alias");
+        let row_spec = list_element_spec_ref(&consumer, &ParentType::custom("iso"))
+            .expect("`iso` is a local name of `with_alias`");
+        assert_eq!(row_spec.name, "alpha2");
+        assert_eq!(
+            row_spec.repository,
+            Some(RepositoryQualifier::new("@iso/countries"))
+        );
+        assert_eq!(row_spec.effective, Some(date(2024, 1, 1)));
 
+        let effective = EffectiveDate::DateTimeValue(date(2024, 6, 1));
+        let resolved = resolve_spec_ref(&ctx, &row_spec, &workspace, &consumer, &effective, None)
+            .expect("alpha2 of @iso/countries is loaded");
         assert_eq!(resolved.1.name, "alpha2");
     }
 
     #[test]
-    fn uses_implicit_alias_same_name_with_effective_resolves_on_import_target() {
-        let inner = SpecRef {
+    fn list_element_naming_a_spec_without_a_local_name_is_no_row_spec() {
+        let consumer = consumer_alias_from_alpha2();
+        assert!(
+            list_element_spec_ref(&consumer, &ParentType::custom("alpha2")).is_none(),
+            "`alpha2` is a spec, not a name inside `with_alias`"
+        );
+    }
+
+    #[test]
+    fn list_element_naming_the_spec_itself_is_a_self_list() {
+        let part = LemmaSpec::new("part".to_string());
+        let row_spec = list_element_spec_ref(&part, &ParentType::custom("part"))
+            .expect("`part list` inside `part` is a self-list");
+        assert_eq!(row_spec.name, "part");
+        assert_eq!(row_spec.repository, None);
+        assert_eq!(row_spec.effective, None);
+    }
+
+    #[test]
+    fn list_element_local_name_equal_to_the_spec_name_is_the_uses_target() {
+        let target = SpecRef {
             name: "finance".to_string(),
             repository: None,
             effective: Some(date(2026, 1, 1)),
@@ -1721,35 +1779,17 @@ mod tests {
         consumer.effective_from = EffectiveDate::from_option(Some(date(2027, 1, 1)));
         consumer.data.push(LemmaData::new(
             Reference::local("finance".to_string()),
-            AstDataValue::import(inner.clone()),
+            AstDataValue::import(target),
             dummy_source(),
         ));
 
-        let mut ctx = Context::new();
-        let workspace = ctx.workspace();
-        let mut finance_2026 = LemmaSpec::new("finance".to_string());
-        finance_2026.effective_from = EffectiveDate::from_option(Some(date(2026, 1, 1)));
-        ctx.insert_spec(Arc::clone(&workspace), finance_2026)
-            .unwrap();
-        ctx.insert_spec(Arc::clone(&workspace), consumer.clone())
-            .unwrap();
-
-        let (resolved, effective_ref) = resolve_spec_ref_after_expanding_uses_aliases(
-            &ctx,
-            &inner,
-            Some(&consumer.data[0].source_location),
-            "finance",
-            Some(&consumer),
-        )
-        .expect("uses finance 2026-01-01 must resolve when alias equals target name");
-
-        assert_eq!(resolved.name, "finance");
+        let row_spec = list_element_spec_ref(&consumer, &ParentType::custom("finance"))
+            .expect("`finance` is the local name of `uses finance 2026-01-01`");
         assert_eq!(
-            resolved.effective.as_ref(),
-            Some(&date(2026, 1, 1)),
-            "effective pin on uses line must be preserved"
+            row_spec.effective,
+            Some(date(2026, 1, 1)),
+            "the pin of the `uses` line is the row spec's"
         );
-        assert_eq!(effective_ref.effective.as_ref(), Some(&date(2026, 1, 1)),);
     }
 
     #[test]
@@ -1760,11 +1800,11 @@ mod tests {
         origin.data.push(LemmaData::new(
             Reference::local("rate".to_string()),
             DataValue::Definition {
-                base: Some(ParentType::Custom {
-                    name: "number".into(),
-                }),
+                base: Some(ParentType::custom("number")),
                 constraints: None,
                 value: None,
+
+                list: None,
             },
             dummy_source(),
         ));
@@ -1813,38 +1853,6 @@ mod tests {
     }
 
     #[test]
-    fn resolve_spec_ref_rejects_effective_on_bare_from_uses_alias() {
-        let consumer = consumer_alias_from_alpha2();
-        let mut ctx = Context::new();
-        let iso_repo = registry_iso_repository();
-        let workspace = ctx.workspace();
-        ctx.insert_spec(Arc::clone(&iso_repo), alpha2_slice_2024())
-            .unwrap();
-        ctx.insert_spec(Arc::clone(&workspace), consumer.clone())
-            .unwrap();
-
-        let effective = EffectiveDate::DateTimeValue(date(2024, 6, 1));
-        let err = resolve_spec_ref(
-            &ctx,
-            &SpecRef {
-                name: "iso".into(),
-                repository: None,
-                effective: Some(date(2026, 1, 1)),
-                repository_span: None,
-                target_span: None,
-            },
-            &workspace,
-            &consumer,
-            &effective,
-            None,
-        )
-        .expect_err("effective pin on from + uses alias is invalid");
-
-        let msg = err.message();
-        assert!(msg.contains("uses alias") || msg.contains("uses"), "{msg}");
-    }
-
-    #[test]
     fn dependency_edges_from_uses_alias_has_registry_qualifier() {
         let mut ctx = Context::new();
         let iso_repo = registry_iso_repository();
@@ -1889,12 +1897,12 @@ mod tests {
             DataValue::Definition {
                 base: Some(ParentType::Qualified {
                     spec_alias: "c".into(),
-                    inner: Box::new(ParentType::Custom {
-                        name: "money".into(),
-                    }),
+                    inner: Box::new(ParentType::custom("money")),
                 }),
                 constraints: None,
                 value: None,
+
+                list: None,
             },
             dummy_source(),
         ));
@@ -1935,13 +1943,11 @@ rule doubled: p * 2
 spec child 2025-01-01
 data money: measure
  -> unit eur: 1.00
- -> decimals 2
 
 spec child 2025-06-01
 data money: measure
  -> unit eur: 1.00
  -> unit usd: 0.91
- -> decimals 2
 "#;
         let specs = crate::parse(
             source,
@@ -1961,6 +1967,7 @@ data money: measure
             .expect("consumer");
         let ordered_dependencies = discover_dependency_order(
             &ctx,
+            &workspace,
             consumer,
             &EffectiveDate::from_option(Some(date(2025, 3, 1))),
             &crate::ResourceLimits::default(),

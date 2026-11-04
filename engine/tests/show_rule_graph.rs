@@ -1,9 +1,18 @@
 //! Show.rules is the reachable rule graph (local + depends_on_rules closure).
 
 use indexmap::IndexMap;
+use lemma::RulePath;
 use lemma::{DateTimeValue, Engine, ShowExpression, SourceType};
 use std::path::PathBuf;
 use std::sync::Arc;
+
+fn dep_input_keys(deps: &[RulePath]) -> Vec<String> {
+    deps.iter().map(RulePath::input_key).collect()
+}
+
+fn deps_contain(deps: &[RulePath], key: &str) -> bool {
+    deps.iter().any(|path| path.input_key() == key)
+}
 
 fn engine(code: &str) -> Engine {
     let mut engine = Engine::new();
@@ -65,7 +74,7 @@ fn show_rule_unless_order_and_rule_leaf_in_depends_on_rules() {
         ShowExpression::Rule { ref name } if name == "bulk_rate"
     ));
     assert_eq!(
-        discount.depends_on_rules,
+        dep_input_keys(&discount.depends_on_rules),
         vec!["bulk_rate".to_string(), "vip_rate".to_string()]
     );
     assert!(show.rules.contains_key("vip_rate"));
@@ -88,7 +97,10 @@ fn show_local_rule_target_via_with_binding_in_depends_on_rules() {
     );
     let show = engine.show(None, "outer", None).expect("show");
     let r = show.rules.get("r").expect("r");
-    assert_eq!(r.depends_on_rules, vec!["computed".to_string()]);
+    assert_eq!(
+        dep_input_keys(&r.depends_on_rules),
+        vec!["computed".to_string()]
+    );
     assert_eq!(r.lemma_type.name(), "slot");
     assert!(matches!(
         &r.branches[0].result,
@@ -135,8 +147,8 @@ fn show_includes_used_imported_rule_omits_unused_sibling() {
     let show = engine.show(None, "outer", None).expect("show");
     let helper = show.rules.get("i.helper").expect("i.helper present");
     assert_eq!(helper.path.len(), 1);
-    assert_eq!(helper.path[0].uses, "i");
-    assert_eq!(helper.path[0].spec, "inner");
+    assert_eq!(helper.path[0].uses.as_ref(), "i");
+    assert_eq!(helper.path[0].spec.as_ref(), "inner");
     assert!(helper.path[0].repository.is_none());
     assert!(matches!(
         &helper.branches[0].result,
@@ -148,7 +160,10 @@ fn show_includes_used_imported_rule_omits_unused_sibling() {
     );
     assert!(!show.rules.contains_key("helper"));
     let r = show.rules.get("r").expect("r");
-    assert_eq!(r.depends_on_rules, vec!["i.helper".to_string()]);
+    assert_eq!(
+        dep_input_keys(&r.depends_on_rules),
+        vec!["i.helper".to_string()]
+    );
     assert!(matches!(
         &r.branches[0].result,
         ShowExpression::Rule { name } if name == "i.helper"
@@ -180,9 +195,15 @@ fn show_two_level_reachable_import_rule() {
         "unused two-level sibling must be absent"
     );
     let r = show.rules.get("r").expect("r");
-    assert_eq!(r.depends_on_rules, vec!["a.pass".to_string()]);
+    assert_eq!(
+        dep_input_keys(&r.depends_on_rules),
+        vec!["a.pass".to_string()]
+    );
     let pass = show.rules.get("a.pass").expect("a.pass");
-    assert_eq!(pass.depends_on_rules, vec!["a.b.target".to_string()]);
+    assert_eq!(
+        dep_input_keys(&pass.depends_on_rules),
+        vec!["a.b.target".to_string()]
+    );
 }
 
 #[test]
@@ -203,11 +224,11 @@ fn show_two_aliases_of_same_spec_are_distinct_keys() {
     assert!(show.rules.contains_key("a.x"));
     assert!(show.rules.contains_key("b.x"));
     assert_eq!(
-        show.rules.get("left").expect("left").depends_on_rules,
+        dep_input_keys(&show.rules.get("left").expect("left").depends_on_rules),
         vec!["a.x".to_string()]
     );
     assert_eq!(
-        show.rules.get("right").expect("right").depends_on_rules,
+        dep_input_keys(&show.rules.get("right").expect("right").depends_on_rules),
         vec!["b.x".to_string()]
     );
 }
@@ -234,9 +255,9 @@ fn show_with_binding_to_imported_rule_in_depends_on_rules() {
     let show = engine.show(None, "outer", None).expect("show");
     let r = show.rules.get("r").expect("r");
     assert!(
-        r.depends_on_rules.contains(&"src.computed".to_string()),
+        deps_contain(&r.depends_on_rules, "src.computed"),
         "deps: {:?}",
-        r.depends_on_rules
+        dep_input_keys(&r.depends_on_rules)
     );
     assert!(show.rules.contains_key("src.computed"));
     assert!(
@@ -268,7 +289,7 @@ fn every_depends_on_rules_and_rule_leaf_is_a_show_key() {
                     "Rule leaf '{name}' missing from Show.rules"
                 );
             }
-            ShowExpression::And { operands } => {
+            ShowExpression::And { operands } | ShowExpression::Or { operands } => {
                 for operand in operands {
                     walk(operand, keys);
                 }
@@ -290,6 +311,12 @@ fn every_depends_on_rules_and_rule_leaf_is_a_show_key() {
             } => {
                 walk(left, keys);
                 walk(right, keys);
+            }
+            ShowExpression::StepRounding { operand, step, .. } => {
+                walk(operand, keys);
+                if let Some(step) = step {
+                    walk(step, keys);
+                }
             }
             ShowExpression::Not { operand }
             | ShowExpression::UnitConversion { operand, .. }
@@ -320,8 +347,9 @@ fn every_depends_on_rules_and_rule_leaf_is_a_show_key() {
     for (name, rule) in &show.rules {
         for dep in &rule.depends_on_rules {
             assert!(
-                keys.contains(dep.as_str()),
-                "depends_on_rules entry '{dep}' of '{name}' missing from Show.rules"
+                keys.contains(dep.input_key().as_str()),
+                "depends_on_rules entry '{}' of '{name}' missing from Show.rules",
+                dep.input_key()
             );
         }
         for branch in &rule.branches {

@@ -1,12 +1,24 @@
 **Organization: spec → rule**
 
-Default: one file, one implicit repo. No `repo` blocks unless multi-namespace workspace requested. Structure: **spec → rule**.
+A repository is one namespace. Files in it are loaded together. `uses other_spec` finds `other_spec` whichever file declared it.
 
-**Spec** = namespace for `data` and `rules`. **Rule** = named computed value. Reference rules by name; engine resolves if name is data or rule. One file can have multiple specs.
+A file does not isolate specs. Two specs in one file and the same two specs in two files are the same program. Split a spec into its own file when it is its own document.
+
+Spec names are unique in the repository.
+
+`evaluate` takes a spec name. There is no evaluate-a-file operation. `source` reads text.
+
+Skip `repo` unless a second namespace is required.
+
+Structure: **spec → rule**.
+
+**Spec** = namespace for `data` and `rules`. **Rule** = named computed value. Reference rules by name; engine resolves if name is data or rule.
 Hierarchical names: `spec employee/contract`. Effective date for temporal changes: `spec pricing 2026-01-01`.
 Commentary placement: see **Syntax**.
 
-**Example: multi-spec composition (same file)**
+**Example: multi-spec composition (same repository)**
+
+The two specs may live in one file or in two.
 
 ```lemma
 spec base_config
@@ -15,7 +27,6 @@ data tax_rate:          21%
 data standard_discount: 5%
 data price: measure
   -> unit eur: 1.00
-  -> decimals 2
 
 rule tax_amount:
   price * tax_rate
@@ -49,7 +60,7 @@ rule has_discount:
   pricing.standard_discount > 0%
 ```
 
-- `uses alias: target_spec`: imports spec in same file.
+- `uses alias: target_spec`: imports that spec from the repository, whichever file declared it.
 - Reference members: `alias.field` or `alias.rule_name`.
 - Imported types need the alias: `data country: iso.code`, not bare `code`. A bare name that an import declares is a planning error naming the qualified form(s). Prefer `units.mass` / `units.duration` after `uses lemma units` (see **Units**).
 - Under `uses`, `  -> with path: value` sets imported data (path relative to imported spec). Several pairs on one line are comma-separated (`-> with qty: 3, sku: "latte"`). Do not use `data alias.field`. Standalone `with alias.field: …` is a parse error; nest under `uses`. Local slots use `data`.
@@ -86,4 +97,4 @@ Forms:
 
 Reference imported members: `iso.code`. Detail: [LemmaBase](https://lemma.run/reference/registry).
 
-`repo` blocks namespace specs across contexts (e.g., `repo accounting`). Skip unless asked. Details: [Composing specs](https://lemma.run/learn/composing_specs).
+`repo` blocks are a second namespace (e.g., `repo accounting`). Skip `repo` unless a second namespace is required. Details: [Composing specs](https://lemma.run/learn/composing_specs).

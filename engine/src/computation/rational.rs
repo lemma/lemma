@@ -11,7 +11,6 @@
 
 use rust_decimal::Decimal;
 use rust_decimal::MathematicalOps;
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::fmt;
 use std::str::FromStr;
 use std::sync::LazyLock;
@@ -75,10 +74,9 @@ fn reduce_small(numer: i128, denom: i128) -> (i128, i128) {
 // RationalInteger
 // ---------------------------------------------------------------------------
 
-/// Serialized as-is: `Small` is two varints, `Big` two bignums. Every constructor
-/// produces the canonical form (positive denominator, gcd 1, `Big` only when the
-/// pair does not fit `i128`), and deserialization accepts nothing else.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+/// Every constructor produces the canonical form (positive denominator, gcd 1,
+/// `Big` only when the pair does not fit `i128`).
+#[derive(Clone, Debug)]
 enum Repr {
     Small { numer: i128, denom: i128 },
     Big { numer: BigInt, denom: BigInt },
@@ -87,64 +85,6 @@ enum Repr {
 #[derive(Clone, Debug)]
 pub struct RationalInteger {
     repr: Repr,
-}
-
-impl Serialize for RationalInteger {
-    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        self.repr.serialize(serializer)
-    }
-}
-
-impl<'de> Deserialize<'de> for RationalInteger {
-    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let repr = Repr::deserialize(deserializer)?;
-        Self::from_canonical_repr(repr).map_err(serde::de::Error::custom)
-    }
-}
-
-impl RationalInteger {
-    /// Accept a decoded `Repr` only if it is the form the constructors would have
-    /// produced; anything else is corrupt or foreign input.
-    fn from_canonical_repr(repr: Repr) -> Result<Self, String> {
-        match repr {
-            Repr::Small { numer, denom } => {
-                if denom <= 0 {
-                    return Err(format!(
-                        "RationalInteger denominator must be positive, got {denom}"
-                    ));
-                }
-                if reduce_small(numer, denom) != (numer, denom) {
-                    return Err(format!("RationalInteger {numer}/{denom} is not reduced"));
-                }
-                Ok(Self::from_reduced_small(numer, denom))
-            }
-            Repr::Big { numer, denom } => {
-                if !denom.is_positive() {
-                    return Err(format!(
-                        "RationalInteger denominator must be positive, got {denom}"
-                    ));
-                }
-                if numer.to_i128().is_some() && denom.to_i128().is_some() {
-                    return Err(format!(
-                        "RationalInteger {numer}/{denom} fits i128 and must be encoded Small"
-                    ));
-                }
-                let candidate = Self {
-                    repr: Repr::Big { numer, denom },
-                };
-                let reduced = Self::try_reduce_ref(&candidate)
-                    .map_err(|failure| format!("invalid RationalInteger: {failure}"))?;
-                if reduced != candidate {
-                    return Err(format!(
-                        "RationalInteger {}/{} is not reduced",
-                        candidate.numer_to_string(),
-                        candidate.denom_to_string()
-                    ));
-                }
-                Ok(candidate)
-            }
-        }
-    }
 }
 
 impl RationalInteger {
@@ -711,7 +651,7 @@ pub fn rational_ceil(rational: &RationalInteger) -> Result<RationalInteger, Nume
     }
 }
 
-/// Nearest integer; a fraction of exactly one half rounds to the even integer.
+/// Nearest integer. An exact half goes away from zero.
 pub fn rational_round(rational: &RationalInteger) -> Result<RationalInteger, NumericFailure> {
     let floor = rational_floor(rational)?;
     let fraction = try_sub(rational, &floor)?;
@@ -719,7 +659,7 @@ pub fn rational_round(rational: &RationalInteger) -> Result<RationalInteger, Num
         std::cmp::Ordering::Less => Ok(floor),
         std::cmp::Ordering::Greater => try_add(&floor, &rational_one()),
         std::cmp::Ordering::Equal => {
-            if try_div(&floor, &rational_new(2, 1))?.is_integer() {
+            if rational.numer_is_negative() {
                 Ok(floor)
             } else {
                 try_add(&floor, &rational_one())
@@ -1386,8 +1326,27 @@ mod tests {
     }
 
     fn assert_canonical(value: &RationalInteger) {
-        if let Err(reason) = RationalInteger::from_canonical_repr(value.repr.clone()) {
-            panic!("{value:?} is not canonical: {reason}");
+        match &value.repr {
+            Repr::Small { numer, denom } => {
+                assert!(*denom > 0, "{value:?} denominator must be positive");
+                assert_eq!(
+                    reduce_small(*numer, *denom),
+                    (*numer, *denom),
+                    "{value:?} is not reduced"
+                );
+            }
+            Repr::Big { numer, denom } => {
+                assert!(
+                    denom.is_positive(),
+                    "{value:?} denominator must be positive"
+                );
+                assert!(
+                    numer.to_i128().is_none() || denom.to_i128().is_none(),
+                    "{value:?} fits i128 and must be Small"
+                );
+                let reduced = RationalInteger::try_reduce_ref(value).expect("reducible");
+                assert!(&reduced == value, "{value:?} is not reduced");
+            }
         }
     }
 
@@ -1866,108 +1825,5 @@ mod tests {
     fn small_path_try_to_decimal_integer() {
         let r = rational_new(42, 1);
         assert_eq!(r.try_to_decimal().unwrap(), Decimal::from(42));
-    }
-
-    #[test]
-    fn serde_round_trip_one_third() {
-        let value = rational_new(1, 3);
-        let bytes = serde_json::to_vec(&value).expect("serialize");
-        let restored: RationalInteger = serde_json::from_slice(&bytes).expect("deserialize");
-        assert_eq!(restored, value);
-    }
-
-    #[test]
-    fn serde_round_trip_negative_and_huge() {
-        let value = RationalInteger::from_bigint_strings(
-            "-123456789012345678901234567890",
-            "987654321098765432109876543210",
-        )
-        .unwrap();
-        let bytes = serde_json::to_vec(&value).expect("serialize");
-        let restored: RationalInteger = serde_json::from_slice(&bytes).expect("deserialize");
-        assert_eq!(restored, value);
-    }
-
-    #[test]
-    fn serde_round_trip_beyond_i128() {
-        let value = RationalInteger::from_bigint_strings(
-            "-1234567890123456789012345678901234567890123",
-            "9876543210987654321098765432109876543210987",
-        )
-        .unwrap();
-        assert!(
-            matches!(value.repr, Repr::Big { .. }),
-            "fixture must exercise the Big variant"
-        );
-        let bytes = postcard::to_allocvec(&value).expect("serialize");
-        let restored: RationalInteger = postcard::from_bytes(&bytes).expect("deserialize");
-        assert_eq!(restored, value);
-    }
-
-    #[test]
-    fn serde_small_is_two_varints() {
-        let bytes = postcard::to_allocvec(&rational_new(1, 3)).expect("serialize");
-        assert_eq!(bytes, [0x00, 0x02, 0x06]);
-    }
-
-    fn reject(repr: Repr, expected: &str) {
-        let payload = serde_json::to_vec(&repr).unwrap();
-        match serde_json::from_slice::<RationalInteger>(&payload) {
-            Ok(_) => panic!("{repr:?} must fail"),
-            Err(err) => assert!(
-                err.to_string().contains(expected),
-                "unexpected error for {repr:?}: {err}"
-            ),
-        }
-    }
-
-    #[test]
-    fn serde_rejects_zero_denominator() {
-        reject(Repr::Small { numer: 1, denom: 0 }, "must be positive");
-        reject(
-            Repr::Big {
-                numer: BigInt::one(),
-                denom: BigInt::zero(),
-            },
-            "must be positive",
-        );
-    }
-
-    #[test]
-    fn serde_rejects_negative_denominator() {
-        reject(
-            Repr::Small {
-                numer: 1,
-                denom: -3,
-            },
-            "must be positive",
-        );
-    }
-
-    #[test]
-    fn serde_rejects_unreduced_small() {
-        reject(Repr::Small { numer: 2, denom: 4 }, "not reduced");
-        reject(Repr::Small { numer: 0, denom: 5 }, "not reduced");
-    }
-
-    #[test]
-    fn serde_rejects_big_that_fits_small() {
-        reject(
-            Repr::Big {
-                numer: BigInt::one(),
-                denom: BigInt::from_i128(3),
-            },
-            "must be encoded Small",
-        );
-    }
-
-    #[test]
-    fn serde_rejects_unreduced_big() {
-        let huge =
-            BigInt::try_from_str_radix("9876543210987654321098765432109876543210987", 10).unwrap();
-        let two = BigInt::from_i128(2);
-        let numer = huge.try_mul(&two).unwrap();
-        let denom = huge.try_mul(&two).unwrap();
-        reject(Repr::Big { numer, denom }, "not reduced");
     }
 }

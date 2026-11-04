@@ -136,7 +136,7 @@ rule total_price: bag.total_price
 }
 
 #[test]
-fn show_lists_literal_with_binding_as_bound_not_promptable() {
+fn show_omits_sealed_literal_uses_binding() {
     let code = r#"
 spec inner
 data v: number
@@ -153,14 +153,10 @@ rule r: i.v
         .unwrap();
     let now = DateTimeValue::now();
     let show = engine.show(None, "outer", Some(&now)).unwrap();
-    let entry = show
-        .data
-        .get("i.v")
-        .expect("literal with still surfaces in show for documentation");
-
     assert!(
-        entry.value.is_some(),
-        "literal with is value; CLI skips, not a free input"
+        !show.data.contains_key("i.v"),
+        "sealed uses key must not be an input: {:?}",
+        show.data.keys().collect::<Vec<_>>()
     );
 }
 
@@ -197,38 +193,19 @@ rule r: i.a + input
     assert_eq!(
         missing_data_union(&response),
         vec!["i.b".to_string(), "input".to_string()],
-        "without override, missing_data still lists wire source i.b and input"
+        "without override, missing_data lists wire source i.b and input"
     );
 
     let show = engine.show(None, "outer", Some(&now)).unwrap();
     assert!(
-        show.data.contains_key("i.a"),
-        "wired nested slot must appear in Show.data for evaluate override: {:?}",
+        !show.data.contains_key("i.a"),
+        "sealed wire LHS must not appear for override: {:?}",
         show.data.keys().collect::<Vec<_>>()
     );
     assert!(
         show.data.contains_key("i.b"),
         "wire source must remain in Show.data: {:?}",
         show.data.keys().collect::<Vec<_>>()
-    );
-    let wired = show.data.get("i.a").expect("i.a");
-    assert_eq!(
-        wired.value.as_ref().and_then(|v| v.reference.as_deref()),
-        Some("i.b"),
-        "Show documents the wire target; not a literal default"
-    );
-    let document = lemma::api::show_document(&engine, &show);
-    let required = document["required"]
-        .as_array()
-        .map(|a| {
-            a.iter()
-                .filter_map(|v| v.as_str().map(str::to_string))
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
-    assert!(
-        !required.iter().any(|k| k == "i.a"),
-        "wired nested key must not be required (wire can fill): {required:?}"
     );
 }
 

@@ -488,11 +488,12 @@ fn result_value_from_non_range_literal(
                 .measure_literal_unit_map(literal, &unit_name_refs, source)
                 .map_err(map_literal_unit_map_failure)?;
             let result = Some(literal.display_value_with_scales(result_type, runtime_scales));
-            let unit = result_type.unit().map(|_| {
+            // Wire `unit` is the unit the result string actually used, not a binding
+            // whose factor was dropped from runtime_scales.
+            let unit = result_type.unit().and_then(|_| {
                 result_type
                     .measure_display_unit_name(runtime_scales)
-                    .expect("BUG: a measure with a written unit has a unit table")
-                    .to_string()
+                    .map(str::to_string)
             });
             Ok(RuleResultValue {
                 result,

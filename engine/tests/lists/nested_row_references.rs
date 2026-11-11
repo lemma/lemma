@@ -501,6 +501,36 @@ fn deferred_nested_binding_in_explain_and_show() {
     assert_contains(&json, "mix.components.1.components.1.target_weight");
     assert_contains(&json, "76.5");
     assert_contains(&json, "required");
+    // mid.required's target_weight is deferred to root rule `share`: that edge must
+    // be RuleRef (not flattened Data), including through the mid↔share↔mix cycle.
+    fn node_refs_share(node: &lemma::ExplanationNode) -> bool {
+        match node {
+            lemma::ExplanationNode::RuleRef { name, .. } => name.input_key() == "share",
+            lemma::ExplanationNode::Compose { operands, .. } => {
+                operands.iter().any(node_refs_share)
+            }
+            _ => false,
+        }
+    }
+    let mid_required = explanation
+        .rules
+        .iter()
+        .find(|rule| rule.name.input_key() == "mid.required")
+        .unwrap_or_else(|| {
+            panic!(
+                "mid.required in rules table: {:?}",
+                explanation
+                    .rules
+                    .iter()
+                    .map(|rule| rule.name.input_key())
+                    .collect::<Vec<_>>()
+            )
+        });
+    assert!(
+        mid_required.children.iter().any(node_refs_share),
+        "mid.required must RuleRef share for deferred target_weight, got {:?}",
+        mid_required.children
+    );
     let show = engine
         .show(None, "blend_order", None)
         .unwrap_or_else(|error| panic!("show blend_order: {error}"));

@@ -575,10 +575,14 @@ fn build_spec_openapi_artifacts(
         post_body_schema_name.clone(),
         build_post_request_schema(document),
     );
-    component_schemas.insert(
-        post_form_body_schema_name.clone(),
-        build_post_form_request_schema(document),
-    );
+    // Form bodies are flat string fields only. List inputs need a JSON array, so a form
+    // schema would have to drop them and /docs would hide the list. Offer form only when
+    // every input can be a form field.
+    let form_body =
+        (!show_document_has_list_input(document)).then(|| build_post_form_request_schema(document));
+    if let Some(form_body) = &form_body {
+        component_schemas.insert(post_form_body_schema_name.clone(), form_body.clone());
+    }
     let mut row_schemas = Map::new();
     if let Some(defs) = document.get("$defs") {
         for (name, schema) in defs.as_object().expect("BUG: Show $defs is an object") {
@@ -594,7 +598,9 @@ fn build_spec_openapi_artifacts(
             &get_show_component_name,
             &evaluate_response_schema_name,
             &post_body_schema_name,
-            &post_form_body_schema_name,
+            form_body
+                .as_ref()
+                .map(|_| post_form_body_schema_name.as_str()),
         ),
         &rule_names,
         explain,
@@ -613,6 +619,8 @@ fn x_explain_header_parameter() -> Value {
         "name": "x-explain",
         "in": "header",
         "required": false,
+        // Scalar skips optional params unless enabled; keep this on by default.
+        "x-disabled": false,
         "description": "Include explanations. Server needs `--explain`.",
         "schema": { "type": "string", "default": "true" }
     })
@@ -623,6 +631,8 @@ fn accept_datetime_header_parameter() -> Value {
         "name": "Accept-Datetime",
         "in": "header",
         "required": false,
+        // Scalar skips optional params unless enabled; keep this on by default.
+        "x-disabled": false,
         "description": "Evaluate at this datetime (Lemma forms: year, year-month, date, or datetime). Omit the header to evaluate at the current time.",
         "schema": { "type": "string" },
         "example": "2025-01-01"
@@ -630,9 +640,12 @@ fn accept_datetime_header_parameter() -> Value {
 }
 
 /// Build the PathItem for `/{spec_name}` (GET show + POST evaluate).
+///
+/// `post_form_body_schema_name` is `None` when the evaluate body has list inputs: form
+/// cannot carry lists, so documenting a form body would omit them from `/docs`.
 fn build_spec_path_item_with_show_refs(
     spec_name: &str,
-    component_names: (&str, &str, &str, &str),
+    component_names: (&str, &str, &str, Option<&str>),
     rule_names: &[String],
     explain: bool,
     effective_range: (Option<&DateTimeValue>, Option<&DateTimeValue>),
@@ -654,9 +667,6 @@ fn build_spec_path_item_with_show_refs(
     let body_ref = json!({
         "$ref": format!("#/components/schemas/{}", post_body_schema_name)
     });
-    let form_body_ref = json!({
-        "$ref": format!("#/components/schemas/{}", post_form_body_schema_name)
-    });
 
     let tag = spec_name.replace('.', "_");
 
@@ -670,6 +680,9 @@ fn build_spec_path_item_with_show_refs(
         "name": "rules",
         "in": "query",
         "required": false,
+        // Scalar skips optional params unless enabled; keep this on by default so
+        // `/docs` Try Request actually sends `?rules=` (and Accept-Datetime).
+        "x-disabled": false,
         "description": "Rules to evaluate, comma-separated. Omit for all.",
         "schema": { "type": "string" },
         "example": rules_example
@@ -695,6 +708,24 @@ fn build_spec_path_item_with_show_refs(
             Some(d) => Value::String(d.to_string()),
             None => Value::Null,
         }
+    };
+
+    // First media type is Scalar's default body encoding. Form is first only when every
+    // input fits a form field; otherwise JSON alone so list inputs stay in /docs.
+    let request_content = match post_form_body_schema_name {
+        Some(form_name) => json!({
+            "application/x-www-form-urlencoded": {
+                "schema": { "$ref": format!("#/components/schemas/{form_name}") }
+            },
+            "application/json": {
+                "schema": body_ref
+            }
+        }),
+        None => json!({
+            "application/json": {
+                "schema": body_ref
+            }
+        }),
     };
 
     json!({
@@ -726,15 +757,7 @@ fn build_spec_path_item_with_show_refs(
             "parameters": post_parameters,
             "requestBody": {
                 "required": true,
-                "content": {
-                    // First media type is Scalar's default body encoding.
-                    "application/x-www-form-urlencoded": {
-                        "schema": form_body_ref
-                    },
-                    "application/json": {
-                        "schema": body_ref
-                    }
-                }
+                "content": request_content
             },
             "responses": {
                 "200": {
@@ -751,6 +774,20 @@ fn build_spec_path_item_with_show_refs(
             }
         }
     })
+}
+
+/// True when any Show property is a list (`type: array`). Those inputs are JSON-only.
+fn show_document_has_list_input(document: &Value) -> bool {
+    document["properties"]
+        .as_object()
+        .expect("BUG: Show properties is an object")
+        .values()
+        .any(|property| {
+            let scalar = property
+                .get("oneOf")
+                .map_or(property, |alternatives| &alternatives[0]);
+            scalar["type"].as_str() == Some("array")
+        })
 }
 
 // ---------------------------------------------------------------------------
@@ -1019,6 +1056,22 @@ rule total: price"#,
         assert!(
             param_names.contains(&"Accept-Datetime"),
             "GET must have Accept-Datetime header"
+        );
+        let post_rules = post_params
+            .iter()
+            .find(|p| p["name"] == "rules")
+            .expect("rules param");
+        assert_eq!(
+            post_rules["x-disabled"], false,
+            "Scalar must enable optional rules by default or Try Request omits ?rules="
+        );
+        let accept = get_params
+            .iter()
+            .find(|p| p["name"] == "Accept-Datetime")
+            .expect("Accept-Datetime param");
+        assert_eq!(
+            accept["x-disabled"], false,
+            "Scalar must enable optional Accept-Datetime by default or Try Request omits it"
         );
 
         let get_ref = spec["paths"]["/pricing"]["get"]["responses"]["200"]["content"]
@@ -1761,11 +1814,63 @@ rule applicable: brackets -> where applies -> count
     }
 
     #[test]
-    fn lists_are_not_form_fields() {
+    fn list_inputs_omit_form_body_so_docs_keep_lists() {
         let engine = create_engine_with_code(LIST_CODE);
         let document = generate_openapi(&engine, false);
-        let form = &document["components"]["schemas"]["order_form_request"]["properties"];
-        assert_eq!(form, &json!({}));
+        let content = &document["paths"]["/order"]["post"]["requestBody"]["content"];
+        let content_keys: Vec<&str> = content
+            .as_object()
+            .expect("requestBody.content object")
+            .keys()
+            .map(|k| k.as_str())
+            .collect();
+        assert_eq!(
+            content_keys,
+            ["application/json"],
+            "form would drop list inputs; JSON-only keeps them in /docs: {content}"
+        );
+        assert!(
+            document["components"]["schemas"]
+                .get("order_form_request")
+                .is_none(),
+            "no stripped form schema when lists are present"
+        );
+        assert_eq!(
+            document["components"]["schemas"]["order_request"]["properties"]["lines"]["type"],
+            "array"
+        );
+    }
+
+    #[test]
+    fn nested_uses_self_list_is_on_json_body_not_form() {
+        let engine = create_engine_with_code(
+            r#"
+spec ingredient
+data percentage: 10%
+data componenten: ingredient list
+rule total:
+  percentage
+  unless componenten -> count > 0 then componenten -> sum total
+
+spec artikel
+uses ingredient
+rule prijs: ingredient.total
+"#,
+        );
+        let document = generate_openapi(&engine, false);
+        let content = &document["paths"]["/artikel"]["post"]["requestBody"]["content"];
+        assert!(content.get("application/x-www-form-urlencoded").is_none());
+        assert_eq!(
+            content["application/json"]["schema"]["$ref"],
+            "#/components/schemas/artikel_request"
+        );
+        let request = &document["components"]["schemas"]["artikel_request"]["properties"];
+        assert_eq!(request["ingredient.componenten"]["type"], "array");
+        assert_eq!(
+            row_ref(&request["ingredient.componenten"]),
+            "#/components/schemas/LemmaRow_ingredient"
+        );
+        assert!(request["ingredient.percentage"].is_object());
     }
 
     #[test]

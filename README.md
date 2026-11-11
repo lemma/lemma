@@ -444,7 +444,7 @@ See [engine/packages/hex/README.md](engine/packages/hex/README.md) and [cli/docu
 <dependency>
   <groupId>com.lemmabase</groupId>
   <artifactId>lemma-engine</artifactId>
-  <version>0.11.0</version>
+  <version>0.11.1</version>
 </dependency>
 ```
 
@@ -453,7 +453,7 @@ See [engine/packages/maven/README.md](engine/packages/maven/README.md) and [cli/
 ### C# / .NET
 
 ```bash
-dotnet add package Lemmabase.Lemma.Engine --version 0.11.0
+dotnet add package Lemmabase.Lemma.Engine --version 0.11.1
 ```
 
 See [engine/packages/nuget/Lemmabase.Lemma.Engine/README.md](engine/packages/nuget/Lemmabase.Lemma.Engine/README.md) and [cli/documentation/tools/dotnet.md](cli/documentation/tools/dotnet.md).

@@ -1,14 +1,14 @@
 use crate::computation::{OperationResult, VetoType};
-use crate::parsing::ast::{ascii_lowercase_logical_name, canonical_logical_name, Value};
+use crate::parsing::ast::{ascii_lowercase_logical_name, canonical_logical_name};
 use crate::planning::execution_plan::{validate_value_against_type, ExecutionPlan};
 use crate::planning::instance_list::{
     default_of, row_end_type, typed_from_bound, InstanceListSource, KeyIndex,
 };
 use crate::planning::semantics::{
-    parse_value_from_string, parser_value_to_value_kind, row_literal, BoundValueKind,
-    DataDefinition, DataPath, InstanceKey, KeyField, LemmaType, ListKey, ListValue, LiteralValue,
-    RowBinding, RowEnd, RowOrigin, Source, SpecIdentity, SpecValue, TypeSpecification,
-    TypedLiteral, UnitTokenResolver, ValueKind,
+    parse_value_from_string, row_literal, typed_literal_from_parsed,
+    typed_literal_with_binding_unit, BoundValueKind, DataDefinition, DataPath, InstanceKey,
+    KeyField, LemmaType, ListKey, ListValue, LiteralValue, RowBinding, RowEnd, RowOrigin, Source,
+    SpecIdentity, SpecValue, TypeSpecification, TypedLiteral, ValueKind,
 };
 use crate::planning::unit_index::UnitIndex;
 use crate::Error;
@@ -569,64 +569,6 @@ fn parse_literal(
         .map_err(|msg| Error::validation(msg, Some(source.clone()), None::<String>))
 }
 
-/// Read a parsed Lemma literal as a value of `lemma_type`, keeping the written unit.
-pub(crate) fn typed_literal_from_parsed(
-    parsed: &Value,
-    lemma_type: &Arc<LemmaType>,
-    unit_index: &UnitIndex,
-    named_types: &IndexMap<String, Arc<LemmaType>>,
-) -> Result<TypedLiteral, String> {
-    let resolve = UnitTokenResolver::Typed {
-        unit_index,
-        named_types,
-        lemma_type: lemma_type.as_ref(),
-    };
-    let kind = parser_value_to_value_kind(parsed, lemma_type.as_ref(), Some(&resolve))?;
-    let binding = match binding_unit_from_parser_value(parsed) {
-        Some(written) => Some(resolve.resolve(&written)?),
-        None => None,
-    };
-    Ok(typed_literal_with_binding_unit(kind, binding, lemma_type))
-}
-
-fn typed_literal_with_binding_unit(
-    kind: ValueKind,
-    binding_unit: Option<String>,
-    lemma_type: &Arc<LemmaType>,
-) -> TypedLiteral {
-    let typed_type = match binding_unit {
-        Some(unit)
-            if matches!(
-                &lemma_type.specifications,
-                TypeSpecification::Measure { .. } | TypeSpecification::Ratio { .. }
-            ) =>
-        {
-            Arc::new(lemma_type.as_ref().clone().with_unit(unit))
-        }
-        Some(_) | None => Arc::clone(lemma_type),
-    };
-    TypedLiteral {
-        value: kind,
-        lemma_type: typed_type,
-    }
-}
-
-fn binding_unit_from_parser_value(value: &Value) -> Option<String> {
-    use crate::parsing::ast::Value;
-    match value {
-        Value::NumberWithUnit(_, unit) => Some(unit.clone()),
-        Value::Range(left, right) => match (left.as_ref(), right.as_ref()) {
-            (Value::NumberWithUnit(_, left_unit), Value::NumberWithUnit(_, right_unit))
-                if left_unit == right_unit =>
-            {
-                Some(left_unit.clone())
-            }
-            _ => None,
-        },
-        _ => None,
-    }
-}
-
 /// Resolve a unit the caller actually wrote to a bare declared name.
 ///
 /// Qualified paths go through [`UnitIndex::resolve_with_named_types`]. Bare names
@@ -752,18 +694,31 @@ impl RowOverrides {
     }
 
     /// These overrides, read on the rows of a level that is itself the row `owner`.
+    ///
+    /// Keys already under a [`RowOrigin::Numbered`] row stay as-is: nested list
+    /// bindings rebased under an inner Numbered row match how [`ListValue::Values`]
+    /// looks them up (`owner: None` on that Numbered row). Re-owning them under an
+    /// outer Numbered row would miss.
     fn under(self, owner: &InstanceKey) -> RowOverrides {
         RowOverrides {
             fields: self
                 .fields
                 .into_iter()
-                .map(|(key, fields)| (key.under(owner), fields))
+                .map(|(key, fields)| {
+                    let key = if instance_key_has_numbered_origin(&key) {
+                        key
+                    } else {
+                        key.under(owner)
+                    };
+                    (key, fields)
+                })
                 .collect(),
             keyed_lists: self
                 .keyed_lists
                 .into_iter()
                 .map(|(list_owner, path)| {
                     let list_owner = match list_owner {
+                        Some(key) if instance_key_has_numbered_origin(&key) => key,
                         Some(key) => key.under(owner),
                         None => owner.clone(),
                     };
@@ -772,6 +727,17 @@ impl RowOverrides {
                 .collect(),
         }
     }
+}
+
+fn instance_key_has_numbered_origin(key: &InstanceKey) -> bool {
+    let mut current = Some(key);
+    while let Some(instance) = current {
+        if matches!(instance.row.origin, RowOrigin::Numbered { .. }) {
+            return true;
+        }
+        current = instance.owner();
+    }
+    false
 }
 
 /// User-provided data values resolved against a plan's type declarations.
@@ -1192,6 +1158,7 @@ fn resolve_scalar_binding(
         typed.lemma_type.as_ref(),
         &literal_value,
         plan.expression_unit_index(),
+        None,
     ) {
         return Ok(OperationResult::Veto(VetoType::computation(
             type_arc.data_veto_message(input_key, &message),
@@ -1201,6 +1168,7 @@ fn resolve_scalar_binding(
     Ok(OperationResult::from_bound(BoundValueKind {
         value: typed.value.clone(),
         unit: typed.lemma_type.unit().map(std::sync::Arc::from),
+        instance_factors: None,
     }))
 }
 

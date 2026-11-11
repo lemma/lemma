@@ -225,6 +225,17 @@ fn rest_is_path_then_colon(lexer: &mut Lexer) -> bool {
     found
 }
 
+/// True when the next tokens are `label (. label)* :` (another `-> with` field pair).
+fn next_is_path_then_colon(lexer: &mut Lexer) -> bool {
+    let saved = lexer.checkpoint();
+    let found = match lexer.next_token() {
+        Ok(tok) if can_be_label(&tok.kind) => scan_rest_path_then_colon(lexer),
+        _ => false,
+    };
+    lexer.restore(saved);
+    found
+}
+
 fn scan_rest_path_then_colon(lexer: &mut Lexer) -> bool {
     loop {
         let tok = match lexer.next_token() {
@@ -254,9 +265,10 @@ fn scan_rest_path_then_colon(lexer: &mut Lexer) -> bool {
 /// declarationKeyword followed by names (spec/data/rule) or body tokens (uses/meta).
 /// After `data name:`, a type annotation (`employee list`, `money range`, `menu.drink`)
 /// is reference and keyword until the first `->`. `-> key` paths are properties.
-/// `-> with` is field pairs, a value row, or named instances. Constraint arguments
-/// (`-> unit`, `-> option`) stay `dataBody`. Rule bodies use reference, value, operator,
-/// keyword, and control buckets.
+/// `-> with` is field pairs, a value row, or named instances. Field-pair identifiers
+/// after the colon are `reference` (uses-instance names); literals stay `dataBody`.
+/// Constraint arguments (`-> unit`, `-> option`) stay `dataBody`. Rule bodies use
+/// reference, value, operator, keyword, and control buckets.
 pub fn tokenize(text: &str) -> Vec<SemanticToken> {
     let mut lexer = Lexer::new(text, &lemma::SourceType::Volatile);
     let mut tokens = Vec::new();
@@ -472,12 +484,23 @@ pub fn tokenize(text: &str) -> Vec<SemanticToken> {
                         state = HeaderState::DataBodyAfterArrow;
                         Some((IDX_OPERATOR, 0))
                     } else if row_mode == RowMode::WithFields && tok.kind == TokenKind::Comma {
-                        state = HeaderState::Data;
+                        if next_is_path_then_colon(&mut lexer) {
+                            state = HeaderState::Data;
+                        }
                         Some((IDX_PUNCTUATION, 0))
                     } else if is_data_region_control(&tok.kind) {
                         row_mode = RowMode::None;
                         state = HeaderState::None;
                         Some((IDX_CONTROL, 0))
+                    } else if row_mode == RowMode::WithFields
+                        && matches!(tok.kind, TokenKind::Identifier | TokenKind::LogicalName)
+                    {
+                        // Magnitude + unit (`9000 eur`) stays dataBody; bare names are refs.
+                        if matches!(prev_token_kind, Some(TokenKind::NumberLit)) {
+                            Some((IDX_DATA_BODY, 0))
+                        } else {
+                            Some((IDX_REFERENCE, 0))
+                        }
                     } else {
                         Some((IDX_DATA_BODY, 0))
                     }
@@ -1397,6 +1420,72 @@ data rijen: schaal list
                 IDX_PUNCTUATION,
                 IDX_DATA_BODY, // 9000
                 IDX_DATA_BODY, // eur
+            ]
+        );
+    }
+
+    #[test]
+    fn with_field_instance_ref_is_reference() {
+        assert_eq!(
+            token_types("uses box: material\n  -> with rollen: etiket_80x100"),
+            vec![
+                IDX_DECLARATION, // uses
+                IDX_PROPERTY,    // box
+                IDX_PUNCTUATION,
+                IDX_REFERENCE, // material
+                IDX_OPERATOR,
+                IDX_DECLARATION, // with
+                IDX_PROPERTY,    // rollen
+                IDX_PUNCTUATION,
+                IDX_REFERENCE, // etiket_80x100
+            ]
+        );
+    }
+
+    #[test]
+    fn with_field_multi_ref_value_list_is_reference() {
+        assert_eq!(
+            token_types("data x: y list\n  -> with components: rim, hub, spoke"),
+            vec![
+                IDX_DECLARATION,
+                IDX_PROPERTY,
+                IDX_PUNCTUATION,
+                IDX_REFERENCE, // y
+                IDX_KEYWORD,   // list
+                IDX_OPERATOR,
+                IDX_DECLARATION, // with
+                IDX_PROPERTY,    // components
+                IDX_PUNCTUATION,
+                IDX_REFERENCE,   // rim
+                IDX_PUNCTUATION, // ,
+                IDX_REFERENCE,   // hub
+                IDX_PUNCTUATION, // ,
+                IDX_REFERENCE,   // spoke
+            ]
+        );
+    }
+
+    #[test]
+    fn with_mixed_field_pair_and_ref_value_list() {
+        assert_eq!(
+            token_types("data x: y list\n  -> with quantity: 1, components: left, right"),
+            vec![
+                IDX_DECLARATION,
+                IDX_PROPERTY,
+                IDX_PUNCTUATION,
+                IDX_REFERENCE, // y
+                IDX_KEYWORD,   // list
+                IDX_OPERATOR,
+                IDX_DECLARATION, // with
+                IDX_PROPERTY,    // quantity
+                IDX_PUNCTUATION,
+                IDX_DATA_BODY,   // 1
+                IDX_PUNCTUATION, // ,
+                IDX_PROPERTY,    // components
+                IDX_PUNCTUATION,
+                IDX_REFERENCE,   // left
+                IDX_PUNCTUATION, // ,
+                IDX_REFERENCE,   // right
             ]
         );
     }

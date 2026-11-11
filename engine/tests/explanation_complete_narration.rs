@@ -658,6 +658,102 @@ rule out: (exp(log(5))) + 0
     assert_eq!(explanation.body, "exp log 5");
 }
 
+#[test]
+fn identity_elim_times_one_keeps_product_in_explanation() {
+    let engine = load(
+        r#"
+spec identity_times_one
+data x: 2
+rule out: x * 1
+"#,
+    );
+    let response = run(
+        &engine,
+        "identity_times_one",
+        IndexMap::new(),
+        Some(&["out".to_string()]),
+        true,
+    );
+    assert_eq!(
+        response.results.get("out").expect("out").result(),
+        Some("2")
+    );
+    let explanation = out_explanation(&response);
+    assert_eq!(explanation.body, "x * 1");
+}
+
+#[test]
+fn identity_elim_plus_zero_keeps_sum_in_explanation() {
+    let engine = load(
+        r#"
+spec identity_plus_zero
+data x: 2
+rule out: x + 0
+"#,
+    );
+    let response = run(
+        &engine,
+        "identity_plus_zero",
+        IndexMap::new(),
+        Some(&["out".to_string()]),
+        true,
+    );
+    assert_eq!(
+        response.results.get("out").expect("out").result(),
+        Some("2")
+    );
+    let explanation = out_explanation(&response);
+    assert_eq!(explanation.body, "x + 0");
+}
+
+#[test]
+fn identity_elim_divide_by_one_keeps_divide_in_explanation() {
+    let engine = load(
+        r#"
+spec identity_div_one
+data x: 2
+rule out: x / 1
+"#,
+    );
+    let response = run(
+        &engine,
+        "identity_div_one",
+        IndexMap::new(),
+        Some(&["out".to_string()]),
+        true,
+    );
+    assert_eq!(
+        response.results.get("out").expect("out").result(),
+        Some("2")
+    );
+    let explanation = out_explanation(&response);
+    assert_eq!(explanation.body, "x / 1");
+}
+
+#[test]
+fn identity_elim_power_one_keeps_power_in_explanation() {
+    let engine = load(
+        r#"
+spec identity_pow_one
+data x: 2
+rule out: x ^ 1
+"#,
+    );
+    let response = run(
+        &engine,
+        "identity_pow_one",
+        IndexMap::new(),
+        Some(&["out".to_string()]),
+        true,
+    );
+    assert_eq!(
+        response.results.get("out").expect("out").result(),
+        Some("2")
+    );
+    let explanation = out_explanation(&response);
+    assert_eq!(explanation.body, "x ^ 1");
+}
+
 // ── Suite 3: conversion and order ────────────────────────────────────────
 
 #[test]
@@ -1088,4 +1184,171 @@ rule can_view: no
         }
         other => panic!("expected type: rental data child, got {other:?}"),
     }
+}
+
+const DEFERRED_RULE_WIRE: &str = r#"
+spec source_spec
+data x: number
+rule computed: x * 2
+
+spec inner
+data slot: number
+rule use_slot: slot
+rule half: slot / 2
+
+spec outer
+uses src: source_spec
+  -> with x: 5
+uses i: inner
+  -> with slot: src.computed
+rule r: i.slot
+rule r_div: i.slot / 2
+rule r_use: i.use_slot
+rule r_half: i.half
+"#;
+
+fn deferred_wire_engine() -> Engine {
+    load(DEFERRED_RULE_WIRE)
+}
+
+fn explain_outer(engine: &Engine, rule: &str) -> (lemma::Response, Explanation) {
+    let response = run(
+        engine,
+        "outer",
+        IndexMap::new(),
+        Some(&[rule.to_string()]),
+        true,
+    );
+    let explanation = response
+        .results
+        .get(rule)
+        .unwrap_or_else(|| panic!("{rule} in response"))
+        .explanation
+        .clone()
+        .unwrap_or_else(|| panic!("{rule} explanation"));
+    (response, explanation)
+}
+
+fn rule_named<'a>(explanation: &'a Explanation, name: &str) -> &'a lemma::ExplainedRule {
+    explanation
+        .rules
+        .iter()
+        .find(|rule| rule.name.input_key() == name)
+        .unwrap_or_else(|| {
+            panic!(
+                "{name} in rules table: {:?}",
+                rule_names(&explanation_json(explanation))
+            )
+        })
+}
+
+/// `uses -> with slot: src.computed` must narrate as RuleRef to the wired rule, not Data.
+#[test]
+fn deferred_with_rule_wire_explains_as_rule_ref() {
+    let (response, explanation) = explain_outer(&deferred_wire_engine(), "r");
+    assert_eq!(
+        response.results.get("r").expect("r").result(),
+        Some("10"),
+        "wire evaluates to src.computed"
+    );
+    let [child] = explanation.children.as_slice() else {
+        panic!(
+            "expected one child (RuleRef to wired rule), got {:?}",
+            explanation.children
+        );
+    };
+    let ExplanationNode::RuleRef { name, .. } = child else {
+        panic!("expected RuleRef for wired rule, got {child:?}");
+    };
+    assert_eq!(name.input_key(), "src.computed");
+    let computed = rule_named(&explanation, "src.computed");
+    assert_eq!(
+        computed.body.as_str(),
+        "src.x * 2",
+        "wired rule body must be the underlying expression"
+    );
+    let formatted = lemma::format_explanation(&explanation);
+    assert!(
+        formatted.contains("src.x"),
+        "ASCII must expand past the wired value:\n{formatted}"
+    );
+}
+
+/// Compose operand that reads a deferred rule wire must expand the wired rule.
+#[test]
+fn deferred_with_rule_wire_expands_under_arithmetic() {
+    let (response, explanation) = explain_outer(&deferred_wire_engine(), "r_div");
+    assert_eq!(
+        response.results.get("r_div").expect("r_div").result(),
+        Some("5")
+    );
+    let formatted = lemma::format_explanation(&explanation);
+    assert!(
+        formatted.contains("src.computed"),
+        "ASCII must name the wired rule:\n{formatted}"
+    );
+    assert!(
+        formatted.contains("src.x"),
+        "ASCII must expand the wired rule under the divide:\n{formatted}"
+    );
+    let computed = rule_named(&explanation, "src.computed");
+    assert_eq!(computed.body.as_str(), "src.x * 2");
+}
+
+/// A rule inside the sealed instance that reads the slot must expand via DataPath narration.
+#[test]
+fn deferred_with_rule_wire_expands_inside_instance_rule() {
+    let (response, explanation) = explain_outer(&deferred_wire_engine(), "r_use");
+    assert_eq!(
+        response.results.get("r_use").expect("r_use").result(),
+        Some("10")
+    );
+    let use_slot = rule_named(&explanation, "i.use_slot");
+    let [child] = use_slot.children.as_slice() else {
+        panic!(
+            "i.use_slot must have one child (RuleRef), got {:?}",
+            use_slot.children
+        );
+    };
+    let ExplanationNode::RuleRef { name, .. } = child else {
+        panic!("i.use_slot child must be RuleRef to wired rule, got {child:?}");
+    };
+    assert_eq!(name.input_key(), "src.computed");
+    let computed = rule_named(&explanation, "src.computed");
+    assert_eq!(computed.body.as_str(), "src.x * 2");
+    let formatted = lemma::format_explanation(&explanation);
+    assert!(
+        formatted.contains("src.x"),
+        "ASCII must expand inside the instance rule:\n{formatted}"
+    );
+}
+
+/// Arithmetic inside the sealed instance over the deferred slot must expand the wire.
+#[test]
+fn deferred_with_rule_wire_expands_inside_instance_arithmetic() {
+    let (response, explanation) = explain_outer(&deferred_wire_engine(), "r_half");
+    assert_eq!(
+        response.results.get("r_half").expect("r_half").result(),
+        Some("5")
+    );
+    let half = rule_named(&explanation, "i.half");
+    assert!(
+        half.children.iter().any(|node| {
+            matches!(node, ExplanationNode::RuleRef { name, .. } if name.input_key() == "src.computed")
+                || matches!(
+                    node,
+                    ExplanationNode::Compose { operands, .. }
+                        if operands.iter().any(|op| {
+                            matches!(op, ExplanationNode::RuleRef { name, .. } if name.input_key() == "src.computed")
+                        })
+                )
+        }),
+        "i.half must reference src.computed as RuleRef, got {:?}",
+        half.children
+    );
+    let formatted = lemma::format_explanation(&explanation);
+    assert!(
+        formatted.contains("src.x"),
+        "ASCII must expand under instance arithmetic:\n{formatted}"
+    );
 }

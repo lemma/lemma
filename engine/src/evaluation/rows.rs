@@ -36,6 +36,7 @@ fn row_field_violation(
         field_type,
         &bound.to_literal(),
         &template.resolved_types.unit_index,
+        None,
     )
     .err()
 }

@@ -1,0 +1,4 @@
+spec fuzz_seed
+data x: number
+rule blocked: veto "nope"
+rule depend: blocked + x

@@ -108,6 +108,9 @@ pub struct MeasureUnit {
     pub factor: Option<RationalFactor>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub reference: Option<String>,
+    /// Exponent applied to the settled reference for a dynamic scale. Omitted when 1.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub scale_exponent: Option<i32>,
     pub derived_measure_factors: Vec<(String, i32)>,
     pub decomposition: Decomposition,
     #[serde(skip_serializing_if = "Option::is_none", default)]
@@ -124,19 +127,43 @@ pub struct MeasureUnit {
 
 impl From<&DomainMeasureUnit> for MeasureUnit {
     fn from(unit: &DomainMeasureUnit) -> Self {
-        let (factor, reference, omit_bounds) = match &unit.scale {
+        let (factor, reference, scale_exponent, omit_bounds) = match &unit.scale {
             crate::literals::UnitScale::Literal(factor) => {
-                (Some(RationalFactor::from_ratio(factor)), None, false)
+                (Some(RationalFactor::from_ratio(factor)), None, None, false)
             }
-            crate::literals::UnitScale::Unresolved { written, .. } => {
-                (None, Some(written.clone()), true)
+            crate::literals::UnitScale::Unresolved {
+                written,
+                coefficient,
+                exponent,
+                ..
+            } => {
+                let factor = if *coefficient == crate::computation::rational::rational_one() {
+                    None
+                } else {
+                    Some(RationalFactor::from_ratio(coefficient))
+                };
+                let scale_exponent = (*exponent != 1).then_some(*exponent);
+                (factor, Some(written.clone()), scale_exponent, true)
             }
-            crate::literals::UnitScale::Reference(target) => (None, Some(target.to_string()), true),
+            crate::literals::UnitScale::Reference {
+                target,
+                coefficient,
+                exponent,
+            } => {
+                let factor = if *coefficient == crate::computation::rational::rational_one() {
+                    None
+                } else {
+                    Some(RationalFactor::from_ratio(coefficient))
+                };
+                let scale_exponent = (*exponent != 1).then_some(*exponent);
+                (factor, Some(target.to_string()), scale_exponent, true)
+            }
         };
         Self {
             name: unit.name.clone(),
             factor,
             reference,
+            scale_exponent,
             derived_measure_factors: unit.derived_measure_factors.clone(),
             decomposition: decomposition_from(&unit.decomposition),
             minimum: if omit_bounds {

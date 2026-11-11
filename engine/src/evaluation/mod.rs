@@ -1182,9 +1182,15 @@ impl Evaluator {
         let mut arena = narration::ExplanationArena::default();
         if explain {
             narration::narrate_row_contexts(plan, &context, &mut arena);
+            let mut session = narration::NarrationSession {
+                root_plan: plan,
+                root_ctx: &context,
+                arena: &mut arena,
+                pending: Vec::new(),
+            };
             for (index, rule) in plan.rules.values().enumerate() {
                 if context.rule_values[index].is_some() {
-                    narration::narrate_rule(rule, plan, &context, &mut arena, None);
+                    narration::narrate_rule(rule, plan, &context, None, &mut session);
                 }
             }
         }
@@ -1223,7 +1229,7 @@ impl Evaluator {
                     keys
                 });
                 let runtime_scales =
-                    tree::runtime_scale_factors_for(rule_type.as_ref(), plan, &context);
+                    tree::display_scale_factors(result.value(), rule_type.as_ref(), plan, &context);
                 (
                     rule_type,
                     explanation,

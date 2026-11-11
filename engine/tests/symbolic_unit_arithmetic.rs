@@ -1029,10 +1029,9 @@ rule charge: (fee * minute)"#;
 
 /// `balance / burn_rate as month` parses as `balance / (burn_rate as month)`.
 /// burn_rate is money/calendar; month is calendar — incompatible families.
-/// But `(balance / burn_rate) as month` would be valid.
-/// Expect a targeted error suggesting the parenthesized form.
+/// Planning checks the AST as written (no parenthesization reinterpretation).
 #[test]
-fn as_binding_division_suggests_parentheses() {
+fn as_binding_division_rejects_operand_conversion() {
     let code = r#"spec burn
 uses lemma units
 data money: measure
@@ -1044,23 +1043,21 @@ data burn_rate: 10000 eur_per_month
 rule runway: balance / burn_rate as month"#;
     let error = load_expect_error(code);
     assert!(
-        error.contains("(balance / burn_rate) as month")
-            || error.contains("(balance / burn_rate) as month"),
-        "expected parenthesized suggestion in error, got: {}",
+        error.contains("Cannot convert") || error.contains("different measure families"),
+        "expected conversion error for burn_rate as month, got: {}",
         error
     );
     assert!(
-        !error.contains("different measure families"),
-        "expected targeted error, not generic family error, got: {}",
+        !error.contains("Write '("),
+        "must not suggest parenthesization, got: {}",
         error
     );
 }
 
 /// Same pattern for multiplication: `fee * shift as eur` where shift is duration
-/// and eur is money. `shift as eur` is incompatible; `(fee * shift) as eur` is valid
-/// because fee is eur/hour and fee * shift cancels hour leaving eur.
+/// and eur is money. `shift as eur` is incompatible; planning rejects as written.
 #[test]
-fn as_binding_multiplication_suggests_parentheses() {
+fn as_binding_multiplication_rejects_operand_conversion() {
     let code = r#"spec payroll
 data money_type: measure
   -> unit eur: 1
@@ -1073,8 +1070,13 @@ data shift: 8 hour
 rule wages: fee * shift as eur"#;
     let error = load_expect_error(code);
     assert!(
-        error.contains("(fee * shift) as eur"),
-        "expected parenthesized suggestion in error, got: {}",
+        error.contains("Cannot convert") || error.contains("different measure families"),
+        "expected conversion error for shift as eur, got: {}",
+        error
+    );
+    assert!(
+        !error.contains("Write '("),
+        "must not suggest parenthesization, got: {}",
         error
     );
 }
@@ -1139,12 +1141,10 @@ rule weird: m / t as gram"#;
     );
 }
 
-/// `mass * acceleration as newton`: acceleration (length/time^2) is not same-family
-/// as force (newton), so operand conversion fails. The combined result mass*acceleration
-/// matches force's decomposition, so suggest `(mass * acceleration) as newton`.
-/// Uses stdlib `newton` (no local redeclaration) plus local `mps2`.
+/// `mass * acceleration as newton`: acceleration is not same-family as force.
+/// Planning rejects the operand conversion as written (no parentheses reinterpretation).
 #[test]
-fn as_binding_compound_unit_newton_suggests_parentheses() {
+fn as_binding_compound_unit_newton_rejects_operand_conversion() {
     let code = r#"spec mechanics
 uses lemma units
 data acceleration_type: measure
@@ -1154,8 +1154,13 @@ data a: 5 mps2
 rule f: m * a as newton"#;
     let error = load_expect_error(code);
     assert!(
-        error.contains("(m * a) as newton"),
-        "expected parenthesized suggestion for compound unit, got: {}",
+        error.contains("Cannot convert") || error.contains("different measure families"),
+        "expected conversion error for a as newton, got: {}",
+        error
+    );
+    assert!(
+        !error.contains("Write '("),
+        "must not suggest parenthesization, got: {}",
         error
     );
 }

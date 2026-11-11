@@ -18,12 +18,15 @@
 //! as the instance, and member reads enter the instance's context like any row.
 
 use crate::computation::arithmetic::divisive_operation_results;
+use crate::computation::bigint::BigInt;
 use crate::computation::datetime::{
     compute_date_calendar, compute_date_relative, evaluate_past_future_range,
 };
 use crate::computation::measure_math::{integer_rounding, step_rounding};
 use crate::computation::range::{check_containment, ordered_endpoints};
-use crate::computation::rational::{checked_mul, rational_one, rational_zero};
+use crate::computation::rational::{
+    checked_mul, checked_pow_integer, rational_one, rational_zero, RationalInteger,
+};
 use crate::computation::{
     arithmetic_operation, comparison_operation, convert_unit_operand, OperationResult, VetoType,
 };
@@ -111,33 +114,37 @@ fn ready(id: NormalFormId, ctx: &EvaluationContext, walk: &WalkDone) -> Option<O
         .or_else(|| ctx.values[id.index()].clone())
 }
 
-/// Store policy for a finished cell. Unbound data leaves must stay None so
-/// missing_data walks still see them as unbound. Cells that read a list row change
-/// value per row and are never cached. A value this plan cannot express in any unit
-/// finishes as a veto.
+/// Store policy for a finished cell. Truly unbound data leaves (slot still `None`)
+/// must stay `None` so missing_data walks still see them as unbound. Cells that
+/// read a list row change value per row and are never cached. An unscaled measure
+/// settled while a list row is active also stays uncached: its factor is per-row.
+///
+/// Intake may already have placed an `UnscaledMeasure` in the data-leaf slot. When
+/// settle yields MissingData for a scale, that veto must **replace** the unscaled
+/// value: otherwise `complete` treats the leaf as stored and operators read the
+/// raw magnitude (factor-1 / panic).
 fn finish(
     id: NormalFormId,
     result: OperationResult,
     plan: &ExecutionPlan,
     ctx: &mut EvaluationContext,
 ) -> OperationResult {
-    let result = match result {
-        OperationResult::Value(_) => match inexpressible_family_veto(plan.result_type(id), plan) {
-            Some(veto) => veto,
-            None => result,
-        },
-        veto @ OperationResult::Veto(_) => veto,
-    };
     let cell = plan.normal_form(id);
-    let store = plan.row_mask[id.index()] == 0
-        && !matches!(
-            (&cell.kind, &result),
-            (
-                NormalFormKind::Leaf(LeafKind::DataPath(_)),
-                OperationResult::Veto(VetoType::MissingData { .. }),
-            )
+    let data_missing = matches!(
+        (&cell.kind, &result),
+        (
+            NormalFormKind::Leaf(LeafKind::DataPath(_)),
+            OperationResult::Veto(VetoType::MissingData { .. }),
+        )
+    );
+    let leave_unbound = data_missing && ctx.values[id.index()].is_none();
+    let per_row_unscaled = !ctx.row_stack.is_empty()
+        && matches!(
+            &cell.kind,
+            NormalFormKind::Leaf(LeafKind::Literal(literal))
+                if literal.value.has_unscaled_measure()
         );
-    if store {
+    if !leave_unbound && plan.row_mask[id.index()] == 0 && !per_row_unscaled {
         ctx.values[id.index()] = Some(result.clone());
     }
     result
@@ -347,7 +354,7 @@ struct RowScopeFrame<'p> {
     /// Fields the body reads; deferred bindings there resolve in [`RowPhase::Resolve`]
     /// before the context opens.
     read_slots: Vec<DataPath>,
-    /// Next entry of the template's `unit_scale_targets` to evaluate before the body:
+    /// Next entry of the template's `data_slot_scale_targets` to evaluate before the body:
     /// a row's context holds its own scales.
     scale_cursor: usize,
 }
@@ -382,7 +389,7 @@ enum ListState {
     PerRow {
         data: ListData,
         cursor: usize,
-        values: Vec<TypedLiteral>,
+        values: Vec<BoundValueKind>,
         first_veto: Option<OperationResult>,
     },
     /// Deferred rule targets inside `WithRow` operand values, forced one at a time in
@@ -458,11 +465,28 @@ fn run<'p>(
                 } else {
                     child.depth
                 };
-                let (_, ctx) = layer(depth, root_plan, &mut *root, &mut scopes);
+                let (plan, ctx) = layer(depth, root_plan, &mut *root, &mut scopes);
                 if let Some(cached) = ctx.values[cell.id.index()].clone() {
                     if !ctx.leaf_unsettled(cell.id.index()) {
-                        frame.inbox = Some(cached);
-                        continue;
+                        let cell_def = plan.normal_form(cell.id);
+                        // Exhaustive runs must still enter the cell so `cell_done`
+                        // visits its fold pre-image (`origin`). A cached value on a
+                        // fold survivor (wrongly shared with a data binding slot)
+                        // must not skip that walk.
+                        if cell_def.origin.is_some() && ctx.exhaustive {
+                            // fall through to push the child frame
+                        } else {
+                            let per_row_unscaled = !ctx.row_stack.is_empty()
+                                && matches!(
+                                    &cell_def.kind,
+                                    NormalFormKind::Leaf(LeafKind::Literal(literal))
+                                        if literal.value.has_unscaled_measure()
+                                );
+                            if !per_row_unscaled {
+                                frame.inbox = Some(cached);
+                                continue;
+                            }
+                        }
                     }
                 }
             }
@@ -1094,9 +1118,7 @@ fn step_row_scope<'p>(
             RowPhase::Body => {
                 let (_, ctx) = layer(depth, root_plan, &mut *root, &mut *scopes);
                 let template = frame.template;
-                while let Some((_, target)) =
-                    template.unit_scale_targets.get_index(frame.scale_cursor)
-                {
+                while let Some(target) = template.data_slot_scale_targets.get(frame.scale_cursor) {
                     frame.scale_cursor += 1;
                     if let Some(force) = unforced_target(target, template, ctx) {
                         let (child, mode) = force_frame(force);
@@ -1210,14 +1232,22 @@ fn step_read_row<'p>(
                     let unscaled = value
                         .value()
                         .is_some_and(|bound| bound.value.has_unscaled_measure());
-                    if !needs_options && !unscaled {
-                        let result = rows::from_row(value, &frame.key, template, ctx);
+                    let row_ctx_ready = ctx.caches.row_contexts.borrow().contains_key(&frame.key);
+                    if !needs_options && !unscaled && row_ctx_ready {
+                        let result_type = row_end_type(template, &frame.end);
+                        let result = attach_row_instance_factors(
+                            rows::from_row(value, &frame.key, template, ctx),
+                            &result_type,
+                            &frame.key,
+                            template,
+                            ctx,
+                        );
                         if ctx.exhaustive {
                             ctx.row_reads_log.push(RowRead {
                                 row: frame.read.clone(),
                                 end: frame.end.clone(),
                                 result: result.clone(),
-                                result_type: row_end_type(template, &frame.end),
+                                result_type,
                             });
                         }
                         return Outcome::Finish(Some(result));
@@ -1244,16 +1274,58 @@ fn step_read_row<'p>(
             ctx.missing_row_keys.extend(keys);
         }
     }
-    let result = rows::from_row(raw, &frame.key, template, ctx);
+    let result_type = row_end_type(template, &frame.end);
+    let result = attach_row_instance_factors(
+        rows::from_row(raw, &frame.key, template, ctx),
+        &result_type,
+        &frame.key,
+        template,
+        ctx,
+    );
     if ctx.exhaustive {
         ctx.row_reads_log.push(RowRead {
             row: frame.read.clone(),
             end: frame.end.clone(),
             result: result.clone(),
-            result_type: row_end_type(template, &frame.end),
+            result_type,
         });
     }
     Outcome::Finish(Some(result))
+}
+
+/// Attach the row's settled dynamic unit factors to a value read from that row.
+fn attach_row_instance_factors(
+    result: OperationResult,
+    result_type: &LemmaType,
+    key: &InstanceKey,
+    template: &ExecutionPlan,
+    ctx: &EvaluationContext,
+) -> OperationResult {
+    let OperationResult::Value(mut bound) = result else {
+        return result;
+    };
+    if !result_type.is_measure() && !result_type.is_measure_range() {
+        return OperationResult::from_bound(bound);
+    }
+    let factors = {
+        let caches = ctx.caches.row_contexts.borrow();
+        let row_ctx = caches.get(key).unwrap_or_else(|| {
+            panic!(
+                "BUG: row context missing after a row read that attaches instance factors ({key})"
+            )
+        });
+        let map = runtime_scale_factors_for(result_type, template, row_ctx);
+        if map.is_empty() {
+            None
+        } else {
+            Some(std::sync::Arc::new(
+                map.into_iter()
+                    .collect::<std::collections::BTreeMap<_, _>>(),
+            ))
+        }
+    };
+    bound.instance_factors = factors;
+    OperationResult::from_bound(bound)
 }
 
 /// The stored list at `path`, its rows owned by `ctx.owner_row`. The store's index
@@ -1292,7 +1364,7 @@ fn resolved_scale_factor(
     target: &ReferenceTarget,
     plan: &ExecutionPlan,
     ctx: &EvaluationContext,
-) -> Result<crate::computation::rational::RationalInteger, OperationResult> {
+) -> Result<RationalInteger, OperationResult> {
     match resolve_stored_target(target, plan, ctx) {
         OperationResult::Veto(veto) => Err(OperationResult::Veto(veto)),
         OperationResult::Value(bound) => {
@@ -1310,6 +1382,44 @@ fn resolved_scale_factor(
             Ok(factor.clone())
         }
     }
+}
+
+/// Effective conversion factor of a dynamic measure unit:
+/// `settled(reference)^exponent * coefficient`.
+fn composed_unit_scale_factor(
+    unit: &crate::literals::MeasureUnit,
+    target: &ReferenceTarget,
+    plan: &ExecutionPlan,
+    ctx: &EvaluationContext,
+) -> Result<RationalInteger, OperationResult> {
+    let settled = resolved_scale_factor(target, plan, ctx)?;
+    let exponent = unit.scale_exponent();
+    let raised = if exponent == 1 {
+        settled
+    } else {
+        checked_pow_integer(&settled, &BigInt::from_i64(i64::from(exponent)))
+            .map_err(|failure| OperationResult::Veto(VetoType::computation(failure.to_string())))?
+    };
+    checked_mul(&raised, &unit.scale_coefficient())
+        .map_err(|failure| OperationResult::Veto(VetoType::computation(failure.to_string())))
+}
+
+fn measure_unit_on_type<'a>(
+    lemma_type: &'a LemmaType,
+    unit_name: &str,
+) -> &'a crate::literals::MeasureUnit {
+    let units = lemma_type.measure_units_table().unwrap_or_else(|| {
+        panic!(
+            "BUG: measure unit lookup on non-measure type '{}'",
+            lemma_type.name()
+        )
+    });
+    units.get(unit_name).unwrap_or_else(|_| {
+        panic!(
+            "BUG: unknown unit '{unit_name}' on measure type '{}'",
+            lemma_type.name()
+        )
+    })
 }
 
 enum ScaleNodeType<'a> {
@@ -1372,23 +1482,25 @@ fn scale_value(
                 binding,
             } => match value {
                 ValueKind::UnscaledMeasure { magnitude, unit } => {
-                    let target = plan
-                        .scale_target_of(lemma_type.get(), &unit)
-                        .unwrap_or_else(|| {
-                            panic!(
-                                "BUG: unscaled measure unit '{unit}' on '{}' has no scale target",
-                                lemma_type.get().name()
-                            )
-                        });
+                    let holding = lemma_type.get();
+                    let target = holding.unit_scale_target(&unit).unwrap_or_else(|| {
+                        panic!(
+                            "BUG: unscaled measure unit '{unit}' on '{}' has no scale target",
+                            holding.name()
+                        )
+                    });
                     if tasks.is_empty() && done.is_empty() {
                         root_unit = Some(Arc::clone(&unit));
                     }
-                    assert!(
-                        unforced_target(target, plan, ctx).is_none(),
-                        "BUG: scale of unit '{unit}' on '{}' read before its scale dependency was evaluated",
-                        lemma_type.get().name()
-                    );
-                    match resolved_scale_factor(target, plan, ctx) {
+                    let measure_unit = measure_unit_on_type(holding, &unit);
+                    match composed_unit_scale_factor_for_settle(
+                        measure_unit,
+                        target,
+                        &unit,
+                        holding,
+                        plan,
+                        ctx,
+                    ) {
                         Err(veto) => return veto,
                         Ok(factor) => match checked_mul(&magnitude, &factor) {
                             Ok(canonical) => done.push(TypedLiteral {
@@ -1484,11 +1596,13 @@ fn scale_value(
     OperationResult::from_bound(BoundValueKind {
         value: result.value,
         unit: root_unit,
+        instance_factors: None,
     })
 }
 
 /// `bound` with every unscaled measure scaled. The scales were evaluated before the
-/// rule or row leaf that reads it (`scale_dependencies`).
+/// rule or row leaf that reads it (`scale_dependencies`). Factors the value already
+/// carried stay on the settled result.
 fn settle_stored(
     bound: BoundValueKind,
     lemma_type: &LemmaType,
@@ -1498,40 +1612,44 @@ fn settle_stored(
     if !bound.value.has_unscaled_measure() {
         return OperationResult::from_bound(bound);
     }
-    scale_value(bound.value, lemma_type, bound.unit, plan, ctx)
+    let carried = bound.instance_factors.clone();
+    match scale_value(bound.value, lemma_type, bound.unit, plan, ctx) {
+        OperationResult::Value(mut settled) => {
+            if settled.instance_factors.is_none() {
+                settled.instance_factors = carried;
+            }
+            OperationResult::from_bound(settled)
+        }
+        other => other,
+    }
 }
 
 fn conversion_scale_target<'a>(
     target: &'a SemanticConversionTarget,
     source_type: &'a LemmaType,
-    plan: &'a ExecutionPlan,
 ) -> Option<&'a ReferenceTarget> {
     match target {
         SemanticConversionTarget::Unit {
             unit_name,
             owning_type,
-        } if owning_type.unit_is_dynamic(unit_name) => Some(
-            plan.scale_target_of(owning_type, unit_name)
-                .unwrap_or_else(|| {
-                    panic!(
-                        "BUG: dynamic unit '{unit_name}' on '{}' has no scale target",
-                        owning_type.name()
-                    )
-                }),
-        ),
+        } if owning_type.unit_is_dynamic(unit_name) => {
+            Some(owning_type.unit_scale_target(unit_name).unwrap_or_else(|| {
+                panic!(
+                    "BUG: dynamic unit '{unit_name}' on '{}' has no scale target",
+                    owning_type.name()
+                )
+            }))
+        }
         SemanticConversionTarget::Type(ConversionTypeKind::Number) if source_type.is_measure() => {
             let unit = source_type.measure_runtime_signature().into_iter().next()?;
             if source_type.unit_is_dynamic(&unit.0) {
-                Some(
-                    plan.scale_target_of(source_type, &unit.0)
-                        .unwrap_or_else(|| {
-                            panic!(
-                                "BUG: dynamic unit '{}' on '{}' has no scale target",
-                                unit.0,
-                                source_type.name()
-                            )
-                        }),
-                )
+                Some(source_type.unit_scale_target(&unit.0).unwrap_or_else(|| {
+                    panic!(
+                        "BUG: dynamic unit '{}' on '{}' has no scale target",
+                        unit.0,
+                        source_type.name()
+                    )
+                }))
             } else {
                 None
             }
@@ -1540,51 +1658,208 @@ fn conversion_scale_target<'a>(
     }
 }
 
-/// Factors of the dynamic units of `lemma_type`'s family that `plan` declares, as
-/// settled in `ctx`: a vetoed or missing scale has no entry. The rule or row leaf that
-/// produced a value of this family evaluated these scales first.
+/// Factor for a dynamic conversion: prefer a factor the operand already carries from
+/// its instance (row / uses read). Otherwise resolve the scale on this plan, or through
+/// the row stack for a bare target. A scale that is not forcible here and not carried
+/// is a computation veto — not a missing data_leaf panic.
+fn conversion_dynamic_factor(
+    bound: &BoundValueKind,
+    target: &SemanticConversionTarget,
+    scale: &ReferenceTarget,
+    source_type: &LemmaType,
+    plan: &ExecutionPlan,
+    ctx: &EvaluationContext,
+) -> Result<RationalInteger, OperationResult> {
+    let (unit_name, holding): (String, &LemmaType) = match target {
+        SemanticConversionTarget::Unit {
+            unit_name,
+            owning_type,
+        } => (unit_name.clone(), owning_type.as_ref()),
+        SemanticConversionTarget::Type(ConversionTypeKind::Number) => {
+            let unit = source_type
+                .measure_runtime_signature()
+                .into_iter()
+                .next()
+                .expect("BUG: number conversion scale requires a measure unit");
+            (unit.0, source_type)
+        }
+        other => panic!("BUG: conversion scale target without a dynamic unit path: {other:?}"),
+    };
+    if let Some(factor) = bound
+        .instance_factors
+        .as_ref()
+        .and_then(|factors| factors.get(&unit_name))
+    {
+        return Ok(factor.clone());
+    }
+    let measure_unit = measure_unit_on_type(holding, &unit_name);
+    if scale_target_in_plan(scale, plan) {
+        assert!(
+            unforced_target(scale, plan, ctx).is_none(),
+            "BUG: conversion scale {scale:?} read before its scale dependency was evaluated"
+        );
+        return composed_unit_scale_factor(measure_unit, scale, plan, ctx);
+    }
+    let bare = match scale {
+        ReferenceTarget::Data(path) => path.segments.is_empty(),
+        ReferenceTarget::Rule(path) => path.segments.is_empty(),
+    };
+    if bare {
+        return composed_unit_scale_factor_for_settle(
+            measure_unit,
+            scale,
+            &unit_name,
+            holding,
+            plan,
+            ctx,
+        );
+    }
+    Err(OperationResult::Veto(VetoType::computation(format!(
+        "no conversion factor is known for unit '{unit_name}'"
+    ))))
+}
+
+/// Factors of the units declared on `lemma_type`, as settled in `ctx`: a vetoed or
+/// missing scale has no entry. The rule or row leaf that produced a value of this
+/// type evaluated these scales first. The type carries the coordinates of the plan
+/// that holds it (`uses` hops already prefixed). A bare target resolves only when
+/// this plan declares the measure family (or the target is otherwise a cell of this
+/// plan). Callers merge [`BoundValueKind::instance_factors`] on top when a value was
+/// read from a row.
 pub(crate) fn runtime_scale_factors_for(
     lemma_type: &LemmaType,
     plan: &ExecutionPlan,
     ctx: &EvaluationContext,
-) -> HashMap<String, crate::computation::rational::RationalInteger> {
+) -> HashMap<String, RationalInteger> {
     let mut out = HashMap::new();
-    let Some(family) = lemma_type.measure_family() else {
+    let Some(units) = lemma_type.measure_units_table() else {
         return out;
     };
-    for ((scale_family, unit), target) in &plan.unit_scale_targets {
-        if scale_family != family {
-            continue;
-        }
-        if let Ok(factor) = resolved_scale_factor(target, plan, ctx) {
-            out.insert(unit.clone(), factor);
+    let family_declared_here = lemma_type.held_measure_family().is_some_and(|family| {
+        family.spec == plan.spec_name
+            && family.repository.as_deref() == plan.identity.repository.as_deref()
+    });
+    for unit in units.iter() {
+        match &unit.scale {
+            crate::literals::UnitScale::Literal(factor) => {
+                out.insert(unit.name.clone(), factor.clone());
+            }
+            crate::literals::UnitScale::Reference { target, .. } => {
+                let bare = match target {
+                    ReferenceTarget::Data(path) => path.segments.is_empty(),
+                    ReferenceTarget::Rule(path) => path.segments.is_empty(),
+                };
+                if bare && !family_declared_here && !scale_target_in_plan(target, plan) {
+                    continue;
+                }
+                if !scale_target_in_plan(target, plan) {
+                    continue;
+                }
+                if let Ok(factor) = composed_unit_scale_factor(unit, target, plan, ctx) {
+                    out.insert(unit.name.clone(), factor);
+                }
+            }
+            crate::literals::UnitScale::Unresolved { .. } => {
+                panic!(
+                    "BUG: dynamic unit '{}' on '{}' never went through scale resolution",
+                    unit.name,
+                    lemma_type.name()
+                );
+            }
         }
     }
     out
 }
 
-/// Veto for a value `plan` cannot express in any unit: every unit of its measure
-/// family is dynamic and this spec declares none of their factors.
-fn inexpressible_family_veto(
+/// Whether `target` is a forcible cell of `plan` (local data/rule leaf or registered
+/// uses-qualified member target).
+fn scale_target_in_plan(target: &ReferenceTarget, plan: &ExecutionPlan) -> bool {
+    if plan.member_targets.contains_key(target) {
+        return true;
+    }
+    match target {
+        ReferenceTarget::Data(path) => plan.data_leaf.contains_key(path),
+        ReferenceTarget::Rule(path) => plan.rules.contains_key(path),
+    }
+}
+
+/// Effective conversion factor for settling an unscaled measure: this plan when the
+/// target is local here; otherwise the innermost row on the stack whose template
+/// holds the bare target (per-row literal in a list argument).
+fn composed_unit_scale_factor_for_settle(
+    unit: &crate::literals::MeasureUnit,
+    target: &ReferenceTarget,
+    unit_name: &str,
+    holding: &LemmaType,
+    plan: &ExecutionPlan,
+    ctx: &EvaluationContext,
+) -> Result<RationalInteger, OperationResult> {
+    if scale_target_in_plan(target, plan) {
+        assert!(
+            unforced_target(target, plan, ctx).is_none(),
+            "BUG: scale of unit '{unit_name}' on '{}' read before its scale dependency was evaluated",
+            holding.name()
+        );
+        return composed_unit_scale_factor(unit, target, plan, ctx);
+    }
+    let bare = match target {
+        ReferenceTarget::Data(path) => path.segments.is_empty(),
+        ReferenceTarget::Rule(path) => path.segments.is_empty(),
+    };
+    if bare {
+        for row in ctx.row_stack.iter().rev() {
+            let CurrentRow::Instance { key, .. } = row else {
+                continue;
+            };
+            let template = plan.row_template(&key.row.identity);
+            if !scale_target_in_plan(target, template) {
+                continue;
+            }
+            if ctx.owner_row.as_ref() == Some(key) {
+                assert!(
+                    unforced_target(target, template, ctx).is_none(),
+                    "BUG: scale of unit '{unit_name}' on '{}' read before its scale dependency was evaluated",
+                    holding.name()
+                );
+                return composed_unit_scale_factor(unit, target, template, ctx);
+            }
+            let caches = ctx.caches.row_contexts.borrow();
+            let Some(row_ctx) = caches.get(key) else {
+                panic!(
+                    "BUG: bare scale target '{target}' of a row-typed value settled before the row context was built; list per-row paths must spawn an empty RowScope first"
+                );
+            };
+            assert!(
+                unforced_target(target, template, row_ctx).is_none(),
+                "BUG: scale of unit '{unit_name}' on '{}' read before its scale dependency was evaluated",
+                holding.name()
+            );
+            return composed_unit_scale_factor(unit, target, template, row_ctx);
+        }
+    }
+    assert!(
+        unforced_target(target, plan, ctx).is_none(),
+        "BUG: scale of unit '{unit_name}' on '{}' read before its scale dependency was evaluated",
+        holding.name()
+    );
+    composed_unit_scale_factor(unit, target, plan, ctx)
+}
+
+/// Display factors for a settled value: instance factors from a row or uses read
+/// override the type lookup for those unit names.
+pub(crate) fn display_scale_factors(
+    bound: Option<&BoundValueKind>,
     lemma_type: &LemmaType,
     plan: &ExecutionPlan,
-) -> Option<OperationResult> {
-    let held = lemma_type.held_value_type();
-    let family = held.measure_family()?;
-    let unit = held
-        .measure_fallback_unit()
-        .filter(|unit| unit.is_dynamic())?;
-    if plan
-        .unit_scale_targets
-        .keys()
-        .any(|(scale_family, _)| scale_family == family)
-    {
-        return None;
+    ctx: &EvaluationContext,
+) -> HashMap<String, RationalInteger> {
+    let mut factors = runtime_scale_factors_for(lemma_type, plan, ctx);
+    if let Some(instance) = bound.and_then(|bound| bound.instance_factors.as_ref()) {
+        for (unit, factor) in instance.iter() {
+            factors.insert(unit.clone(), factor.clone());
+        }
     }
-    Some(OperationResult::Veto(VetoType::computation(format!(
-        "unit '{}' takes its conversion factor from spec '{}' and cannot be used in spec '{}'",
-        unit.name, family.spec, plan.spec_name
-    ))))
+    factors
 }
 
 /// An empty `sum` has no operand that settled a scale. When every unit of its family
@@ -1601,8 +1876,8 @@ fn empty_sum_scale_veto(
     let unit = result_type
         .measure_fallback_unit()
         .filter(|unit| unit.is_dynamic())?;
-    let target = plan
-        .scale_target_of(result_type, &unit.name)
+    let target = result_type
+        .unit_scale_target(&unit.name)
         .unwrap_or_else(|| {
             panic!(
                 "BUG: dynamic unit '{}' on '{}' has no scale target",
@@ -1785,7 +2060,7 @@ fn step_list_op<'p>(
                                 return Outcome::Finish(Some(veto));
                             }
                         }
-                        return Outcome::Finish(Some(list_ops::reduce(
+                        return Outcome::Finish(Some(list_ops::reduce_typed(
                             data.rows.values(),
                             ListFold::Sum,
                             result_type,
@@ -1793,7 +2068,7 @@ fn step_list_op<'p>(
                         )));
                     }
                     (None, NormalFormListOp::Product) => {
-                        return Outcome::Finish(Some(list_ops::reduce(
+                        return Outcome::Finish(Some(list_ops::reduce_typed(
                             data.rows.values(),
                             ListFold::Product,
                             result_type,
@@ -1801,7 +2076,7 @@ fn step_list_op<'p>(
                         )));
                     }
                     (None, NormalFormListOp::Avg) => {
-                        return Outcome::Finish(Some(list_ops::reduce(
+                        return Outcome::Finish(Some(list_ops::reduce_typed(
                             data.rows.values(),
                             ListFold::Avg,
                             result_type,
@@ -2114,7 +2389,7 @@ fn step_list_op<'p>(
                     ctx.row_stack.truncate(level);
                     match value {
                         OperationResult::Value(bound) => {
-                            values.push(typed_from_bound(&bound, plan.result_type(argument)));
+                            values.push(bound);
                         }
                         veto => {
                             first_veto.get_or_insert(veto);
@@ -2128,16 +2403,15 @@ fn step_list_op<'p>(
                         level,
                         "BUG: list command entered at the wrong row depth"
                     );
+                    let row = data
+                        .rows
+                        .get(cursor)
+                        .expect("BUG: cursor below the list length");
                     let current = match op {
                         NormalFormListOp::Predicate {
                             form: crate::parsing::ast::ListPredicateForm::Value,
                             ..
-                        } => CurrentRow::Value(
-                            data.rows
-                                .get(cursor)
-                                .expect("BUG: cursor below the list length")
-                                .into_owned(),
-                        ),
+                        } => CurrentRow::Value(row.into_owned()),
                         NormalFormListOp::Predicate {
                             form: crate::parsing::ast::ListPredicateForm::Instance,
                             ..
@@ -2147,15 +2421,22 @@ fn step_list_op<'p>(
                         | NormalFormListOp::Avg
                         | NormalFormListOp::Min
                         | NormalFormListOp::Max
-                        | NormalFormListOp::Sort { .. } => current_instance_row(
-                            &data
-                                .rows
-                                .get(cursor)
-                                .expect("BUG: cursor below the list length"),
-                            cursor,
-                        ),
+                        | NormalFormListOp::Sort { .. } => current_instance_row(&row, cursor),
                         other => unreachable!("BUG: {other:?} is not a per-row operation"),
                     };
+                    if let CurrentRow::Instance { key, .. } = &current {
+                        if !ctx.caches.row_contexts.borrow().contains_key(key) {
+                            let template = plan.row_template(&key.row.identity);
+                            let child = Frame::row_scope(key.clone(), template, RowBody::Nothing);
+                            frame.state = ListState::PerRow {
+                                data,
+                                cursor,
+                                values,
+                                first_veto,
+                            };
+                            return spawn(child, WalkMode::Same);
+                        }
+                    }
                     ctx.row_stack.push(current);
                     frame.state = ListState::PerRow {
                         data,
@@ -2178,6 +2459,7 @@ fn step_list_op<'p>(
                         &data.rows,
                         &values,
                         data.unit.clone(),
+                        plan.result_type(argument),
                         result_type,
                         plan,
                     ),
@@ -2328,7 +2610,8 @@ fn check_data_options(
         },
         None => None,
     };
-    match lemma_type.explain_disallowed(&slot_bound.value, rule_rows) {
+    let scales = display_scale_factors(Some(slot_bound), lemma_type, plan, ctx);
+    match lemma_type.explain_disallowed(&slot_bound.value, rule_rows, Some(&scales)) {
         None => slot,
         Some(message) => OperationResult::Veto(VetoType::computation(message)),
     }
@@ -2448,10 +2731,12 @@ fn step_cell<'p>(
                     done!(slot)
                 }
                 if let (Some(lemma_type), Some(bound)) = (lemma_type, slot.value()) {
+                    let scales = display_scale_factors(Some(bound), lemma_type, plan, ctx);
                     if let Err(msg) = validate_value_against_type(
                         lemma_type,
                         &bound.to_literal(),
                         &plan.resolved_types.unit_index,
+                        Some(&scales),
                     ) {
                         ctx.settle_leaf(id.index());
                         done!(OperationResult::Veto(VetoType::computation(msg)))
@@ -2763,15 +3048,25 @@ fn step_cell<'p>(
                 done!(value)
             }
             let source_type = plan.result_type(*inner).as_ref();
-            if let Some(scale) = conversion_scale_target(target, source_type, plan) {
-                assert!(
-                    unforced_target(scale, plan, ctx).is_none(),
-                    "BUG: conversion scale {scale:?} read before its scale dependency was evaluated"
-                );
-                match resolved_scale_factor(scale, plan, ctx) {
+            // Source unscaled dynamic magnitudes must settle before any cast —
+            // including `as <literal-unit>`, which has no conversion_scale_target.
+            let value = match value {
+                OperationResult::Value(bound) if bound.value.has_unscaled_measure() => {
+                    settle_stored(bound, source_type, plan, ctx)
+                }
+                other => other,
+            };
+            if value.vetoed() {
+                done!(value)
+            }
+            if let Some(scale) = conversion_scale_target(target, source_type) {
+                let bound = borrow_value(&value, "conversion operand");
+                let factor =
+                    conversion_dynamic_factor(bound, target, scale, source_type, plan, ctx);
+                match factor {
                     Err(veto) => done!(veto),
                     Ok(factor) => done!(convert_unit_operand(
-                        borrow_value(&value, "conversion operand"),
+                        bound,
                         source_type,
                         target,
                         Some(&factor),

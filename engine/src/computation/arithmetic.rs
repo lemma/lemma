@@ -454,6 +454,7 @@ pub(crate) fn scalar_arithmetic(
                     Ok(rational) => OperationResult::from_bound(BoundValueKind {
                         value: ValueKind::Ratio(rational),
                         unit: left.unit.clone(),
+                        instance_factors: None,
                     }),
                     Err(failure) => OperationResult::Veto(VetoType::computation(failure.message())),
                 }
@@ -476,6 +477,7 @@ pub(crate) fn scalar_arithmetic(
                         left.unit.as_ref(),
                         right.unit.as_ref(),
                     ),
+                    instance_factors: None,
                 }),
                 Err(failure) => OperationResult::Veto(VetoType::computation(failure.message())),
             }
@@ -622,13 +624,24 @@ pub(crate) fn scalar_arithmetic(
                     );
                     }
                     match measure_add_subtract(l_val, op, r_val) {
-                        Ok(rational) => OperationResult::from_bound(BoundValueKind {
-                            value: ValueKind::Measure(rational),
-                            unit: BoundValueKind::agree_or_left_binding(
-                                left.unit.as_ref(),
-                                right.unit.as_ref(),
-                            ),
-                        }),
+                        Ok(rational) => {
+                            let instance_factors = BoundValueKind::agree_instance_factors(
+                                left.instance_factors.as_ref(),
+                                right.instance_factors.as_ref(),
+                            );
+                            let unit = BoundValueKind::binding_with_agreed_factors(
+                                BoundValueKind::agree_or_left_binding(
+                                    left.unit.as_ref(),
+                                    right.unit.as_ref(),
+                                ),
+                                &instance_factors,
+                            );
+                            OperationResult::from_bound(BoundValueKind {
+                                value: ValueKind::Measure(rational),
+                                unit,
+                                instance_factors,
+                            })
+                        }
                         Err(failure) => {
                             OperationResult::Veto(VetoType::computation(failure.message()))
                         }
@@ -670,6 +683,15 @@ pub(crate) fn scalar_arithmetic(
                         .expect("BUG: planning bounds combined unit exponents");
                     if combined_decomposition.is_empty() {
                         OperationResult::from_literal(LiteralValue::number(raw_result))
+                    } else if left_type.same_measure_family(right_type) {
+                        OperationResult::from_bound(BoundValueKind {
+                            value: ValueKind::Measure(raw_result),
+                            unit: None,
+                            instance_factors: BoundValueKind::agree_instance_factors(
+                                left.instance_factors.as_ref(),
+                                right.instance_factors.as_ref(),
+                            ),
+                        })
                     } else {
                         OperationResult::from_bound(BoundValueKind::unbound(ValueKind::Measure(
                             raw_result,
@@ -685,6 +707,7 @@ pub(crate) fn scalar_arithmetic(
                 Ok(rational) => OperationResult::from_bound(BoundValueKind {
                     value: ValueKind::Measure(rational),
                     unit: left.unit.clone(),
+                    instance_factors: left.instance_factors.clone(),
                 }),
                 Err(failure) => OperationResult::Veto(VetoType::computation(failure.message())),
             }
@@ -696,6 +719,7 @@ pub(crate) fn scalar_arithmetic(
                     Ok(rational) => OperationResult::from_bound(BoundValueKind {
                         value: ValueKind::Measure(rational),
                         unit: right.unit.clone(),
+                        instance_factors: right.instance_factors.clone(),
                     }),
                     Err(failure) => OperationResult::Veto(VetoType::computation(failure.message())),
                 }
@@ -717,6 +741,7 @@ pub(crate) fn scalar_arithmetic(
                 Ok(rational) => OperationResult::from_bound(BoundValueKind {
                     value: ValueKind::Measure(rational),
                     unit: left.unit.clone(),
+                    instance_factors: left.instance_factors.clone(),
                 }),
                 Err(failure) => OperationResult::Veto(VetoType::computation(failure.message())),
             },
@@ -730,9 +755,11 @@ pub(crate) fn scalar_arithmetic(
                     Ok(rational) if n.numer_is_zero() => {
                         OperationResult::from_literal(LiteralValue::number(rational))
                     }
-                    Ok(rational) => OperationResult::from_bound(BoundValueKind::unbound(
-                        ValueKind::Measure(rational),
-                    )),
+                    Ok(rational) => OperationResult::from_bound(BoundValueKind {
+                        value: ValueKind::Measure(rational),
+                        unit: None,
+                        instance_factors: left.instance_factors.clone(),
+                    }),
                     Err(failure) => OperationResult::Veto(VetoType::computation(failure.message())),
                 }
             }
@@ -747,6 +774,7 @@ pub(crate) fn scalar_arithmetic(
                 Ok(rational) => OperationResult::from_bound(BoundValueKind {
                     value: ValueKind::Measure(rational),
                     unit: right.unit.clone(),
+                    instance_factors: right.instance_factors.clone(),
                 }),
                 Err(failure) => OperationResult::Veto(VetoType::computation(failure.message())),
             },

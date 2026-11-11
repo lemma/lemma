@@ -39,6 +39,7 @@ pub fn integer_rounding(mode: RoundingMode, value: &BoundValueKind) -> Operation
         Ok(rounded) => OperationResult::from_bound(BoundValueKind {
             value: ValueKind::Number(rounded),
             unit: None,
+            instance_factors: None,
         }),
         Err(failure) => OperationResult::Veto(VetoType::computation(failure.to_string())),
     }
@@ -57,6 +58,7 @@ pub fn magnitude_abs(value: &BoundValueKind) -> OperationResult {
                 _ => ValueKind::Ratio(magnitude),
             },
             unit: value.unit.clone(),
+            instance_factors: None,
         }),
         Err(failure) => OperationResult::Veto(VetoType::computation(failure.to_string())),
     }
@@ -99,6 +101,7 @@ pub fn step_rounding(
             _ => ValueKind::Measure(rounded),
         },
         unit: result_type.unit().map(Arc::from),
+        instance_factors: None,
     })
 }
 
@@ -152,6 +155,7 @@ mod tests {
         let value = BoundValueKind {
             value: ValueKind::Measure(rational_new(-26, 10)),
             unit: Some(Arc::from("kilogram")),
+            instance_factors: None,
         };
         let result = bound(magnitude_abs(&value));
         assert_eq!(result.value, ValueKind::Measure(rational_new(26, 10)));

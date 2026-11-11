@@ -4,6 +4,7 @@ mod formatter;
 mod interactive;
 mod mcp;
 pub(crate) mod server;
+mod unit_value_prompt;
 
 use anyhow::Result;
 use clap::{Args, CommandFactory, Parser, Subcommand};
@@ -165,9 +166,7 @@ enum Commands {
     ///
     /// Routes:
     ///   GET  /{spec}              — show spec interface (data, rules, this version's window)
-    ///   POST /{spec}              — evaluate all rules (data as JSON or form body)
-    ///   GET  /{spec}/{rules}      — evaluate specific rules (comma-separated)
-    ///   POST /{spec}/{rules}      — evaluate specific rules (JSON or form body)
+    ///   POST /{spec}              — evaluate (JSON or form body; `?rules=a,b` limits rules)
     ///   GET  /                    — all loaded specs (as `lemma specs --all --json`)
     ///   GET  /docs                — interactive API documentation
     ///   GET  /openapi.json        — OpenAPI 3.1 specification

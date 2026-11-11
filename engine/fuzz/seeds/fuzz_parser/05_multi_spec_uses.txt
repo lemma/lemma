@@ -1,0 +1,8 @@
+spec base
+data qty: number
+  -> suggest 1
+
+spec fuzz_seed
+uses base
+data extra: 3
+rule total: base.qty + extra

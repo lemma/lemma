@@ -1405,6 +1405,7 @@ fn prompt_measure_data(
         unreachable!("BUG: Measure type has no units");
     }
 
+    let unit_names: Vec<String> = units.iter().map(|u| u.name.clone()).collect();
     let default_unit = suggestion.and_then(|lit| match &lit.value {
         ValueKind::Measure(_) => lemma_type
             .measure_runtime_signature()
@@ -1412,48 +1413,44 @@ fn prompt_measure_data(
             .map(|(name, _)| name.clone()),
         _ => None,
     });
-
-    let unit_names: Vec<String> = units.iter().map(|u| u.name.clone()).collect();
-    let unit = if unit_names.len() == 1 {
-        unit_names[0].clone()
-    } else {
-        let prompt_msg = format!("Select unit for {}", data_name);
-        let mut select = Select::new(&prompt_msg, unit_names);
-        if let Some(def_unit) = default_unit.as_deref() {
-            if let Some(idx) = units.iter().position(|u| u.name == def_unit) {
-                select = select.with_starting_cursor(idx);
-            }
-        }
-        select
-            .prompt()
-            .context(format!("Failed to get unit for {}", data_name))?
-    };
-
+    let default_unit_index = default_unit
+        .as_deref()
+        .and_then(|name| unit_names.iter().position(|u| u == name))
+        .unwrap_or(0);
+    let default_unit_name = &unit_names[default_unit_index];
     let numeric_default = suggestion
-        .and_then(|lit| lit.magnitude_in_unit(lemma_type, &unit))
+        .and_then(|lit| lit.magnitude_in_unit(lemma_type, default_unit_name))
         .map(|decimal| decimal.to_string());
-
-    let selected = units
-        .get(&unit)
-        .expect("BUG: selected measure unit must exist on planned type");
-    let value_constraints = NumericConstraints {
-        minimum: selected.minimum_decimal(),
-        maximum: selected.maximum_decimal(),
-        decimals: None,
-        help: if constraints.help.is_empty() {
-            format!("Enter numeric value (unit: {})", unit)
-        } else {
-            constraints.help.clone()
-        },
+    let per_unit_constraints: Vec<crate::unit_value_prompt::MagnitudeConstraints> = unit_names
+        .iter()
+        .map(|name| {
+            let unit = units
+                .get(name)
+                .expect("BUG: measure unit must exist on planned type");
+            crate::unit_value_prompt::MagnitudeConstraints {
+                minimum: unit.minimum_decimal(),
+                maximum: unit.maximum_decimal(),
+                decimals: None,
+            }
+        })
+        .collect();
+    let help = if constraints.help.is_empty() {
+        String::new()
+    } else {
+        constraints.help.clone()
     };
-    let value = prompt_decimal_input(
-        &format!("Enter value for {} ({})", data_name, unit),
-        numeric_default.as_deref(),
-        &value_constraints,
-        "7.65",
-    )?;
-
-    Ok(format!("{} {}", value, unit))
+    let answer =
+        crate::unit_value_prompt::prompt_unit_value(crate::unit_value_prompt::UnitValuePrompt {
+            message: data_name,
+            help: &help,
+            units: &unit_names,
+            default_unit_index,
+            default_magnitude: numeric_default.as_deref(),
+            per_unit_constraints: &per_unit_constraints,
+        })
+        .with_context(|| format!("Failed to get measure value for {data_name}"))?;
+    let unit = &unit_names[answer.unit_index];
+    Ok(format!("{} {}", answer.magnitude, unit))
 }
 
 fn prompt_ratio_data(
@@ -1467,55 +1464,52 @@ fn prompt_ratio_data(
         unreachable!("BUG: Ratio type has no units");
     }
 
+    let unit_names: Vec<String> = units.iter().map(|u| u.name.clone()).collect();
     let default_unit = suggestion.and_then(|lit| match &lit.value {
         ValueKind::Ratio(_) => lemma_type.ratio_primary_unit().map(|name| name.to_string()),
         _ => None,
     });
-
-    let unit_names: Vec<String> = units.iter().map(|u| u.name.clone()).collect();
-    let selected_unit = if unit_names.len() == 1 {
-        unit_names[0].clone()
-    } else {
-        let prompt_msg = format!("Select ratio unit for {}", data_name);
-        let mut select = Select::new(&prompt_msg, unit_names);
-        if let Some(def_unit) = default_unit.as_deref() {
-            if let Some(idx) = units.iter().position(|u| u.name == def_unit) {
-                select = select.with_starting_cursor(idx);
-            }
-        }
-        select
-            .prompt()
-            .context(format!("Failed to get ratio unit for {}", data_name))?
-    };
-
-    let default_decimal = suggestion
-        .and_then(|lit| lit.magnitude_in_unit(lemma_type, &selected_unit))
+    let default_unit_index = default_unit
+        .as_deref()
+        .and_then(|name| unit_names.iter().position(|u| u == name))
+        .unwrap_or(0);
+    let default_unit_name = &unit_names[default_unit_index];
+    let numeric_default = suggestion
+        .and_then(|lit| lit.magnitude_in_unit(lemma_type, default_unit_name))
         .map(|decimal| decimal.to_string());
-
-    let selected = units
-        .get(&selected_unit)
-        .expect("BUG: selected ratio unit must exist on planned type");
-    let value_constraints = NumericConstraints {
-        minimum: selected.minimum_decimal(),
-        maximum: selected.maximum_decimal(),
-        decimals: None,
-        help: if constraints.help.is_empty() {
-            format!("Enter numeric value (unit: {})", selected_unit)
-        } else {
-            constraints.help.clone()
-        },
+    let per_unit_constraints: Vec<crate::unit_value_prompt::MagnitudeConstraints> = unit_names
+        .iter()
+        .map(|name| {
+            let unit = units
+                .get(name)
+                .expect("BUG: ratio unit must exist on planned type");
+            crate::unit_value_prompt::MagnitudeConstraints {
+                minimum: unit.minimum_decimal(),
+                maximum: unit.maximum_decimal(),
+                decimals: None,
+            }
+        })
+        .collect();
+    let help = if constraints.help.is_empty() {
+        String::new()
+    } else {
+        constraints.help.clone()
     };
-    let value = prompt_decimal_input(
-        &format!("Enter value for {} ({})", data_name, selected_unit),
-        default_decimal.as_deref(),
-        &value_constraints,
-        "0.10",
-    )?;
-
+    let answer =
+        crate::unit_value_prompt::prompt_unit_value(crate::unit_value_prompt::UnitValuePrompt {
+            message: data_name,
+            help: &help,
+            units: &unit_names,
+            default_unit_index,
+            default_magnitude: numeric_default.as_deref(),
+            per_unit_constraints: &per_unit_constraints,
+        })
+        .with_context(|| format!("Failed to get ratio value for {data_name}"))?;
+    let selected_unit = &unit_names[answer.unit_index];
     match selected_unit.as_str() {
-        "percent" => Ok(format!("{}%", value)),
-        "permille" => Ok(format!("{}%%", value)),
-        other => Ok(format!("{} {}", value, other)),
+        "percent" => Ok(format!("{}%", answer.magnitude)),
+        "permille" => Ok(format!("{}%%", answer.magnitude)),
+        other => Ok(format!("{} {}", answer.magnitude, other)),
     }
 }
 

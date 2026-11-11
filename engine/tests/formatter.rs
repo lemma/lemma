@@ -759,6 +759,72 @@ data fares: number list
 }
 
 #[test]
+fn uses_multi_ref_binding_wraps_with_deeper_indent() {
+    let source = r#"
+spec node
+data children: node list
+
+spec tree
+uses left: node
+uses right: node
+uses weight: node
+uses color: node
+uses size: node
+uses depth: node
+uses width: node
+uses height: node
+uses mix: node
+  -> with children: left, right, weight, color, size, depth, width, height
+"#;
+    let formatted = format_source(source, lemma::SourceType::Volatile).expect("format");
+    let with_lines: Vec<&str> = formatted
+        .lines()
+        .filter(|line| line.trim_start().starts_with("-> with children:"))
+        .collect();
+    assert!(
+        with_lines.len() == 1,
+        "first line keeps -> with children:, got:\n{formatted}"
+    );
+    assert!(
+        with_lines[0].trim_end().ends_with(','),
+        "overflow line ends with comma, got:\n{formatted}"
+    );
+    assert!(
+        formatted
+            .lines()
+            .any(|line| line.starts_with("      ") && !line.trim_start().starts_with("->")),
+        "continuation indent, got:\n{formatted}"
+    );
+    let twice = format_source(&formatted, lemma::SourceType::Volatile).expect("reformat");
+    assert_eq!(formatted, twice, "uses multi-ref wrap is not idempotent");
+}
+
+#[test]
+fn uses_short_multi_ref_binding_stays_one_line() {
+    let source = r#"
+spec node
+data children: node list
+
+spec tree
+uses left: node
+uses right: node
+uses mix: node
+  -> with children: left, right
+"#;
+    let formatted = format_source(source, lemma::SourceType::Volatile).expect("format");
+    assert!(
+        formatted.contains("-> with children: left, right\n"),
+        "short multi-ref stays inline, got:\n{formatted}"
+    );
+    assert!(
+        !formatted
+            .lines()
+            .any(|line| line.starts_with("      ") && line.contains("right")),
+        "no continuation for short list, got:\n{formatted}"
+    );
+}
+
+#[test]
 fn list_valued_unless_uses_split_then() {
     let source = r#"
 spec rate

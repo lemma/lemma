@@ -14,7 +14,7 @@ path = "src/lib.rs"
 crate-type = ["cdylib", "lib"]
 
 [dependencies]
-lemma-engine = { path = "../../../../", version = "=0.11.0" }
+lemma-engine = { path = "../../../../", version = "=0.11.1" }
 serde = { workspace = true }
 serde_json.workspace = true
 thiserror = "2"

@@ -107,8 +107,12 @@ rule runway: balance / burn_rate as month
         .collect::<Vec<_>>()
         .join("; ");
     assert!(
-        joined.contains("(balance / burn_rate) as month"),
-        "expected parenthesized suggestion in error, got: {joined}"
+        joined.contains("Cannot convert") || joined.contains("different measure families"),
+        "expected conversion error for burn_rate as month, got: {joined}"
+    );
+    assert!(
+        !joined.contains("Write '("),
+        "must not suggest parenthesization, got: {joined}"
     );
 }
 

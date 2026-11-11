@@ -184,6 +184,24 @@ impl RuleResult {
                 IndexMap::new(),
             ),
             OperationResult::Value(bound) => {
+                if (rule_type.is_measure() || rule_type.is_measure_range())
+                    && !crate::planning::semantics::measure_family_has_expressible_unit(
+                        rule_type,
+                        runtime_scales,
+                    )
+                {
+                    return Self::vetoed_with(
+                        rule,
+                        VetoType::computation(format!(
+                            "no conversion factor is known for any unit of {}",
+                            rule_type.name()
+                        )),
+                        rule_type_name,
+                        explanation,
+                        missing_data,
+                        IndexMap::new(),
+                    );
+                }
                 match rule_result_value_from_literal(
                     &bound.to_literal(),
                     rule_type,

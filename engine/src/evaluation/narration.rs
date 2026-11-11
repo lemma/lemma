@@ -54,7 +54,8 @@ pub(crate) struct ArenaId(usize);
 struct ArenaEntry {
     name: RulePath,
     result: RuleResultValue,
-    body: String,
+    /// `None` while reserved for a cyclic RuleRef; filled after the body walk.
+    body: Option<String>,
     causes: Vec<Cause>,
     children: Vec<ExplanationNode>,
 }
@@ -77,6 +78,29 @@ impl ExplanationArena {
             .get(id.0)
             .unwrap_or_else(|| panic!("BUG: arena id {} out of range", id.0))
     }
+
+    fn get_mut(&mut self, id: ArenaId) -> &mut ArenaEntry {
+        self.entries
+            .get_mut(id.0)
+            .unwrap_or_else(|| panic!("BUG: arena id {} out of range", id.0))
+    }
+}
+
+/// Root plan/context and shared arena for one explain run. Deferred `uses -> with`
+/// rule wires resolve in the owner scope (often the request root).
+pub(crate) struct NarrationSession<'a> {
+    pub(crate) root_plan: &'a ExecutionPlan,
+    pub(crate) root_ctx: &'a EvaluationContext,
+    pub(crate) arena: &'a mut ExplanationArena,
+    /// Rules reserved during a body walk; drained iteratively so RuleRef does not
+    /// call back into [`narrate_rule`] (recursion-check).
+    pub(crate) pending: Vec<PendingNarration>,
+}
+
+/// A rule whose arena entry is reserved but whose body is not filled yet.
+pub(crate) enum PendingNarration {
+    Root { path: RulePath },
+    Instance { key: InstanceKey, path: RulePath },
 }
 
 /// Narration of one cell.
@@ -100,36 +124,133 @@ fn operands_of(as_operand: &Option<ExplanationNode>) -> Vec<ExplanationNode> {
 }
 
 /// Narrate a rule whose value is stored and insert its arena id into
-/// `rule_explanations`. Rules narrate in plan order (topological), so every rule
-/// reference under this rule already has its arena entry.
+/// `rule_explanations`. Reserves the arena entry before the body so a cyclic
+/// RuleRef (deferred wire through a root rule that reads back into this instance)
+/// can resolve while the body is still being filled. Further rules discovered
+/// mid-body are queued on [`NarrationSession::pending`] and filled in a loop.
 pub(crate) fn narrate_rule(
     rule: &ExecutableRule,
     plan: &ExecutionPlan,
     ctx: &EvaluationContext,
-    arena: &mut ExplanationArena,
     qualifier: Option<&NameScope>,
+    session: &mut NarrationSession<'_>,
 ) {
-    if ctx.rule_explanations.borrow().contains_key(&rule.path) {
-        return;
+    fill_rule_body(rule, plan, ctx, qualifier, session);
+    drain_pending(session);
+}
+
+fn drain_pending(session: &mut NarrationSession<'_>) {
+    while let Some(item) = session.pending.pop() {
+        fill_pending_rule(item, session);
     }
+}
+
+fn fill_pending_rule(item: PendingNarration, session: &mut NarrationSession<'_>) {
+    match item {
+        PendingNarration::Root { path } => {
+            let plan = session.root_plan;
+            let ctx = session.root_ctx;
+            let Some(rule) = plan.rules.get(&path) else {
+                panic!("BUG: pending root rule '{path}' missing from plan");
+            };
+            fill_rule_body(rule, plan, ctx, None, session);
+        }
+        PendingNarration::Instance { key, path } => {
+            let qualifier = NameScope {
+                data: key.segments().unwrap_or_else(|| key.import_hops()),
+                rules: key.import_hops(),
+            };
+            let plan = session.root_plan.row_template(&key.row.identity);
+            let contexts = session.root_ctx.caches.row_contexts.borrow();
+            let ctx = contexts
+                .get(&key)
+                .unwrap_or_else(|| panic!("BUG: pending instance {key} missing from row_contexts"));
+            let Some(rule) = plan.rules.get(&path) else {
+                panic!("BUG: pending rule '{path}' of {key} missing from plan");
+            };
+            fill_rule_body(rule, plan, ctx, Some(&qualifier), session);
+        }
+    }
+}
+
+fn fill_rule_body(
+    rule: &ExecutableRule,
+    plan: &ExecutionPlan,
+    ctx: &EvaluationContext,
+    qualifier: Option<&NameScope>,
+    session: &mut NarrationSession<'_>,
+) {
+    let existing = ctx.rule_explanations.borrow().get(&rule.path).copied();
+    let id = match existing {
+        Some(id) if session.arena.get(id).body.is_some() => return,
+        Some(id) => id,
+        None => {
+            let result_type = ctx.rule_result_type(plan, rule);
+            let result = explained_value(
+                ctx.rule_value(plan, &rule.path),
+                result_type.as_ref(),
+                plan,
+                ctx,
+            );
+            let id = session.arena.push(ArenaEntry {
+                name: qualified_rule_path(qualifier, &rule.path),
+                result,
+                body: None,
+                causes: Vec::new(),
+                children: Vec::new(),
+            });
+            ctx.rule_explanations
+                .borrow_mut()
+                .insert(rule.path.clone(), id);
+            id
+        }
+    };
+    let narrated = narrate(rule.normal_form, plan, ctx, qualifier, session);
+    let entry = session.arena.get_mut(id);
+    entry.body = Some(narrated.body);
+    entry.causes = narrated.causes;
+    entry.children = operands_of(&narrated.as_operand);
+}
+
+fn reserve_rule_entry(
+    path: &RulePath,
+    plan: &ExecutionPlan,
+    ctx: &EvaluationContext,
+    qualifier: Option<&NameScope>,
+    session: &mut NarrationSession<'_>,
+) -> ArenaId {
+    if let Some(id) = ctx.rule_explanations.borrow().get(path).copied() {
+        return id;
+    }
+    let rule = plan
+        .rules
+        .get(path)
+        .unwrap_or_else(|| panic!("BUG: reserved rule '{path}' missing from plan"));
     let result_type = ctx.rule_result_type(plan, rule);
-    let result = explained_value(
-        ctx.rule_value(plan, &rule.path),
-        result_type.as_ref(),
-        plan,
-        ctx,
-    );
-    let narrated = narrate(rule.normal_form, plan, ctx, qualifier);
-    let id = arena.push(ArenaEntry {
-        name: qualified_rule_path(qualifier, &rule.path),
+    let result = explained_value(ctx.rule_value(plan, path), result_type.as_ref(), plan, ctx);
+    let id = session.arena.push(ArenaEntry {
+        name: qualified_rule_path(qualifier, path),
         result,
-        body: narrated.body,
-        causes: narrated.causes,
-        children: operands_of(&narrated.as_operand),
+        body: None,
+        causes: Vec::new(),
+        children: Vec::new(),
     });
-    ctx.rule_explanations
-        .borrow_mut()
-        .insert(rule.path.clone(), id);
+    ctx.rule_explanations.borrow_mut().insert(path.clone(), id);
+    match qualifier {
+        None => session
+            .pending
+            .push(PendingNarration::Root { path: path.clone() }),
+        Some(_) => {
+            let key = ctx.owner_row.clone().unwrap_or_else(|| {
+                panic!("BUG: qualified reserve needs the instance owner_row for '{path}'")
+            });
+            session.pending.push(PendingNarration::Instance {
+                key,
+                path: path.clone(),
+            });
+        }
+    }
+    id
 }
 
 /// Narrate every cached row context (rows at every nesting level share one map).
@@ -143,6 +264,12 @@ pub(crate) fn narrate_row_contexts(
     ctx: &EvaluationContext,
     arena: &mut ExplanationArena,
 ) {
+    let mut session = NarrationSession {
+        root_plan: plan,
+        root_ctx: ctx,
+        arena,
+        pending: Vec::new(),
+    };
     let contexts = ctx.caches.row_contexts.borrow();
     let mut starts: Vec<InstanceKey> = contexts.keys().cloned().collect();
     starts.sort_by_cached_key(|key| key.to_string());
@@ -155,7 +282,7 @@ pub(crate) fn narrate_row_contexts(
         stack.push((start, false));
         while let Some((key, expand)) = stack.pop() {
             if expand {
-                narrate_one_row(&key, plan, &contexts, arena);
+                narrate_one_row(&key, plan, &contexts, &mut session);
                 continue;
             }
             if !done.insert(key.clone()) {
@@ -186,7 +313,7 @@ fn narrate_one_row(
     key: &InstanceKey,
     plan: &ExecutionPlan,
     contexts: &indexmap::IndexMap<InstanceKey, EvaluationContext>,
-    arena: &mut ExplanationArena,
+    session: &mut NarrationSession<'_>,
 ) {
     // A planned instance's rule bodies name data by its path (`people.1.age`,
     // `i.x`); under an evaluation-data or inline row only the `uses` hops below it.
@@ -200,7 +327,7 @@ fn narrate_one_row(
         .expect("BUG: narrated row context missing from the cache");
     for (index, rule) in scope_plan.rules.values().enumerate() {
         if scope_ctx.rule_values[index].is_some() {
-            narrate_rule(rule, scope_plan, scope_ctx, arena, Some(&qualifier));
+            narrate_rule(rule, scope_plan, scope_ctx, Some(&qualifier), session);
         }
     }
 }
@@ -229,14 +356,20 @@ pub(crate) fn explanation_for(
         });
     let root = arena.get(root_id);
     let (children, causes, rules) = remap_reachable(arena, &root.children, &root.causes);
-    let runtime_scales = tree::runtime_scale_factors_for(rule_result_type.as_ref(), plan, ctx);
+    let runtime_scales =
+        tree::display_scale_factors(rule_value.value(), rule_result_type.as_ref(), plan, ctx);
     Explanation {
         name: name.clone(),
         result: rule_value.clone(),
         result_type: rule_result_type,
         family_units: Arc::clone(&plan.family_units),
         runtime_scales,
-        body: root.body.clone(),
+        body: root.body.clone().unwrap_or_else(|| {
+            panic!(
+                "BUG: rule '{}' explanation root has an unfilled arena body",
+                rule.path.rule
+            )
+        }),
         causes,
         children,
         rules,
@@ -249,7 +382,7 @@ fn explained_value(
     plan: &ExecutionPlan,
     ctx: &EvaluationContext,
 ) -> RuleResultValue {
-    let scales = tree::runtime_scale_factors_for(lemma_type, plan, ctx);
+    let scales = tree::display_scale_factors(result.value(), lemma_type, plan, ctx);
     explanation_result_value(result, lemma_type, &plan.family_units, Some(&scales))
 }
 
@@ -266,8 +399,19 @@ fn row_field_value(
     let template = plan.row_template(&key.row.identity);
     let contexts = ctx.caches.row_contexts.borrow();
     let scales = match contexts.get(key) {
-        Some(row_ctx) => tree::runtime_scale_factors_for(field_type, template, row_ctx),
-        None => HashMap::new(),
+        Some(row_ctx) => tree::display_scale_factors(result.value(), field_type, template, row_ctx),
+        None => match result
+            .value()
+            .and_then(|bound| bound.instance_factors.as_ref())
+        {
+            Some(factors) => factors
+                .iter()
+                .map(|(unit, factor)| (unit.clone(), factor.clone()))
+                .collect(),
+            None => panic!(
+                "BUG: row field narration for '{key}' has neither a row context nor carried instance factors"
+            ),
+        },
     };
     explanation_result_value(result, field_type, &template.family_units, Some(&scales))
 }
@@ -316,7 +460,12 @@ fn remap_reachable(
             id: arena_to_public[arena_id],
             name: entry.name.clone(),
             result: entry.result.clone(),
-            body: entry.body.clone(),
+            body: entry.body.clone().unwrap_or_else(|| {
+                panic!(
+                    "BUG: arena entry '{}' reached remap with an unfilled body",
+                    entry.name.input_key()
+                )
+            }),
             causes,
             children,
         });
@@ -391,18 +540,17 @@ fn remap_in_place<'a>(
 }
 
 /// Reference to rule `path` of `plan`, narrated in `ctx`, displayed as `name`.
+/// Reserves an arena entry (and queues body fill) when a deferred wire or cyclic
+/// read reaches the rule before plan-order narration finished the entry.
 fn rule_ref_node(
     path: &RulePath,
     name: RulePath,
     plan: &ExecutionPlan,
     ctx: &EvaluationContext,
+    qualifier: Option<&NameScope>,
+    session: &mut NarrationSession<'_>,
 ) -> ExplanationNode {
-    let arena_id = *ctx.rule_explanations.borrow().get(path).unwrap_or_else(|| {
-        panic!(
-            "BUG: rule '{}' narrated after its use-site (plan order is topological)",
-            path.rule
-        )
-    });
+    let arena_id = reserve_rule_entry(path, plan, ctx, qualifier, session);
     let rule = plan
         .rules
         .get(path)
@@ -418,6 +566,120 @@ fn rule_ref_node(
             ctx,
         ),
     }
+}
+
+/// When data `path` of instance `key` is sealed by a deferred rule wire
+/// (`uses -> with` to a rule), the RuleRef that narrates that rule and whether
+/// the wired rule itself vetoed. `display_name` overrides the default label (the
+/// wired rule path); list row fields pass a row-local label.
+///
+/// Lifted from the deferred arm of [`row_field_node`]: same resolution for
+/// in-rule DataPath and import-member Data reads.
+fn deferred_binding_rule_ref(
+    key: &InstanceKey,
+    path: &DataPath,
+    display_name: Option<RulePath>,
+    caches_ctx: &EvaluationContext,
+    session: &mut NarrationSession<'_>,
+) -> Option<(ExplanationNode, bool)> {
+    let template = session.root_plan.row_template(&key.row.identity);
+    let slot = template.data.get_index_of(path)?;
+    let RowBinding::Deferred {
+        target: target @ ReferenceTarget::Rule(rule),
+        hops,
+    } = caches_ctx.caches.row_binding(key, slot)?
+    else {
+        return None;
+    };
+    let name = display_name.unwrap_or_else(|| rule.clone());
+    let owner = key.scope(*hops);
+    if rule.segments.is_empty() {
+        match owner {
+            Some(owner_key) => {
+                let qualifier = NameScope {
+                    data: owner_key
+                        .segments()
+                        .unwrap_or_else(|| owner_key.import_hops()),
+                    rules: owner_key.import_hops(),
+                };
+                let owner_plan = session.root_plan.row_template(&owner_key.row.identity);
+                let contexts = caches_ctx.caches.row_contexts.borrow();
+                let owner_ctx = contexts.get(owner_key).unwrap_or_else(|| {
+                    panic!(
+                        "BUG: owner context of deferred rule wire on '{path}' of {key} is cached"
+                    )
+                });
+                let vetoed = owner_ctx.rule_value(owner_plan, rule).vetoed();
+                let node =
+                    rule_ref_node(rule, name, owner_plan, owner_ctx, Some(&qualifier), session);
+                return Some((node, vetoed));
+            }
+            None => {
+                let vetoed = session
+                    .root_ctx
+                    .rule_value(session.root_plan, rule)
+                    .vetoed();
+                return Some((
+                    rule_ref_node(
+                        rule,
+                        name,
+                        session.root_plan,
+                        session.root_ctx,
+                        None,
+                        session,
+                    ),
+                    vetoed,
+                ));
+            }
+        }
+    }
+    let owner_key = owner;
+    let contexts = caches_ctx.caches.row_contexts.borrow();
+    let (owner_plan, owner_ctx) = match owner_key {
+        Some(owner) => (
+            session.root_plan.row_template(&owner.row.identity),
+            contexts.get(owner).unwrap_or_else(|| {
+                panic!("BUG: owner context of deferred rule wire on '{path}' of {key} is cached")
+            }),
+        ),
+        None => (session.root_plan, session.root_ctx),
+    };
+    let cell = owner_plan.member_targets.get(target).unwrap_or_else(|| {
+        panic!("BUG: deferred member target '{rule}' has no member cell in its owner")
+    });
+    let member_read = owner_ctx
+        .row_reads
+        .get(cell)
+        .and_then(|reads| reads.last())
+        .unwrap_or_else(|| {
+            panic!("BUG: deferred member target '{rule}' narrated without its read")
+        });
+    let RowEnd::Rule(member) = &member_read.end else {
+        panic!("BUG: deferred rule target '{rule}' read a data member");
+    };
+    let instance_key = &member_read.row.key;
+    let instance_ctx = contexts
+        .get(instance_key)
+        .unwrap_or_else(|| panic!("BUG: instance of '{rule}' read without its context"));
+    let member_plan = session.root_plan.row_template(&instance_key.row.identity);
+    let member_qualifier = NameScope {
+        data: instance_key
+            .segments()
+            .unwrap_or_else(|| instance_key.import_hops()),
+        rules: instance_key.import_hops(),
+    };
+    let vetoed = instance_ctx.rule_value(member_plan, member).vetoed();
+    Some((
+        rule_ref_node(
+            member,
+            name,
+            member_plan,
+            instance_ctx,
+            Some(&member_qualifier),
+            session,
+        ),
+        vetoed,
+    ))
 }
 
 /// Value the walk produced for a cell. A data leaf reads through its binding
@@ -460,6 +722,7 @@ fn narrate(
     plan: &ExecutionPlan,
     ctx: &EvaluationContext,
     qualifier: Option<&NameScope>,
+    session: &mut NarrationSession<'_>,
 ) -> Narrated {
     let mut done: Done = HashMap::new();
     let mut stack = vec![root];
@@ -468,7 +731,7 @@ fn narrate(
             stack.pop();
             continue;
         }
-        match narrate_step(top, plan, ctx, &done, qualifier) {
+        match narrate_step(top, plan, ctx, &done, qualifier, session) {
             Ok(narrated) => {
                 done.insert(top, narrated);
                 stack.pop();
@@ -486,6 +749,7 @@ fn narrate_step(
     ctx: &EvaluationContext,
     done: &Done,
     qualifier: Option<&NameScope>,
+    session: &mut NarrationSession<'_>,
 ) -> Need<Narrated> {
     let cell = plan.normal_form(id);
     if let Some(path) = &cell.rule_ref {
@@ -493,7 +757,7 @@ fn narrate_step(
         return Ok(Narrated {
             body: name.input_key(),
             causes: Vec::new(),
-            as_operand: Some(rule_ref_node(path, name, plan, ctx)),
+            as_operand: Some(rule_ref_node(path, name, plan, ctx, qualifier, session)),
         });
     }
     if let Some(origin) = cell.origin {
@@ -501,7 +765,7 @@ fn narrate_step(
             scrutinee, regions, ..
         } = &cell.kind
         {
-            assert_dispatch_agrees_with_record(id, plan, ctx, done, qualifier)?;
+            assert_dispatch_agrees_with_record(id, plan, ctx, done, qualifier, session)?;
             let mut narrated = child(done, origin)?.clone();
             if is_exclusive_point_table(regions, |region| {
                 region_body_is_nested(plan, region.cell())
@@ -512,7 +776,7 @@ fn narrate_step(
         }
         return Ok(child(done, origin)?.clone());
     }
-    narrate_shape(id, plan, ctx, done, qualifier)
+    narrate_shape(id, plan, ctx, done, qualifier, session)
 }
 
 /// Point region body is itself a Piecewise or OrderedDispatch (conjunctive nest).
@@ -583,6 +847,7 @@ fn narrate_shape(
     ctx: &EvaluationContext,
     done: &Done,
     qualifier: Option<&NameScope>,
+    session: &mut NarrationSession<'_>,
 ) -> Need<Narrated> {
     let forms = plan.normal_forms.as_slice();
     Ok(match &plan.normal_form(id).kind {
@@ -626,9 +891,30 @@ fn narrate_shape(
                             message: Some(veto.to_string()),
                         }
                     }
-                    _ => rule_ref_node(rule, qualified_rule_path(qualifier, rule), plan, ctx),
+                    _ => rule_ref_node(
+                        rule,
+                        qualified_rule_path(qualifier, rule),
+                        plan,
+                        ctx,
+                        qualifier,
+                        session,
+                    ),
                 },
-                Some(ReferenceEnd::Promptable(_)) | None => data_node(path, plan, ctx, qualifier),
+                Some(ReferenceEnd::Promptable(_)) | None => {
+                    match ctx
+                        .owner_row
+                        .as_ref()
+                        .and_then(|key| deferred_binding_rule_ref(key, path, None, ctx, session))
+                    {
+                        Some((node, rule_vetoed)) => match slot(id, plan, ctx) {
+                            OperationResult::Veto(veto) if !rule_vetoed => ExplanationNode::Veto {
+                                message: Some(veto.to_string()),
+                            },
+                            _ => node,
+                        },
+                        None => data_node(path, plan, ctx, qualifier),
+                    }
+                }
             };
             Narrated {
                 body: qualified_input_key(qualifier, path),
@@ -739,7 +1025,7 @@ fn narrate_shape(
             }
         }
         NormalFormKind::Piecewise(arms) => {
-            match piecewise_causes(arms, plan, ctx, done, qualifier)? {
+            match piecewise_causes(arms, plan, ctx, done, qualifier, session)? {
                 PiecewiseNarration::Causes {
                     causes,
                     winner_body,
@@ -777,13 +1063,13 @@ fn narrate_shape(
                     .unwrap_or_else(|| {
                         panic!("BUG: member '{member}' of {instance} narrated without its read")
                     });
-                let mut narrated = import_member_narration(read, plan, ctx);
+                let mut narrated = import_member_narration(read, plan, ctx, session);
                 narrated.body = format!("{instance}.{member}");
                 return Ok(narrated);
             }
             let mut operands: Vec<ExplanationNode> =
                 child(done, *base)?.as_operand.clone().into_iter().collect();
-            let member_fields = row_read_nodes(id, None, plan, ctx);
+            let member_fields = row_read_nodes(id, None, plan, ctx, session);
             merge_member_fields_into_list_rows(&mut operands, member_fields);
             drop_list_data_when_rows(&mut operands);
             let expression = explanation_display(forms, id, qualifier);
@@ -815,6 +1101,7 @@ fn narrate_shape(
             ctx,
             done,
             qualifier,
+            session,
         )?,
         NormalFormKind::RowField { .. } | NormalFormKind::Leaf(LeafKind::RowValue { .. }) => {
             unreachable!("BUG: row leaf narrated outside its list command")
@@ -838,6 +1125,7 @@ fn narrate_list_command(
     ctx: &EvaluationContext,
     done: &Done,
     qualifier: Option<&NameScope>,
+    session: &mut NarrationSession<'_>,
 ) -> Need<Narrated> {
     let ListCommand {
         list,
@@ -848,12 +1136,12 @@ fn narrate_list_command(
     let forms = plan.normal_forms.as_slice();
     let this_is_where = is_where_op(op);
     let (base, filters) = if this_is_where && !slot(id, plan, ctx).vetoed() {
-        let (base, inner) = peel_where_chain(list, plan, ctx, qualifier);
+        let (base, inner) = peel_where_chain(list, plan, ctx, qualifier, session);
         let mut filters = inner;
-        filters.push(filter_info(id, list, op, args, plan, ctx, qualifier));
+        filters.push(filter_info(id, list, plan, ctx, qualifier, session));
         (base, filters)
     } else {
-        peel_where_chain(list, plan, ctx, qualifier)
+        peel_where_chain(list, plan, ctx, qualifier, session)
     };
 
     let base_operand = child(done, base)?.as_operand.clone();
@@ -882,7 +1170,7 @@ fn narrate_list_command(
         ) {
         Vec::new()
     } else if matches!(op, NormalFormListOp::Find) && row_level.is_some() {
-        let mut rows = row_read_nodes(id, key_fields, plan, ctx);
+        let mut rows = row_read_nodes(id, key_fields, plan, ctx, session);
         let keep = result_row_instances(&slot(id, plan, ctx));
         rows.retain(|node| row_node_in_instances(node, &keep));
         if rows.is_empty() && key_fields.is_some() {
@@ -898,7 +1186,7 @@ fn narrate_list_command(
         }
         rows
     } else if row_level.is_some() {
-        row_read_nodes(id, key_fields, plan, ctx)
+        row_read_nodes(id, key_fields, plan, ctx, session)
     } else {
         Vec::new()
     };
@@ -1102,11 +1390,12 @@ fn peel_where_chain(
     plan: &ExecutionPlan,
     ctx: &EvaluationContext,
     qualifier: Option<&NameScope>,
+    session: &mut NarrationSession<'_>,
 ) -> (NormalFormId, Vec<FilterInfo>) {
     let mut filters = Vec::new();
     loop {
         let cell = plan.normal_form(id);
-        let NormalFormKind::ListCommand { list, op, args, .. } = &cell.kind else {
+        let NormalFormKind::ListCommand { list, op, .. } = &cell.kind else {
             return (id, filters);
         };
         if !is_where_op(op) {
@@ -1115,7 +1404,7 @@ fn peel_where_chain(
         if slot(id, plan, ctx).vetoed() {
             return (id, filters);
         }
-        filters.push(filter_info(id, *list, op, args, plan, ctx, qualifier));
+        filters.push(filter_info(id, *list, plan, ctx, qualifier, session));
         id = *list;
     }
 }
@@ -1123,13 +1412,15 @@ fn peel_where_chain(
 fn filter_info(
     where_id: NormalFormId,
     input_list: NormalFormId,
-    op: &NormalFormListOp,
-    args: &[NormalFormId],
     plan: &ExecutionPlan,
     ctx: &EvaluationContext,
     qualifier: Option<&NameScope>,
+    session: &mut NarrationSession<'_>,
 ) -> FilterInfo {
     let forms = plan.normal_forms.as_slice();
+    let NormalFormKind::ListCommand { op, args, .. } = &plan.normal_form(where_id).kind else {
+        panic!("BUG: filter_info on a non-list-command cell");
+    };
     let condition = match op {
         NormalFormListOp::Predicate {
             kind: ListPredKind::Where,
@@ -1148,7 +1439,7 @@ fn filter_info(
         .expect("BUG: where command has no condition argument");
     let columns = where_row_column_names(condition_arg, plan);
     let keep = result_row_instances(&slot(where_id, plan, ctx));
-    let read_rows = row_read_nodes(where_id, key_fields, plan, ctx);
+    let read_rows = row_read_nodes(where_id, key_fields, plan, ctx, session);
     let rows = keep
         .iter()
         .map(|instance| where_matched_row(instance, key_fields, &columns, &read_rows, plan, ctx))
@@ -1427,6 +1718,7 @@ fn import_member_narration(
     read: &RowRead,
     plan: &ExecutionPlan,
     ctx: &EvaluationContext,
+    session: &mut NarrationSession<'_>,
 ) -> Narrated {
     let key = &read.row.key;
     let template = plan.row_template(&key.row.identity);
@@ -1434,23 +1726,24 @@ fn import_member_narration(
         data: key.import_hops(),
         rules: key.import_hops(),
     };
-    let rule_node = |rule: &RulePath| {
-        let contexts = ctx.caches.row_contexts.borrow();
-        let instance_ctx = contexts
-            .get(key)
-            .unwrap_or_else(|| panic!("BUG: rule '{rule}' of {key} read without its context"));
-        rule_ref_node(
-            rule,
-            qualified_rule_path(Some(&scope), rule),
-            template,
-            instance_ctx,
-        )
-    };
     let (body, node) = match &read.end {
-        RowEnd::Rule(rule) => (
-            qualified_rule_path(Some(&scope), rule).input_key(),
-            rule_node(rule),
-        ),
+        RowEnd::Rule(rule) => {
+            let contexts = ctx.caches.row_contexts.borrow();
+            let instance_ctx = contexts
+                .get(key)
+                .unwrap_or_else(|| panic!("BUG: rule '{rule}' of {key} read without its context"));
+            (
+                qualified_rule_path(Some(&scope), rule).input_key(),
+                rule_ref_node(
+                    rule,
+                    qualified_rule_path(Some(&scope), rule),
+                    template,
+                    instance_ctx,
+                    Some(&scope),
+                    session,
+                ),
+            )
+        }
         RowEnd::Data(path) => {
             let name = qualified_data_path(Some(&scope), path);
             let node = match template.reference_ends.get(path) {
@@ -1460,14 +1753,43 @@ fn import_member_narration(
                             message: Some(veto.to_string()),
                         }
                     }
-                    _ => rule_node(rule),
+                    _ => {
+                        let contexts = ctx.caches.row_contexts.borrow();
+                        let instance_ctx = contexts.get(key).unwrap_or_else(|| {
+                            panic!("BUG: rule '{rule}' of {key} read without its context")
+                        });
+                        rule_ref_node(
+                            rule,
+                            qualified_rule_path(Some(&scope), rule),
+                            template,
+                            instance_ctx,
+                            Some(&scope),
+                            session,
+                        )
+                    }
                 },
                 Some(ReferenceEnd::Promptable(_)) | None => {
-                    let data_type =
-                        EvaluationContext::data_display_type(template, path, &read.result);
-                    ExplanationNode::Data {
-                        name: name.clone(),
-                        result: row_field_value(&read.result, data_type.as_ref(), key, plan, ctx),
+                    match deferred_binding_rule_ref(key, path, None, ctx, session) {
+                        Some((node, rule_vetoed)) => match &read.result {
+                            OperationResult::Veto(veto) if !rule_vetoed => ExplanationNode::Veto {
+                                message: Some(veto.to_string()),
+                            },
+                            _ => node,
+                        },
+                        None => {
+                            let data_type =
+                                EvaluationContext::data_display_type(template, path, &read.result);
+                            ExplanationNode::Data {
+                                name: name.clone(),
+                                result: row_field_value(
+                                    &read.result,
+                                    data_type.as_ref(),
+                                    key,
+                                    plan,
+                                    ctx,
+                                ),
+                            }
+                        }
                     }
                 }
             };
@@ -1502,6 +1824,7 @@ fn row_read_nodes(
     key: Option<&[KeyField]>,
     plan: &ExecutionPlan,
     ctx: &EvaluationContext,
+    session: &mut NarrationSession<'_>,
 ) -> Vec<ExplanationNode> {
     let Some(reads) = ctx.row_reads.get(&id) else {
         return Vec::new();
@@ -1512,7 +1835,7 @@ fn row_read_nodes(
             continue;
         }
         let (row, below) = labelled_row(&read.row, ctx.owner_row.as_ref());
-        let field = row_field_node(read, &row, below.as_deref(), plan, ctx);
+        let field = row_field_node(read, &row, below.as_deref(), plan, ctx, session);
         match nodes.iter_mut().find(|(labelled, _)| *labelled == row) {
             Some((_, fields)) => fields.push(field),
             None => nodes.push((row, vec![field])),
@@ -1588,6 +1911,7 @@ fn row_field_node(
     below: Option<&str>,
     plan: &ExecutionPlan,
     ctx: &EvaluationContext,
+    session: &mut NarrationSession<'_>,
 ) -> ExplanationNode {
     let key = &read.row.key;
     let template = plan.row_template(&key.row.identity);
@@ -1601,7 +1925,18 @@ fn row_field_node(
     if let Some(rule_path) = rule_path {
         let contexts = ctx.caches.row_contexts.borrow();
         let row_ctx = contexts.get(key).expect("BUG: narrated row was never read");
-        return rule_ref_node(rule_path, rule_path.clone(), template, row_ctx);
+        let qualifier = NameScope {
+            data: key.segments().unwrap_or_else(|| key.import_hops()),
+            rules: key.import_hops(),
+        };
+        return rule_ref_node(
+            rule_path,
+            rule_path.clone(),
+            template,
+            row_ctx,
+            Some(&qualifier),
+            session,
+        );
     }
     if let RowEnd::Data(path) = &read.end {
         let slot = template
@@ -1609,7 +1944,7 @@ fn row_field_node(
             .get_index_of(path)
             .expect("BUG: a row field read is template data");
         if let Some(RowBinding::Deferred {
-            target: target @ ReferenceTarget::Rule(rule),
+            target: ReferenceTarget::Rule(rule),
             hops,
         }) = ctx.caches.row_binding(key, slot)
         {
@@ -1620,48 +1955,11 @@ fn row_field_node(
                 }
                 _ => rule.clone(),
             };
-            let contexts = ctx.caches.row_contexts.borrow();
-            let (owner_plan, owner_ctx) = match owner {
-                Some(owner) => (
-                    plan.row_template(&owner.row.identity),
-                    contexts
-                        .get(owner)
-                        .expect("BUG: owner context of a deferred row field is cached"),
-                ),
-                None => {
-                    assert!(
-                        ctx.owner_row.is_none(),
-                        "BUG: a row the root writes is read only in the root context \
-                         (planning: a row binds values, not lists; list slots take `uses` aliases)"
-                    );
-                    (plan, ctx)
-                }
-            };
-            if rule.segments.is_empty() {
-                return rule_ref_node(rule, name, owner_plan, owner_ctx);
+            if let Some((node, _)) = deferred_binding_rule_ref(key, path, Some(name), ctx, session)
+            {
+                return node;
             }
-            let cell = owner_plan.member_targets.get(target).unwrap_or_else(|| {
-                panic!("BUG: deferred member target '{rule}' has no member cell in its owner")
-            });
-            let member_read = owner_ctx
-                .row_reads
-                .get(cell)
-                .and_then(|reads| reads.last())
-                .unwrap_or_else(|| {
-                    panic!("BUG: deferred member target '{rule}' narrated without its read")
-                });
-            let RowEnd::Rule(member) = &member_read.end else {
-                panic!("BUG: deferred rule target '{rule}' read a data member");
-            };
-            let instance_ctx = contexts
-                .get(&member_read.row.key)
-                .unwrap_or_else(|| panic!("BUG: instance of '{rule}' read without its context"));
-            return rule_ref_node(
-                member,
-                name,
-                plan.row_template(&member_read.row.key.row.identity),
-                instance_ctx,
-            );
+            panic!("BUG: deferred row field '{path}' of {key} failed to resolve");
         }
     }
     let name = match below {
@@ -1919,6 +2217,7 @@ fn piecewise_causes(
     ctx: &EvaluationContext,
     done: &Done,
     qualifier: Option<&NameScope>,
+    session: &mut NarrationSession<'_>,
 ) -> Need<PiecewiseNarration> {
     let decision = piecewise_decision(arms.len(), |arm| {
         Some(condition_outcome(&slot(arms[arm].0, plan, ctx)))
@@ -1951,15 +2250,23 @@ fn piecewise_causes(
     let after = winner.map(|arm| arm + 1).unwrap_or(1);
     for (condition, _) in arms.iter().skip(after) {
         match condition_outcome(&slot(*condition, plan, ctx)) {
-            BranchOutcome::NotTaken => {
-                causes.push(cause(*condition, false, plan, ctx, done, qualifier)?)
-            }
+            BranchOutcome::NotTaken => causes.push(cause(
+                *condition, false, plan, ctx, done, qualifier, session,
+            )?),
             BranchOutcome::Taken | BranchOutcome::Propagate(_) => {}
         }
     }
     let winner_body = match winner {
         Some(arm) => {
-            causes.push(cause(arms[arm].0, true, plan, ctx, done, qualifier)?);
+            causes.push(cause(
+                arms[arm].0,
+                true,
+                plan,
+                ctx,
+                done,
+                qualifier,
+                session,
+            )?);
             arms[arm].1
         }
         None => arms[0].1,
@@ -1980,6 +2287,7 @@ fn assert_dispatch_agrees_with_record(
     ctx: &EvaluationContext,
     done: &Done,
     qualifier: Option<&NameScope>,
+    session: &mut NarrationSession<'_>,
 ) -> Need<()> {
     let cell = plan.normal_form(id);
     let NormalFormKind::OrderedDispatch {
@@ -2005,7 +2313,7 @@ fn assert_dispatch_agrees_with_record(
         panic!("BUG: OrderedDispatch region check vetoed after a non-veto dispatch value: {veto}")
     });
     let PiecewiseNarration::Causes { winner_body, .. } =
-        piecewise_causes(arms, plan, ctx, done, qualifier)?
+        piecewise_causes(arms, plan, ctx, done, qualifier, session)?
     else {
         panic!("BUG: OrderedDispatch value is not a veto but its record scan is undecided")
     };
@@ -2027,6 +2335,7 @@ fn cause(
     ctx: &EvaluationContext,
     done: &Done,
     qualifier: Option<&NameScope>,
+    session: &mut NarrationSession<'_>,
 ) -> Need<Cause> {
     let root = peel_bool_leaf_origins(condition, plan);
     let root_is_logical = matches!(plan.normal_form(root).kind, NormalFormKind::Logical(..));
@@ -2057,19 +2366,19 @@ fn cause(
     };
 
     let children = if show_full_logical {
-        short_circuit_cause_children(root, plan, ctx, qualifier)
+        short_circuit_cause_children(root, plan, ctx, qualifier, session)
     } else {
         match (&plan.normal_form(focus).kind, held) {
             (NormalFormKind::Logical(connective, ..), polarity)
                 if polarity != connective.absorbing_operand() =>
             {
-                premise_cause_children(focus, plan, ctx, qualifier)
+                premise_cause_children(focus, plan, ctx, qualifier, session)
             }
             (NormalFormKind::Logical(..), _) => {
                 unreachable!("BUG: absorbing Logical must be peeled before cause children")
             }
             (NormalFormKind::Comparison(..), true) => {
-                premise_cause_children(focus, plan, ctx, qualifier)
+                premise_cause_children(focus, plan, ctx, qualifier, session)
             }
             _ => cause_children(child(done, focus)?.as_operand.clone()),
         }
@@ -2281,6 +2590,7 @@ fn premise_cause_children(
     plan: &ExecutionPlan,
     ctx: &EvaluationContext,
     qualifier: Option<&NameScope>,
+    session: &mut NarrationSession<'_>,
 ) -> Vec<ExplanationNode> {
     let mut children = Vec::new();
     let mut seen_data = HashSet::new();
@@ -2289,10 +2599,13 @@ fn premise_cause_children(
         focus,
         plan,
         ctx,
-        &mut children,
-        &mut seen_data,
-        &mut seen_rules,
+        &mut PremiseSink {
+            out: &mut children,
+            seen_data: &mut seen_data,
+            seen_rules: &mut seen_rules,
+        },
         qualifier,
+        session,
     );
     children
 }
@@ -2307,6 +2620,7 @@ fn short_circuit_cause_children(
     plan: &ExecutionPlan,
     ctx: &EvaluationContext,
     qualifier: Option<&NameScope>,
+    session: &mut NarrationSession<'_>,
 ) -> Vec<ExplanationNode> {
     let NormalFormKind::Logical(connective, children) = &plan.normal_form(root).kind else {
         unreachable!("BUG: short_circuit_cause_children on a non-Logical root")
@@ -2330,10 +2644,13 @@ fn short_circuit_cause_children(
         deciding,
         plan,
         ctx,
-        &mut out,
-        &mut seen_data,
-        &mut seen_rules,
+        &mut PremiseSink {
+            out: &mut out,
+            seen_data: &mut seen_data,
+            seen_rules: &mut seen_rules,
+        },
         qualifier,
+        session,
     );
     for skipped in &children[deciding_index + 1..] {
         collect_unused_data_paths(*skipped, plan, &mut out, &mut seen_data, qualifier);
@@ -2429,14 +2746,20 @@ fn collect_unused_data_paths(
     }
 }
 
+/// Accumulator for [`collect_premise_facts`]: emitted nodes plus dedupe sets.
+struct PremiseSink<'a> {
+    out: &'a mut Vec<ExplanationNode>,
+    seen_data: &'a mut HashSet<DataPath>,
+    seen_rules: &'a mut HashSet<RulePath>,
+}
+
 fn collect_premise_facts(
     id: NormalFormId,
     plan: &ExecutionPlan,
     ctx: &EvaluationContext,
-    out: &mut Vec<ExplanationNode>,
-    seen_data: &mut HashSet<DataPath>,
-    seen_rules: &mut HashSet<RulePath>,
+    sink: &mut PremiseSink<'_>,
     qualifier: Option<&NameScope>,
+    session: &mut NarrationSession<'_>,
 ) {
     enum Task {
         Facts(NormalFormId),
@@ -2448,12 +2771,14 @@ fn collect_premise_facts(
             Task::Facts(id) => {
                 let cell = plan.normal_form(id);
                 if let Some(path) = &cell.rule_ref {
-                    if seen_rules.insert(path.clone()) {
-                        out.push(rule_ref_node(
+                    if sink.seen_rules.insert(path.clone()) {
+                        sink.out.push(rule_ref_node(
                             path,
                             qualified_rule_path(qualifier, path),
                             plan,
                             ctx,
+                            qualifier,
+                            session,
                         ));
                     }
                     continue;
@@ -2474,11 +2799,19 @@ fn collect_premise_facts(
                         stack.push(Task::Facts(*inner));
                     }
                     NormalFormKind::Leaf(LeafKind::DataPath(path)) => {
-                        push_premise_data(path, plan, ctx, out, seen_data, qualifier);
+                        push_premise_data(path, plan, ctx, sink.out, sink.seen_data, qualifier);
                     }
                     NormalFormKind::Leaf(LeafKind::Literal(_)) => {}
                     _ if import_member_read(id, plan, ctx).is_some() => {
-                        push_premise_import_member(id, plan, ctx, out, seen_data, seen_rules);
+                        push_premise_import_member(
+                            id,
+                            plan,
+                            ctx,
+                            sink.out,
+                            sink.seen_data,
+                            sink.seen_rules,
+                            session,
+                        );
                     }
                     _ => {
                         for child in cell.kind.children().into_iter().rev() {
@@ -2490,12 +2823,14 @@ fn collect_premise_facts(
             Task::Side { id, omit_data } => {
                 let cell = plan.normal_form(id);
                 if let Some(path) = &cell.rule_ref {
-                    if seen_rules.insert(path.clone()) {
-                        out.push(rule_ref_node(
+                    if sink.seen_rules.insert(path.clone()) {
+                        sink.out.push(rule_ref_node(
                             path,
                             qualified_rule_path(qualifier, path),
                             plan,
                             ctx,
+                            qualifier,
+                            session,
                         ));
                     }
                     continue;
@@ -2503,7 +2838,7 @@ fn collect_premise_facts(
                 match &cell.kind {
                     NormalFormKind::Leaf(LeafKind::DataPath(path)) => {
                         if !omit_data {
-                            push_premise_data(path, plan, ctx, out, seen_data, qualifier);
+                            push_premise_data(path, plan, ctx, sink.out, sink.seen_data, qualifier);
                         }
                     }
                     NormalFormKind::Leaf(LeafKind::Literal(_)) => {}
@@ -2511,7 +2846,15 @@ fn collect_premise_facts(
                         .is_some_and(|read| matches!(read.end, RowEnd::Data(_))) =>
                     {
                         if !omit_data {
-                            push_premise_import_member(id, plan, ctx, out, seen_data, seen_rules);
+                            push_premise_import_member(
+                                id,
+                                plan,
+                                ctx,
+                                sink.out,
+                                sink.seen_data,
+                                sink.seen_rules,
+                                session,
+                            );
                         }
                     }
                     _ => stack.push(Task::Facts(id)),
@@ -2557,9 +2900,10 @@ fn push_premise_import_member(
     out: &mut Vec<ExplanationNode>,
     seen_data: &mut HashSet<DataPath>,
     seen_rules: &mut HashSet<RulePath>,
+    session: &mut NarrationSession<'_>,
 ) {
     let read = import_member_read(id, plan, ctx).expect("BUG: premise cell is an import member");
-    let node = import_member_narration(read, plan, ctx)
+    let node = import_member_narration(read, plan, ctx, session)
         .as_operand
         .expect("BUG: an import member narrates as an operand");
     let first = match &node {

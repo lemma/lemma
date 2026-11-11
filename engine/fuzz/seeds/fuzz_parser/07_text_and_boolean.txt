@@ -1,0 +1,6 @@
+spec fuzz_seed
+data label: text
+  -> option "a"
+  -> option "b"
+data flag: boolean
+rule ok: flag and (label is "a")

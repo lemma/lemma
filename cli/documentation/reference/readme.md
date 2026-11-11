@@ -764,9 +764,9 @@ List commands are postfix `->` expressions in Rules and `unless` results. On a `
 
 ### Evaluation data and results
 
-- A list is one input key with an array that replaces every source row: literal strings for a value list, objects keyed by row data names for an instance list. Per-row keys such as `staff.2.salary` are request errors. `name=value` and form bodies cannot carry a list.
+- A list is one input key with an array that replaces every source row: literal strings for a value list, objects keyed by row data names for an instance list. Unbound cells may also be patched with dotted ask keys (`staff.2.salary`) when the list already has a row; sending both the whole list and a dotted key for the same list in one request is an error. `name=value` and form bodies cannot carry a list.
 - Missing row fields are reported by row number: `staff.2.salary`, `components.1.components.2.own_cost`.
-- A list result has `list` (one value per row). A row result, including a `uses` instance projected from a row, has `row` (`spec`, `effective`, `instance`, `index`); `instance` names the bound path (`staff.2`, `lines.1.item`) and `index` points into the response's top-level `rows`, which lists each referenced row once with its `data` and `rules`.
+- A list result has `list` (one value per row). A row result, including a `uses` instance projected from a row, has `row` (`spec`, `effective`, `instance`, `index`); `instance` names the bound path (`staff.2`, `lines.1.item`) and `index` is a 0-based offset into the response's top-level `rows`, which lists each referenced row once with its `data` and `rules`.
 - Show types have `kind: "list"` with `element` and `key` (`"numbered"` or `{"fields": [...]}`).
 
 ## Data
@@ -901,7 +901,7 @@ Each `->` row on a `data` declaration is a **data command**. Built-in primitives
 
 **For** `measure`**:**
 
-- `unit <name> <value>` - Define a unit (see [Compound units](#compound-units) for derived forms). The value is a number, a compound expression, or a reference to a `data` or `rule` of type `number` (the scale is evaluated before every rule that holds a value of that measure). Literals and `as` targets that use the unit follow [Qualifying units](#qualifying-units). Dynamic units cannot appear in compound expressions, or in `minimum`, `maximum`, `suggest`, or `option`. A dynamic unit belongs to the spec that declares it: a spec that imports the measure cannot write or convert to it, and a value of a measure whose units are all dynamic is a veto there.
+- `unit <name> <value>` - Define a unit (see [Compound units](#compound-units) for derived forms). The value is a number, a compound expression, or a reference to a `data` or `rule` of type `number` (the scale is evaluated before every rule that holds a value of that measure). Literals and `as` targets that use the unit follow [Qualifying units](#qualifying-units). Dynamic units may appear in compound expressions and in `minimum`, `maximum`, `suggest`, and `option`. A unit factor is set per instance (`uses` alias or list row), never shared: write, convert, read, and display a dynamic unit through `uses` the same way as a literal one; a value from a row keeps that row's factors.
 - `minimum <value>` - Set minimum value
 - `maximum <value>` - Set maximum value
 - `help "<text>"` - Add help text

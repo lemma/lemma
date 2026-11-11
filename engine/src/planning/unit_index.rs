@@ -210,11 +210,11 @@ impl PlanningUnitIndex {
                         .find(|existing_unit| existing_unit.name == unit)
                         .zip(new_units.iter().find(|new_unit| new_unit.name == unit))
                         .is_some_and(|(existing_unit, new_unit)| {
-                            existing_unit.same_consumer_scale(new_unit, existing_path, import_path)
+                            existing_unit.same_scale(new_unit)
                         });
                     if same_factor {
-                        // Same import path family: keep one local declarer (extension chain).
-                        // Distinct import paths keep every owner; bare use collapses later.
+                        // Same family and same scale: keep one local declarer
+                        // (extension chain). Distinct scales are a conflict below.
                         if import_path.is_empty() && existing_path.is_empty() {
                             skip_insert = true;
                         }
@@ -728,12 +728,12 @@ fn unit_ref_bare(unit_ref: &str) -> String {
         .unwrap_or_default()
 }
 
-fn unit_scalar_for_bare(lemma_type: &LemmaType, bare: &str) -> Option<UnitScalar> {
+fn unit_scale_for_bare(lemma_type: &LemmaType, bare: &str) -> Option<UnitScalar> {
     match &lemma_type.specifications {
         TypeSpecification::Measure { units, .. } => units
             .get(bare)
             .ok()
-            .and_then(|unit| unit.literal_factor().cloned().map(UnitScalar::Measure)),
+            .map(|unit| UnitScalar::Measure(unit.scale.clone())),
         TypeSpecification::Ratio { units, .. } => units
             .get(bare)
             .ok()
@@ -744,7 +744,7 @@ fn unit_scalar_for_bare(lemma_type: &LemmaType, bare: &str) -> Option<UnitScalar
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum UnitScalar {
-    Measure(crate::computation::rational::RationalInteger),
+    Measure(crate::literals::UnitScale),
     Ratio(crate::computation::rational::RationalInteger),
 }
 
@@ -760,7 +760,7 @@ fn try_collapse_equivalent_owners<'a, O>(
     if !type_declares_unit(first_type.as_ref(), bare) {
         return Err(());
     }
-    let first_scalar = unit_scalar_for_bare(first_type.as_ref(), bare).ok_or(())?;
+    let first_scalar = unit_scale_for_bare(first_type.as_ref(), bare).ok_or(())?;
     for owner in candidates.iter().copied().skip(1) {
         let other_type = lemma_type(owner);
         let same_root = first_type.as_ref() == other_type.as_ref()
@@ -772,7 +772,7 @@ fn try_collapse_equivalent_owners<'a, O>(
         if !same_root {
             return Err(());
         }
-        if unit_scalar_for_bare(other_type.as_ref(), bare) != Some(first_scalar.clone()) {
+        if unit_scale_for_bare(other_type.as_ref(), bare) != Some(first_scalar.clone()) {
             return Err(());
         }
     }
@@ -976,7 +976,7 @@ mod tests {
     use crate::literals::{MeasureUnit, MeasureUnits, UnitScale};
     use crate::parsing::ast::EffectiveDate;
     use crate::planning::semantics::{
-        LemmaType, SpecVersionKey, TypeExtends, TypeFamily, TypeSpecification,
+        LemmaType, PathSegment, SpecVersionKey, TypeExtends, TypeFamily, TypeSpecification,
     };
     use indexmap::IndexMap;
     use std::collections::HashMap;
@@ -1483,10 +1483,12 @@ mod tests {
     }
 
     fn reference_scale(name: &str) -> UnitScale {
-        UnitScale::Unresolved {
-            written: name.to_string(),
-            segments: Vec::new(),
-            name: name.to_string(),
+        UnitScale::Reference {
+            target: crate::planning::semantics::ReferenceTarget::Data(
+                crate::planning::semantics::DataPath::local(name.to_string()),
+            ),
+            coefficient: crate::computation::rational::rational_one(),
+            exponent: 1,
         }
     }
 
@@ -1517,7 +1519,7 @@ mod tests {
     }
 
     #[test]
-    fn merge_same_consumer_reference_scale_agrees() {
+    fn merge_same_reference_scale_agrees() {
         let mut index = PlanningUnitIndex::new();
         let left = measure_type_scale("left", "gbp", reference_scale("rate"));
         let right = measure_type_scale("right", "gbp", reference_scale("rate"));
@@ -1540,32 +1542,32 @@ mod tests {
                 "money",
                 &locals(&[("left", &left), ("right", &right)]),
             )
-            .expect("same consumer-coordinate reference");
+            .expect("same reference scale");
     }
 
     #[test]
     fn merge_literal_and_reference_conflict() {
         let mut index = PlanningUnitIndex::new();
-        let literal = measure_type_scale("money", "gbp", UnitScale::Literal(rational_one()));
-        let reference = measure_type_scale("money", "gbp", reference_scale("rate"));
+        let literal = measure_type_scale("left", "gbp", UnitScale::Literal(rational_one()));
+        let reference = measure_type_scale("right", "gbp", reference_scale("rate"));
         index
             .merge_measure_unit(
                 "gbp".into(),
                 &literal,
+                "left",
+                &[],
                 "money",
-                &["a".into()],
-                "money",
-                &locals(&[("money", &literal)]),
+                &locals(&[("left", &literal)]),
             )
             .expect("literal");
         let err = index
             .merge_measure_unit(
                 "gbp".into(),
                 &reference,
+                "right",
+                &[],
                 "money",
-                &["b".into()],
-                "money",
-                &locals(&[("money", &reference)]),
+                &locals(&[("left", &literal), ("right", &reference)]),
             )
             .expect_err("literal vs reference");
         assert_eq!(
@@ -1578,29 +1580,30 @@ mod tests {
     }
 
     #[test]
-    fn merge_different_reference_paths_conflict() {
+    fn merge_different_reference_scales_conflict() {
         let mut index = PlanningUnitIndex::new();
-        let money = measure_type_scale("money", "gbp", reference_scale("rate"));
+        let left = measure_type_scale("left", "gbp", reference_scale("rate_left"));
+        let right = measure_type_scale("right", "gbp", reference_scale("rate_right"));
         index
             .merge_measure_unit(
                 "gbp".into(),
-                &money,
+                &left,
+                "left",
+                &[],
                 "money",
-                &["a".into()],
-                "money",
-                &locals(&[("money", &money)]),
+                &locals(&[("left", &left)]),
             )
-            .expect("alias a");
+            .expect("rate_left");
         let err = index
             .merge_measure_unit(
                 "gbp".into(),
-                &money,
+                &right,
+                "right",
+                &[],
                 "money",
-                &["b".into()],
-                "money",
-                &locals(&[("money", &money)]),
+                &locals(&[("left", &left), ("right", &right)]),
             )
-            .expect_err("alias b different consumer path");
+            .expect_err("different reference scales in one family conflict");
         assert_eq!(
             err,
             UnitMergeConflict::ConflictingFactors {
@@ -1608,5 +1611,55 @@ mod tests {
                 family: "money".into(),
             }
         );
+    }
+
+    #[test]
+    fn two_imported_owners_of_one_dynamic_unit_stay_distinct() {
+        let declared = measure_type_scale("money", "gbp", reference_scale("rate"));
+        let money_a = Arc::new(declared.with_scale_import_hop(&PathSegment {
+            uses: Arc::from("a"),
+            row: None,
+            repository: None,
+            spec: Arc::from("priced"),
+        }));
+        let money_b = Arc::new(declared.with_scale_import_hop(&PathSegment {
+            uses: Arc::from("b"),
+            row: None,
+            repository: None,
+            spec: Arc::from("priced"),
+        }));
+        let mut index = PlanningUnitIndex::new();
+        index.insert_owner(
+            "gbp".to_string(),
+            PlanningOwner::Imported {
+                import_path: vec!["a".to_string()],
+                type_name: "money".to_string(),
+                lemma_type: Arc::clone(&money_a),
+            },
+        );
+        index.insert_owner(
+            "gbp".to_string(),
+            PlanningOwner::Imported {
+                import_path: vec!["b".to_string()],
+                type_name: "money".to_string(),
+                lemma_type: Arc::clone(&money_b),
+            },
+        );
+        let bound = bind_locals(index, &[]);
+        let error = bound.resolve("gbp").expect_err("bare gbp is ambiguous");
+        assert!(
+            error.contains("Unit 'gbp' matches more than one type")
+                && error.contains("a.money.gbp")
+                && error.contains("b.money.gbp"),
+            "two instances of one spec demand qualification, got: {error}"
+        );
+        let (_, owner) = bound
+            .resolve_owner("a.money.gbp")
+            .expect("qualification by alias a");
+        assert_eq!(owner.import_path(), &["a".to_string()][..]);
+        let (_, owner) = bound
+            .resolve_owner("b.money.gbp")
+            .expect("qualification by alias b");
+        assert_eq!(owner.import_path(), &["b".to_string()][..]);
     }
 }

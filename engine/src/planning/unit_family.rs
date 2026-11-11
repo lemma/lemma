@@ -25,18 +25,123 @@ pub(crate) struct FamilyUnitCatalog {
 
 impl FamilyUnitCatalog {
     /// Units per family in unit-index order. Types resolve parent-first, so a family's
-    /// inherited units precede the units its extensions add.
+    /// inherited units precede the units its extensions add. A unit name whose owners
+    /// in this scope disagree on its scale (two instances of one spec, each with its
+    /// own factor) has no single factor here and is left out of the family entry; the
+    /// declared units of a type still name it.
     #[must_use]
     pub(crate) fn build(unit_index: &UnitIndex) -> Self {
-        let mut measure: BTreeMap<TypeFamily, MeasureUnits> = BTreeMap::new();
-        let mut ratio: BTreeMap<TypeFamily, RatioUnits> = BTreeMap::new();
-        let mut seen: BTreeSet<(TypeFamily, &str)> = BTreeSet::new();
+        use std::collections::btree_map::Entry;
+
+        type MeasureScales = BTreeMap<(TypeFamily, String), Option<crate::literals::UnitScale>>;
+        type RatioScales =
+            BTreeMap<(TypeFamily, String), Option<crate::computation::rational::RationalInteger>>;
+
+        fn record_unit(
+            lemma_type: &LemmaType,
+            family: &TypeFamily,
+            bare: &str,
+            measure_scales: &mut MeasureScales,
+            ratio_scales: &mut RatioScales,
+        ) {
+            match &lemma_type.specifications {
+                TypeSpecification::Measure { units, .. } => {
+                    let Ok(unit) = units.get(bare) else {
+                        return;
+                    };
+                    match measure_scales.entry((family.clone(), bare.to_string())) {
+                        Entry::Vacant(vacant) => {
+                            vacant.insert(Some(unit.scale.clone()));
+                        }
+                        Entry::Occupied(mut occupied) => {
+                            if occupied
+                                .get()
+                                .as_ref()
+                                .is_some_and(|scale| scale != &unit.scale)
+                            {
+                                occupied.insert(None);
+                            }
+                        }
+                    }
+                }
+                TypeSpecification::Ratio { units, .. } => {
+                    let Ok(unit) = units.get(bare) else {
+                        return;
+                    };
+                    match ratio_scales.entry((family.clone(), bare.to_string())) {
+                        Entry::Vacant(vacant) => {
+                            vacant.insert(Some(unit.value.clone()));
+                        }
+                        Entry::Occupied(mut occupied) => {
+                            if occupied
+                                .get()
+                                .as_ref()
+                                .is_some_and(|scale| scale != &unit.value)
+                            {
+                                occupied.insert(None);
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        let mut measure_scales: MeasureScales = BTreeMap::new();
+        let mut ratio_scales: RatioScales = BTreeMap::new();
         for (bare, owner) in unit_index.iter_owners() {
             let lemma_type = owner.lemma_type();
             let Some(family) = lemma_type.unit_family() else {
                 continue;
             };
-            if !seen.insert((family.clone(), bare)) {
+            record_unit(
+                lemma_type.as_ref(),
+                family,
+                bare,
+                &mut measure_scales,
+                &mut ratio_scales,
+            );
+        }
+        for (_, owner) in unit_index.iter_owners() {
+            let lemma_type = owner.lemma_type();
+            let Some(family) = lemma_type.unit_family() else {
+                continue;
+            };
+            let names: Vec<String> = match &lemma_type.specifications {
+                TypeSpecification::Measure { units, .. } => {
+                    units.iter().map(|unit| unit.name.clone()).collect()
+                }
+                TypeSpecification::Ratio { units, .. } => {
+                    units.iter().map(|unit| unit.name.clone()).collect()
+                }
+                _ => continue,
+            };
+            for bare in names {
+                record_unit(
+                    lemma_type.as_ref(),
+                    family,
+                    &bare,
+                    &mut measure_scales,
+                    &mut ratio_scales,
+                );
+            }
+        }
+
+        let agreed = |key: &(TypeFamily, String)| {
+            measure_scales.get(key).is_some_and(|scale| scale.is_some())
+                || ratio_scales.get(key).is_some_and(|scale| scale.is_some())
+        };
+
+        let mut measure: BTreeMap<TypeFamily, MeasureUnits> = BTreeMap::new();
+        let mut ratio: BTreeMap<TypeFamily, RatioUnits> = BTreeMap::new();
+        let mut seen: BTreeSet<(TypeFamily, String)> = BTreeSet::new();
+        for (bare, owner) in unit_index.iter_owners() {
+            let lemma_type = owner.lemma_type();
+            let Some(family) = lemma_type.unit_family() else {
+                continue;
+            };
+            let key = (family.clone(), bare.to_string());
+            if !seen.insert(key.clone()) || !agreed(&key) {
                 continue;
             }
             match &lemma_type.specifications {
@@ -66,7 +171,8 @@ impl FamilyUnitCatalog {
             match &lemma_type.specifications {
                 TypeSpecification::Measure { units, .. } => {
                     for unit in units.iter() {
-                        if seen.insert((family.clone(), unit.name.as_str())) {
+                        let key = (family.clone(), unit.name.clone());
+                        if seen.insert(key.clone()) && agreed(&key) {
                             measure
                                 .entry(family.clone())
                                 .or_default()
@@ -76,7 +182,8 @@ impl FamilyUnitCatalog {
                 }
                 TypeSpecification::Ratio { units, .. } => {
                     for unit in units.iter() {
-                        if seen.insert((family.clone(), unit.name.as_str())) {
+                        let key = (family.clone(), unit.name.clone());
+                        if seen.insert(key.clone()) && agreed(&key) {
                             ratio.entry(family.clone()).or_default().push(unit.clone());
                         }
                     }

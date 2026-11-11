@@ -257,6 +257,91 @@ rule first_price:
 }
 
 #[test]
+fn nested_list_row_object_binds_uses_qualified_field() {
+    let engine = load_ok(
+        r#"
+spec product_info
+data price: measure
+  -> unit eur: 1.00
+
+spec line
+uses item: product_info
+data qty: number
+rule line_price: item.price
+
+spec mid
+uses line
+data lines: line list
+rule first_price: (lines -> first).line_price
+
+spec nest
+uses mid
+data batches: mid list
+rule out: (batches -> first).first_price
+"#,
+    );
+    let response = evaluate(
+        &engine,
+        "nest",
+        data(&[(
+            "batches",
+            list(vec![map(&[(
+                "lines",
+                list(vec![map(&[
+                    ("item.price", lit("3 eur")),
+                    ("qty", lit("2")),
+                ])]),
+            )])]),
+        )]),
+    );
+    assert_eq!(value(&response, "out"), "3 eur");
+}
+
+#[test]
+fn nested_list_row_object_binds_uses_qualified_scale() {
+    let engine = load_ok(
+        r#"
+spec fx
+uses lemma units
+data rate: number
+data money: measure
+  -> unit eur: 1
+  -> unit gbp: rate
+
+spec line
+uses fx
+data amount: fx.money
+rule line_total: amount
+
+spec mid
+uses line
+data lines: line list
+rule subtotal: lines -> sum line_total
+
+spec nest
+uses mid
+data batches: mid list
+rule total: batches -> sum subtotal
+"#,
+    );
+    let response = evaluate(
+        &engine,
+        "nest",
+        data(&[(
+            "batches",
+            list(vec![map(&[(
+                "lines",
+                list(vec![map(&[
+                    ("amount", lit("10 gbp")),
+                    ("fx.rate", lit("0.86")),
+                ])]),
+            )])]),
+        )]),
+    );
+    assert_eq!(value(&response, "total"), "8.6 eur");
+}
+
+#[test]
 fn row_parse_failure_vetoes_whole_list() {
     let engine = load_ok(payroll());
     let response = evaluate(

@@ -173,17 +173,8 @@ fn format_with_rhs(rhs: &crate::parsing::ast::WithRhs) -> String {
     }
 }
 
-fn format_uses_binding_rhs(rhs: &crate::parsing::ast::UsesBindingRhs) -> String {
-    match rhs {
-        crate::parsing::ast::UsesBindingRhs::Literal(value) => {
-            format!("{}", AsLemmaSource(value))
-        }
-        crate::parsing::ast::UsesBindingRhs::References { targets } => targets
-            .iter()
-            .map(ToString::to_string)
-            .collect::<Vec<_>>()
-            .join(", "),
-    }
+fn format_uses_literal_binding(value: &crate::parsing::ast::Value) -> String {
+    format!("{}", AsLemmaSource(value))
 }
 
 fn data_value_rhs_for_spec_body(
@@ -266,6 +257,36 @@ fn data_value_rhs_for_spec_body(
     }
 }
 
+/// Soft-wrap a comma-separated item list after `first_line_prefix`.
+///
+/// Overflowing lines end with a trailing comma; continuations start at
+/// `continuation_prefix` plus four spaces.
+fn format_comma_items_wrapped(
+    first_line_prefix: &str,
+    items: &[String],
+    continuation_prefix: &str,
+    max_cols: usize,
+) -> String {
+    let first = items
+        .first()
+        .expect("BUG: comma wrap requires at least one item");
+    let wrap_indent = format!("{continuation_prefix}    ");
+    let mut lines: Vec<String> = Vec::new();
+    let mut current = format!("{first_line_prefix}{first}");
+    for item in items.iter().skip(1) {
+        let candidate = format!("{current}, {item}");
+        if candidate.len() <= max_cols {
+            current = candidate;
+        } else {
+            current.push(',');
+            lines.push(current);
+            current = format!("{wrap_indent}{item}");
+        }
+    }
+    lines.push(current);
+    lines.join("\n")
+}
+
 fn format_constraint_block(
     command: &TypeConstraintCommand,
     args: &[crate::parsing::ast::CommandArg],
@@ -283,21 +304,12 @@ fn format_constraint_block(
         .iter()
         .map(|arg| format!("{}", AsLemmaSource(arg)))
         .collect();
-    let wrap_indent = format!("{continuation_prefix}    ");
-    let mut lines: Vec<String> = Vec::new();
-    let mut current = format!("{continuation_prefix}-> {command} {}", items[0]);
-    for item in items.iter().skip(1) {
-        let candidate = format!("{current}, {item}");
-        if candidate.len() <= max_cols {
-            current = candidate;
-        } else {
-            current.push(',');
-            lines.push(current);
-            current = format!("{wrap_indent}{item}");
-        }
-    }
-    lines.push(current);
-    lines.join("\n")
+    format_comma_items_wrapped(
+        &format!("{continuation_prefix}-> {command} "),
+        &items,
+        continuation_prefix,
+        max_cols,
+    )
 }
 
 /// `data reference:` then `gap` spaces, then `rhs`.
@@ -531,7 +543,7 @@ fn format_instance_row_line(
     }
 }
 
-fn format_uses_block(data: &LemmaData, line_prefix: &str) -> String {
+fn format_uses_block(data: &LemmaData, line_prefix: &str, max_cols: usize) -> String {
     let mut out = format_import_header(data);
     let DataValue::Import {
         bindings,
@@ -550,14 +562,27 @@ fn format_uses_block(data: &LemmaData, line_prefix: &str) -> String {
     }
     for binding in bindings {
         out.push('\n');
-        out.push_str(line_prefix);
-        out.push_str(DATA_CONSTRAINT_INDENT);
-        out.push_str("-> ");
-        out.push_str(&crate::parsing::ast::format_assignment_continuation(
-            "with",
-            &format!("{}", binding.path),
-            &format_uses_binding_rhs(&binding.rhs),
-        ));
+        let continuation_prefix = format!("{line_prefix}{DATA_CONSTRAINT_INDENT}");
+        match &binding.rhs {
+            crate::parsing::ast::UsesBindingRhs::References { targets } => {
+                let items: Vec<String> = targets.iter().map(ToString::to_string).collect();
+                out.push_str(&format_comma_items_wrapped(
+                    &format!("{continuation_prefix}-> with {}: ", binding.path),
+                    &items,
+                    &continuation_prefix,
+                    max_cols,
+                ));
+            }
+            crate::parsing::ast::UsesBindingRhs::Literal(value) => {
+                out.push_str(&continuation_prefix);
+                out.push_str("-> ");
+                out.push_str(&crate::parsing::ast::format_assignment_continuation(
+                    "with",
+                    &format!("{}", binding.path),
+                    &format_uses_literal_binding(value),
+                ));
+            }
+        }
     }
     out
 }
@@ -590,7 +615,7 @@ fn format_sorted_data(data: &[LemmaData], out: &mut String, line_prefix: &str, m
                 out.push('\n');
             }
             out.push_str(line_prefix);
-            out.push_str(&format_uses_block(row, line_prefix));
+            out.push_str(&format_uses_block(row, line_prefix, max_cols));
             out.push('\n');
         }
     }

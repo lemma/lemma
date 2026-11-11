@@ -25,30 +25,41 @@ Bare `cargo precommit` skips the coverage check and fuzz. `cargo precommit --fuz
 
 ```bash
 cd engine/fuzz
-cargo +nightly fuzz run fuzz_parser -- -max_total_time=30
+mkdir -p corpus/fuzz_parser
+cargo +nightly fuzz run fuzz_parser corpus/fuzz_parser seeds/fuzz_parser -- -max_total_time=30 -dict=lemma.dict
 ```
 
 ### Full Fuzzing Session (1 hour)
 
+From the repo root (all targets, 1 hour total, split evenly):
+
 ```bash
-cargo +nightly fuzz run fuzz_parser -- -max_total_time=3600
+cargo fuzzing
+# or: cargo fuzzing --seconds 3600
+```
+
+Single target for a full hour:
+
+```bash
+mkdir -p corpus/fuzz_parser
+cargo +nightly fuzz run fuzz_parser corpus/fuzz_parser seeds/fuzz_parser -- -max_total_time=3600 -dict=lemma.dict
 ```
 
 ### Available Targets
 
-1. `fuzz_parser` - Full spec parsing with random input; on successful load, evaluate with `explain: true`, format explanations, and serialize the API Response
-2. `fuzz_expressions` - Structured typed leaf/operator expressions (numbers, measures, booleans, text) inside a fixed typed preamble; load then evaluate
-3. `fuzz_literals` - Literal value parsing (numbers, strings, units)
-4. `fuzz_deeply_nested` - Nested expressions to test stack limits
-5. `fuzz_data_bindings` - Multi-type and instance-list data overlays: varied keys (dotted, numbered, case-variant, unknown) and Literal/Boolean/Map/List shapes
+1. `fuzz_parser` - Full spec parsing with random input; on successful load, evaluate twice with a fixed effective datetime and `explain: true`, require explanations on non-vetoed results, format explanations, and serialize the API Response (serialize failure fails the fuzzer). Pass writable `corpus/fuzz_parser` first, curated seeds in `seeds/fuzz_parser/` second; pass `-dict=lemma.dict`.
+2. `fuzz_expressions` - Structured typed leaf/operator expressions (numbers, measures, booleans, text), `unless` chains, list pipelines, and deep nesting inside a fixed typed preamble; load then evaluate twice for determinism
+3. `fuzz_literals` - Structured literal generator (number, text, measure, ratio, date, time, boolean, range) spliced into a one-line `data` declaration
+4. `fuzz_data_bindings` - Multi-type and instance-list data overlays: varied keys (dotted, numbered, case-variant, unknown) and Literal/Boolean/Map/List shapes; duplicate map keys black-box the Err and continue
+5. `fuzz_lists_uses` - Structured list pipelines (`where` / `sort` / `sum` / `find` / …) and multi-spec `uses` composition inside a fixed preamble
 
 ### Running Specific Targets
 
 ```bash
-cargo +nightly fuzz run fuzz_expressions -- -max_total_time=60
-cargo +nightly fuzz run fuzz_literals -- -max_total_time=60
-cargo +nightly fuzz run fuzz_deeply_nested -- -max_total_time=60
-cargo +nightly fuzz run fuzz_data_bindings -- -max_total_time=60
+cargo +nightly fuzz run fuzz_expressions -- -max_total_time=60 -dict=lemma.dict
+cargo +nightly fuzz run fuzz_literals -- -max_total_time=60 -dict=lemma.dict
+cargo +nightly fuzz run fuzz_data_bindings -- -max_total_time=60 -dict=lemma.dict
+cargo +nightly fuzz run fuzz_lists_uses -- -max_total_time=60 -dict=lemma.dict
 ```
 
 ### Reproducing Crashes
@@ -56,7 +67,7 @@ cargo +nightly fuzz run fuzz_data_bindings -- -max_total_time=60
 When a crash is found, it's saved to `artifacts/<target>/crash-*`:
 
 ```bash
-cargo +nightly fuzz run fuzz_parser artifacts/fuzz_parser/crash-abc123
+cargo +nightly fuzz run fuzz_parser artifacts/fuzz_parser/crash-abc123 -- -dict=lemma.dict
 ```
 
 ### Minimizing Test Cases
@@ -77,7 +88,7 @@ The fuzzer may report memory leaks from global initialization. These are typical
 To run without leak detection:
 
 ```bash
-ASAN_OPTIONS="detect_leaks=0" cargo +nightly fuzz run fuzz_parser
+ASAN_OPTIONS="detect_leaks=0" cargo +nightly fuzz run fuzz_parser corpus/fuzz_parser seeds/fuzz_parser -- -dict=lemma.dict
 ```
 
 ## Interpreting Results
@@ -90,16 +101,16 @@ ASAN_OPTIONS="detect_leaks=0" cargo +nightly fuzz run fuzz_parser
 
 1. Create `fuzz_targets/fuzz_your_target.rs`
 2. Add a `[[bin]]` entry in `Cargo.toml`
-3. Follow the pattern from existing targets
+3. Follow the pattern from existing targets (fixed `DateTimeValue`, serialize-must-succeed, evaluate twice for determinism)
 4. Add the target name to `FUZZ_TARGETS` in `xtask/src/main.rs` so `cargo precommit --fuzz` / CI runs it
 
 ## Continuous Fuzzing
 
-For long-running fuzzing campaigns, use a corpus directory:
+For long-running fuzzing campaigns, put the writable corpus first so new inputs are not written into curated seeds:
 
 ```bash
 mkdir -p corpus/fuzz_parser
-cargo +nightly fuzz run fuzz_parser corpus/fuzz_parser -- -max_total_time=86400
+cargo +nightly fuzz run fuzz_parser corpus/fuzz_parser seeds/fuzz_parser -- -max_total_time=86400 -dict=lemma.dict
 ```
 
-This will save interesting inputs and gradually improve coverage over time.
+This will save interesting inputs under `corpus/` (gitignored) and gradually improve coverage over time.

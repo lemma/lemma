@@ -159,6 +159,7 @@ impl OperationResult {
         Self::from_bound(BoundValueKind {
             value: crate::planning::semantics::ValueKind::Measure(canonical),
             unit: Some(std::sync::Arc::from(unit_name)),
+            instance_factors: None,
         })
     }
 

@@ -1,0 +1,7 @@
+spec fuzz_seed
+uses lemma units
+data weight: measure
+  -> unit kilogram: 1
+  -> unit gram: 0.001
+  -> suggest 1 kilogram
+rule heavier: weight + 500 gram

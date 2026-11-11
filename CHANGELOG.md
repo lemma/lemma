@@ -2,6 +2,23 @@
 
 Releases cover the Lemma engine, `lemma` CLI, OpenAPI crate, LSP, SDKs and VS Code extension. They all follow the same version everywhere. The release version is `[workspace.package] version` in the root `Cargo.toml`. Git tags follow `lemma-v{version}` (for example `lemma-v0.8.20`); releases before the rename used `cli-v{version}`. Draft notes for the next version quickly by running `cargo changelog` to print `git diff` / `git log` since the latest release tag (`xtask` `versions-diff`). Tip: feed that into an LLM to create a summary for this changelog.
 
+## [0.11.1] - 2026-11-10
+
+Dynamic measure units work through `uses` and in compounds; OpenAPI /docs and interactive prompts keep list and measure inputs usable; `--explain` expands deferred rule wires.
+
+### Fixed
+
+- **Explain after identity elim** (`x * 1`, `x + 0`, `x / 1`, `x ^ 1`): the data binding slot stays on the origin-free DataPath leaf, so exhaustive eval still visits the fold pre-image and narration no longer panics on the eliminated literal.
+- **Formatter wraps long `uses -> with` reference lists** at `MAX_COLS`, with the same trailing-comma / deeper-indent layout as value-list comma continuations.
+- **OrderedDispatch expression scrutinees keep gated inputs**: unbound `unless 5 * x > 3 then y` (also `+`, `-`, `/`, `^`, `-x`, `abs`, `-> floor`, mirrored `3 < …`) lists `x` and `y` on `missing_data` until the condition decides; bare / `is` / `in` / `and` parity unchanged. A definitive scrutinee Computation veto still settles without asking for the then-arm.
+- **Dynamic measure unit factors**: a unit factor is set per instance (`uses` alias or list row), never shared. Write, convert, read, and display through `uses` like a literal unit; a value from a row keeps that row's factors, and values combined across rows keep only agreed factors. Dynamic units may appear in compound expressions (`gbp/kilogram`, `0.001 gbp/kilogram`) and in `minimum`, `maximum`, `suggest`, and `option`. The MeasureUnit wire may carry `reference` alone, or `reference` plus a constant `factor` coefficient (and optional `scale_exponent`) for compounds that inherit a dynamic base. A measure with no expressible unit vetoes.
+- **OpenAPI `/docs` kept list inputs**: evaluate bodies with a list no longer advertise `application/x-www-form-urlencoded`. Form cannot carry lists, and the old form schema dropped every array property, so Scalar's default tab hid inputs such as `ingredient.componenten`. Those operations document JSON only.
+- **OpenAPI `x-disabled: false`** on `rules`, `Accept-Datetime`, and `x-explain`: Scalar leaves optional params off by default, so Try Request showed filled examples but sent neither `?rules=` nor the datetime header.
+- **Interactive measure/ratio**: one magnitude+unit prompt (Tab switches focus, arrows change unit, help stays visible) instead of Select-then-Text.
+- **`lemma server --help`**: drop stale `/{spec}/{rules}` routes. Rule selection is `POST /{spec}?rules=a,b` only (as in OpenAPI and `cli.md`).
+- **`--explain` deferred `uses -> with` rule wires**: a slot bound to another rule narrates as `RuleRef` to that rule (including root-local and cross-instance wires, and through cycles such as a deferred pin that reads back into the same instance).
+- **LSP `-> with` field values**: bare instance names after the colon are `reference` tokens (literals stay `dataBody`).
+
 ## [0.11.0] - 2026-11-06
 
 Lists are `data`, `uses` bindings are sealed, `or` joins `and`, `->` binds below arithmetic, rounding is postfix-only, measure units can take a number scale, and `uses` can pin dynamically with `-> effective`.

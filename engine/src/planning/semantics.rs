@@ -922,6 +922,19 @@ impl TypeSpecification {
         }
     }
 
+    /// Primitive `measure range` before units/decomposition are declared on a named type.
+    #[must_use]
+    pub fn is_unresolved_measure_range(&self) -> bool {
+        matches!(
+            self,
+            Self::MeasureRange {
+                units,
+                decomposition: None,
+                ..
+            } if units.0.is_empty()
+        )
+    }
+
     #[must_use]
     fn with_families_without_effective(&self) -> Self {
         match self {
@@ -1791,22 +1804,41 @@ pub(crate) fn finalize_measure_unit_constraint_magnitudes(
         return Ok(());
     };
 
+    let mut synced_minimum = false;
     if let Some(bound) = minimum.as_ref() {
-        let canonical =
-            measure_declared_bound_to_canonical(&bound.0, &bound.1, units, type_name, "minimum")?;
-        sync_measure_units_from_canonical(units, &canonical, UnitConstraintField::Minimum)?;
+        let bound_unit = units.get(bound.1.as_str()).map_err(|err| err.to_string())?;
+        if bound_unit.literal_factor().is_some() {
+            let canonical = measure_declared_bound_to_canonical(
+                &bound.0, &bound.1, units, type_name, "minimum",
+            )?;
+            sync_measure_units_from_canonical(units, &canonical, UnitConstraintField::Minimum)?;
+            synced_minimum = true;
+        }
     }
+    let mut synced_maximum = false;
     if let Some(bound) = maximum.as_ref() {
-        let canonical =
-            measure_declared_bound_to_canonical(&bound.0, &bound.1, units, type_name, "maximum")?;
-        sync_measure_units_from_canonical(units, &canonical, UnitConstraintField::Maximum)?;
+        let bound_unit = units.get(bound.1.as_str()).map_err(|err| err.to_string())?;
+        if bound_unit.literal_factor().is_some() {
+            let canonical = measure_declared_bound_to_canonical(
+                &bound.0, &bound.1, units, type_name, "maximum",
+            )?;
+            sync_measure_units_from_canonical(units, &canonical, UnitConstraintField::Maximum)?;
+            synced_maximum = true;
+        }
     }
+    let mut synced_suggestion = false;
     if let Some(default) = declared_suggestion {
-        sync_measure_suggestion_units(units, default, type_name)?;
+        if matches!(default, ValueKind::Measure(_)) {
+            sync_measure_suggestion_units(units, default, type_name)?;
+            synced_suggestion = true;
+        }
     }
 
-    if minimum.is_some() {
+    if synced_minimum {
         for unit in units.iter() {
+            if unit.literal_factor().is_none() {
+                continue;
+            }
             assert!(
                 unit.minimum.is_some(),
                 "BUG: type '{type_name}' has minimum but unit '{}' missing per-unit minimum after finalize",
@@ -1814,8 +1846,11 @@ pub(crate) fn finalize_measure_unit_constraint_magnitudes(
             );
         }
     }
-    if maximum.is_some() {
+    if synced_maximum {
         for unit in units.iter() {
+            if unit.literal_factor().is_none() {
+                continue;
+            }
             assert!(
                 unit.maximum.is_some(),
                 "BUG: type '{type_name}' has maximum but unit '{}' missing per-unit maximum after finalize",
@@ -1823,8 +1858,11 @@ pub(crate) fn finalize_measure_unit_constraint_magnitudes(
             );
         }
     }
-    if declared_suggestion.is_some() {
+    if synced_suggestion {
         for unit in units.iter() {
+            if unit.literal_factor().is_none() {
+                continue;
+            }
             assert!(
                 unit.suggestion_magnitude.is_some(),
                 "BUG: type '{type_name}' has default but unit '{}' missing per-unit default after finalize",
@@ -2027,11 +2065,6 @@ fn option_bound_from_literal(
     resolve_unit: Option<&UnitTokenResolver<'_>>,
 ) -> Result<BoundValueKind, String> {
     let kind = parser_value_to_value_kind(value, lemma_type, resolve_unit)?;
-    if let ValueKind::UnscaledMeasure { unit, .. } = &kind {
-        return Err(format!(
-            "option cannot use unit '{unit}': its conversion factor is a reference and is not known at planning."
-        ));
-    }
     let token = match value {
         crate::literals::Value::NumberWithUnit(_, unit) => Some(unit.as_str()),
         crate::literals::Value::Range(left, right) => match (left.as_ref(), right.as_ref()) {
@@ -2051,7 +2084,11 @@ fn option_bound_from_literal(
         )?)),
         None => None,
     };
-    Ok(BoundValueKind { value: kind, unit })
+    Ok(BoundValueKind {
+        value: kind,
+        unit,
+        instance_factors: None,
+    })
 }
 
 fn apply_spec_list_options(
@@ -2197,6 +2234,118 @@ fn static_option_match(options: &TypeOptions, value: &ValueKind) -> bool {
         .values
         .iter()
         .any(|option| option_values_match(&option.value.value, value))
+}
+
+fn options_have_unscaled_measure(options: &TypeOptions) -> bool {
+    options
+        .values
+        .iter()
+        .any(|option| option.value.value.has_unscaled_measure())
+}
+
+/// Rewrite every [`ValueKind::UnscaledMeasure`] using composed runtime unit factors.
+/// Walks ranges and lists iteratively. Missing scale for a needed unit is an error.
+pub(crate) fn settle_value_kind_with_scales(
+    value: &ValueKind,
+    scales: &std::collections::HashMap<String, crate::computation::rational::RationalInteger>,
+) -> Result<ValueKind, String> {
+    use crate::computation::rational::checked_mul;
+
+    enum Task {
+        Visit(ValueKind),
+        AssembleRange {
+            left_type: Arc<LemmaType>,
+            right_type: Arc<LemmaType>,
+        },
+        AssembleList {
+            row_types: Vec<Arc<LemmaType>>,
+        },
+    }
+
+    let mut tasks = vec![Task::Visit(value.clone())];
+    let mut done: Vec<ValueKind> = Vec::new();
+    while let Some(task) = tasks.pop() {
+        match task {
+            Task::Visit(ValueKind::UnscaledMeasure { magnitude, unit }) => {
+                let factor = scales.get(unit.as_ref()).ok_or_else(|| {
+                    format!("unit '{unit}' scale is not settled for option membership")
+                })?;
+                let canonical =
+                    checked_mul(&magnitude, factor).map_err(|failure| failure.to_string())?;
+                done.push(ValueKind::Measure(canonical));
+            }
+            Task::Visit(ValueKind::Range(left, right)) => {
+                tasks.push(Task::AssembleRange {
+                    left_type: Arc::clone(&left.lemma_type),
+                    right_type: Arc::clone(&right.lemma_type),
+                });
+                let right = *right;
+                let left = *left;
+                tasks.push(Task::Visit(right.value));
+                tasks.push(Task::Visit(left.value));
+            }
+            Task::Visit(ValueKind::List(rows)) => {
+                let owned = rows.to_vec();
+                let row_types: Vec<Arc<LemmaType>> = owned
+                    .iter()
+                    .map(|row| Arc::clone(&row.lemma_type))
+                    .collect();
+                tasks.push(Task::AssembleList { row_types });
+                for row in owned.into_iter().rev() {
+                    tasks.push(Task::Visit(row.value));
+                }
+            }
+            Task::Visit(other) => done.push(other),
+            Task::AssembleRange {
+                left_type,
+                right_type,
+            } => {
+                let right_value = done
+                    .pop()
+                    .expect("BUG: settled range missing right endpoint");
+                let left_value = done
+                    .pop()
+                    .expect("BUG: settled range missing left endpoint");
+                done.push(ValueKind::Range(
+                    Box::new(TypedLiteral {
+                        value: left_value,
+                        lemma_type: left_type,
+                    }),
+                    Box::new(TypedLiteral {
+                        value: right_value,
+                        lemma_type: right_type,
+                    }),
+                ));
+            }
+            Task::AssembleList { row_types } => {
+                let mut settled = Vec::with_capacity(row_types.len());
+                for lemma_type in row_types.into_iter().rev() {
+                    let value = done.pop().expect("BUG: settled list missing a row");
+                    settled.push(TypedLiteral { value, lemma_type });
+                }
+                settled.reverse();
+                done.push(ValueKind::List(settled.into()));
+            }
+        }
+    }
+    Ok(done
+        .pop()
+        .expect("BUG: settle_value_kind_with_scales leaves one result"))
+}
+
+fn static_option_match_with_scales(
+    options: &TypeOptions,
+    value: &ValueKind,
+    scales: &std::collections::HashMap<String, crate::computation::rational::RationalInteger>,
+) -> Result<bool, String> {
+    let settled_value = settle_value_kind_with_scales(value, scales)?;
+    for option in &options.values {
+        let settled_option = settle_value_kind_with_scales(&option.value.value, scales)?;
+        if option_values_match(&settled_option, &settled_value) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 pub(crate) fn disallowed_message(
@@ -2791,7 +2940,7 @@ impl TypeSpecification {
                                     segments == &reference.segments
                                         && target_name == &reference.name
                                 }
-                                UnitScale::Literal(_) | UnitScale::Reference(_) => false,
+                                UnitScale::Literal(_) | UnitScale::Reference { .. } => false,
                             };
                             if !same {
                                 return Err(format!(
@@ -2882,11 +3031,6 @@ impl TypeSpecification {
                                 .get(unit_name)
                                 .is_ok_and(crate::literals::MeasureUnit::is_dynamic)
                             {
-                                if command == TypeConstraintCommand::Suggest {
-                                    return Err(format!(
-                                        "suggest cannot use unit '{unit_name}' on '{type_name}': its conversion factor is a reference and is not known at planning."
-                                    ));
-                                }
                                 *target = Some(RawSuggestion::Measure {
                                     magnitude: lift_parser_decimal(*n)?,
                                     unit_name: unit_name.clone(),
@@ -4069,19 +4213,44 @@ pub enum RawSuggestion {
 /// display stamps it so the one-liner matches the written unit, not the type's first unit.
 /// Shared via [`Arc`] so value-table clones bump a refcount instead of allocating.
 /// For ranges this stays `None`; each endpoint carries its own unit on its type.
+///
+/// `instance_factors` are the settled dynamic unit factors of the instance this value
+/// was read from (`uses` alias or list row). Same-family arithmetic keeps only factors
+/// both sides agree on; a family change drops them.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct BoundValueKind {
     pub value: ValueKind,
     pub unit: Option<Arc<str>>,
+    pub instance_factors: Option<Arc<std::collections::BTreeMap<String, RationalInteger>>>,
 }
 
 impl BoundValueKind {
     pub fn unbound(value: ValueKind) -> Self {
-        Self { value, unit: None }
+        Self {
+            value,
+            unit: None,
+            instance_factors: None,
+        }
     }
 
     pub fn with_binding(value: ValueKind, unit: Option<Arc<str>>) -> Self {
-        Self { value, unit }
+        Self {
+            value,
+            unit,
+            instance_factors: None,
+        }
+    }
+
+    pub fn with_instance_factors(
+        value: ValueKind,
+        unit: Option<Arc<str>>,
+        instance_factors: Option<Arc<std::collections::BTreeMap<String, RationalInteger>>>,
+    ) -> Self {
+        Self {
+            value,
+            unit,
+            instance_factors,
+        }
     }
 
     pub fn to_literal(&self) -> LiteralValue {
@@ -4103,6 +4272,47 @@ impl BoundValueKind {
             (Some(a), None) => Some(Arc::clone(a)),
             (None, Some(b)) => Some(Arc::clone(b)),
             (None, None) => None,
+        }
+    }
+
+    /// Agreed instance factors for same-family arithmetic: units both sides carry with
+    /// equal factors stay; either side missing a map means no carried instance agreement
+    /// (local / plan-scoped values rely on runtime scales, not a one-sided carry).
+    #[must_use]
+    pub fn agree_instance_factors(
+        left: Option<&Arc<std::collections::BTreeMap<String, RationalInteger>>>,
+        right: Option<&Arc<std::collections::BTreeMap<String, RationalInteger>>>,
+    ) -> Option<Arc<std::collections::BTreeMap<String, RationalInteger>>> {
+        match (left, right) {
+            (None, None) | (Some(_), None) | (None, Some(_)) => None,
+            (Some(left), Some(right)) => {
+                let mut agreed = std::collections::BTreeMap::new();
+                for (unit, factor) in left.iter() {
+                    if right.get(unit) == Some(factor) {
+                        agreed.insert(unit.clone(), factor.clone());
+                    }
+                }
+                if agreed.is_empty() {
+                    None
+                } else {
+                    Some(Arc::new(agreed))
+                }
+            }
+        }
+    }
+
+    /// Keep a written unit only when agreed instance factors still know its factor.
+    /// When there is no instance map, leave the binding for plan-scoped runtime scales.
+    #[must_use]
+    pub fn binding_with_agreed_factors(
+        unit: Option<Arc<str>>,
+        factors: &Option<Arc<std::collections::BTreeMap<String, RationalInteger>>>,
+    ) -> Option<Arc<str>> {
+        match (unit, factors) {
+            (Some(unit), Some(factors)) if factors.contains_key(unit.as_ref()) => Some(unit),
+            (Some(_), Some(_)) => None,
+            (unit, None) => unit,
+            (None, _) => None,
         }
     }
 }
@@ -4129,6 +4339,7 @@ pub fn bound_value_kind_from_raw_suggestion(
                 RawSuggestion::UnitBound { value, unit_name } => bounds.push(BoundValueKind {
                     value,
                     unit: Some(Arc::from(unit_name)),
+                    instance_factors: None,
                 }),
                 RawSuggestion::Measure {
                     magnitude,
@@ -4149,6 +4360,7 @@ pub fn bound_value_kind_from_raw_suggestion(
                                 unit: Arc::from(unit_name.as_str()),
                             },
                             unit: Some(Arc::from(unit_name)),
+                            instance_factors: None,
                         });
                     } else {
                         let canonical = measure_declared_bound_to_canonical(
@@ -4157,6 +4369,7 @@ pub fn bound_value_kind_from_raw_suggestion(
                         bounds.push(BoundValueKind {
                             value: ValueKind::Measure(canonical),
                             unit: Some(Arc::from(unit_name)),
+                            instance_factors: None,
                         });
                     }
                 }
@@ -5889,10 +6102,29 @@ impl LemmaType {
     }
 
     /// Value is outside an inline option set. A rule is checked at evaluation, with the static rows.
-    pub(crate) fn reject_disallowed(&self, value: &ValueKind) -> Result<(), String> {
+    ///
+    /// When the option set contains unscaled (dynamic-unit) values and `runtime_scales` is
+    /// absent, membership is deferred to the evaluation walk (`Ok`).
+    pub(crate) fn reject_disallowed(
+        &self,
+        value: &ValueKind,
+        runtime_scales: Option<
+            &std::collections::HashMap<String, crate::computation::rational::RationalInteger>,
+        >,
+    ) -> Result<(), String> {
         let options = self.options_for_check();
         if options.rule.is_some() || options.values.is_empty() {
             return Ok(());
+        }
+        if options_have_unscaled_measure(&options) {
+            let Some(scales) = runtime_scales else {
+                return Ok(());
+            };
+            return if static_option_match_with_scales(&options, value, scales)? {
+                Ok(())
+            } else {
+                Err(disallowed_message(self, &options, value, None))
+            };
         }
         if static_option_match(&options, value) {
             return Ok(());
@@ -5914,11 +6146,17 @@ impl LemmaType {
         None
     }
 
-    /// Evaluation re-checks a rule. A fixed `values` set was already accepted when the
-    /// value was bound.
+    /// Inline option literals that still need a runtime scale before membership.
+    #[must_use]
+    pub(crate) fn has_unscaled_options(&self) -> bool {
+        options_have_unscaled_measure(&self.options_for_check())
+    }
+
+    /// Evaluation re-checks a named options rule, or a static set that includes
+    /// dynamic-unit (unscaled) option literals.
     #[must_use]
     pub(crate) fn needs_runtime_option_check(&self) -> bool {
-        self.options_rule().is_some()
+        self.options_rule().is_some() || self.has_unscaled_options()
     }
 
     /// Static option displays. A rule that adds rows on a run is not included.
@@ -5970,39 +6208,75 @@ impl LemmaType {
     }
 
     /// `None` when `value` is in the static set or in `rule_rows`.
+    ///
+    /// When the static set has unscaled options and `runtime_scales` is absent, returns
+    /// `None` so the caller can defer. When scales are present, settles before matching.
+    /// Settle failure returns `Some(message)`.
     pub(crate) fn explain_disallowed(
         &self,
         value: &ValueKind,
         rule_rows: Option<&ListValue>,
+        runtime_scales: Option<
+            &std::collections::HashMap<String, crate::computation::rational::RationalInteger>,
+        >,
     ) -> Option<String> {
         let options = self.options_for_check();
-        let allowed = |candidate: &ValueKind| {
+        let needs_scales = options_have_unscaled_measure(&options)
+            || rule_rows
+                .is_some_and(|rows| rows.iter().any(|row| row.value.has_unscaled_measure()))
+            || value.has_unscaled_measure();
+        if needs_scales && runtime_scales.is_none() {
+            return None;
+        }
+        let allowed = |candidate: &ValueKind| -> Result<bool, String> {
+            if let Some(scales) = runtime_scales {
+                if options_have_unscaled_measure(&options) {
+                    if static_option_match_with_scales(&options, candidate, scales)? {
+                        return Ok(true);
+                    }
+                } else if static_option_match(&options, candidate) {
+                    return Ok(true);
+                }
+                if let Some(rows) = rule_rows {
+                    let settled_candidate = settle_value_kind_with_scales(candidate, scales)?;
+                    for option in rows.iter() {
+                        let settled_option = settle_value_kind_with_scales(&option.value, scales)?;
+                        if option_values_match(&settled_option, &settled_candidate) {
+                            return Ok(true);
+                        }
+                    }
+                    return Ok(false);
+                }
+                return Ok(options.is_empty());
+            }
             if static_option_match(&options, candidate) {
-                return true;
+                return Ok(true);
             }
             if let Some(rows) = rule_rows {
-                return rows
+                return Ok(rows
                     .iter()
-                    .any(|option| option_values_match(&option.value, candidate));
+                    .any(|option| option_values_match(&option.value, candidate)));
             }
-            options.is_empty()
+            Ok(options.is_empty())
         };
         match (&self.specifications, value) {
             (TypeSpecification::List { .. }, ValueKind::List(rows)) => {
                 for row in rows.iter() {
-                    if !allowed(&row.value) {
-                        return Some(disallowed_message(self, &options, &row.value, rule_rows));
+                    match allowed(&row.value) {
+                        Ok(true) => {}
+                        Ok(false) => {
+                            return Some(disallowed_message(self, &options, &row.value, rule_rows));
+                        }
+                        Err(message) => return Some(message),
                     }
                 }
                 None
             }
-            _ => {
-                if allowed(value) {
-                    None
-                } else {
-                    Some(disallowed_message(self, &options, value, rule_rows))
-                }
-            }
+            _ => match allowed(value) {
+                Ok(true) => None,
+                Ok(false) => Some(disallowed_message(self, &options, value, rule_rows)),
+                Err(message) => Some(message),
+            },
         }
     }
 
@@ -6022,6 +6296,90 @@ impl LemmaType {
             ),
         }
         self
+    }
+
+    /// Prefix dynamic scale references on `lemma_type` with the `uses` hops from
+    /// import `base_alias` through nested import names along `member_path`.
+    /// `nested_import` returns the identity of the import slot named `segment` on
+    /// the template of the current identity, or `None` when that hop is not an import.
+    #[must_use]
+    pub(crate) fn reanchor_through_import_path(
+        lemma_type: Arc<LemmaType>,
+        base_alias: &str,
+        base_identity: &SpecIdentity,
+        member_path: &[String],
+        mut nested_import: impl FnMut(&SpecIdentity, &str) -> Option<SpecIdentity>,
+    ) -> Arc<LemmaType> {
+        let mut hops = vec![PathSegment::import(base_alias, base_identity)];
+        let mut identity = base_identity.clone();
+        for segment in member_path {
+            let Some(next) = nested_import(&identity, segment) else {
+                break;
+            };
+            hops.push(PathSegment::import(segment, &next));
+            identity = next;
+        }
+        let mut out = lemma_type.as_ref().clone();
+        for hop in hops.into_iter().rev() {
+            out = out.with_scale_import_hop(&hop);
+        }
+        Arc::new(out)
+    }
+
+    /// Clone with `segment` prefixed onto every dynamic unit scale reference: the
+    /// `uses` alias hop a type crossed when it entered another spec. The declaring
+    /// spec's coordinates stay on the type of the declaring spec itself; this clone
+    /// is the importing spec's instance view of the same type.
+    #[must_use]
+    pub(crate) fn with_scale_import_hop(&self, segment: &PathSegment) -> Self {
+        fn prefix_units(units: &mut MeasureUnits, segment: &PathSegment) {
+            for unit in units.0.iter_mut() {
+                if let crate::literals::UnitScale::Reference { target, .. } = &mut unit.scale {
+                    match target {
+                        ReferenceTarget::Data(path) => path.segments.insert(0, segment.clone()),
+                        ReferenceTarget::Rule(rule) => rule.segments.insert(0, segment.clone()),
+                    }
+                }
+            }
+        }
+        fn prefix_specifications(specifications: &mut TypeSpecification, segment: &PathSegment) {
+            match specifications {
+                TypeSpecification::Measure { units, .. }
+                | TypeSpecification::MeasureRange { units, .. } => {
+                    prefix_units(units, segment);
+                }
+                TypeSpecification::List { element, .. } => {
+                    let prefixed = element.with_scale_import_hop(segment);
+                    *element = Arc::new(prefixed);
+                }
+                _ => {}
+            }
+        }
+        let mut out = self.clone();
+        prefix_specifications(&mut out.specifications, segment);
+        out
+    }
+
+    /// Scale target of `unit_name` when that unit is reference-scaled on this type.
+    /// The target is in the coordinates of the spec that holds this type Arc
+    /// (`uses` hops are already prefixed).
+    #[must_use]
+    pub(crate) fn unit_scale_target(&self, unit_name: &str) -> Option<&ReferenceTarget> {
+        self.measure_units_table()
+            .and_then(|units| units.get(unit_name).ok())
+            .and_then(MeasureUnit::resolved_scale_target)
+    }
+
+    /// Every reference-scaled unit on this measure type, in declaration order.
+    #[must_use]
+    pub(crate) fn dynamic_scale_targets(&self) -> Vec<ReferenceTarget> {
+        let Some(units) = self.measure_units_table() else {
+            return Vec::new();
+        };
+        units
+            .iter()
+            .filter_map(|unit| unit.resolved_scale_target().cloned())
+            .collect()
     }
 
     /// Written unit on a measure or ratio specification, if any.
@@ -6424,34 +6782,45 @@ impl LemmaType {
         }
     }
 
+    /// Drop a written unit so a path/reference expression type does not claim
+    /// the stored value named that unit. Literals and `as <unit>` results keep
+    /// units via [`Self::with_unit`].
+    #[must_use]
+    pub(crate) fn without_written_unit(&self) -> Self {
+        let mut cleared = self.clone();
+        match &mut cleared.specifications {
+            TypeSpecification::Measure { unit, .. } | TypeSpecification::Ratio { unit, .. } => {
+                *unit = None;
+            }
+            _ => {}
+        }
+        cleared
+    }
+
     /// Clear slot bounds, help, and written unit so a computed/generalized type
     /// does not carry either operand's constraints.
     #[must_use]
     pub(crate) fn without_slot_bounds(&self) -> Self {
-        let mut cleared = self.clone();
+        let mut cleared = self.without_written_unit();
         match &mut cleared.specifications {
             TypeSpecification::Measure {
                 minimum,
                 maximum,
-                unit,
                 help,
                 ..
             } => {
                 *minimum = None;
                 *maximum = None;
-                *unit = None;
                 *help = String::new();
             }
             TypeSpecification::Ratio {
                 minimum,
                 maximum,
-                unit,
                 help,
                 ..
             } => {
                 *minimum = None;
                 *maximum = None;
-                *unit = None;
                 *help = String::new();
             }
             TypeSpecification::Number {
@@ -6721,6 +7090,21 @@ impl LemmaType {
         }
     }
 
+    /// One family dimension with exponent 1 — the shape that may cross-family
+    /// relabel when the expression also names a unit (`5 eur as kg`).
+    #[must_use]
+    pub(crate) fn is_simple_base_measure(&self) -> bool {
+        if !self.is_measure() {
+            return false;
+        }
+        match self.measure_type_decomposition() {
+            Some(decomposition) if decomposition.len() == 1 => {
+                decomposition.values().next() == Some(&1)
+            }
+            _ => false,
+        }
+    }
+
     /// Declared measure unit table, when this type is a measure or measure range.
     #[must_use]
     pub fn measure_units_table(&self) -> Option<&MeasureUnits> {
@@ -6755,20 +7139,8 @@ impl LemmaType {
             .is_some_and(MeasureUnit::is_dynamic)
     }
 
-    /// Fallback unit for a measure with no binding: factor-1, then the first
-    /// literal-factor unit, then the first declared unit.
+    /// Unit name chosen for measure display / wire `unit` under `runtime_scales`.
     #[must_use]
-    pub fn measure_fallback_unit(&self) -> Option<&MeasureUnit> {
-        let units = self.measure_units_table()?;
-        units
-            .iter()
-            .find(|unit| unit.is_canonical_factor())
-            .or_else(|| units.iter().find(|unit| unit.literal_factor().is_some()))
-            .or_else(|| units.iter().next())
-    }
-
-    /// Unit a measure value of this type is displayed in, given the scales settled in
-    /// the presenting scope. `None` for a measure without a unit table.
     pub(crate) fn measure_display_unit_name(
         &self,
         runtime_scales: Option<&HashMap<String, crate::computation::rational::RationalInteger>>,
@@ -6781,6 +7153,18 @@ impl LemmaType {
             ),
             _ => None,
         }
+    }
+
+    /// Fallback unit for a measure with no binding: factor-1, then the first
+    /// literal-factor unit, then the first declared unit.
+    #[must_use]
+    pub fn measure_fallback_unit(&self) -> Option<&MeasureUnit> {
+        let units = self.measure_units_table()?;
+        units
+            .iter()
+            .find(|unit| unit.is_canonical_factor())
+            .or_else(|| units.iter().find(|unit| unit.literal_factor().is_some()))
+            .or_else(|| units.iter().next())
     }
 
     /// Runtime unit signature for measure arithmetic and display.
@@ -7106,14 +7490,10 @@ impl UnitFactorSource<'_> {
                 unit.literal_factor().cloned()
             }
             UnitFactorSource::Merged { measure, .. } => {
-                let units = measure.unwrap_or_else(|| {
-                    panic!(
-                        "BUG: family measure expansion missing merged table for unit '{unit_name}'"
-                    )
-                });
-                let unit = units.get(unit_name).unwrap_or_else(|_| {
-                    panic!("BUG: family unit '{unit_name}' missing from merged measure table")
-                });
+                // A unit omitted from the merged table (owners disagree on its scale)
+                // has no single factor here; the column is skipped.
+                let units = (*measure)?;
+                let unit = units.get(unit_name).ok()?;
                 unit.literal_factor().cloned()
             }
             UnitFactorSource::Runtime { scales, fallback } => scales
@@ -7726,7 +8106,7 @@ impl fmt::Display for TypedLiteral {
 
 /// What a [`DataDefinition::Reference`] copies its value from: either another data path
 /// or a rule whose result becomes this data's value.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum ReferenceTarget {
     Data(DataPath),
     Rule(RulePath),
@@ -8251,6 +8631,64 @@ pub fn parser_value_to_value_kind(
     }
 }
 
+/// Read a parsed Lemma literal as a value of `lemma_type`, keeping the written unit.
+pub(crate) fn typed_literal_from_parsed(
+    parsed: &crate::literals::Value,
+    lemma_type: &Arc<LemmaType>,
+    unit_index: &UnitIndex,
+    named_types: &IndexMap<String, Arc<LemmaType>>,
+) -> Result<TypedLiteral, String> {
+    let resolve = UnitTokenResolver::Typed {
+        unit_index,
+        named_types,
+        lemma_type: lemma_type.as_ref(),
+    };
+    let kind = parser_value_to_value_kind(parsed, lemma_type.as_ref(), Some(&resolve))?;
+    let binding = match binding_unit_from_parser_value(parsed) {
+        Some(written) => Some(resolve.resolve(&written)?),
+        None => None,
+    };
+    Ok(typed_literal_with_binding_unit(kind, binding, lemma_type))
+}
+
+pub(crate) fn typed_literal_with_binding_unit(
+    kind: ValueKind,
+    binding_unit: Option<String>,
+    lemma_type: &Arc<LemmaType>,
+) -> TypedLiteral {
+    let typed_type = match binding_unit {
+        Some(unit)
+            if matches!(
+                &lemma_type.specifications,
+                TypeSpecification::Measure { .. } | TypeSpecification::Ratio { .. }
+            ) =>
+        {
+            Arc::new(lemma_type.as_ref().clone().with_unit(unit))
+        }
+        Some(_) | None => Arc::clone(lemma_type),
+    };
+    TypedLiteral {
+        value: kind,
+        lemma_type: typed_type,
+    }
+}
+
+fn binding_unit_from_parser_value(value: &crate::literals::Value) -> Option<String> {
+    use crate::literals::Value;
+    match value {
+        Value::NumberWithUnit(_, unit) => Some(unit.clone()),
+        Value::Range(left, right) => match (left.as_ref(), right.as_ref()) {
+            (Value::NumberWithUnit(_, left_unit), Value::NumberWithUnit(_, right_unit))
+                if left_unit == right_unit =>
+            {
+                Some(left_unit.clone())
+            }
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
 /// Convert parser Value to ValueKind for primitives and ranges only.
 ///
 /// [`Value::NumberWithUnit`] requires [`parser_value_to_value_kind`] with a measure or ratio type.
@@ -8506,6 +8944,24 @@ fn format_rational_for_human_display(
     }
 }
 
+/// Whether any declared unit of this measure family has a known factor (literal or
+/// settled / carried in `runtime_scales`).
+pub(crate) fn measure_family_has_expressible_unit(
+    lemma_type: &LemmaType,
+    runtime_scales: Option<&HashMap<String, crate::computation::rational::RationalInteger>>,
+) -> bool {
+    let Some(units) = lemma_type.measure_units_table() else {
+        return true;
+    };
+    if units.is_empty() {
+        return true;
+    }
+    units.iter().any(|unit| {
+        unit.literal_factor().is_some()
+            || runtime_scales.is_some_and(|scales| scales.contains_key(&unit.name))
+    })
+}
+
 fn measure_display_unit<'a>(
     units: &'a crate::literals::MeasureUnits,
     lemma_type: &LemmaType,
@@ -8538,8 +8994,12 @@ fn measure_display_unit<'a>(
                 .find(|unit| unit.literal_factor().is_some() && factor_known(unit))
         })
         .or_else(|| units.iter().find(|unit| factor_known(unit)))
-        .or_else(|| units.iter().next())
-        .expect("BUG: measure type with non-empty units must have a first unit")
+        .unwrap_or_else(|| {
+            panic!(
+                "BUG: measure display of '{}' reached with no factor-known unit; callers must veto first",
+                lemma_type.name()
+            )
+        })
 }
 
 fn format_measure_canonical_for_display(

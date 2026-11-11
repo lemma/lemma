@@ -4,8 +4,13 @@ use lemma::DateTimeValue;
 use lemma::Engine;
 use lemma::IndexMap;
 use libfuzzer_sys::fuzz_target;
+use std::str::FromStr;
 
 const MAX_DEPTH: usize = 4;
+
+fn fixed_now() -> DateTimeValue {
+    DateTimeValue::from_str("2024-06-15T12:00:00Z").expect("BUG: fixed fuzz datetime")
+}
 
 struct Cursor<'a> {
     bytes: &'a [u8],
@@ -95,13 +100,62 @@ fn rounding_mode(cursor: &mut Cursor<'_>) -> &'static str {
     }
 }
 
+fn number_range(cursor: &mut Cursor<'_>) -> String {
+    match cursor.next_u8() % 4 {
+        0 => "1...10".to_string(),
+        1 => "0...100".to_string(),
+        2 => "-5...5".to_string(),
+        _ => format!("{}...{}", number_leaf(cursor), number_leaf(cursor)),
+    }
+}
+
+fn deep_nested_number(cursor: &mut Cursor<'_>) -> String {
+    // Depth 1..=9 crosses the default max_expression_depth of 7.
+    let depth = (cursor.next_u8() as usize % 9) + 1;
+    let variant = cursor.next_u8() % 4;
+    let mut expr = number_leaf(cursor);
+    for i in 0..depth {
+        expr = match variant {
+            0 => format!("({expr} + 1)"),
+            1 => format!("({expr} * 2)"),
+            2 => format!("({expr} - {i})"),
+            _ => format!("({expr})"),
+        };
+    }
+    expr
+}
+
+fn unless_number(cursor: &mut Cursor<'_>, depth: usize) -> String {
+    let default_body = build_expr(Kind::Number, depth.saturating_sub(1), cursor);
+    let cond = build_expr(Kind::Boolean, depth.saturating_sub(1), cursor);
+    let arm = build_expr(Kind::Number, depth.saturating_sub(1), cursor);
+    if cursor.next_u8() % 2 == 0 {
+        format!("{default_body}\n  unless {cond} then {arm}")
+    } else {
+        let cond2 = build_expr(Kind::Boolean, depth.saturating_sub(1), cursor);
+        let arm2 = build_expr(Kind::Number, depth.saturating_sub(1), cursor);
+        format!("{default_body}\n  unless {cond} then {arm}\n  unless {cond2} then {arm2}")
+    }
+}
+
+fn list_number(cursor: &mut Cursor<'_>) -> String {
+    match cursor.next_u8() % 6 {
+        0 => "items -> count".to_string(),
+        1 => "items -> sum qty".to_string(),
+        2 => "items -> min qty".to_string(),
+        3 => "items -> max qty".to_string(),
+        4 => "items -> where qty > 0 -> count".to_string(),
+        _ => "(items -> sort qty desc -> first).qty".to_string(),
+    }
+}
+
 fn build_expr(kind: Kind, depth: usize, cursor: &mut Cursor<'_>) -> String {
     if depth == 0 {
         return leaf(kind, cursor);
     }
 
     match kind {
-        Kind::Number => match cursor.next_u8() % 11 {
+        Kind::Number => match cursor.next_u8() % 14 {
             0 => format!(
                 "({} + {})",
                 build_expr(Kind::Number, depth - 1, cursor),
@@ -145,13 +199,16 @@ fn build_expr(kind: Kind, depth: usize, cursor: &mut Cursor<'_>) -> String {
                 "({} -> round)",
                 build_expr(Kind::Number, depth - 1, cursor)
             ),
-            _ => {
+            10 => {
                 let mode = rounding_mode(cursor);
                 format!(
                     "({} -> {mode}(0.25))",
                     build_expr(Kind::Number, depth - 1, cursor)
                 )
             }
+            11 => unless_number(cursor, depth),
+            12 => list_number(cursor),
+            _ => deep_nested_number(cursor),
         },
         Kind::Measure => match cursor.next_u8() % 6 {
             0 => format!(
@@ -188,7 +245,7 @@ fn build_expr(kind: Kind, depth: usize, cursor: &mut Cursor<'_>) -> String {
                 )
             }
         },
-        Kind::Boolean => match cursor.next_u8() % 8 {
+        Kind::Boolean => match cursor.next_u8() % 10 {
             0 => format!(
                 "({} and {})",
                 build_expr(Kind::Boolean, depth - 1, cursor),
@@ -220,6 +277,12 @@ fn build_expr(kind: Kind, depth: usize, cursor: &mut Cursor<'_>) -> String {
                 build_expr(Kind::Number, depth - 1, cursor),
                 build_expr(Kind::Number, depth - 1, cursor)
             ),
+            7 => format!(
+                "({} in {})",
+                build_expr(Kind::Number, depth - 1, cursor),
+                number_range(cursor)
+            ),
+            8 => format!("(items -> count > {})", number_leaf(cursor)),
             _ => format!(
                 "({} in 1...10)",
                 build_expr(Kind::Number, depth - 1, cursor)
@@ -237,8 +300,13 @@ fuzz_target!(|data: &[u8]| {
 
     let code = format!(
         r#"
+spec item
+data name: text
+data qty: number
+
 spec fuzz_test
 uses lemma units
+uses item
 data x: 100
 data y: 50
 data flag: true
@@ -247,6 +315,10 @@ data m: measure
   -> unit kilogram: 1
   -> unit gram: 0.001
   -> suggest 1 kilogram
+data items: item list
+  -> key name
+  -> with name: "a", qty: 1
+  -> with name: "b", qty: 2
 rule test_expr: {expr}
 "#
     );
@@ -257,18 +329,44 @@ rule test_expr: {expr}
         code,
     )]);
 
-    // Property: load Ok => evaluation must not panic.
+    // Property: load Ok => evaluation must not panic; serialize must succeed;
+    // two evaluates with the same effective datetime must agree.
     if loaded.is_ok() {
-        let now = DateTimeValue::now();
-        if let Err(error) = engine.evaluate(
+        let now = fixed_now();
+        let first = engine.evaluate(
             None,
             "fuzz_test",
             Some(&now),
             IndexMap::new(),
             None,
             false,
-        ) {
-            std::hint::black_box(error);
+        );
+        let second = engine.evaluate(
+            None,
+            "fuzz_test",
+            Some(&now),
+            IndexMap::new(),
+            None,
+            false,
+        );
+        match (first, second) {
+            (Ok(a), Ok(b)) => {
+                let json_a = serde_json::to_string(&lemma::api::Response::from(&a))
+                    .expect("BUG: Response must serialize");
+                let json_b = serde_json::to_string(&lemma::api::Response::from(&b))
+                    .expect("BUG: Response must serialize");
+                assert_eq!(
+                    json_a, json_b,
+                    "BUG: evaluate must be deterministic for fixed effective datetime"
+                );
+                std::hint::black_box(json_a);
+            }
+            (Err(error), Err(_)) => {
+                std::hint::black_box(error);
+            }
+            (Ok(_), Err(_)) | (Err(_), Ok(_)) => {
+                panic!("BUG: evaluate Ok/Err disagree across identical deterministic runs");
+            }
         }
     }
 });

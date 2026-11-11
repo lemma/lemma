@@ -97,11 +97,17 @@ const FUZZ_TARGETS: &[&str] = &[
     "fuzz_parser",
     "fuzz_expressions",
     "fuzz_literals",
-    "fuzz_deeply_nested",
     "fuzz_data_bindings",
+    "fuzz_lists_uses",
 ];
-/// Wall-clock budget for `--fuzz`, split evenly across [`FUZZ_TARGETS`].
+/// Wall-clock budget for `cargo precommit --fuzz`, split evenly across [`FUZZ_TARGETS`].
 const FUZZ_BUDGET_SECS: u64 = 300;
+/// Default wall-clock budget for `cargo fuzzing`, split evenly across [`FUZZ_TARGETS`].
+const FUZZING_DEFAULT_SECS: u64 = 3600;
+const FUZZ_DICT: &str = "lemma.dict";
+/// Writable corpus dir (gitignored). Must be first so libFuzzer writes here, not into seeds.
+const FUZZ_PARSER_CORPUS: &str = "corpus/fuzz_parser";
+const FUZZ_PARSER_SEEDS: &str = "seeds/fuzz_parser";
 
 fn require_command(name: &str, install_hint: &str) {
     let ok = probe_succeeded(
@@ -320,10 +326,10 @@ fn run_deny_precommit() {
     }
 }
 
-fn run_fuzz_precommit() {
+fn run_fuzz(budget_secs: u64) {
     require_command(
         "rustup",
-        "Install rustup (https://rustup.rs/) for the nightly toolchain used by --fuzz.",
+        "Install rustup (https://rustup.rs/) for the nightly toolchain used by fuzzing.",
     );
     require_nightly();
     let fuzz_ok = probe_succeeded(
@@ -338,42 +344,79 @@ fn run_fuzz_precommit() {
         panic!("cargo fuzz not available. Install cargo-fuzz: cargo install cargo-fuzz");
     }
 
-    let per_target_secs = FUZZ_BUDGET_SECS / FUZZ_TARGETS.len() as u64;
+    let target_count = FUZZ_TARGETS.len() as u64;
+    let per_target_secs = budget_secs / target_count;
     if per_target_secs == 0 {
         panic!(
-            "BUG: FUZZ_BUDGET_SECS ({FUZZ_BUDGET_SECS}) smaller than target count ({})",
-            FUZZ_TARGETS.len()
+            "fuzz budget ({budget_secs}s) smaller than target count ({target_count}); use at least {target_count} seconds"
         );
     }
     let max_total_time_arg = format!("-max_total_time={per_target_secs}");
+    let dict_arg = format!("-dict={FUZZ_DICT}");
     let fuzz_dir = versions::workspace_root().join(FUZZ_PACKAGE_DIR);
     eprintln!(
-        "xtask: fuzz budget {FUZZ_BUDGET_SECS}s across {} targets ({per_target_secs}s each)",
-        FUZZ_TARGETS.len()
+        "xtask: fuzz budget {budget_secs}s across {target_count} targets ({per_target_secs}s each)"
     );
     for target in FUZZ_TARGETS {
-        eprintln!("xtask: fuzz {target} ({max_total_time_arg})");
-        let status = Command::new("rustup")
-            .args([
-                "run",
-                "nightly",
-                "cargo",
-                "fuzz",
-                "run",
-                target,
-                "--",
-                max_total_time_arg.as_str(),
-            ])
-            .current_dir(&fuzz_dir)
-            .status()
-            .unwrap_or_else(|e| {
+        eprintln!("xtask: fuzz {target} ({max_total_time_arg}, {dict_arg})");
+        let mut cmd = Command::new("rustup");
+        cmd.args(["run", "nightly", "cargo", "fuzz", "run", target]);
+        if *target == "fuzz_parser" {
+            std::fs::create_dir_all(fuzz_dir.join(FUZZ_PARSER_CORPUS)).unwrap_or_else(|e| {
                 panic!(
-                    "failed to run rustup run nightly cargo fuzz run {target} in {}: {e}",
-                    fuzz_dir.display()
+                    "failed to create {}: {e}",
+                    fuzz_dir.join(FUZZ_PARSER_CORPUS).display()
                 )
             });
+            cmd.arg(FUZZ_PARSER_CORPUS).arg(FUZZ_PARSER_SEEDS);
+        }
+        cmd.args(["--", max_total_time_arg.as_str(), dict_arg.as_str()]);
+        let status = cmd.current_dir(&fuzz_dir).status().unwrap_or_else(|e| {
+            panic!(
+                "failed to run rustup run nightly cargo fuzz run {target} in {}: {e}",
+                fuzz_dir.display()
+            )
+        });
         if !status.success() {
             exit_for_child_status(status, &format!("cargo fuzz run {target}"));
+        }
+    }
+}
+
+fn parse_fuzzing_args(mut args: impl Iterator<Item = String>) -> Result<u64, String> {
+    match args.next().as_deref() {
+        None => Ok(FUZZING_DEFAULT_SECS),
+        Some("--seconds") => {
+            let Some(value) = args.next() else {
+                return Err("fuzzing: --seconds needs a positive integer".to_string());
+            };
+            if args.next().is_some() {
+                return Err("fuzzing: too many arguments".to_string());
+            }
+            let secs: u64 = value
+                .parse()
+                .map_err(|_| format!("fuzzing: invalid --seconds value {value:?}"))?;
+            if secs == 0 {
+                return Err("fuzzing: --seconds must be at least 1".to_string());
+            }
+            Ok(secs)
+        }
+        Some(other) => Err(format!(
+            "fuzzing: unknown argument {other:?} (expected --seconds <n>)"
+        )),
+    }
+}
+
+fn fuzzing_from_args(args: impl Iterator<Item = String>) {
+    match parse_fuzzing_args(args) {
+        Ok(budget_secs) => {
+            eprintln!("xtask: fuzzing ({budget_secs}s budget across targets)");
+            run_fuzz(budget_secs);
+        }
+        Err(message) => {
+            eprintln!("xtask: {message}");
+            usage();
+            std::process::exit(1);
         }
     }
 }
@@ -492,14 +535,14 @@ fn precommit(flags: PrecommitFlags) {
     }
     if flags.run_fuzz {
         eprintln!("xtask: fuzz (5 minute budget across targets)");
-        run_fuzz_precommit();
+        run_fuzz(FUZZ_BUDGET_SECS);
     }
     eprintln!("xtask: done");
 }
 
 fn usage() {
     eprintln!(
-        "usage:\n  cargo precommit [--coverage] [--fuzz] | cargo run -p xtask -- [precommit] [--coverage] [--fuzz]\n  cargo verify   | cargo run -p xtask -- versions-verify\n  cargo bump <version> | cargo run -p xtask -- versions-bump <version>\n  cargo changelog | cargo run -p xtask -- versions-diff [semver]\n  cargo lsp | cargo run -p xtask -- lsp [vsix|prepare|package|publish-marketplace|publish-openvsx|--help]\n  cargo run -p xtask -- hex-standalone\n  cargo benchmarks <engine|logistics|cli|all> | cargo run -p xtask -- benchmarks <engine|logistics|cli|all>\n  cargo coverage <engine|cli|all> [--check] | cargo run -p xtask -- coverage <engine|cli|all> [--check]\n  cargo run -p xtask -- schema [--check]\n  cargo run -p xtask -- llms\n  cargo run -p xtask -- maven-natives\n  cargo run -p xtask -- nuget-natives\n  cargo run -p xtask -- recursion-check\n  cargo run -p xtask -- todo-check\n\n  --coverage  after the gate, run coverage all --check (CI uses this)\n  --fuzz      after the gate, run engine/fuzz for 5 minutes total (split across targets; CI push uses this)"
+        "usage:\n  cargo precommit [--coverage] [--fuzz] | cargo run -p xtask -- [precommit] [--coverage] [--fuzz]\n  cargo fuzzing [--seconds <n>] | cargo run -p xtask -- fuzzing [--seconds <n>]\n  cargo verify   | cargo run -p xtask -- versions-verify\n  cargo bump <version> | cargo run -p xtask -- versions-bump <version>\n  cargo changelog | cargo run -p xtask -- versions-diff [semver]\n  cargo lsp | cargo run -p xtask -- lsp [vsix|prepare|package|publish-marketplace|publish-openvsx|--help]\n  cargo run -p xtask -- hex-standalone\n  cargo benchmarks <engine|logistics|cli|all> | cargo run -p xtask -- benchmarks <engine|logistics|cli|all>\n  cargo coverage <engine|cli|all> [--check] | cargo run -p xtask -- coverage <engine|cli|all> [--check]\n  cargo run -p xtask -- schema [--check]\n  cargo run -p xtask -- llms\n  cargo run -p xtask -- maven-natives\n  cargo run -p xtask -- nuget-natives\n  cargo run -p xtask -- recursion-check\n  cargo run -p xtask -- todo-check\n\n  --coverage  after the gate, run coverage all --check (CI uses this)\n  --fuzz      after the gate, run engine/fuzz for 5 minutes total (split across targets; CI push uses this)\n  cargo fuzzing  run engine/fuzz only (default 1 hour total, split across targets; optional --seconds <n>)"
     );
 }
 
@@ -509,6 +552,7 @@ fn main() {
     match sub.as_deref() {
         None => precommit_from_args(args),
         Some("precommit") => precommit_from_args(args),
+        Some("fuzzing") => fuzzing_from_args(args),
         Some(flag @ ("--coverage" | "--fuzz")) => {
             let mut rest = vec![flag.to_string()];
             rest.extend(args);
@@ -685,7 +729,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_precommit_flags, PrecommitFlags};
+    use super::{parse_fuzzing_args, parse_precommit_flags, PrecommitFlags, FUZZING_DEFAULT_SECS};
 
     fn flags(args: &[&str]) -> PrecommitFlags {
         parse_precommit_flags(args.iter().copied().map(str::to_string)).expect("valid flags")
@@ -710,5 +754,29 @@ mod tests {
     fn unknown_precommit_flag_is_rejected() {
         let err = parse_precommit_flags(["--nope".to_string()].into_iter()).unwrap_err();
         assert!(err.contains("--nope"), "{err}");
+    }
+
+    #[test]
+    fn fuzzing_defaults_to_one_hour() {
+        let secs = parse_fuzzing_args(std::iter::empty()).expect("default");
+        assert_eq!(secs, FUZZING_DEFAULT_SECS);
+        assert_eq!(secs, 3600);
+    }
+
+    #[test]
+    fn fuzzing_seconds_flag_parses() {
+        let secs = parse_fuzzing_args(["--seconds".into(), "300".into()].into_iter())
+            .expect("valid seconds");
+        assert_eq!(secs, 300);
+    }
+
+    #[test]
+    fn fuzzing_rejects_unknown_and_missing_seconds() {
+        let unknown = parse_fuzzing_args(["--nope".into()].into_iter()).unwrap_err();
+        assert!(unknown.contains("--nope"), "{unknown}");
+        let missing = parse_fuzzing_args(["--seconds".into()].into_iter()).unwrap_err();
+        assert!(missing.contains("--seconds"), "{missing}");
+        let zero = parse_fuzzing_args(["--seconds".into(), "0".into()].into_iter()).unwrap_err();
+        assert!(zero.contains("at least 1"), "{zero}");
     }
 }

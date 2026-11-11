@@ -6,8 +6,9 @@ use crate::planning::semantics::{
     combine_decompositions, duration_decomposition, primitive_boolean_arc, primitive_date_arc,
     primitive_date_range_arc, primitive_number_arc, primitive_ratio_arc, primitive_text_arc,
     primitive_time_arc, range_type_specification_from_endpoints, ArithmeticComputation,
-    BaseMeasureVector, DataPath, KeyField, LemmaType, ListKey, MathematicalComputation,
-    SemanticConversionTarget, TypeExtends, TypeFamily, TypeOptions, TypeSpecification,
+    BaseMeasureVector, ComparisonComputation, DataPath, KeyField, LemmaType, ListKey,
+    MathematicalComputation, SemanticConversionTarget, TypeExtends, TypeFamily, TypeOptions,
+    TypeSpecification,
 };
 use crate::planning::unit_index::UnitIndex;
 use indexmap::IndexMap;
@@ -290,8 +291,18 @@ fn arithmetic_result_ordered(
             ))
         }
 
-        // Measure pairs must fall through to operator-specific arms below.
-        // The general equal-type guard must not short-circuit those.
+        // `mod` is numbers only.
+        _ if matches!(op, ArithmeticComputation::Modulo) => {
+            if left_type.is_number() && right_type.is_number() {
+                primitive_number_arc().clone()
+            } else {
+                Arc::new(LemmaType::undetermined_type())
+            }
+        }
+
+        // Measure pairs and date/time arithmetic must fall through to
+        // operator-specific arms below. Date−date / time−time are not values
+        // of date/time; the equal-type guard must not invent them.
         _ if *left_type == *right_type
             && !matches!(
                 &left_type.specifications,
@@ -301,6 +312,8 @@ fn arithmetic_result_ordered(
                     | TypeSpecification::DateRange { .. }
                     | TypeSpecification::TimeRange { .. }
                     | TypeSpecification::RatioRange { .. }
+                    | TypeSpecification::Date { .. }
+                    | TypeSpecification::Time { .. }
             ) =>
         {
             Arc::clone(&left_type)
@@ -366,8 +379,13 @@ fn arithmetic_result_ordered(
             ArithmeticComputation::Add | ArithmeticComputation::Subtract => {
                 if left_type.is_anonymous_measure() || right_type.is_anonymous_measure() {
                     Arc::new(LemmaType::undetermined_type())
-                } else {
+                } else if left_type.same_measure_family(&right_type)
+                    || left_type.compatible_with_anonymous_measure(&right_type)
+                    || right_type.compatible_with_anonymous_measure(&left_type)
+                {
                     Arc::clone(&left_type)
+                } else {
+                    Arc::new(LemmaType::undetermined_type())
                 }
             }
             ArithmeticComputation::Multiply | ArithmeticComputation::Divide => {
@@ -389,7 +407,7 @@ fn arithmetic_result_ordered(
                     _ => Arc::clone(&left_type),
                 }
             }
-            _ => primitive_number_arc().clone(),
+            _ => Arc::new(LemmaType::undetermined_type()),
         },
 
         (
@@ -411,20 +429,29 @@ fn arithmetic_result_ordered(
             _ => Arc::new(LemmaType::undetermined_type()),
         },
 
-        (TypeSpecification::Number { .. }, TypeSpecification::Ratio { .. }) => {
-            primitive_number_arc().clone()
-        }
+        (TypeSpecification::Number { .. }, TypeSpecification::Ratio { .. }) => match op {
+            ArithmeticComputation::Multiply
+            | ArithmeticComputation::Divide
+            | ArithmeticComputation::Power => primitive_number_arc().clone(),
+            _ => Arc::new(LemmaType::undetermined_type()),
+        },
         (TypeSpecification::Ratio { .. }, TypeSpecification::Number { .. }) => match op {
             ArithmeticComputation::Multiply => primitive_number_arc().clone(),
-            _ => Arc::clone(&left_type),
+            ArithmeticComputation::Divide | ArithmeticComputation::Power => Arc::clone(&left_type),
+            _ => Arc::new(LemmaType::undetermined_type()),
         },
         (TypeSpecification::Number { .. }, TypeSpecification::Number { .. }) => {
             primitive_number_arc().clone()
         }
 
-        (TypeSpecification::Ratio { .. }, TypeSpecification::Ratio { .. }) => {
-            Arc::clone(&left_type)
-        }
+        (TypeSpecification::Ratio { .. }, TypeSpecification::Ratio { .. }) => match op {
+            ArithmeticComputation::Add
+            | ArithmeticComputation::Subtract
+            | ArithmeticComputation::Multiply
+            | ArithmeticComputation::Divide
+            | ArithmeticComputation::Power => Arc::clone(&left_type),
+            _ => Arc::new(LemmaType::undetermined_type()),
+        },
         (TypeSpecification::DateRange { .. }, TypeSpecification::DateRange { .. }) => match op {
             ArithmeticComputation::Add | ArithmeticComputation::Subtract => {
                 range_span_type(&left_type)
@@ -670,7 +697,7 @@ pub(crate) fn measure_range_matches_measure(
                 ..
             },
         ) => {
-            if range_units.0.is_empty() && range_decomposition.is_none() {
+            if range_type.specifications.is_unresolved_measure_range() {
                 true
             } else if measure_decomposition.is_none() {
                 range_units == measure_units
@@ -706,16 +733,26 @@ pub(crate) fn logical_not_type(operand: &LemmaType) -> Arc<LemmaType> {
     primitive_boolean_arc().clone()
 }
 
-pub(crate) fn comparison_type(left: &LemmaType, right: &LemmaType) -> Arc<LemmaType> {
+pub(crate) fn comparison_type(
+    left: &LemmaType,
+    op: &ComparisonComputation,
+    right: &LemmaType,
+) -> Arc<LemmaType> {
     if left.vetoed() || right.vetoed() {
         return Arc::new(LemmaType::veto_type());
     }
     if left.is_undetermined() || right.is_undetermined() {
         return Arc::new(LemmaType::undetermined_type());
     }
-    let comparable = (left.is_boolean() && right.is_boolean())
-        || (left.is_text() && right.is_text())
-        || (left.is_number() && right.is_number())
+    let equality_only = matches!(op, ComparisonComputation::Is | ComparisonComputation::IsNot);
+    if (left.is_boolean() && right.is_boolean()) || (left.is_text() && right.is_text()) {
+        return if equality_only {
+            primitive_boolean_arc().clone()
+        } else {
+            Arc::new(LemmaType::undetermined_type())
+        };
+    }
+    let comparable = (left.is_number() && right.is_number())
         || (left.is_ratio() && right.is_ratio())
         || (left.is_date() && right.is_date())
         || (left.is_time() && right.is_time())
@@ -840,11 +877,44 @@ pub(crate) fn unit_conversion_type(
     source: &Arc<LemmaType>,
     target: &SemanticConversionTarget,
 ) -> Arc<LemmaType> {
+    if source.vetoed() {
+        return Arc::new(LemmaType::veto_type());
+    }
+    if source.is_undetermined() || source.is_spec() {
+        return Arc::new(LemmaType::undetermined_type());
+    }
     match target {
         SemanticConversionTarget::Type(ConversionTypeKind::Number) => {
-            primitive_number_arc().clone()
+            if source.is_date_range()
+                || source.is_time_range()
+                || source.is_measure_range()
+                || source.is_ratio_range()
+                || source.is_calendar_like_range()
+            {
+                return Arc::new(LemmaType::undetermined_type());
+            }
+            if source.is_anonymous_measure()
+                && source
+                    .measure_type_decomposition()
+                    .is_some_and(|decomp| !decomp.is_empty())
+            {
+                return Arc::new(LemmaType::undetermined_type());
+            }
+            // Measure/calendar/duration strip requires an expression-named unit
+            // (`5 eur as number`, not a bare data path).
+            if source.is_measure() && source.unit().is_none() {
+                return Arc::new(LemmaType::undetermined_type());
+            }
+            if source.is_number_range()
+                || source.is_number()
+                || source.is_measure()
+                || source.is_ratio()
+            {
+                return primitive_number_arc().clone();
+            }
+            Arc::new(LemmaType::undetermined_type())
         }
-        SemanticConversionTarget::Type(ConversionTypeKind::Boolean) => {
+        SemanticConversionTarget::Type(ConversionTypeKind::Boolean) if source.is_boolean() => {
             primitive_boolean_arc().clone()
         }
         SemanticConversionTarget::Type(ConversionTypeKind::Time)
@@ -860,9 +930,45 @@ pub(crate) fn unit_conversion_type(
         SemanticConversionTarget::Unit {
             unit_name,
             owning_type,
-        } => Arc::new(owning_type.as_ref().clone().with_unit(unit_name.clone())),
+        } => {
+            let target_type = owning_type.as_ref();
+            // Span-to-unit validity needs the unit index; planning check owns that.
+            let compatible = source.is_number()
+                || (source.is_measure() && measure_unit_conversion_compatible(source, target_type))
+                || source.is_date_range()
+                || source.is_time_range()
+                || source.is_measure_range()
+                || source.is_ratio_range()
+                || source.is_ratio();
+            if compatible {
+                Arc::new(owning_type.as_ref().clone().with_unit(unit_name.clone()))
+            } else {
+                Arc::new(LemmaType::undetermined_type())
+            }
+        }
         SemanticConversionTarget::Type(_) => Arc::new(LemmaType::undetermined_type()),
     }
+}
+
+/// Whether a measure expression may convert or relabel onto `target_type`'s unit.
+fn measure_unit_conversion_compatible(source: &LemmaType, target_type: &LemmaType) -> bool {
+    if source.is_calendar_like() {
+        return target_type.is_calendar_like();
+    }
+    if source.same_measure_family(target_type)
+        || source.compatible_with_anonymous_measure(target_type)
+        || target_type.compatible_with_anonymous_measure(source)
+    {
+        return true;
+    }
+    // Cross-family relabel: expression named a unit, both sides simple base,
+    // neither duration-trait nor calendar target/source (calendar handled above).
+    source.unit().is_some()
+        && !source.is_duration_like()
+        && !target_type.is_calendar_like()
+        && !target_type.is_duration_like()
+        && source.is_simple_base_measure()
+        && target_type.is_simple_base_measure()
 }
 
 pub(crate) fn past_future_range_type(offset: &LemmaType) -> Arc<LemmaType> {
@@ -1327,9 +1433,191 @@ mod tests {
         let scope = empty_scope(&unit_index, &signature_index, &named);
 
         assert!(logical_not_type(&number).is_undetermined());
-        assert!(comparison_type(&text, &number).is_undetermined());
+        assert!(comparison_type(
+            &text,
+            &crate::planning::semantics::ComparisonComputation::Is,
+            &number
+        )
+        .is_undetermined());
         assert!(math_op_type(&MathematicalComputation::Sqrt, &measure, &scope).is_undetermined());
         assert!(date_predicate_type(&number).is_undetermined());
         assert!(past_future_range_type(&number).is_undetermined());
+    }
+
+    fn simple_base_measure(name: &str, family_name: &str) -> Arc<LemmaType> {
+        let family = test_type_family(family_name);
+        let mut spec = TypeSpecification::measure();
+        if let TypeSpecification::Measure { decomposition, .. } = &mut spec {
+            *decomposition = Some(
+                [(
+                    crate::planning::semantics::Dimension::Family(family.clone()),
+                    1i32,
+                )]
+                .into_iter()
+                .collect(),
+            );
+        }
+        Arc::new(LemmaType::new(
+            name.to_string(),
+            spec,
+            TypeExtends::custom_local(family_name.to_string(), family),
+        ))
+    }
+
+    fn compound_measure(name: &str, family_name: &str) -> Arc<LemmaType> {
+        let family = test_type_family(family_name);
+        let other = test_type_family("other_axis");
+        let mut spec = TypeSpecification::measure();
+        if let TypeSpecification::Measure { decomposition, .. } = &mut spec {
+            *decomposition = Some(
+                [
+                    (
+                        crate::planning::semantics::Dimension::Family(family.clone()),
+                        1i32,
+                    ),
+                    (crate::planning::semantics::Dimension::Family(other), -1i32),
+                ]
+                .into_iter()
+                .collect(),
+            );
+        }
+        Arc::new(LemmaType::new(
+            name.to_string(),
+            spec,
+            TypeExtends::custom_local(family_name.to_string(), family),
+        ))
+    }
+
+    #[test]
+    fn unit_conversion_cross_family_relabel_needs_expression_unit() {
+        let money = simple_base_measure("money", "money");
+        let mass = simple_base_measure("mass", "mass");
+        let target = SemanticConversionTarget::Unit {
+            unit_name: "kg".to_string(),
+            owning_type: Arc::clone(&mass),
+        };
+        let bare = unit_conversion_type(&money, &target);
+        assert!(
+            bare.is_undetermined(),
+            "path-like measure without written unit must not relabel"
+        );
+        let stamped = Arc::new(money.as_ref().clone().with_unit("eur"));
+        let relabelled = unit_conversion_type(&stamped, &target);
+        assert_eq!(relabelled.name.as_deref(), Some("mass"));
+        assert_eq!(relabelled.unit(), Some("kg"));
+    }
+
+    #[test]
+    fn unit_conversion_compound_cannot_cross_family_relabel() {
+        let rate = compound_measure("rate", "rate");
+        let calendar = {
+            let mut spec = TypeSpecification::measure();
+            if let TypeSpecification::Measure {
+                decomposition,
+                traits,
+                ..
+            } = &mut spec
+            {
+                *decomposition = Some(crate::planning::semantics::calendar_decomposition());
+                *traits = vec![crate::planning::semantics::MeasureTrait::Calendar];
+            }
+            Arc::new(LemmaType::new(
+                "calendar".to_string(),
+                spec,
+                TypeExtends::Primitive,
+            ))
+        };
+        let stamped = Arc::new(rate.as_ref().clone().with_unit("eur_per_month"));
+        let target = SemanticConversionTarget::Unit {
+            unit_name: "month".to_string(),
+            owning_type: calendar,
+        };
+        assert!(unit_conversion_type(&stamped, &target).is_undetermined());
+    }
+
+    #[test]
+    fn unit_conversion_calendar_cannot_become_duration_unit() {
+        let mut calendar_spec = TypeSpecification::measure();
+        if let TypeSpecification::Measure {
+            decomposition,
+            traits,
+            ..
+        } = &mut calendar_spec
+        {
+            *decomposition = Some(crate::planning::semantics::calendar_decomposition());
+            *traits = vec![crate::planning::semantics::MeasureTrait::Calendar];
+        }
+        let calendar = Arc::new(
+            LemmaType::new(
+                "calendar".to_string(),
+                calendar_spec,
+                TypeExtends::Primitive,
+            )
+            .with_unit("month"),
+        );
+        let mut duration_spec = TypeSpecification::measure();
+        if let TypeSpecification::Measure {
+            decomposition,
+            traits,
+            ..
+        } = &mut duration_spec
+        {
+            *decomposition = Some(crate::planning::semantics::duration_decomposition());
+            *traits = vec![crate::planning::semantics::MeasureTrait::Duration];
+        }
+        let duration = Arc::new(LemmaType::new(
+            "duration".to_string(),
+            duration_spec,
+            TypeExtends::Primitive,
+        ));
+        let target = SemanticConversionTarget::Unit {
+            unit_name: "second".to_string(),
+            owning_type: duration,
+        };
+        assert!(unit_conversion_type(&calendar, &target).is_undetermined());
+    }
+
+    #[test]
+    fn unit_conversion_duration_trait_cannot_relabel_to_money() {
+        let mut duration_spec = TypeSpecification::measure();
+        if let TypeSpecification::Measure {
+            decomposition,
+            traits,
+            ..
+        } = &mut duration_spec
+        {
+            *decomposition = Some(crate::planning::semantics::duration_decomposition());
+            *traits = vec![crate::planning::semantics::MeasureTrait::Duration];
+        }
+        let duration = Arc::new(
+            LemmaType::new(
+                "duration".to_string(),
+                duration_spec,
+                TypeExtends::Primitive,
+            )
+            .with_unit("hour"),
+        );
+        let money = simple_base_measure("money", "money");
+        let target = SemanticConversionTarget::Unit {
+            unit_name: "eur".to_string(),
+            owning_type: money,
+        };
+        assert!(unit_conversion_type(&duration, &target).is_undetermined());
+    }
+
+    #[test]
+    fn unit_conversion_measure_as_number_needs_expression_unit() {
+        let money = simple_base_measure("money", "money");
+        let bare = unit_conversion_type(
+            &money,
+            &SemanticConversionTarget::Type(ConversionTypeKind::Number),
+        );
+        assert!(bare.is_undetermined());
+        let stamped = Arc::new(money.as_ref().clone().with_unit("eur"));
+        let stripped = unit_conversion_type(
+            &stamped,
+            &SemanticConversionTarget::Type(ConversionTypeKind::Number),
+        );
+        assert!(stripped.is_number());
     }
 }

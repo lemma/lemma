@@ -1,0 +1,8 @@
+spec fuzz_seed
+data quantity: number
+data is_vip: false
+rule discount:
+  0%
+  unless quantity >= 10 then 10%
+  unless quantity >= 50 then 20%
+  unless is_vip then 25%

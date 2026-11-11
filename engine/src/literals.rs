@@ -30,20 +30,57 @@ pub fn rational_from_parsed_decimal(decimal: Decimal) -> Result<RationalInteger,
 
 /// Conversion factor of a measure unit: a plan-time rational, or a data/rule
 /// reference whose value is known only during evaluation.
+///
+/// Dynamic scales carry a plan-time `coefficient` and `exponent` so compound
+/// units can inherit a base unit's reference:
+/// `effective = settled(reference)^exponent * coefficient`.
+/// Plain `-> unit gbp: rate` uses coefficient 1 and exponent 1.
+/// `-> unit gbp_per_kg: gbp/kilogram` uses the gbp reference with
+/// coefficient `1/kilogram` and exponent 1.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum UnitScale {
     /// 1 of this unit equals this many canonical units.
     Literal(RationalInteger),
-    /// Written path before graph resolution (`rate`, `fx.rate`). Replaced by
-    /// [`Self::Reference`] when the declaring spec's scales are resolved.
+    /// Written path between parse and classification (`rate`, `fx.rate`). The
+    /// declaring spec's type resolution replaces it with [`Self::Reference`] or a
+    /// compound literal factor; it never survives type resolution.
     Unresolved {
         written: String,
         segments: Vec<String>,
         name: String,
+        coefficient: RationalInteger,
+        exponent: i32,
     },
-    /// Resolved `number` data field or rule. After planning succeeds every
-    /// dynamic unit is this variant — never [`Self::Unresolved`].
-    Reference(crate::planning::semantics::ReferenceTarget),
+    /// Resolved `number` data field or rule, in the coordinates of the spec whose
+    /// type resolution wrote it: a local data or rule, or `uses` hops plus a member
+    /// of the imported spec. After planning succeeds every dynamic unit is this
+    /// variant — never [`Self::Unresolved`].
+    Reference {
+        target: crate::planning::semantics::ReferenceTarget,
+        coefficient: RationalInteger,
+        exponent: i32,
+    },
+}
+
+impl UnitScale {
+    #[must_use]
+    pub fn dynamic_coefficient(&self) -> Option<&RationalInteger> {
+        match self {
+            UnitScale::Literal(_) => None,
+            UnitScale::Unresolved { coefficient, .. }
+            | UnitScale::Reference { coefficient, .. } => Some(coefficient),
+        }
+    }
+
+    #[must_use]
+    pub fn dynamic_exponent(&self) -> Option<i32> {
+        match self {
+            UnitScale::Literal(_) => None,
+            UnitScale::Unresolved { exponent, .. } | UnitScale::Reference { exponent, .. } => {
+                Some(*exponent)
+            }
+        }
+    }
 }
 
 /// A single unit within a Measure type.
@@ -99,6 +136,8 @@ impl MeasureUnit {
                 written,
                 segments,
                 name: reference_name,
+                coefficient: rational::rational_one(),
+                exponent: 1,
             },
             derived_measure_factors: Vec::new(),
             decomposition: BaseMeasureVector::new(),
@@ -118,7 +157,7 @@ impl MeasureUnit {
     pub fn is_dynamic(&self) -> bool {
         matches!(
             self.scale,
-            UnitScale::Unresolved { .. } | UnitScale::Reference(_)
+            UnitScale::Unresolved { .. } | UnitScale::Reference { .. }
         )
     }
 
@@ -127,7 +166,7 @@ impl MeasureUnit {
     pub fn scale_written(&self) -> Option<String> {
         match &self.scale {
             UnitScale::Unresolved { written, .. } => Some(written.clone()),
-            UnitScale::Reference(target) => Some(target.to_string()),
+            UnitScale::Reference { target, .. } => Some(target.to_string()),
             UnitScale::Literal(_) => None,
         }
     }
@@ -136,7 +175,7 @@ impl MeasureUnit {
     #[must_use]
     pub fn resolved_scale_target(&self) -> Option<&crate::planning::semantics::ReferenceTarget> {
         match &self.scale {
-            UnitScale::Reference(target) => Some(target),
+            UnitScale::Reference { target, .. } => Some(target),
             UnitScale::Literal(_) | UnitScale::Unresolved { .. } => None,
         }
     }
@@ -148,7 +187,7 @@ impl MeasureUnit {
             UnitScale::Unresolved { segments, name, .. } => {
                 Some((segments.as_slice(), name.as_str()))
             }
-            UnitScale::Literal(_) | UnitScale::Reference(_) => None,
+            UnitScale::Literal(_) | UnitScale::Reference { .. } => None,
         }
     }
 
@@ -157,7 +196,28 @@ impl MeasureUnit {
     pub fn literal_factor(&self) -> Option<&RationalInteger> {
         match &self.scale {
             UnitScale::Literal(factor) => Some(factor),
-            UnitScale::Unresolved { .. } | UnitScale::Reference(_) => None,
+            UnitScale::Unresolved { .. } | UnitScale::Reference { .. } => None,
+        }
+    }
+
+    /// Plan-time coefficient for a dynamic scale (`1` when literal).
+    #[must_use]
+    pub fn scale_coefficient(&self) -> RationalInteger {
+        match &self.scale {
+            UnitScale::Literal(_) => rational::rational_one(),
+            UnitScale::Unresolved { coefficient, .. }
+            | UnitScale::Reference { coefficient, .. } => coefficient.clone(),
+        }
+    }
+
+    /// Exponent applied to the settled reference for a dynamic scale (`1` when literal).
+    #[must_use]
+    pub fn scale_exponent(&self) -> i32 {
+        match &self.scale {
+            UnitScale::Literal(_) => 1,
+            UnitScale::Unresolved { exponent, .. } | UnitScale::Reference { exponent, .. } => {
+                *exponent
+            }
         }
     }
 
@@ -172,49 +232,13 @@ impl MeasureUnit {
         })
     }
 
-    /// Whether this unit and `other` have the same scale in consumer coordinates:
-    /// equal literal factors, or equal reference paths after prefixing each
-    /// owner's import path.
+    /// Whether this unit and `other` have the same scale: equal literal factors, or
+    /// equal reference targets with equal coefficient and exponent. Both types carry
+    /// the coordinates of the spec holding them (import hops are already prefixed on
+    /// the type), so target equality is coordinate equality.
     #[must_use]
-    pub fn same_consumer_scale(
-        &self,
-        other: &Self,
-        self_import_path: &[String],
-        other_import_path: &[String],
-    ) -> bool {
-        match (&self.scale, &other.scale) {
-            (UnitScale::Literal(left), UnitScale::Literal(right)) => left == right,
-            (
-                UnitScale::Unresolved {
-                    segments: left_segments,
-                    name: left_name,
-                    ..
-                },
-                UnitScale::Unresolved {
-                    segments: right_segments,
-                    name: right_name,
-                    ..
-                },
-            ) => {
-                let left: Vec<&str> = self_import_path
-                    .iter()
-                    .map(String::as_str)
-                    .chain(left_segments.iter().map(String::as_str))
-                    .chain(std::iter::once(left_name.as_str()))
-                    .collect();
-                let right: Vec<&str> = other_import_path
-                    .iter()
-                    .map(String::as_str)
-                    .chain(right_segments.iter().map(String::as_str))
-                    .chain(std::iter::once(right_name.as_str()))
-                    .collect();
-                left == right
-            }
-            (UnitScale::Reference(left), UnitScale::Reference(right)) => {
-                left == right && self_import_path == other_import_path
-            }
-            _ => false,
-        }
+    pub fn same_scale(&self, other: &Self) -> bool {
+        self.scale == other.scale
     }
 
     pub fn is_canonical_factor(&self) -> bool {
@@ -225,7 +249,8 @@ impl MeasureUnit {
     pub fn is_positive_factor(&self) -> bool {
         match &self.scale {
             UnitScale::Literal(factor) => factor.numer_is_positive(),
-            UnitScale::Unresolved { .. } | UnitScale::Reference(_) => true,
+            UnitScale::Unresolved { coefficient, .. }
+            | UnitScale::Reference { coefficient, .. } => coefficient.numer_is_positive(),
         }
     }
 
@@ -323,13 +348,44 @@ impl MeasureUnit {
                 scale: UnitScale::Literal(factor),
                 ..self
             },
-            UnitScale::Unresolved { .. } | UnitScale::Reference(_) => {
+            UnitScale::Unresolved { .. } | UnitScale::Reference { .. } => {
                 panic!(
-                    "BUG: with_factor on reference-scaled unit '{}'; compound resolution must reject dynamic units",
+                    "BUG: with_factor on reference-scaled unit '{}'; use with_dynamic_scale for compounds that inherit a dynamic base",
                     self.name
                 )
             }
         }
+    }
+
+    /// Replace this unit's scale with a dynamic scale (typically copied from a
+    /// referenced base unit) and the composed coefficient/exponent from compound
+    /// resolution.
+    pub fn with_dynamic_scale(
+        self,
+        scale: UnitScale,
+        coefficient: RationalInteger,
+        exponent: i32,
+    ) -> Self {
+        let scale = match scale {
+            UnitScale::Unresolved { .. } => {
+                panic!(
+                    "BUG: with_dynamic_scale on unit '{}' got a still-unresolved base; the declaring spec's type resolution must classify and resolve unit payloads before compound resolution",
+                    self.name
+                )
+            }
+            UnitScale::Reference { target, .. } => UnitScale::Reference {
+                target,
+                coefficient,
+                exponent,
+            },
+            UnitScale::Literal(_) => {
+                panic!(
+                    "BUG: with_dynamic_scale on unit '{}' requires an unresolved or reference scale",
+                    self.name
+                )
+            }
+        };
+        Self { scale, ..self }
     }
 
     pub fn with_resolved_scale(
@@ -337,11 +393,19 @@ impl MeasureUnit {
         resolved: crate::planning::semantics::ReferenceTarget,
     ) -> Self {
         match self.scale {
-            UnitScale::Unresolved { .. } => Self {
-                scale: UnitScale::Reference(resolved),
+            UnitScale::Unresolved {
+                coefficient,
+                exponent,
+                ..
+            } => Self {
+                scale: UnitScale::Reference {
+                    target: resolved,
+                    coefficient,
+                    exponent,
+                },
                 ..self
             },
-            UnitScale::Literal(_) | UnitScale::Reference(_) => {
+            UnitScale::Literal(_) | UnitScale::Reference { .. } => {
                 panic!(
                     "BUG: with_resolved_scale on non-unresolved unit '{}'",
                     self.name

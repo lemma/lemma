@@ -800,6 +800,8 @@ impl NormalFormInterner {
 }
 
 /// Result type of a data leaf, from its definition in the flattened data map.
+/// Written units from the stored value are cleared: a path expression does not
+/// name a unit (same invariant as graph expression inference).
 pub(crate) fn data_path_result_type(
     data: &IndexMap<DataPath, DataDefinition>,
     path: &DataPath,
@@ -808,7 +810,9 @@ pub(crate) fn data_path_result_type(
         Some(DataDefinition::Value { resolved_type, .. })
         | Some(DataDefinition::TypeDeclaration { resolved_type, .. })
         | Some(DataDefinition::Reference { resolved_type, .. })
-        | Some(DataDefinition::InstanceList { resolved_type, .. }) => Arc::clone(resolved_type),
+        | Some(DataDefinition::InstanceList { resolved_type, .. }) => {
+            Arc::new(resolved_type.as_ref().without_written_unit())
+        }
         Some(DataDefinition::Import { row, .. }) => Arc::new(LemmaType::primitive(
             crate::planning::semantics::TypeSpecification::Spec {
                 spec: row.identity.as_ref().clone(),
@@ -1224,8 +1228,8 @@ impl Cells<'_> {
                 });
                 (ty, Vec::new())
             }
-            NormalFormKind::Comparison(a, _, b) => (
-                comparison_type(self.result_type(*a), self.result_type(*b)),
+            NormalFormKind::Comparison(a, op, b) => (
+                comparison_type(self.result_type(*a), op, self.result_type(*b)),
                 Vec::new(),
             ),
             NormalFormKind::RangeContainment(a, b) => (
@@ -1518,7 +1522,11 @@ fn lower_spec_member(
         )
     });
     let last = chain.last().expect("BUG: a row end chain has a last hop");
-    let result_type = lower.row_end_type(&last.identity, &last.end);
+    let mut result_type = lower.row_end_type(&last.identity, &last.end);
+    if let NormalFormKind::Leaf(LeafKind::DataPath(data_path)) = &cells.get(base).kind {
+        result_type = reanchor_lowered_member_type(lower, data_path, path, result_type);
+    }
+    result_type = Arc::new(result_type.as_ref().without_written_unit());
     cells.intern_empty(NormalFormKind::SpecMember {
         base,
         path: path.to_vec(),
@@ -1528,6 +1536,34 @@ fn lower_spec_member(
             result_type,
         },
     })
+}
+
+/// Prefix `uses` hops from a SpecMember's import base onto the field type's
+/// dynamic scale references (normalize twin of graph typing's reanchor).
+fn reanchor_lowered_member_type(
+    lower: &LowerCtx<'_>,
+    base_path: &DataPath,
+    member_path: &[String],
+    lemma_type: Arc<LemmaType>,
+) -> Arc<LemmaType> {
+    use crate::planning::semantics::{DataDefinition, LemmaType, SpecIdentity};
+    let Some(DataDefinition::Import { row, .. }) = lower.data.get(base_path) else {
+        return lemma_type;
+    };
+    LemmaType::reanchor_through_import_path(
+        lemma_type,
+        &base_path.data,
+        row.identity.as_ref(),
+        member_path,
+        |identity: &SpecIdentity, segment: &str| {
+            let template = lower.template(identity);
+            let slot = DataPath::local(segment.to_string());
+            match template.data.get(&slot) {
+                Some(DataDefinition::Import { row, .. }) => Some(row.identity.as_ref().clone()),
+                _ => None,
+            }
+        },
+    )
 }
 
 /// Lower one node whose children are already lowered to `children`, in `children()` order.
@@ -1552,7 +1588,11 @@ fn lower_node(
         }
         ExpressionKind::RulePath(path) => {
             let body = lower.completed_rule(path);
-            cells.intern_rule_ref(body, path.clone(), lower.rule_type(path))
+            cells.intern_rule_ref(
+                body,
+                path.clone(),
+                Arc::new(lower.rule_type(path).as_ref().without_written_unit()),
+            )
         }
         ExpressionKind::Logical { connective, .. } => {
             cells.intern_empty(NormalFormKind::Logical(*connective, children.to_vec()))
@@ -1686,14 +1726,22 @@ fn lower_node(
                 end: end.clone(),
                 qualifier: qualifier.clone(),
             },
-            lower.row_end_type(identity, end),
+            Arc::new(
+                lower
+                    .row_end_type(identity, end)
+                    .as_ref()
+                    .without_written_unit(),
+            ),
         ),
         ExpressionKind::RowValue { level, list } => {
             let list_cell = *lowered.get(list.index()).expect(
                 "BUG: row value type-only list reference must point to an earlier expression",
             );
             let element_type = cells.result_type(list_cell).list_element_lemma_type();
-            cells.intern_row_value_leaf(*level, Arc::clone(element_type))
+            cells.intern_row_value_leaf(
+                *level,
+                Arc::new(element_type.as_ref().without_written_unit()),
+            )
         }
     }
 }

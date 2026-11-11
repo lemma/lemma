@@ -1,0 +1,4 @@
+spec fuzz_seed
+data x: number
+rule inside: x in 1...10
+rule band: 5 in 0...100

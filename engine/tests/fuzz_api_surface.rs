@@ -9,6 +9,10 @@ use lemma::{Engine, SourceType};
 use std::collections::HashMap;
 use std::str::FromStr;
 
+fn fixed_now() -> DateTimeValue {
+    DateTimeValue::from_str("2024-06-15T12:00:00Z").expect("BUG: fixed fuzz datetime")
+}
+
 fn engine_with_files(files: HashMap<String, String>) -> Engine {
     let mut engine = Engine::new();
     for (attr, code) in files {
@@ -64,7 +68,7 @@ fn fuzz_data_bindings_api_number_too_long_no_panic() {
     // veto with a parse reason, not panic.
     let mut data = IndexMap::new();
     data.insert("x".to_string(), "999999999999999999999999999999".into());
-    let now = DateTimeValue::now();
+    let now = fixed_now();
     let response = engine
         .evaluate(None, "fuzz_test", Some(&now), data, None, false)
         .expect("evaluate must complete with veto, not Error");
@@ -140,7 +144,7 @@ rule band_out: band
                 code.to_string(),
             )])
             .unwrap_or_else(|e| panic!("{name} must load: {e:?}"));
-        let now = DateTimeValue::now();
+        let now = fixed_now();
         let show = engine
             .show(None, name, Some(&now))
             .unwrap_or_else(|e| panic!("{name} show: {e:?}"));
@@ -174,7 +178,7 @@ fn data_binding_at_max_fractional_digits_evaluates() {
         .unwrap();
     let mut data = IndexMap::new();
     data.insert("x".to_string(), literal.clone().into());
-    let now = DateTimeValue::now();
+    let now = fixed_now();
     let response = engine
         .evaluate(None, "fuzz_test", Some(&now), data, None, false)
         .expect("evaluate must complete");
@@ -237,7 +241,7 @@ rule total: items -> sum price
         ),
     ];
     let data = lemma::evaluate_data_from_entries(entries).expect("distinct keys");
-    let now = DateTimeValue::now();
+    let now = fixed_now();
     // Property mirrored from fuzz_data_bindings: overlays and odd keys must not panic.
     // Request Error and Veto are both acceptable outcomes.
     match engine.evaluate(None, "fuzz_test", Some(&now), data, None, false) {
@@ -277,7 +281,7 @@ rule doubled: x * 2
             code.to_string(),
         )])
         .expect("explain fixture must load");
-    let now = DateTimeValue::now();
+    let now = fixed_now();
     let response = engine
         .evaluate(
             None,
@@ -325,7 +329,7 @@ rule test_expr: (x + y) * 2
             code.to_string(),
         )])
         .expect("typed operand fixture must load");
-    let now = DateTimeValue::now();
+    let now = fixed_now();
     let response = engine
         .evaluate(None, "fuzz_test", Some(&now), IndexMap::new(), None, false)
         .expect("typed operand evaluate must succeed");
@@ -354,7 +358,7 @@ fn data_binding_with_excess_fractional_digits_vetoes_at_input() {
         .unwrap();
     let mut data = IndexMap::new();
     data.insert("x".to_string(), literal.clone().into());
-    let now = DateTimeValue::now();
+    let now = fixed_now();
     let response = engine
         .evaluate(None, "fuzz_test", Some(&now), data, None, false)
         .expect("evaluate must complete with veto, not Error");
@@ -369,4 +373,209 @@ fn data_binding_with_excess_fractional_digits_vetoes_at_input() {
         reason.contains("Invalid number") && reason.contains("too many fractional digits"),
         "expected parse-failure veto for over-scale input, got: {reason}"
     );
+}
+
+#[test]
+fn fuzz_promoted_adversarial_literal_soup_no_panic() {
+    // Shape promoted from a historical fuzz_literals crash artifact: long
+    // percent/calendar soup spliced as a text literal must not panic.
+    let soup = "080-000000180-50000percent-percent-6day-60l0.-00/00000000000-50000180-50000181850percent-80calendar-00/00000000ercent-80";
+    let code = format!(
+        "spec fuzz_test\nuses lemma units\ndata test_value: \"{soup}\"\nrule echo: test_value\n"
+    );
+    let mut engine = Engine::new();
+    engine
+        .load([(
+            SourceType::Path(std::sync::Arc::new(std::path::PathBuf::from(
+                "fuzz_literal_soup",
+            ))),
+            code,
+        )])
+        .expect("adversarial text literal must load");
+    let now = fixed_now();
+    let first = engine
+        .evaluate(None, "fuzz_test", Some(&now), IndexMap::new(), None, true)
+        .expect("evaluate must complete");
+    let second = engine
+        .evaluate(None, "fuzz_test", Some(&now), IndexMap::new(), None, true)
+        .expect("second evaluate must complete");
+    let json_a = serde_json::to_string(&lemma::api::Response::from(&first))
+        .expect("Response must serialize");
+    let json_b = serde_json::to_string(&lemma::api::Response::from(&second))
+        .expect("Response must serialize");
+    assert_eq!(json_a, json_b, "deterministic evaluate");
+    let echo = first.results.get("echo").expect("echo");
+    assert!(
+        !echo.vetoed,
+        "text literal soup must not veto, got {:?}",
+        echo.veto_reason
+    );
+    assert!(
+        echo.explanation.is_some(),
+        "explain:true and non-vetoed rule must carry explanation"
+    );
+}
+
+#[test]
+fn fuzz_promoted_power_expression_no_panic() {
+    // Theme promoted from a historical fuzz_expressions timeout artifact:
+    // power (including a ratio exponent) must not hang or panic.
+    let code = r#"
+spec fuzz_test
+data x: 787
+rule powered: (x * 480) ^ 0
+rule fractional: 2 ^ 50%
+"#;
+    let mut engine = Engine::new();
+    engine
+        .load([(
+            SourceType::Path(std::sync::Arc::new(std::path::PathBuf::from("fuzz_power"))),
+            code.to_string(),
+        )])
+        .expect("power fixture must load");
+    let now = fixed_now();
+    let start = std::time::Instant::now();
+    let response = engine
+        .evaluate(None, "fuzz_test", Some(&now), IndexMap::new(), None, false)
+        .expect("power evaluate must complete");
+    assert!(
+        start.elapsed().as_millis() < 500,
+        "power evaluate took {}ms, expected <500ms",
+        start.elapsed().as_millis()
+    );
+    serde_json::to_string(&lemma::api::Response::from(&response)).expect("Response must serialize");
+    assert!(response.results.contains_key("powered"));
+    assert!(response.results.contains_key("fractional"));
+}
+
+#[test]
+fn fuzz_lists_uses_pipelines_and_composition_no_panic() {
+    let code = r#"
+spec item
+data name: text
+data qty: number
+
+spec base
+data qty: number
+  -> suggest 1
+
+spec fuzz_test
+uses item
+uses base
+data flag: true
+data extra: 3
+data wanted: item.name
+  -> with "a"
+data items: item list
+  -> key name
+  -> with name: "a", qty: 1
+  -> with name: "b", qty: 2
+  -> with name: "c", qty: 0
+rule listed: items -> where qty > 0 -> sum qty
+rule composed:
+  base.qty
+  unless flag then base.qty + extra
+  unless items -> count > 0 then items -> count
+"#;
+    let mut engine = Engine::new();
+    engine
+        .load([(
+            SourceType::Path(std::sync::Arc::new(std::path::PathBuf::from(
+                "fuzz_lists_uses",
+            ))),
+            code.to_string(),
+        )])
+        .expect("lists/uses fixture must load");
+    let now = fixed_now();
+    let response = engine
+        .evaluate(None, "fuzz_test", Some(&now), IndexMap::new(), None, false)
+        .expect("lists/uses evaluate must complete");
+    let listed = response.results.get("listed").expect("listed");
+    assert!(
+        !listed.vetoed,
+        "list pipeline must not veto, got {:?}",
+        listed.veto_reason
+    );
+    let composed = response.results.get("composed").expect("composed");
+    assert!(
+        !composed.vetoed,
+        "composed uses/unless must not veto, got {:?}",
+        composed.veto_reason
+    );
+}
+
+#[test]
+fn fuzz_structured_literal_kinds_load() {
+    let cases = [
+        ("number", "42"),
+        ("text", "\"hello\""),
+        ("measure", "1 kilogram"),
+        ("ratio", "50%"),
+        ("date", "2024-01-01"),
+        ("time", "12:30:45"),
+        ("boolean", "true"),
+        ("range", "1...10"),
+    ];
+    for (name, literal) in cases {
+        let code = format!("spec fuzz_test\nuses lemma units\ndata test_value: {literal}\n");
+        let mut engine = Engine::new();
+        engine
+            .load([(
+                SourceType::Path(std::sync::Arc::new(std::path::PathBuf::from(format!(
+                    "fuzz_literal_{name}"
+                )))),
+                code,
+            )])
+            .unwrap_or_else(|e| panic!("structured literal {name} must load: {e:?}"));
+        let now = fixed_now();
+        engine
+            .evaluate(None, "fuzz_test", Some(&now), IndexMap::new(), None, false)
+            .unwrap_or_else(|e| panic!("structured literal {name} evaluate: {e:?}"));
+    }
+}
+
+#[test]
+fn fuzz_expressions_unless_and_list_ops_load() {
+    let code = r#"
+spec item
+data name: text
+data qty: number
+
+spec fuzz_test
+uses lemma units
+uses item
+data x: 100
+data y: 50
+data flag: true
+data items: item list
+  -> key name
+  -> with name: "a", qty: 1
+  -> with name: "b", qty: 2
+rule with_unless:
+  x
+  unless flag then y
+  unless x > 0 then 0
+rule with_list: items -> where qty > 0 -> count
+"#;
+    let mut engine = Engine::new();
+    engine
+        .load([(
+            SourceType::Path(std::sync::Arc::new(std::path::PathBuf::from(
+                "fuzz_expr_grown",
+            ))),
+            code.to_string(),
+        )])
+        .expect("grown expression fixture must load");
+    let now = fixed_now();
+    let response = engine
+        .evaluate(None, "fuzz_test", Some(&now), IndexMap::new(), None, false)
+        .expect("grown expression evaluate must complete");
+    assert!(
+        !response
+            .results
+            .get("with_unless")
+            .expect("with_unless")
+            .vetoed
+    );
+    assert!(!response.results.get("with_list").expect("with_list").vetoed);
 }

@@ -1,0 +1,3 @@
+spec fuzz_seed
+data x: 2
+rule doubled: x * 2

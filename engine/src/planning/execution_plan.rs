@@ -33,7 +33,7 @@ use crate::planning::semantics::{
     lemma_type_with_display_binding, option_detail_line, primitive_number_arc, primitive_ratio_arc,
     value_kind_matches_spec, BoundValueKind, ComparisonComputation, DataDefinition, DataPath,
     LemmaType, LiteralValue, PathSegment, ReferenceEnd, ReferenceTarget, RowBinding, RowEnd,
-    RowInstance, RulePath, SpecIdentity, TypeFamily, TypeSpecification, TypedLiteral, ValueKind,
+    RowInstance, RulePath, SpecIdentity, TypeSpecification, TypedLiteral, ValueKind,
 };
 use crate::planning::show_expression::{project_depends_on_rules, show_branches_from, ShowScope};
 use crate::planning::spec_set::LemmaSpecSet;
@@ -226,10 +226,9 @@ pub struct ExecutionPlan {
     /// slot and land in the value table through this.
     pub(crate) data_slot_leaves: Vec<NormalFormId>,
 
-    /// Scale target of every dynamic unit this plan's spec declares, in this plan's
-    /// coordinates, keyed by family and unit name. A dynamic unit another spec declares
-    /// has no entry here.
-    pub(crate) unit_scale_targets: IndexMap<(TypeFamily, String), ReferenceTarget>,
+    /// Scale targets of dynamic units on this plan's data-slot types (this plan's
+    /// coordinates). Row scopes force these before a leaf body.
+    pub(crate) data_slot_scale_targets: Vec<ReferenceTarget>,
 }
 
 /// Plan-time prefill/suggestion for one data path (show cache).
@@ -260,8 +259,8 @@ pub struct ExecutableRule {
     /// after rewrites (`x + 0` → `x`), so the API type reads this field.
     pub rule_type: Arc<LemmaType>,
 
-    /// Scale targets of every dynamic unit of the families this rule's nodes hold, in
-    /// this plan's coordinates. Evaluated before the rule body; topological order puts
+    /// Scale targets of every dynamic unit this rule's nodes hold or write, in this
+    /// plan's coordinates. Evaluated before the rule body; topological order puts
     /// local scale rules first.
     pub scale_dependencies: Vec<ReferenceTarget>,
 }
@@ -324,9 +323,9 @@ pub(crate) fn build_execution_plan(
     own_spec: Arc<LemmaSpec>,
     edges: Vec<SpecIdentity>,
 ) -> Result<ExecutionPlan, Vec<Error>> {
-    let rule_order = graph.rule_order();
+    let rule_order = &graph.rule_order;
 
-    let main_spec = graph.main_spec();
+    let main_spec = graph.main_spec;
     let data = graph.build_data(&resolved_types.resolved)?;
 
     // Planning gate: every data-target reference and plain data declaration
@@ -382,7 +381,7 @@ pub(crate) fn build_execution_plan(
     let family_units = Arc::new(FamilyUnitCatalog::build(&resolved_types.unit_index));
 
     let rule_types: HashMap<RulePath, Arc<LemmaType>> = graph
-        .rules()
+        .rules
         .iter()
         .map(|(path, node)| (path.clone(), Arc::clone(&node.rule_type)))
         .collect();
@@ -390,14 +389,14 @@ pub(crate) fn build_execution_plan(
     let mut completed_rules: HashMap<RulePath, NormalFormId> = HashMap::new();
     let mut local_show_rules: HashMap<RulePath, ShowRule> = HashMap::new();
 
-    let show_imports = graph.show_imports();
-    let show_edges = graph.show_edges();
-    let show_order = graph.show_order();
+    let show_imports = &graph.show_imports;
+    let show_edges = &graph.show_edges;
+    let show_order = &graph.show_order;
     let show_keys: HashSet<RulePath> = show_edges.keys().cloned().collect();
     let catalog_keys: HashSet<RulePath> = rule_order.iter().cloned().collect();
 
     for rule_path in rule_order {
-        let rule_node = graph.rules().get(rule_path).expect(
+        let rule_node = graph.rules.get(rule_path).expect(
             "bug: rule from topological sort not in graph - validation should have caught this",
         );
 
@@ -408,8 +407,8 @@ pub(crate) fn build_execution_plan(
         };
         let normalize_ctx = NormalizeContext {
             data: &data,
-            row_templates: &graph.instance_lists().templates,
-            self_identity: &graph.instance_lists().self_identity,
+            row_templates: &graph.instance_lists.templates,
+            self_identity: &graph.instance_lists.self_identity,
             rule_order,
             measure_scope,
             max_normalized_expression_nodes: limits.max_normalized_expression_nodes,
@@ -451,7 +450,7 @@ pub(crate) fn build_execution_plan(
                     &ShowScope {
                         show_keys: &show_keys,
                         data: &data,
-                        templates: &graph.instance_lists().templates,
+                        templates: &graph.instance_lists.templates,
                     },
                 ),
                 depends_on_rules: project_depends_on_rules(&show_edges[rule_path], &catalog_keys),
@@ -470,28 +469,18 @@ pub(crate) fn build_execution_plan(
         );
     }
 
-    let unit_scale_targets = graph.unit_scale_targets().clone();
     for (rule_path, rule) in rules.iter_mut() {
-        let families = &graph
-            .rules()
+        rule.scale_dependencies = graph
+            .rules
             .get(rule_path)
             .expect("BUG: executable rule missing from its graph")
-            .scale_families;
-        rule.scale_dependencies = unit_scale_targets
-            .iter()
-            .filter(|((family, _), _)| families.contains(family))
-            .map(|(_, target)| target.clone())
-            .collect();
+            .scale_targets
+            .clone();
     }
-    let scale_member_targets: Vec<ReferenceTarget> = unit_scale_targets
-        .values()
-        .filter(|target| !reference_target_segments(target).is_empty())
-        .cloned()
-        .collect();
     let mut member_target_paths: Vec<&ReferenceTarget> = Vec::new();
     crate::planning::graph::for_each_owned_reference(
         &data,
-        graph.instance_lists(),
+        &graph.instance_lists,
         |_, _, target| {
             if !reference_target_segments(target).is_empty()
                 && !member_target_paths.contains(&target)
@@ -500,17 +489,41 @@ pub(crate) fn build_execution_plan(
             }
         },
     );
-    for target in &scale_member_targets {
-        if !member_target_paths.contains(&target) {
-            member_target_paths.push(target);
+    let mut owned_scale_member_targets: Vec<ReferenceTarget> = Vec::new();
+    let mut push_uses_scale_member = |target: &ReferenceTarget| {
+        if reference_target_segments(target).is_empty() {
+            return;
         }
+        if !first_hop_is_uses_import(&data, target) {
+            return;
+        }
+        if member_target_paths.contains(&target) || owned_scale_member_targets.contains(target) {
+            return;
+        }
+        owned_scale_member_targets.push(target.clone());
+    };
+    for rule in rules.values() {
+        for target in &rule.scale_dependencies {
+            push_uses_scale_member(target);
+        }
+    }
+    for definition in data.values() {
+        let Some(lemma_type) = definition.schema_type() else {
+            continue;
+        };
+        for target in lemma_type.dynamic_scale_targets() {
+            push_uses_scale_member(&target);
+        }
+    }
+    for target in &owned_scale_member_targets {
+        member_target_paths.push(target);
     }
     let mut member_target_roots: Vec<NormalFormId> = Vec::new();
     for target in &member_target_paths {
         let normalize_ctx = NormalizeContext {
             data: &data,
-            row_templates: &graph.instance_lists().templates,
-            self_identity: &graph.instance_lists().self_identity,
+            row_templates: &graph.instance_lists.templates,
+            self_identity: &graph.instance_lists.self_identity,
             rule_order,
             measure_scope: MeasureScope {
                 unit_index: &resolved_types.unit_index,
@@ -565,7 +578,7 @@ pub(crate) fn build_execution_plan(
         data,
         normal_forms,
         rules,
-        data_reference_order: graph.data_reference_order().to_vec(),
+        data_reference_order: graph.data_reference_order.to_vec(),
         meta: main_spec
             .meta_fields
             .iter()
@@ -595,24 +608,25 @@ pub(crate) fn build_execution_plan(
         show_rule_index: IndexMap::new(),
         data_leaf: IndexMap::new(),
         member_targets,
-        row_templates: graph.instance_lists().templates.clone(),
-        identity: graph.instance_lists().self_identity.clone(),
+        row_templates: graph.instance_lists.templates.clone(),
+        identity: graph.instance_lists.self_identity.clone(),
         own_spec,
         edges,
         rule_candidates: graph
-            .rule_candidates()
+            .rule_candidates
             .iter()
             .map(|(rule, candidates)| (rule.clone(), candidates.clone()))
             .collect(),
         self_row_rules: Vec::new(),
-        instance_lists: graph.instance_lists().sources.clone(),
+        instance_lists: graph.instance_lists.sources.clone(),
         row_mask: Vec::new(),
         initial_values: Vec::new(),
         walk_settled_leaves: Vec::new(),
         rule_ref_indexes: Vec::new(),
         data_slot_leaves: Vec::new(),
-        unit_scale_targets,
+        data_slot_scale_targets: Vec::new(),
     };
+    plan.data_slot_scale_targets = data_slot_scale_targets(&plan.data);
 
     let mut plan_errors = validate_literal_data_against_types(&plan);
     if let Err(error) = validate_unit_conversion_targets(&plan) {
@@ -622,7 +636,7 @@ pub(crate) fn build_execution_plan(
         return Err(plan_errors);
     }
 
-    plan.reference_ends = graph.reference_ends().clone();
+    plan.reference_ends = graph.reference_ends.clone();
     let input_keys: Vec<DataPath> = plan.data.keys().cloned().collect();
     plan.data_leaf = ensure_data_leaves(&mut plan.normal_forms, &input_keys, &plan.data);
     plan.input_key_index = input_keys
@@ -658,6 +672,37 @@ pub(crate) fn reference_target_segments(target: &ReferenceTarget) -> &[PathSegme
         ReferenceTarget::Data(path) => &path.segments,
         ReferenceTarget::Rule(rule) => &rule.segments,
     }
+}
+
+/// Whether `target`'s first hop is a `uses` Import of this plan (not a list name).
+fn first_hop_is_uses_import(
+    data: &IndexMap<DataPath, DataDefinition>,
+    target: &ReferenceTarget,
+) -> bool {
+    let Some(first) = reference_target_segments(target).first() else {
+        return false;
+    };
+    matches!(
+        data.get(&DataPath::local(first.uses.to_string())),
+        Some(DataDefinition::Import { .. })
+    )
+}
+
+/// Dynamic scale targets declared on this plan's data-slot types, in slot order.
+fn data_slot_scale_targets(data: &IndexMap<DataPath, DataDefinition>) -> Vec<ReferenceTarget> {
+    let mut seen = BTreeSet::new();
+    let mut out = Vec::new();
+    for definition in data.values() {
+        let Some(lemma_type) = definition.schema_type() else {
+            continue;
+        };
+        for target in lemma_type.dynamic_scale_targets() {
+            if seen.insert(target.clone()) {
+                out.push(target);
+            }
+        }
+    }
+    out
 }
 
 /// `i.j.x` as a member read on the plan's import slot `i`: the expression a member
@@ -1114,34 +1159,6 @@ fn self_row_rules(plan: &ExecutionPlan) -> Vec<RulePath> {
 }
 
 impl ExecutionPlan {
-    /// Consumer-coordinate scale target of `unit` on `family`.
-    pub(crate) fn unit_scale_target(
-        &self,
-        family: &TypeFamily,
-        unit: &str,
-    ) -> Option<&ReferenceTarget> {
-        self.unit_scale_targets
-            .get(&(family.clone(), unit.to_string()))
-    }
-
-    /// Scale target of `unit` on a measure type of this plan.
-    ///
-    /// The type must carry its measure family (including range endpoints from
-    /// [`LemmaType::range_element_type`]). Missing family is a planning bug.
-    pub(crate) fn scale_target_of(
-        &self,
-        lemma_type: &LemmaType,
-        unit: &str,
-    ) -> Option<&ReferenceTarget> {
-        let family = lemma_type.measure_family().unwrap_or_else(|| {
-            panic!(
-                "BUG: scale lookup on '{}' has no measure family",
-                lemma_type.name()
-            )
-        });
-        self.unit_scale_target(family, unit)
-    }
-
     /// Template plan rows of `identity` read: this plan for its own self-lists.
     pub(crate) fn row_template(&self, identity: &SpecIdentity) -> &ExecutionPlan {
         if *identity == self.identity {
@@ -1402,13 +1419,26 @@ impl NeedsMarker<'_> {
             stack.push(cell);
             return;
         }
-        match target {
-            ReferenceTarget::Rule(rule) => self.mark(InputNeed::Rule(rule.clone())),
-            ReferenceTarget::Data(path) => {
-                if let Some(need) = self.plan.data_read_needs(path) {
-                    self.mark(need);
+        let segments = reference_target_segments(target);
+        if segments.is_empty() {
+            match target {
+                ReferenceTarget::Rule(rule) => self.mark(InputNeed::Rule(rule.clone())),
+                ReferenceTarget::Data(path) => {
+                    if let Some(need) = self.plan.data_read_needs(path) {
+                        self.mark(need);
+                    }
                 }
             }
+            return;
+        }
+        // Uses-qualified target that is a `uses` Import of this plan must have a
+        // member cell. A first hop that is not this plan's import (list name, nested
+        // element's uses) settles in that row template — not as a SpecMember here.
+        if first_hop_is_uses_import(&self.plan.data, target) {
+            panic!(
+                "BUG: uses-qualified scale target '{target}' missing from member_targets of plan '{}'",
+                self.plan.spec_name
+            );
         }
     }
 }
@@ -1421,6 +1451,11 @@ impl NeedsMarker<'_> {
 /// Rule reference cells share a body's Kind, so a `Leaf(DataPath)` cell may carry
 /// `rule_ref`. Those cells hold the referenced rule's value in the value table and
 /// must never be the binding slot for the path.
+///
+/// Fold survivors also share a body's Kind and carry `origin` (identity elim of
+/// `x * 1` → DataPath `x` with the Product as pre-image). Those cells are the
+/// rule body's explanation root, not the binding slot: intake must land on the
+/// origin-free leaf so an explain walk still visits the pre-image.
 fn ensure_data_leaves(
     normal_forms: &mut Vec<NormalForm>,
     input_keys: &[DataPath],
@@ -1431,7 +1466,7 @@ fn ensure_data_leaves(
 
     let mut data_leaf: IndexMap<DataPath, NormalFormId> = IndexMap::new();
     for (index, cell) in normal_forms.iter().enumerate() {
-        if cell.rule_ref.is_some() {
+        if cell.rule_ref.is_some() || cell.origin.is_some() {
             continue;
         }
         if let NormalFormKind::Leaf(LeafKind::DataPath(path)) = &cell.kind {
@@ -1496,6 +1531,7 @@ fn insert_data_display_entry(
         } => Some(BoundValueKind {
             value: value.value.clone(),
             unit: resolved_type.unit().map(Arc::from),
+            instance_factors: None,
         }),
         _ => data.bound_value().cloned(),
     };
@@ -2193,11 +2229,16 @@ impl ExecutionPlan {
                 }
                 match &nf.kind {
                     NormalFormKind::Leaf(LeafKind::DataPath(path)) => {
-                        if let Some(need) = self.data_read_needs(path) {
-                            needs.mark(need);
-                        }
-                        if let Some(rule) = self.options_rule_of(path) {
-                            needs.mark(InputNeed::Rule(rule));
+                        // Local slots only. Uses-qualified paths are SpecMember /
+                        // member-target cells; `data_read_needs` keys `plan.data` by
+                        // local name and must not see nested import FX scales.
+                        if path.segments.is_empty() {
+                            if let Some(need) = self.data_read_needs(path) {
+                                needs.mark(need);
+                            }
+                            if let Some(rule) = self.options_rule_of(path) {
+                                needs.mark(InputNeed::Rule(rule));
+                            }
                         }
                     }
                     NormalFormKind::OrderedDispatch { .. } => {
@@ -2687,6 +2728,7 @@ impl ExecutionPlan {
                 values[leaf.index()] = Some(OperationResult::from_bound(BoundValueKind {
                     value: literal.value,
                     unit,
+                    instance_factors: None,
                 }));
             }
         }
@@ -2736,6 +2778,7 @@ impl ExecutionPlan {
                         resolved_type.as_ref(),
                         &value.to_literal(),
                         &self.resolved_types.unit_index,
+                        None,
                     ) {
                         Ok(()) => OperationResult::from_bound(value.clone()),
                         Err(msg) => OperationResult::Veto(VetoType::computation(format!(
@@ -3080,10 +3123,11 @@ pub(crate) fn reachable_data_paths(
                             Err(_) => vec![*scrutinee],
                         }
                     }
-                    Some(OperationResult::Veto(_)) => vec![*scrutinee],
-                    // Origin Piecewise conditions are not filled under the dispatch
-                    // value walk, so an open scrutinee keeps every origin arm live.
-                    None => {
+                    // Definitive veto settles the rule; gated bodies cannot un-veto.
+                    Some(result) if !result.is_missing_data() => vec![*scrutinee],
+                    // Open scrutinee (unbound DataPath leave-None, or expression
+                    // MissingData stored on the cell): keep every origin arm live.
+                    None | Some(_) => {
                         let mut live = vec![*scrutinee];
                         live.extend(live_piecewise_children(
                             arms,
@@ -3139,6 +3183,9 @@ pub(crate) fn validate_value_against_type(
     expected_type: &LemmaType,
     value: &LiteralValue,
     unit_index: &UnitIndex,
+    runtime_scales: Option<
+        &std::collections::HashMap<String, crate::computation::rational::RationalInteger>,
+    >,
 ) -> Result<(), String> {
     use std::borrow::Cow;
 
@@ -3175,8 +3222,8 @@ pub(crate) fn validate_value_against_type(
                 unit_index,
             )?,
             _ => {
-                validate_scalar_against_type(expected, &value)?;
-                expected.reject_disallowed(&value.value)?;
+                validate_scalar_against_type(expected, &value, runtime_scales)?;
+                expected.reject_disallowed(&value.value, runtime_scales)?;
             }
         }
     }
@@ -3186,6 +3233,9 @@ pub(crate) fn validate_value_against_type(
 fn validate_scalar_against_type(
     expected_type: &LemmaType,
     value: &LiteralValue,
+    runtime_scales: Option<
+        &std::collections::HashMap<String, crate::computation::rational::RationalInteger>,
+    >,
 ) -> Result<(), String> {
     use crate::computation::bigint::BigInt;
     use crate::computation::rational::{
@@ -3274,8 +3324,7 @@ fn validate_scalar_against_type(
             },
             ValueKind::Measure(magnitude),
         ) => {
-            use crate::computation::rational::checked_div;
-            use crate::planning::semantics::measure_declared_bound_to_canonical;
+            use crate::computation::rational::{checked_div, checked_mul};
             use std::cmp::Ordering;
             for (bound, label, violation, relation) in [
                 (minimum, "minimum", Ordering::Less, "below"),
@@ -3284,13 +3333,24 @@ fn validate_scalar_against_type(
                 let Some((bound_magnitude, bound_unit)) = bound else {
                     continue;
                 };
-                let canonical_bound = measure_declared_bound_to_canonical(
-                    bound_magnitude,
-                    bound_unit,
-                    units,
-                    expected_type.name().as_str(),
-                    label,
-                )?;
+                let bound_unit_def = units.get(bound_unit.as_str())?;
+                let canonical_bound = if let Some(factor) = bound_unit_def.literal_factor() {
+                    checked_mul(bound_magnitude, factor).map_err(|failure| {
+                        format!("{label}: unit conversion overflow: {failure}")
+                    })?
+                } else {
+                    let factor = runtime_scales
+                        .and_then(|scales| scales.get(bound_unit.as_str()))
+                        .ok_or_else(|| {
+                            format!(
+                                "{label} cannot use unit '{bound_unit}' on '{}': its conversion factor is not settled.",
+                                expected_type.name()
+                            )
+                        })?;
+                    checked_mul(bound_magnitude, factor).map_err(|failure| {
+                        format!("{label}: unit conversion overflow: {failure}")
+                    })?
+                };
                 if magnitude.try_cmp(&canonical_bound).map_err(|failure| {
                     format!("Comparing against the {label} bound failed: {failure}.")
                 })? != violation
@@ -3301,11 +3361,23 @@ fn validate_scalar_against_type(
                     Some(written) => units.get(written)?,
                     None => units.get(bound_unit)?,
                 };
-                let factor = display_unit.require_literal_factor();
-                let value_in_unit = checked_div(magnitude, factor).map_err(|failure| {
+                let factor = if let Some(factor) = display_unit.literal_factor() {
+                    factor.clone()
+                } else {
+                    runtime_scales
+                        .and_then(|scales| scales.get(display_unit.name.as_str()))
+                        .cloned()
+                        .ok_or_else(|| {
+                            format!(
+                                "Cannot de-canonicalize the measure for validation: unit '{}' scale is not settled.",
+                                display_unit.name
+                            )
+                        })?
+                };
+                let value_in_unit = checked_div(magnitude, &factor).map_err(|failure| {
                     format!("Cannot de-canonicalize the measure for validation: {failure}.")
                 })?;
-                let bound_in_unit = checked_div(&canonical_bound, factor).map_err(|failure| {
+                let bound_in_unit = checked_div(&canonical_bound, &factor).map_err(|failure| {
                     format!("Cannot de-canonicalize the {label} for validation: {failure}.")
                 })?;
                 return Err(format!(
@@ -3513,8 +3585,8 @@ fn validate_range_literal(
         );
     }
     let element_type = Arc::new(LemmaType::primitive(element_spec));
-    validate_scalar_against_type(element_type.as_ref(), &left.to_literal())?;
-    validate_scalar_against_type(element_type.as_ref(), &right.to_literal())?;
+    validate_scalar_against_type(element_type.as_ref(), &left.to_literal(), None)?;
+    validate_scalar_against_type(element_type.as_ref(), &right.to_literal(), None)?;
 
     let ordering = match (&left.value, &right.value) {
         (ValueKind::Number(l), ValueKind::Number(r)) => l
@@ -3743,7 +3815,7 @@ fn validate_literal_data_against_types(plan: &ExecutionPlan) -> Vec<Error> {
         };
 
         if let Err(msg) =
-            validate_value_against_type(expected_type, lit, plan.expression_unit_index())
+            validate_value_against_type(expected_type, lit, plan.expression_unit_index(), None)
         {
             let source = data_definition.source().clone();
             errors.push(Error::validation(
@@ -4093,7 +4165,7 @@ mod tests {
             walk_settled_leaves: Vec::new(),
             rule_ref_indexes: Vec::new(),
             data_slot_leaves: Vec::new(),
-            unit_scale_targets: IndexMap::new(),
+            data_slot_scale_targets: Vec::new(),
         };
 
         let values = input_data(&[("x", "11")]);
@@ -4198,7 +4270,7 @@ mod tests {
             walk_settled_leaves: Vec::new(),
             rule_ref_indexes: Vec::new(),
             data_slot_leaves: Vec::new(),
-            unit_scale_targets: IndexMap::new(),
+            data_slot_scale_targets: Vec::new(),
         };
 
         let values = input_data(&[("tier", "platinum")]);
@@ -4259,7 +4331,7 @@ mod tests {
             walk_settled_leaves: Vec::new(),
             rule_ref_indexes: Vec::new(),
             data_slot_leaves: Vec::new(),
-            unit_scale_targets: IndexMap::new(),
+            data_slot_scale_targets: Vec::new(),
         }
     }
 

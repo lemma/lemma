@@ -244,6 +244,8 @@ rule unit_cost:
 
 A data list is one input. You may replace every row with one JSON array, or patch individual unbound fields with dotted keys that match ask keys (`staff.2.salary`).
 
+On a numbered list, array order becomes Lemma rows `1` to `n`: the first element is `staff.1`, not a 0-based host index. Ask keys, MissingData, `find`, and request errors such as `list item 2 is null` use those Lemma numbers. Keep the JSON array; do not send an object keyed by `"1"`, `"2"`, ….
+
 - Value list: an array of literal strings, `{"fares": ["89 eur", "120 eur"]}`.
 - Instance list: an array of objects, keyed by the row Spec's Data names: `{"staff": [{"name": "Linus", "salary": "7000 eur"}]}`.
 - Dotted patch: `{"staff.2.salary": "8000 eur"}` fills that cell when the list already has a row (from source defaults or a prior whole-list bind). Sending both the whole list key and a dotted key for the same list in one request is an error.
@@ -259,7 +261,7 @@ echo '{"staff": [{"name": "Linus", "salary": "7000 eur"}, {"name": "Ada", "salar
 
 ## Results
 
-A Rule that returns a list has a `list` field with one entry per row. A Rule that returns a row, including a `uses` instance projected from a row, has a `row` reference: the row Spec, its effective date, the instance path (`staff.2` or `lines.1.item`) and an `index`. The index points into the response's `rows` array, which holds each referenced row once, with its Data and Rule results:
+A Rule that returns a list has a `list` field with one entry per row. A Rule that returns a row, including a `uses` instance projected from a row, has a `row` reference: the row Spec, its effective date, the instance path (`staff.2` or `lines.1.item`) and an `index`. `instance` is the Lemma path (1-based where it names a numbered row). `index` is a 0-based offset into the response's `rows` array, which holds each referenced row once, with its Data and Rule results — not the Lemma row number:
 
 ```json
 {

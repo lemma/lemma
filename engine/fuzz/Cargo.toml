@@ -39,17 +39,15 @@ doc = false
 bench = false
 
 [[bin]]
-name = "fuzz_deeply_nested"
-path = "fuzz_targets/fuzz_deeply_nested.rs"
-test = false
-doc = false
-bench = false
-
-[[bin]]
 name = "fuzz_data_bindings"
 path = "fuzz_targets/fuzz_data_bindings.rs"
 test = false
 doc = false
 bench = false
 
-
+[[bin]]
+name = "fuzz_lists_uses"
+path = "fuzz_targets/fuzz_lists_uses.rs"
+test = false
+doc = false
+bench = false

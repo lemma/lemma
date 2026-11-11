@@ -125,6 +125,7 @@ fn rule_bound_slot_value(
         resolved_type.as_ref(),
         &bound.to_literal(),
         &plan.resolved_types.unit_index,
+        None,
     ) {
         Ok(()) => value,
         Err(message) => OperationResult::Veto(VetoType::computation(format!(

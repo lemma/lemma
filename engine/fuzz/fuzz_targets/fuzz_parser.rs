@@ -4,6 +4,16 @@ use lemma::DateTimeValue;
 use lemma::Engine;
 use lemma::IndexMap;
 use libfuzzer_sys::fuzz_target;
+use std::str::FromStr;
+
+fn fixed_now() -> DateTimeValue {
+    DateTimeValue::from_str("2024-06-15T12:00:00Z").expect("BUG: fixed fuzz datetime")
+}
+
+fn response_json(response: &lemma::Response) -> String {
+    serde_json::to_string(&lemma::api::Response::from(response))
+        .expect("BUG: Response must serialize")
+}
 
 fuzz_target!(|data: &[u8]| {
     if let Ok(s) = std::str::from_utf8(data) {
@@ -14,9 +24,10 @@ fuzz_target!(|data: &[u8]| {
         )]);
 
         // Property: load Ok => every loaded spec must evaluate and format
-        // explanations without panic.
+        // explanations without panic; serialize must succeed; two evaluates
+        // with the same effective datetime must agree.
         if loaded.is_ok() {
-            let now = DateTimeValue::now();
+            let now = fixed_now();
             let spec_names: Vec<String> = engine
                 .specs()
                 .iter()
@@ -27,29 +38,51 @@ fuzz_target!(|data: &[u8]| {
                 .map(|version| version.name.clone())
                 .collect();
             for name in spec_names {
-                match engine.evaluate(
+                let first = engine.evaluate(
                     None,
                     &name,
                     Some(&now),
                     IndexMap::new(),
                     None,
                     true,
-                ) {
-                    Ok(response) => {
-                        if let Ok(json) = serde_json::to_string(&lemma::api::Response::from(
-                            &response,
-                        )) {
-                            std::hint::black_box(json);
-                        }
-                        for result in response.results.values() {
-                            if let Some(explanation) = &result.explanation {
+                );
+                let second = engine.evaluate(
+                    None,
+                    &name,
+                    Some(&now),
+                    IndexMap::new(),
+                    None,
+                    true,
+                );
+                match (first, second) {
+                    (Ok(a), Ok(b)) => {
+                        let json_a = response_json(&a);
+                        let json_b = response_json(&b);
+                        assert_eq!(
+                            json_a, json_b,
+                            "BUG: evaluate must be deterministic for fixed effective datetime"
+                        );
+                        std::hint::black_box(json_a);
+                        for result in a.results.values() {
+                            if !result.vetoed {
+                                let explanation = result.explanation.as_ref().expect(
+                                    "BUG: explain:true and non-vetoed rule must carry explanation",
+                                );
+                                std::hint::black_box(lemma::format_explanation(explanation));
+                                std::hint::black_box(format!("{explanation:?}"));
+                            } else if let Some(explanation) = &result.explanation {
                                 std::hint::black_box(lemma::format_explanation(explanation));
                                 std::hint::black_box(format!("{explanation:?}"));
                             }
                         }
                     }
-                    Err(error) => {
+                    (Err(error), Err(_)) => {
                         std::hint::black_box(error);
+                    }
+                    (Ok(_), Err(_)) | (Err(_), Ok(_)) => {
+                        panic!(
+                            "BUG: evaluate Ok/Err disagree across identical deterministic runs"
+                        );
                     }
                 }
             }

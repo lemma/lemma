@@ -832,3 +832,59 @@ rule result: x
         }
     }
 }
+
+#[test]
+fn post_rules_query_limits_results() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        temp_dir.path().join("artikel.lemma"),
+        r#"spec artikel
+data x: 1
+rule alpha: x
+rule adviesprijs: x * 3
+"#,
+    )
+    .unwrap();
+
+    let port = SERVER_TEST_PORT + 14;
+    let bin = env!("CARGO_BIN_EXE_lemma");
+    let mut child = std::process::Command::new(bin)
+        .arg("server")
+        .arg("--path")
+        .arg(temp_dir.path())
+        .arg("--port")
+        .arg(port.to_string())
+        .spawn()
+        .unwrap();
+
+    let ok = wait_for_port(port, SERVER_STARTUP_TIMEOUT);
+    if !ok {
+        stop_child(&mut child);
+        panic!("server did not start within timeout");
+    }
+
+    let client = reqwest::blocking::Client::new();
+    let url = format!("http://127.0.0.1:{port}/artikel?rules=adviesprijs");
+    let resp = client
+        .post(&url)
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .body("")
+        .send()
+        .expect("POST request");
+    let status = resp.status();
+    let body: serde_json::Value =
+        serde_json::from_str(&resp.text().expect("response body")).expect("JSON body");
+    stop_child(&mut child);
+
+    assert!(
+        status.is_success(),
+        "POST ?rules= should return 2xx, got {status}: {body:?}"
+    );
+    let results = body["results"].as_object().expect("results object");
+    assert_eq!(
+        results.keys().collect::<Vec<_>>(),
+        ["adviesprijs"],
+        "only the requested rule: {body:?}"
+    );
+    assert_eq!(body["results"]["adviesprijs"]["number"].as_str(), Some("3"));
+}

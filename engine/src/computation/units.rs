@@ -46,7 +46,7 @@ fn convert_unit_with_factor(
         SemanticConversionTarget::Unit {
             unit_name,
             owning_type,
-        } => cast_to_unit(&value.value, unit_name, owning_type, runtime_factor),
+        } => cast_to_unit(value, unit_name, owning_type, runtime_factor),
     }
 }
 
@@ -106,16 +106,18 @@ fn cast_to_time(value: &ValueKind) -> OperationResult {
 }
 
 fn cast_to_unit(
-    value: &ValueKind,
+    value: &BoundValueKind,
     unit_name: &str,
     owning_type: &Arc<crate::planning::semantics::LemmaType>,
     runtime_factor: Option<&RationalInteger>,
 ) -> OperationResult {
-    match value {
+    match &value.value {
         ValueKind::Number(magnitude) => {
             cast_number_to_unit(magnitude.clone(), unit_name, owning_type, runtime_factor)
         }
-        ValueKind::Measure(magnitude) => cast_measure_to_unit(magnitude.clone(), unit_name),
+        ValueKind::Measure(magnitude) => {
+            cast_measure_to_unit(magnitude.clone(), unit_name, value.instance_factors.clone())
+        }
         ValueKind::Range(left, right) => {
             cast_range_span_to_unit(left, right, unit_name, owning_type, runtime_factor)
         }
@@ -137,6 +139,7 @@ fn cast_number_to_unit(
         return OperationResult::from_bound(BoundValueKind {
             value: ValueKind::Ratio(magnitude),
             unit: Some(Arc::from(unit_name)),
+            instance_factors: None,
         });
     }
     let stored;
@@ -158,13 +161,19 @@ fn cast_number_to_unit(
     OperationResult::from_bound(BoundValueKind {
         value: ValueKind::Measure(canonical),
         unit: Some(Arc::from(unit_name)),
+        instance_factors: None,
     })
 }
 
-fn cast_measure_to_unit(magnitude: RationalInteger, unit_name: &str) -> OperationResult {
+fn cast_measure_to_unit(
+    magnitude: RationalInteger,
+    unit_name: &str,
+    instance_factors: Option<Arc<std::collections::BTreeMap<String, RationalInteger>>>,
+) -> OperationResult {
     OperationResult::from_bound(BoundValueKind {
         value: ValueKind::Measure(magnitude),
         unit: Some(Arc::from(unit_name)),
+        instance_factors,
     })
 }
 
@@ -172,6 +181,7 @@ fn cast_ratio_to_unit(magnitude: RationalInteger, unit_name: &str) -> OperationR
     OperationResult::from_bound(BoundValueKind {
         value: ValueKind::Ratio(magnitude),
         unit: Some(Arc::from(unit_name)),
+        instance_factors: None,
     })
 }
 
@@ -211,7 +221,7 @@ fn convert_span_measure_to_unit(span: &BoundValueKind, unit_name: &str) -> Opera
     let ValueKind::Measure(magnitude) = &span.value else {
         unreachable!("BUG: span measure expected");
     };
-    cast_measure_to_unit(magnitude.clone(), unit_name)
+    cast_measure_to_unit(magnitude.clone(), unit_name, span.instance_factors.clone())
 }
 
 fn cast_to_number(

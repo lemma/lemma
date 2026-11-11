@@ -28,6 +28,7 @@ pub(crate) fn list_result(rows: impl Into<ListValue>, unit: Option<Arc<str>>) ->
     OperationResult::from_bound(BoundValueKind {
         value: ValueKind::List(rows.into()),
         unit,
+        instance_factors: None,
     })
 }
 
@@ -64,9 +65,27 @@ pub(crate) enum ListFold {
     Avg,
 }
 
-pub(crate) fn reduce(
+/// Reduce over value-list rows (no per-instance factors).
+pub(crate) fn reduce_typed(
     rows: &[TypedLiteral],
     fold: ListFold,
+    result_type: &Arc<LemmaType>,
+    plan: &ExecutionPlan,
+) -> OperationResult {
+    if rows.is_empty() {
+        return reduce(&[], fold, result_type, result_type, plan);
+    }
+    let bounds: Vec<BoundValueKind> = rows
+        .iter()
+        .map(|row| BoundValueKind::unbound(row.value.clone()))
+        .collect();
+    reduce(&bounds, fold, &rows[0].lemma_type, result_type, plan)
+}
+
+pub(crate) fn reduce(
+    rows: &[BoundValueKind],
+    fold: ListFold,
+    operand_type: &Arc<LemmaType>,
     result_type: &Arc<LemmaType>,
     plan: &ExecutionPlan,
 ) -> OperationResult {
@@ -81,8 +100,8 @@ pub(crate) fn reduce(
             )),
         };
     }
-    let mut acc = BoundValueKind::unbound(rows[0].value.clone());
-    let mut acc_type = Arc::clone(&rows[0].lemma_type);
+    let mut acc = rows[0].clone();
+    let mut acc_type = Arc::clone(operand_type);
     for row in rows.iter().skip(1) {
         let op = match fold {
             ListFold::Sum | ListFold::Avg => ArithmeticComputation::Add,
@@ -92,8 +111,8 @@ pub(crate) fn reduce(
             &acc,
             &acc_type,
             &op,
-            &BoundValueKind::unbound(row.value.clone()),
-            &row.lemma_type,
+            row,
+            operand_type,
             &plan.signature_index,
         );
         match next {
@@ -109,16 +128,30 @@ pub(crate) fn reduce(
             i64::try_from(rows.len()).expect("BUG: list len fits i64"),
             1,
         )));
-        return arithmetic_operation(
+        match arithmetic_operation(
             &acc,
             result_type,
             &ArithmeticComputation::Divide,
             &count,
             primitive_number_arc(),
             &plan.signature_index,
-        );
+        ) {
+            OperationResult::Value(bound) => {
+                return OperationResult::from_bound(BoundValueKind {
+                    value: bound.value,
+                    unit: None,
+                    instance_factors: bound.instance_factors,
+                });
+            }
+            veto @ OperationResult::Veto(_) => return veto,
+        }
     }
-    OperationResult::from_bound(acc)
+    // A fold is not a written value: keep agreed instance factors, drop written unit.
+    OperationResult::from_bound(BoundValueKind {
+        value: acc.value,
+        unit: None,
+        instance_factors: acc.instance_factors,
+    })
 }
 
 fn empty_sum(result_type: &Arc<LemmaType>) -> OperationResult {
@@ -285,23 +318,61 @@ pub(crate) fn append_values(
 pub(crate) fn per_row_result(
     op: &NormalFormListOp,
     rows: &ListValue,
-    values: &[TypedLiteral],
+    values: &[BoundValueKind],
     unit: Option<Arc<str>>,
+    operand_type: &Arc<LemmaType>,
     result_type: &Arc<LemmaType>,
     plan: &ExecutionPlan,
 ) -> OperationResult {
     match op {
-        NormalFormListOp::Sum => reduce(values, ListFold::Sum, result_type, plan),
-        NormalFormListOp::Product => reduce(values, ListFold::Product, result_type, plan),
-        NormalFormListOp::Avg => reduce(values, ListFold::Avg, result_type, plan),
-        NormalFormListOp::Min => extrema(values, Ordering::Less),
-        NormalFormListOp::Max => extrema(values, Ordering::Greater),
+        NormalFormListOp::Sum => reduce(values, ListFold::Sum, operand_type, result_type, plan),
+        NormalFormListOp::Product => {
+            reduce(values, ListFold::Product, operand_type, result_type, plan)
+        }
+        NormalFormListOp::Avg => reduce(values, ListFold::Avg, operand_type, result_type, plan),
+        NormalFormListOp::Min | NormalFormListOp::Max | NormalFormListOp::Sort { .. } => {
+            let typed: Vec<TypedLiteral> = values
+                .iter()
+                .map(|bound| typed_from_bound(bound, operand_type))
+                .collect();
+            match op {
+                NormalFormListOp::Min => extrema(&typed, Ordering::Less),
+                NormalFormListOp::Max => extrema(&typed, Ordering::Greater),
+                NormalFormListOp::Sort { descending } => {
+                    let mut order: Vec<usize> = (0..rows.len()).collect();
+                    let mut first_veto = None;
+                    order.sort_by(|&a, &b| match order_rows(&typed[a], &typed[b]) {
+                        Ok(ordering) if *descending => ordering.reverse(),
+                        Ok(ordering) => ordering,
+                        Err(veto) => {
+                            first_veto.get_or_insert(veto);
+                            Ordering::Equal
+                        }
+                    });
+                    if let Some(veto) = first_veto {
+                        return OperationResult::Veto(veto);
+                    }
+                    list_result(
+                        order
+                            .into_iter()
+                            .map(|index| {
+                                rows.get(index)
+                                    .expect("BUG: sort order holds positions of the list")
+                                    .into_owned()
+                            })
+                            .collect::<Arc<[_]>>(),
+                        unit,
+                    )
+                }
+                _ => unreachable!("BUG: matched min/max/sort arm"),
+            }
+        }
         NormalFormListOp::Predicate { kind, .. } => {
             let flags: Vec<bool> = values
                 .iter()
-                .map(|value| match value.value {
-                    ValueKind::Boolean(flag) => flag,
-                    ref other => panic!("BUG: predicate evaluated to {other:?}"),
+                .map(|value| match &value.value {
+                    ValueKind::Boolean(flag) => *flag,
+                    other => panic!("BUG: predicate evaluated to {other:?}"),
                 })
                 .collect();
             match kind {
@@ -313,32 +384,6 @@ pub(crate) fn per_row_result(
                 }
                 ListPredKind::Where => filter_rows(rows, flags, unit),
             }
-        }
-        NormalFormListOp::Sort { descending } => {
-            let mut order: Vec<usize> = (0..rows.len()).collect();
-            let mut first_veto = None;
-            order.sort_by(|&a, &b| match order_rows(&values[a], &values[b]) {
-                Ok(ordering) if *descending => ordering.reverse(),
-                Ok(ordering) => ordering,
-                Err(veto) => {
-                    first_veto.get_or_insert(veto);
-                    Ordering::Equal
-                }
-            });
-            if let Some(veto) = first_veto {
-                return OperationResult::Veto(veto);
-            }
-            list_result(
-                order
-                    .into_iter()
-                    .map(|index| {
-                        rows.get(index)
-                            .expect("BUG: sort order holds positions of the list")
-                            .into_owned()
-                    })
-                    .collect::<Arc<[_]>>(),
-                unit,
-            )
         }
         other => unreachable!("BUG: {other:?} is not a per-row list reduction"),
     }

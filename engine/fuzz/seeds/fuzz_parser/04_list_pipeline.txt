@@ -1,0 +1,12 @@
+spec item
+data name: text
+data qty: number
+
+spec fuzz_seed
+uses item
+data items: item list
+  -> key name
+  -> with name: "a", qty: 1
+  -> with name: "b", qty: 2
+rule total: items -> sum qty
+rule filtered: items -> where qty > 1 -> count

@@ -370,6 +370,50 @@ rule r: exp_one + 0
 }
 
 #[test]
+fn identity_elim_data_leaf_is_origin_free_binding_slot() {
+    let code = r#"
+spec t
+data x: 2
+rule out: x * 1
+"#;
+    let plan = plan_from_code(code);
+    let root_id = plan.get_rule("out").expect("out").normal_form;
+    let root = plan.normal_form(root_id);
+    let origin = root
+        .origin
+        .expect("identity elim of x * 1 must keep Product as origin");
+    assert!(
+        matches!(plan.normal_form(origin).kind, NormalFormKind::Product(_)),
+        "origin must be Product, got {:?}",
+        plan.normal_form(origin).kind
+    );
+    let path = crate::planning::semantics::DataPath {
+        segments: Vec::new(),
+        data: "x".into(),
+    };
+    let binding = *plan
+        .data_leaf
+        .get(&path)
+        .expect("data x must have a data_leaf");
+    assert_ne!(
+        binding, root_id,
+        "binding slot must not be the fold survivor (explain would cache-skip its origin)"
+    );
+    assert!(
+        plan.normal_form(binding).origin.is_none(),
+        "binding slot must be origin-free"
+    );
+    assert!(
+        plan.initial_values[binding.index()].is_some(),
+        "intake must land on the origin-free leaf"
+    );
+    assert!(
+        plan.initial_values[root_id.index()].is_none(),
+        "fold survivor must not carry the data binding"
+    );
+}
+
+#[test]
 fn normal_form_cells_carry_stamped_result_type() {
     use crate::planning::semantics::{primitive_boolean_arc, primitive_number_arc};
 

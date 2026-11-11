@@ -20,6 +20,7 @@ pub mod semantics;
 pub mod show_expression;
 pub mod spec_set;
 pub(crate) mod spec_value;
+pub mod types;
 pub mod typing;
 pub mod unit_family;
 pub mod unit_index;

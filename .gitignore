@@ -13,6 +13,10 @@ cli/packages/npm/dist/
 engine/fuzz/artifacts/
 engine/fuzz/corpus/
 engine/fuzz/target/
+# Curated seeds are *.txt; libfuzzer hash dumps must not be committed
+engine/fuzz/seeds/**
+!engine/fuzz/seeds/**/
+!engine/fuzz/seeds/**/*.txt
 
 # Coverage artifacts (repo-root llvm-cov output only; not cli/documentation/reference/coverage/)
 /coverage/

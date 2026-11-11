@@ -2190,3 +2190,127 @@ rule result: veto "pick mode"
         missing(&middle, "result")
     );
 }
+
+// --- OrderedDispatch expression-scrutinee missing_data ---
+//
+// Comparison unless-arms fold to OrderedDispatch. A bare DataPath scrutinee leaves
+// MissingData as None (then-arm stays live). Expression scrutinees store MissingData;
+// reachable must treat that like an open scrutinee so gated `y` stays on missing_data.
+
+fn gated_number_spec(condition: &str) -> String {
+    format!(
+        r#"
+spec demo
+data x: number
+data y: number
+rule z: 0 unless {condition} then y
+"#
+    )
+}
+
+fn unbound_missing(condition: &str) -> Vec<String> {
+    let mut engine = Engine::new();
+    load(&mut engine, &gated_number_spec(condition));
+    missing(&run(&engine, "demo", IndexMap::new(), None, false), "z").to_vec()
+}
+
+#[test]
+fn ordered_dispatch_expression_scrutinee_unbound_keeps_then_arm() {
+    let cases = [
+        ("product", "5 * x > 3"),
+        ("sum", "x + 1 > 3"),
+        ("power", "x ^ 2 > 3"),
+        ("subtract", "x - 1 > 3"),
+        ("divide", "x / 2 > 3"),
+        ("negate", "-x > 3"),
+        ("mathop", "abs(x) > 3"),
+        ("floor", "x -> floor > 3"),
+        ("mirrored", "3 < 5 * x"),
+    ];
+    for (label, condition) in cases {
+        let md = unbound_missing(condition);
+        assert_eq!(
+            md,
+            vec!["x".to_string(), "y".to_string()],
+            "{label} ({condition}): unbound expression scrutinee must keep then-arm y, got {md:?}"
+        );
+    }
+}
+
+#[test]
+fn ordered_dispatch_bare_and_piecewise_unbound_keep_then_arm() {
+    let cases = [
+        ("bare", "x > 3"),
+        ("is", "x is 3"),
+        ("in_range", "x in 0...3"),
+        ("and_true", "x > 3 and true"),
+    ];
+    for (label, condition) in cases {
+        let md = unbound_missing(condition);
+        assert_eq!(
+            md,
+            vec!["x".to_string(), "y".to_string()],
+            "{label} ({condition}): unbound must list x and y, got {md:?}"
+        );
+    }
+}
+
+#[test]
+fn ordered_dispatch_decided_false_releases_then_arm() {
+    let cases = [
+        ("product", "5 * x > 3", "0"),
+        ("power", "x ^ 2 > 3", "1"),
+        ("in_range", "x in 0...3", "5"),
+    ];
+    for (label, condition, x) in cases {
+        let mut engine = Engine::new();
+        load(&mut engine, &gated_number_spec(condition));
+        let mut data = IndexMap::new();
+        data.insert("x".to_string(), x.into());
+        let response = run(&engine, "demo", data, None, false);
+        let z = rule(&response, "z");
+        assert!(!z.vetoed, "{label}: decided-false must settle, got {z:?}");
+        assert!(
+            z.missing_data().is_empty(),
+            "{label}: decided-false must release y: {:?}",
+            z.missing_data()
+        );
+        assert_eq!(
+            z.result(),
+            Some("0"),
+            "{label}: default body must win, got {:?}",
+            z.result()
+        );
+    }
+}
+
+#[test]
+fn ordered_dispatch_scrutinee_computation_veto_does_not_ask_then_arm() {
+    let mut engine = Engine::new();
+    load(
+        &mut engine,
+        r#"
+spec demo
+data x: number
+data denom: number
+data y: number
+rule z: 0 unless x / denom > 3 then y
+"#,
+    );
+    let mut data = IndexMap::new();
+    data.insert("x".to_string(), "1".into());
+    data.insert("denom".to_string(), "0".into());
+    let response = run(&engine, "demo", data, None, false);
+    let z = rule(&response, "z");
+    assert!(z.vetoed, "div-by-zero scrutinee must veto: {z:?}");
+    assert!(
+        !z.is_missing_data(),
+        "Computation veto must not stay MissingData: {:?}",
+        z.veto_detail
+    );
+    assert!(
+        z.missing_data().is_empty(),
+        "settled Computation must not ask for y: {:?}",
+        z.missing_data()
+    );
+}

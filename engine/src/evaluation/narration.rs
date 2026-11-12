@@ -2366,7 +2366,14 @@ fn cause(
     };
 
     let children = if show_full_logical {
-        short_circuit_cause_children(root, plan, ctx, qualifier, session)
+        let NormalFormKind::Logical(connective, _) = &plan.normal_form(root).kind else {
+            unreachable!("BUG: show_full_logical requires a Logical root")
+        };
+        if held == connective.absorbing_operand() {
+            short_circuit_cause_children(root, plan, ctx, qualifier, session)
+        } else {
+            premise_cause_children(root, plan, ctx, qualifier, session)
+        }
     } else {
         match (&plan.normal_form(focus).kind, held) {
             (NormalFormKind::Logical(connective, ..), polarity)

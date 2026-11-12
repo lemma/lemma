@@ -1150,7 +1150,7 @@ impl<'a> Graph<'a> {
                             owning_type,
                         },
                     ) => {
-                        if let Some(target) = owning_type.unit_scale_target(unit_name) {
+                        for (target, _) in owning_type.unit_scale_factors(unit_name) {
                             if scale_target_resolvable_in_graph(self, target) {
                                 push_target(target.clone());
                             }
@@ -1164,7 +1164,7 @@ impl<'a> Graph<'a> {
                         if let Some((unit, _)) =
                             source_type.measure_runtime_signature().into_iter().next()
                         {
-                            if let Some(target) = source_type.unit_scale_target(&unit) {
+                            for (target, _) in source_type.unit_scale_factors(&unit) {
                                 if scale_target_resolvable_in_graph(self, target) {
                                     push_target(target.clone());
                                 }
@@ -1314,20 +1314,19 @@ impl<'a> Graph<'a> {
                 })
                 .expect("BUG: spec with a measure type has a source location");
             for unit in units.iter() {
-                let Some(target) = unit.resolved_scale_target() else {
-                    continue;
-                };
-                let target_type = self.scale_target_lemma_type(target, inferred_types);
-                if !target_type.is_number() {
-                    errors.push(engine_error_at_graph(
-                        self,
-                        source,
-                        format!(
-                            "unit '{}' conversion factor must be a number, got {}",
-                            unit.name,
-                            target_type.name()
-                        ),
-                    ));
+                for (target, _) in unit.resolved_scale_factors() {
+                    let target_type = self.scale_target_lemma_type(target, inferred_types);
+                    if !target_type.is_number() {
+                        errors.push(engine_error_at_graph(
+                            self,
+                            source,
+                            format!(
+                                "unit '{}' conversion factor must be a number, got {}",
+                                unit.name,
+                                target_type.name()
+                            ),
+                        ));
+                    }
                 }
             }
         }
@@ -8802,13 +8801,16 @@ fn scale_targets_of_unscaled(value: &ValueKind, lemma_type: &LemmaType) -> Vec<R
     while let Some((value, lemma_type)) = pending.pop() {
         match value {
             ValueKind::UnscaledMeasure { unit, .. } => {
-                let target = lemma_type.unit_scale_target(unit).unwrap_or_else(|| {
+                let factors = lemma_type.unit_scale_factors(unit);
+                if factors.is_empty() {
                     panic!(
-                        "BUG: unscaled measure unit '{unit}' on '{}' has no scale target",
+                        "BUG: unscaled measure unit '{unit}' on '{}' has no scale factors",
                         lemma_type.name()
-                    )
-                });
-                found.push(target.clone());
+                    );
+                }
+                for (target, _) in factors {
+                    found.push(target.clone());
+                }
             }
             ValueKind::Range(left, right) => {
                 pending.push((&right.value, right.lemma_type.as_ref()));

@@ -434,6 +434,45 @@ rule out: "ok"
 }
 
 #[test]
+fn or_both_false_states_full_expression_with_both_premises() {
+    let engine = load(
+        r#"
+spec short_or
+data a: boolean
+data b: boolean
+rule out: "ok"
+  unless a or b then "either"
+"#,
+    );
+    let mut data = IndexMap::new();
+    data.insert("a".into(), "false".into());
+    data.insert("b".into(), "false".into());
+    let response = run(&engine, "short_or", data, Some(&["out".to_string()]), true);
+    assert_eq!(
+        response.results.get("out").expect("out").result(),
+        Some("ok")
+    );
+    let explanation = out_explanation(&response);
+    assert_eq!(
+        cause_pairs(explanation),
+        vec![("a or b", "false")],
+        "not-taken or keeps full authored expression with value false"
+    );
+    assert_eq!(
+        explanation.causes[0].children.len(),
+        2,
+        "identity or lists both walked operands as premises, got {:?}",
+        explanation.causes[0].children
+    );
+    for child in &explanation.causes[0].children {
+        assert!(
+            matches!(child, ExplanationNode::Data { .. }),
+            "false or premises are Data, not DataUnused, got {child:?}"
+        );
+    }
+}
+
+#[test]
 fn and_right_comparison_fail_states_flipped_fact() {
     let engine = load(
         r#"

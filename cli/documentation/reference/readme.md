@@ -901,7 +901,7 @@ Each `->` row on a `data` declaration is a **data command**. Built-in primitives
 
 **For** `measure`**:**
 
-- `unit <name> <value>` - Define a unit (see [Compound units](#compound-units) for derived forms). The value is a number, a compound expression, or a reference to a `data` or `rule` of type `number` (the scale is evaluated before every rule that holds a value of that measure). Literals and `as` targets that use the unit follow [Qualifying units](#qualifying-units). Dynamic units may appear in compound expressions and in `minimum`, `maximum`, `suggest`, and `option`. A unit factor is set per instance (`uses` alias or list row), never shared: write, convert, read, and display a dynamic unit through `uses` the same way as a literal one; a value from a row keeps that row's factors.
+- `unit <name> <value>` - Define a unit (see [Compound units](#compound-units) for derived forms). The value is a number, a compound expression, or a reference to a `data` or `rule` of type `number` (the scale is evaluated before every rule that holds a value of that measure). Literals and `as` targets that use the unit follow [Qualifying units](#qualifying-units). Dynamic units may appear in compound expressions (including two distinct dynamic bases) and in `minimum`, `maximum`, `suggest`, and `option`. A compound that inherits dynamics uses `coefficient * Π settled(t_i)^e_i`. A unit factor is set per instance (`uses` alias or list row), never shared: write, convert, read, and display a dynamic unit through `uses` the same way as a literal one; a value from a row keeps that row's factors.
 - `minimum <value>` - Set minimum value
 - `maximum <value>` - Set maximum value
 - `help "<text>"` - Add help text

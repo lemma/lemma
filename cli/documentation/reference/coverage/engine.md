@@ -41,14 +41,14 @@ LLVM version: 21.1.3
 
 | Metric | Covered | Total | Percent |
 |--------|--------:|------:|--------:|
-| Lines | 66713 | 76708 | 86.97% |
-| Functions | 5038 | 5658 | 89.04% |
-| Regions | 98397 | 114258 | 86.12% |
+| Lines | 66857 | 76826 | 87.02% |
+| Functions | 5052 | 5669 | 89.12% |
+| Regions | 98662 | 114493 | 86.17% |
 
 ## Test run
 
-- Total: 4092
-- Passed: 4092
+- Total: 4106
+- Passed: 4106
 - Skipped: 0
 - Failed: 0
 
@@ -70,19 +70,19 @@ Sorted by line coverage ascending (weakest first). Only files under `src/` for t
 | `computation/bigint/signed.rs` | 76.68 | 72.50 | 74.18 | 217/283 |
 | `documentation/mod.rs` | 77.22 | 76.92 | 78.63 | 61/79 |
 | `mcp/tools.rs` | 80.13 | 71.43 | 78.95 | 383/478 |
-| `planning/types.rs` | 80.23 | 86.44 | 83.50 | 4372/5449 |
+| `planning/types.rs` | 80.34 | 86.49 | 83.56 | 4376/5447 |
 | `evaluation/mod.rs` | 81.26 | 75.71 | 80.65 | 789/971 |
-| `planning/semantics.rs` | 81.90 | 84.11 | 81.34 | 5931/7242 |
+| `planning/semantics.rs` | 81.91 | 84.13 | 81.35 | 5938/7249 |
 | `computation/units.rs` | 82.05 | 100.00 | 79.05 | 192/234 |
-| `planning/graph.rs` | 82.66 | 87.29 | 82.47 | 8573/10371 |
+| `planning/graph.rs` | 82.67 | 87.45 | 82.48 | 8574/10371 |
 | `error.rs` | 83.74 | 83.02 | 78.51 | 443/529 |
-| `literals.rs` | 84.32 | 81.54 | 84.93 | 753/893 |
+| `api/types.rs` | 85.07 | 93.55 | 87.00 | 302/355 |
 | `planning/execution_plan.rs` | 85.15 | 78.52 | 82.59 | 3382/3972 |
-| `api/types.rs` | 85.35 | 96.67 | 86.56 | 303/355 |
+| `literals.rs` | 85.56 | 82.58 | 85.93 | 776/907 |
 | `parsing/lexer.rs` | 85.63 | 97.62 | 78.19 | 739/863 |
 | `result_value.rs` | 85.79 | 83.33 | 81.81 | 471/549 |
 | `computation/datetime.rs` | 85.90 | 82.42 | 84.40 | 944/1099 |
-| `evaluation/narration.rs` | 86.14 | 75.16 | 85.00 | 1989/2309 |
+| `evaluation/narration.rs` | 86.12 | 75.16 | 85.02 | 1992/2313 |
 | `api/show.rs` | 87.69 | 84.51 | 88.85 | 819/934 |
 | `spec_set_id.rs` | 87.72 | 100.00 | 95.52 | 50/57 |
 | `computation/range.rs` | 88.10 | 94.12 | 83.33 | 185/210 |
@@ -92,22 +92,22 @@ Sorted by line coverage ascending (weakest first). Only files under `src/` for t
 | `planning/ordered_dispatch.rs` | 88.99 | 94.44 | 87.87 | 404/454 |
 | `formatting/expression.rs` | 90.15 | 98.04 | 90.64 | 595/660 |
 | `string_distance.rs` | 90.48 | 83.33 | 93.22 | 57/63 |
-| `evaluation/tree.rs` | 90.51 | 87.93 | 89.16 | 2318/2561 |
 | `planning/show_expression.rs` | 90.52 | 91.67 | 91.37 | 382/422 |
+| `evaluation/tree.rs` | 90.59 | 88.98 | 89.17 | 2349/2593 |
 | `evaluation/list_ops.rs` | 90.75 | 100.00 | 87.89 | 353/389 |
 | `api/evaluate_data_json.rs` | 90.76 | 100.00 | 92.16 | 216/238 |
 | `evaluation/explanations.rs` | 91.46 | 91.11 | 90.49 | 632/691 |
 | `planning/discovery.rs` | 91.48 | 97.94 | 92.76 | 1599/1748 |
-| `planning/normalize/rewrite.rs` | 91.75 | 96.88 | 91.50 | 1334/1454 |
-| `computation/rational.rs` | 91.81 | 98.50 | 88.75 | 1144/1246 |
 | `formatting/mod.rs` | 91.90 | 100.00 | 91.28 | 1134/1234 |
 | `parsing/arena.rs` | 92.03 | 88.00 | 92.27 | 254/276 |
+| `computation/rational.rs` | 92.27 | 98.55 | 89.33 | 1206/1307 |
 | `planning/typing.rs` | 92.53 | 98.25 | 90.09 | 1065/1151 |
+| `planning/normalize/rewrite.rs` | 92.57 | 97.92 | 92.34 | 1346/1454 |
 | `registry.rs` | 92.76 | 97.53 | 94.50 | 999/1077 |
 | `parsing/mod.rs` | 93.01 | 99.25 | 89.25 | 1984/2133 |
 | `limits.rs` | 93.27 | 100.00 | 83.45 | 97/104 |
 | `engine.rs` | 93.38 | 92.41 | 93.24 | 2823/3023 |
-| `planning/unit_index.rs` | 93.85 | 95.90 | 93.97 | 1267/1350 |
+| `planning/unit_index.rs` | 93.86 | 95.90 | 93.97 | 1269/1352 |
 | `quality.rs` | 93.96 | 97.80 | 90.60 | 887/944 |
 | `planning/spec_value.rs` | 93.99 | 86.67 | 94.55 | 344/366 |
 | `evaluation/rows.rs` | 94.38 | 93.33 | 92.50 | 151/160 |
@@ -132,4 +132,4 @@ Sorted by line coverage ascending (weakest first). Only files under `src/` for t
 - [Engine integration test catalog](../../../engine/tests/README.md) — qualitative map of scenarios and subsystem overlap clusters
 - [CLI test coverage](cli.md)
 - [Engine benchmarks](../benchmarks/engine.md)
-<!-- coverage-input-digest: d2dd52de578fbac9 -->
+<!-- coverage-input-digest: f1862912a754541c -->

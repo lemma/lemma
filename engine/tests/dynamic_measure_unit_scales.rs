@@ -254,6 +254,198 @@ data money_squared: measure
 }
 
 #[test]
+fn two_distinct_dynamic_units_in_compound_loads() {
+    let mut engine = Engine::new();
+    load(
+        &mut engine,
+        r#"
+spec bedragen
+uses lemma units
+data koers_eur_usd: number
+data consumenteneenheid_in_kilogram: number
+data money: measure
+    -> unit eur: 1.00
+    -> unit usd: eur_per_usd
+data massa: units.mass
+    -> unit consumenteneenheid: consumenteneenheid_in_kilogram
+data gewichtsprijs: measure
+    -> unit eur_per_kg: eur/kilogram
+    -> unit usd_per_kg: usd/kilogram
+    -> unit eur_per_ce: eur/consumenteneenheid
+    -> unit usd_per_ce: usd/consumenteneenheid
+rule eur_per_usd:
+    1 / koers_eur_usd
+"#,
+    );
+}
+
+#[test]
+fn convert_two_distinct_dynamic_compound_units() {
+    let mut engine = Engine::new();
+    load(
+        &mut engine,
+        r#"
+spec bedragen
+uses lemma units
+data usd_rate: number
+data consumenteneenheid_in_kilogram: number
+data money: measure
+    -> unit eur: 1.00
+    -> unit usd: usd_rate
+data massa: units.mass
+    -> unit consumenteneenheid: consumenteneenheid_in_kilogram
+data gewichtsprijs: measure
+    -> unit eur_per_kg: eur/kilogram
+    -> unit usd_per_ce: usd/consumenteneenheid
+rule in_eur: 1 usd_per_ce as eur_per_kg
+rule in_usd_ce: 1.6 eur_per_kg as usd_per_ce
+"#,
+    );
+    let response = run(
+        &engine,
+        "bedragen",
+        data(&[
+            ("usd_rate", "0.8"),
+            ("consumenteneenheid_in_kilogram", "0.5"),
+        ]),
+        false,
+    );
+    // 1 usd_per_ce = 0.8 / 0.5 = 1.6 eur_per_kg
+    let eur = measure_map(&response, "in_eur")
+        .get("eur_per_kg")
+        .expect("eur_per_kg");
+    assert_eq!(eur.to_string(), "1.6");
+    let usd_ce = measure_map(&response, "in_usd_ce")
+        .get("usd_per_ce")
+        .expect("usd_per_ce");
+    assert_eq!(usd_ce.to_string(), "1");
+}
+
+#[test]
+fn unbound_either_scale_on_two_dynamic_compound_is_missing_data() {
+    let mut engine = Engine::new();
+    load(
+        &mut engine,
+        r#"
+spec bedragen
+uses lemma units
+data usd_rate: number
+data consumenteneenheid_in_kilogram: number
+data money: measure
+    -> unit eur: 1.00
+    -> unit usd: usd_rate
+data massa: units.mass
+    -> unit consumenteneenheid: consumenteneenheid_in_kilogram
+data gewichtsprijs: measure
+    -> unit usd_per_ce: usd/consumenteneenheid
+rule x: 1 usd_per_ce
+"#,
+    );
+    let missing_usd = run(
+        &engine,
+        "bedragen",
+        data(&[("consumenteneenheid_in_kilogram", "0.5")]),
+        false,
+    );
+    assert_missing_scale(&missing_usd, "x", "usd_rate");
+    let missing_ce = run(&engine, "bedragen", data(&[("usd_rate", "0.8")]), false);
+    assert_missing_scale(&missing_ce, "x", "consumenteneenheid_in_kilogram");
+}
+
+#[test]
+fn zero_either_scale_on_two_dynamic_compound_vetoes() {
+    let mut engine = Engine::new();
+    load(
+        &mut engine,
+        r#"
+spec bedragen
+uses lemma units
+data usd_rate: number
+data consumenteneenheid_in_kilogram: number
+data money: measure
+    -> unit eur: 1.00
+    -> unit usd: usd_rate
+data massa: units.mass
+    -> unit consumenteneenheid: consumenteneenheid_in_kilogram
+data gewichtsprijs: measure
+    -> unit usd_per_ce: usd/consumenteneenheid
+rule x: 1 usd_per_ce
+"#,
+    );
+    let zero_usd = run(
+        &engine,
+        "bedragen",
+        data(&[("usd_rate", "0"), ("consumenteneenheid_in_kilogram", "0.5")]),
+        false,
+    );
+    let r = rule(&zero_usd, "x");
+    assert!(r.vetoed, "non-positive usd scale must veto");
+    assert!(
+        !r.is_missing_data(),
+        "non-positive scale is a computation veto"
+    );
+    let zero_ce = run(
+        &engine,
+        "bedragen",
+        data(&[("usd_rate", "0.8"), ("consumenteneenheid_in_kilogram", "0")]),
+        false,
+    );
+    let r = rule(&zero_ce, "x");
+    assert!(r.vetoed, "non-positive ce scale must veto");
+    assert!(
+        !r.is_missing_data(),
+        "non-positive scale is a computation veto"
+    );
+}
+
+#[test]
+fn two_uses_two_dynamic_compound_settles_each_instance() {
+    let mut engine = Engine::new();
+    load(
+        &mut engine,
+        r#"
+repo r
+
+spec bedragen
+uses lemma units
+data koers_eur_usd: number
+data consumenteneenheid_in_kilogram: number
+data money: measure
+    -> unit eur: 1.00
+    -> unit usd: eur_per_usd
+data massa: units.mass
+    -> unit consumenteneenheid: consumenteneenheid_in_kilogram
+data gewichtsprijs: measure
+    -> unit eur_per_kg: eur/kilogram
+    -> unit usd_per_ce: usd/consumenteneenheid
+rule eur_per_usd:
+    1 / koers_eur_usd
+
+spec quote
+uses a: bedragen
+    -> with koers_eur_usd: 1.25
+    -> with consumenteneenheid_in_kilogram: 0.5
+uses b: bedragen
+    -> with koers_eur_usd: 2
+    -> with consumenteneenheid_in_kilogram: 0.25
+rule left: 1 a.gewichtsprijs.usd_per_ce as a.gewichtsprijs.eur_per_kg
+rule right: 1 b.gewichtsprijs.usd_per_ce as b.gewichtsprijs.eur_per_kg
+"#,
+    );
+    let response = run_in_repo(&engine, Some("r"), "quote", IndexMap::new(), false);
+    // a: eur_per_usd = 0.8; ce = 0.5 → 0.8/0.5 = 1.6
+    let left = measure_map(&response, "left")
+        .get("eur_per_kg")
+        .expect("eur_per_kg");
+    assert_eq!(left.to_string(), "1.6");
+    // b: eur_per_usd = 0.5; ce = 0.25 → 0.5/0.25 = 2
+    let right = measure_map(&response, "right")
+        .get("eur_per_kg")
+        .expect("eur_per_kg");
+    assert_eq!(right.to_string(), "2");
+}
+
+#[test]
 fn minimum_in_dynamic_unit_loads() {
     let mut engine = Engine::new();
     load(

@@ -1385,23 +1385,33 @@ fn resolved_scale_factor(
 }
 
 /// Effective conversion factor of a dynamic measure unit:
-/// `settled(reference)^exponent * coefficient`.
+/// `coefficient * Π settled(t_i)^e_i`.
 fn composed_unit_scale_factor(
     unit: &crate::literals::MeasureUnit,
-    target: &ReferenceTarget,
     plan: &ExecutionPlan,
     ctx: &EvaluationContext,
 ) -> Result<RationalInteger, OperationResult> {
-    let settled = resolved_scale_factor(target, plan, ctx)?;
-    let exponent = unit.scale_exponent();
-    let raised = if exponent == 1 {
-        settled
-    } else {
-        checked_pow_integer(&settled, &BigInt::from_i64(i64::from(exponent)))
-            .map_err(|failure| OperationResult::Veto(VetoType::computation(failure.to_string())))?
-    };
-    checked_mul(&raised, &unit.scale_coefficient())
-        .map_err(|failure| OperationResult::Veto(VetoType::computation(failure.to_string())))
+    let factors = unit.resolved_scale_factors();
+    if factors.is_empty() {
+        panic!(
+            "BUG: composed_unit_scale_factor on unit '{}' with no scale factors",
+            unit.name
+        );
+    }
+    let mut product = unit.scale_coefficient();
+    for (target, exponent) in factors {
+        let settled = resolved_scale_factor(target, plan, ctx)?;
+        let raised = if *exponent == 1 {
+            settled
+        } else {
+            checked_pow_integer(&settled, &BigInt::from_i64(i64::from(*exponent))).map_err(
+                |failure| OperationResult::Veto(VetoType::computation(failure.to_string())),
+            )?
+        };
+        product = checked_mul(&product, &raised)
+            .map_err(|failure| OperationResult::Veto(VetoType::computation(failure.to_string())))?;
+    }
+    Ok(product)
 }
 
 fn measure_unit_on_type<'a>(
@@ -1483,19 +1493,18 @@ fn scale_value(
             } => match value {
                 ValueKind::UnscaledMeasure { magnitude, unit } => {
                     let holding = lemma_type.get();
-                    let target = holding.unit_scale_target(&unit).unwrap_or_else(|| {
+                    if holding.unit_scale_factors(&unit).is_empty() {
                         panic!(
-                            "BUG: unscaled measure unit '{unit}' on '{}' has no scale target",
+                            "BUG: unscaled measure unit '{unit}' on '{}' has no scale factors",
                             holding.name()
-                        )
-                    });
+                        );
+                    }
                     if tasks.is_empty() && done.is_empty() {
                         root_unit = Some(Arc::clone(&unit));
                     }
                     let measure_unit = measure_unit_on_type(holding, &unit);
                     match composed_unit_scale_factor_for_settle(
                         measure_unit,
-                        target,
                         &unit,
                         holding,
                         plan,
@@ -1624,32 +1633,35 @@ fn settle_stored(
     }
 }
 
-fn conversion_scale_target<'a>(
+/// Dynamic unit a conversion needs to settle, if any.
+fn conversion_dynamic_unit<'a>(
     target: &'a SemanticConversionTarget,
     source_type: &'a LemmaType,
-) -> Option<&'a ReferenceTarget> {
+) -> Option<(String, &'a LemmaType)> {
     match target {
         SemanticConversionTarget::Unit {
             unit_name,
             owning_type,
         } if owning_type.unit_is_dynamic(unit_name) => {
-            Some(owning_type.unit_scale_target(unit_name).unwrap_or_else(|| {
+            if owning_type.unit_scale_factors(unit_name).is_empty() {
                 panic!(
-                    "BUG: dynamic unit '{unit_name}' on '{}' has no scale target",
+                    "BUG: dynamic unit '{unit_name}' on '{}' has no scale factors",
                     owning_type.name()
-                )
-            }))
+                );
+            }
+            Some((unit_name.clone(), owning_type.as_ref()))
         }
         SemanticConversionTarget::Type(ConversionTypeKind::Number) if source_type.is_measure() => {
             let unit = source_type.measure_runtime_signature().into_iter().next()?;
             if source_type.unit_is_dynamic(&unit.0) {
-                Some(source_type.unit_scale_target(&unit.0).unwrap_or_else(|| {
+                if source_type.unit_scale_factors(&unit.0).is_empty() {
                     panic!(
-                        "BUG: dynamic unit '{}' on '{}' has no scale target",
+                        "BUG: dynamic unit '{}' on '{}' has no scale factors",
                         unit.0,
                         source_type.name()
-                    )
-                }))
+                    );
+                }
+                Some((unit.0, source_type))
             } else {
                 None
             }
@@ -1659,60 +1671,46 @@ fn conversion_scale_target<'a>(
 }
 
 /// Factor for a dynamic conversion: prefer a factor the operand already carries from
-/// its instance (row / uses read). Otherwise resolve the scale on this plan, or through
-/// the row stack for a bare target. A scale that is not forcible here and not carried
-/// is a computation veto — not a missing data_leaf panic.
+/// its instance (row / uses read). Otherwise resolve every scale factor on this plan,
+/// or through the row stack for bare targets. A scale that is not forcible here and
+/// not carried is a computation veto — not a missing data_leaf panic.
 fn conversion_dynamic_factor(
     bound: &BoundValueKind,
-    target: &SemanticConversionTarget,
-    scale: &ReferenceTarget,
-    source_type: &LemmaType,
+    unit_name: &str,
+    holding: &LemmaType,
     plan: &ExecutionPlan,
     ctx: &EvaluationContext,
 ) -> Result<RationalInteger, OperationResult> {
-    let (unit_name, holding): (String, &LemmaType) = match target {
-        SemanticConversionTarget::Unit {
-            unit_name,
-            owning_type,
-        } => (unit_name.clone(), owning_type.as_ref()),
-        SemanticConversionTarget::Type(ConversionTypeKind::Number) => {
-            let unit = source_type
-                .measure_runtime_signature()
-                .into_iter()
-                .next()
-                .expect("BUG: number conversion scale requires a measure unit");
-            (unit.0, source_type)
-        }
-        other => panic!("BUG: conversion scale target without a dynamic unit path: {other:?}"),
-    };
     if let Some(factor) = bound
         .instance_factors
         .as_ref()
-        .and_then(|factors| factors.get(&unit_name))
+        .and_then(|factors| factors.get(unit_name))
     {
         return Ok(factor.clone());
     }
-    let measure_unit = measure_unit_on_type(holding, &unit_name);
-    if scale_target_in_plan(scale, plan) {
-        assert!(
-            unforced_target(scale, plan, ctx).is_none(),
-            "BUG: conversion scale {scale:?} read before its scale dependency was evaluated"
-        );
-        return composed_unit_scale_factor(measure_unit, scale, plan, ctx);
+    let measure_unit = measure_unit_on_type(holding, unit_name);
+    let factors = measure_unit.resolved_scale_factors();
+    if factors.is_empty() {
+        panic!("BUG: conversion_dynamic_factor on unit '{unit_name}' with no scale factors");
     }
-    let bare = match scale {
+    let all_in_plan = factors
+        .iter()
+        .all(|(target, _)| scale_target_in_plan(target, plan));
+    if all_in_plan {
+        for (target, _) in factors {
+            assert!(
+                unforced_target(target, plan, ctx).is_none(),
+                "BUG: conversion scale {target:?} read before its scale dependency was evaluated"
+            );
+        }
+        return composed_unit_scale_factor(measure_unit, plan, ctx);
+    }
+    let all_bare = factors.iter().all(|(target, _)| match target {
         ReferenceTarget::Data(path) => path.segments.is_empty(),
         ReferenceTarget::Rule(path) => path.segments.is_empty(),
-    };
-    if bare {
-        return composed_unit_scale_factor_for_settle(
-            measure_unit,
-            scale,
-            &unit_name,
-            holding,
-            plan,
-            ctx,
-        );
+    });
+    if all_bare {
+        return composed_unit_scale_factor_for_settle(measure_unit, unit_name, holding, plan, ctx);
     }
     Err(OperationResult::Veto(VetoType::computation(format!(
         "no conversion factor is known for unit '{unit_name}'"
@@ -1744,18 +1742,28 @@ pub(crate) fn runtime_scale_factors_for(
             crate::literals::UnitScale::Literal(factor) => {
                 out.insert(unit.name.clone(), factor.clone());
             }
-            crate::literals::UnitScale::Reference { target, .. } => {
-                let bare = match target {
-                    ReferenceTarget::Data(path) => path.segments.is_empty(),
-                    ReferenceTarget::Rule(path) => path.segments.is_empty(),
-                };
-                if bare && !family_declared_here && !scale_target_in_plan(target, plan) {
+            crate::literals::UnitScale::Reference { factors, .. } => {
+                if factors.is_empty() {
+                    panic!(
+                        "BUG: dynamic unit '{}' on '{}' has empty scale factors after planning",
+                        unit.name,
+                        lemma_type.name()
+                    );
+                }
+                let all_forcible = factors.iter().all(|(target, _)| {
+                    let bare = match target {
+                        ReferenceTarget::Data(path) => path.segments.is_empty(),
+                        ReferenceTarget::Rule(path) => path.segments.is_empty(),
+                    };
+                    if bare && !family_declared_here && !scale_target_in_plan(target, plan) {
+                        return false;
+                    }
+                    scale_target_in_plan(target, plan)
+                });
+                if !all_forcible {
                     continue;
                 }
-                if !scale_target_in_plan(target, plan) {
-                    continue;
-                }
-                if let Ok(factor) = composed_unit_scale_factor(unit, target, plan, ctx) {
+                if let Ok(factor) = composed_unit_scale_factor(unit, plan, ctx) {
                     out.insert(unit.name.clone(), factor);
                 }
             }
@@ -1783,11 +1791,39 @@ fn scale_target_in_plan(target: &ReferenceTarget, plan: &ExecutionPlan) -> bool 
     }
 }
 
-/// Effective conversion factor for settling an unscaled measure: this plan when the
-/// target is local here; otherwise the innermost row on the stack whose template
-/// holds the bare target (per-row literal in a list argument).
+/// Effective conversion factor for settling an unscaled measure: each scale factor
+/// settles on this plan when local here; otherwise the innermost row on the stack
+/// whose template holds a bare target (per-row literal in a list argument).
 fn composed_unit_scale_factor_for_settle(
     unit: &crate::literals::MeasureUnit,
+    unit_name: &str,
+    holding: &LemmaType,
+    plan: &ExecutionPlan,
+    ctx: &EvaluationContext,
+) -> Result<RationalInteger, OperationResult> {
+    let factors = unit.resolved_scale_factors();
+    if factors.is_empty() {
+        panic!(
+            "BUG: composed_unit_scale_factor_for_settle on unit '{unit_name}' with no scale factors"
+        );
+    }
+    let mut product = unit.scale_coefficient();
+    for (target, exponent) in factors {
+        let settled = settled_scale_factor_for_target(target, unit_name, holding, plan, ctx)?;
+        let raised = if *exponent == 1 {
+            settled
+        } else {
+            checked_pow_integer(&settled, &BigInt::from_i64(i64::from(*exponent))).map_err(
+                |failure| OperationResult::Veto(VetoType::computation(failure.to_string())),
+            )?
+        };
+        product = checked_mul(&product, &raised)
+            .map_err(|failure| OperationResult::Veto(VetoType::computation(failure.to_string())))?;
+    }
+    Ok(product)
+}
+
+fn settled_scale_factor_for_target(
     target: &ReferenceTarget,
     unit_name: &str,
     holding: &LemmaType,
@@ -1800,7 +1836,7 @@ fn composed_unit_scale_factor_for_settle(
             "BUG: scale of unit '{unit_name}' on '{}' read before its scale dependency was evaluated",
             holding.name()
         );
-        return composed_unit_scale_factor(unit, target, plan, ctx);
+        return resolved_scale_factor(target, plan, ctx);
     }
     let bare = match target {
         ReferenceTarget::Data(path) => path.segments.is_empty(),
@@ -1821,7 +1857,7 @@ fn composed_unit_scale_factor_for_settle(
                     "BUG: scale of unit '{unit_name}' on '{}' read before its scale dependency was evaluated",
                     holding.name()
                 );
-                return composed_unit_scale_factor(unit, target, template, ctx);
+                return resolved_scale_factor(target, template, ctx);
             }
             let caches = ctx.caches.row_contexts.borrow();
             let Some(row_ctx) = caches.get(key) else {
@@ -1834,7 +1870,7 @@ fn composed_unit_scale_factor_for_settle(
                 "BUG: scale of unit '{unit_name}' on '{}' read before its scale dependency was evaluated",
                 holding.name()
             );
-            return composed_unit_scale_factor(unit, target, template, row_ctx);
+            return resolved_scale_factor(target, template, row_ctx);
         }
     }
     assert!(
@@ -1842,7 +1878,7 @@ fn composed_unit_scale_factor_for_settle(
         "BUG: scale of unit '{unit_name}' on '{}' read before its scale dependency was evaluated",
         holding.name()
     );
-    composed_unit_scale_factor(unit, target, plan, ctx)
+    resolved_scale_factor(target, plan, ctx)
 }
 
 /// Display factors for a settled value: instance factors from a row or uses read
@@ -1876,22 +1912,23 @@ fn empty_sum_scale_veto(
     let unit = result_type
         .measure_fallback_unit()
         .filter(|unit| unit.is_dynamic())?;
-    let target = result_type
-        .unit_scale_target(&unit.name)
-        .unwrap_or_else(|| {
-            panic!(
-                "BUG: dynamic unit '{}' on '{}' has no scale target",
-                unit.name,
-                result_type.name()
-            )
-        });
-    assert!(
-        unforced_target(target, plan, ctx).is_none(),
-        "BUG: scale of unit '{}' on '{}' read before its scale dependency was evaluated",
-        unit.name,
-        result_type.name()
-    );
-    resolved_scale_factor(target, plan, ctx).err()
+    let factors = result_type.unit_scale_factors(&unit.name);
+    if factors.is_empty() {
+        panic!(
+            "BUG: dynamic unit '{}' on '{}' has no scale factors",
+            unit.name,
+            result_type.name()
+        );
+    }
+    for (target, _) in factors {
+        assert!(
+            unforced_target(target, plan, ctx).is_none(),
+            "BUG: scale of unit '{}' on '{}' read before its scale dependency was evaluated",
+            unit.name,
+            result_type.name()
+        );
+    }
+    composed_unit_scale_factor(unit, plan, ctx).err()
 }
 
 pub(crate) fn resolve_stored_target(
@@ -3049,7 +3086,7 @@ fn step_cell<'p>(
             }
             let source_type = plan.result_type(*inner).as_ref();
             // Source unscaled dynamic magnitudes must settle before any cast —
-            // including `as <literal-unit>`, which has no conversion_scale_target.
+            // including `as <literal-unit>`, which has no conversion_dynamic_unit.
             let value = match value {
                 OperationResult::Value(bound) if bound.value.has_unscaled_measure() => {
                     settle_stored(bound, source_type, plan, ctx)
@@ -3059,10 +3096,9 @@ fn step_cell<'p>(
             if value.vetoed() {
                 done!(value)
             }
-            if let Some(scale) = conversion_scale_target(target, source_type) {
+            if let Some((unit_name, holding)) = conversion_dynamic_unit(target, source_type) {
                 let bound = borrow_value(&value, "conversion operand");
-                let factor =
-                    conversion_dynamic_factor(bound, target, scale, source_type, plan, ctx);
+                let factor = conversion_dynamic_factor(bound, &unit_name, holding, plan, ctx);
                 match factor {
                     Err(veto) => done!(veto),
                     Ok(factor) => done!(convert_unit_operand(

@@ -313,8 +313,17 @@ export interface NamedBound {
   unit: string;
 }
 
-type MeasureUnitBase = {
+/**
+ * One declared unit of a Measure type.
+ * When `scale_factors` is absent or empty, `factor` is required.
+ * When `scale_factors` is non-empty, optional `factor` is the plan-time coefficient
+ * (omitted when 1); effective scale is `coefficient * Π settled(t_i)^e_i`.
+ */
+export type MeasureUnit = {
   name: string;
+  factor?: { numer: string; denom: string };
+  /** (reference path, exponent) pairs of a dynamic scale product. */
+  scale_factors?: [string, number][];
   /** (measure_ref, exponent) pairs from a compound unit declaration (e.g. meter/second). */
   derived_measure_factors: [string, number][];
   decomposition: Record<string, number>;
@@ -322,18 +331,6 @@ type MeasureUnitBase = {
   maximum?: string;
   suggestion?: string;
 };
-
-/** Exactly one of `factor` or `reference` is present. */
-export type MeasureUnit =
-  | (MeasureUnitBase & {
-      factor: { numer: string; denom: string };
-      reference?: never;
-    })
-  | (MeasureUnitBase & {
-      /** Source spelling of the number data or rule that supplies this unit's scale. */
-      reference: string;
-      factor?: never;
-    });
 
 export interface RatioUnit {
   name: string;

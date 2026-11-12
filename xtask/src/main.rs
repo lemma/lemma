@@ -317,7 +317,15 @@ fn run_deny_precommit() {
     let config = versions::workspace_root().join(".cargo/deny.toml");
     eprintln!("xtask: deny ({})", config.display());
     let status = Command::new(cargo_bin())
-        .args(["deny", "check", "--config"])
+        .args([
+            "deny",
+            "check",
+            "-D",
+            "unmatched-skip",
+            "-D",
+            "unmatched-skip-root",
+            "--config",
+        ])
         .arg(&config)
         .status()
         .unwrap_or_else(|e| panic!("failed to run cargo deny: {e}"));

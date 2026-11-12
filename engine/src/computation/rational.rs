@@ -834,7 +834,12 @@ fn decimal_power(base: Decimal, exponent: Decimal) -> Result<Decimal, NumericFai
     if decimal_is_half(exponent) {
         return base.sqrt().ok_or(NumericFailure::Irrational);
     }
-    Err(NumericFailure::Irrational)
+    // Real non-integer powers: a^b = exp(b·ln(a)). Reject negative bases; rust_decimal's
+    // checked_powd would flip the sign of |a|^b, which is not real-valued for general b.
+    if base.is_sign_negative() {
+        return Err(NumericFailure::Irrational);
+    }
+    base.checked_powd(exponent).ok_or(NumericFailure::Overflow)
 }
 
 // -- Core four + power ---
@@ -1103,6 +1108,7 @@ pub use {try_div as checked_div, try_mul as checked_mul, try_pow_integer as chec
 mod tests {
     use super::*;
     use rust_decimal::Decimal;
+    use rust_decimal::MathematicalOps;
     use std::str::FromStr;
 
     #[test]
@@ -1725,6 +1731,80 @@ mod tests {
             result.try_to_decimal().unwrap().round_dp(27),
             expected.round_dp(27),
         );
+    }
+
+    #[test]
+    fn rational_operation_with_fallback_power_compound_day_fraction() {
+        let base = decimal_to_rational(Decimal::from_str("1.04").expect("1.04")).expect("rational");
+        let result = rational_operation_with_fallback(
+            &base,
+            NumericOperation::Power,
+            &rational_new(28, 365),
+        )
+        .expect("1.04^(28/365) must use Decimal fallback");
+        let decimal = result
+            .try_to_decimal()
+            .expect("fallback power must fit Decimal::MAX_SCALE");
+        let expected = base
+            .try_to_decimal()
+            .expect("1.04")
+            .checked_powd(Decimal::from_str("28").expect("28") / Decimal::from(365))
+            .expect("checked_powd");
+        // ℚ round-trip can move the last Decimal digit by 1 ULP.
+        let diff = (decimal - expected).abs();
+        assert!(
+            diff <= Decimal::new(1, 27),
+            "1.04^(28/365) ≈ checked_powd within 1e-27, got {decimal} vs {expected} (diff {diff})"
+        );
+    }
+
+    #[test]
+    fn rational_operation_with_fallback_power_cube_root_irrational() {
+        let base = decimal_to_rational(Decimal::from_str("1.04").expect("1.04")).expect("rational");
+        let result =
+            rational_operation_with_fallback(&base, NumericOperation::Power, &rational_new(1, 3))
+                .expect("1.04^(1/3) must use Decimal fallback");
+        assert!(result.try_to_decimal().is_ok());
+    }
+
+    #[test]
+    fn rational_operation_with_fallback_power_negative_half() {
+        let result = rational_operation_with_fallback(
+            &rational_new(2, 1),
+            NumericOperation::Power,
+            &rational_new(-1, 2),
+        )
+        .expect("2^(-1/2) must use Decimal fallback");
+        let actual = result.try_to_decimal().expect("fits Decimal");
+        let expected = Decimal::ONE
+            / rational_new(2, 1)
+                .try_to_decimal()
+                .expect("2")
+                .sqrt()
+                .expect("sqrt(2)");
+        assert_eq!(actual.round_dp(26), expected.round_dp(26));
+    }
+
+    #[test]
+    fn rational_operation_with_fallback_power_negative_base_fraction_stays_irrational() {
+        let err = rational_operation_with_fallback(
+            &rational_new(-2, 1),
+            NumericOperation::Power,
+            &rational_new(1, 3),
+        )
+        .expect_err("negative base with non-integer exponent stays irrational on R");
+        assert_eq!(err, NumericFailure::Irrational);
+    }
+
+    #[test]
+    fn rational_operation_exact_cube_root_unchanged() {
+        let result = rational_operation(
+            &rational_new(8, 1),
+            NumericOperation::Power,
+            &rational_new(1, 3),
+        )
+        .expect("8^(1/3) is exact in Q");
+        assert_eq!(result, rational_new(2, 1));
     }
 
     #[test]

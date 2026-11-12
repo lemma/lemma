@@ -171,6 +171,28 @@ rule result: r ^ 3"#;
     assert_eq!(eval(code, "t", "result"), "133.1%");
 }
 
+#[test]
+fn ratio_power_day_fraction_compound() {
+    use rust_decimal::Decimal;
+    let code = r#"spec t
+rule growth: (100% + 4%) ^ (28 / 365)
+rule interest: (100% + 4%) ^ (28 / 365) - 100%"#;
+    let growth = eval(code, "t", "growth");
+    let interest = eval(code, "t", "interest");
+    assert!(
+        !growth.is_empty() && growth.ends_with('%'),
+        "ratio power must display as a percentage, got {growth}"
+    );
+    let interest_magnitude: Decimal = interest
+        .trim_end_matches('%')
+        .parse()
+        .unwrap_or_else(|_| panic!("interest display must be decimal%, got {interest}"));
+    assert!(
+        interest_magnitude > Decimal::ZERO,
+        "day-fraction compound interest must be positive, got {interest}"
+    );
+}
+
 // ═══════════════════════════════════════════════════════════════════
 // Operand-order correctness: divide
 // ═══════════════════════════════════════════════════════════════════

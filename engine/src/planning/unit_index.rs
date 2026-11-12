@@ -1484,11 +1484,13 @@ mod tests {
 
     fn reference_scale(name: &str) -> UnitScale {
         UnitScale::Reference {
-            target: crate::planning::semantics::ReferenceTarget::Data(
-                crate::planning::semantics::DataPath::local(name.to_string()),
-            ),
+            factors: vec![(
+                crate::planning::semantics::ReferenceTarget::Data(
+                    crate::planning::semantics::DataPath::local(name.to_string()),
+                ),
+                1,
+            )],
             coefficient: crate::computation::rational::rational_one(),
-            exponent: 1,
         }
     }
 

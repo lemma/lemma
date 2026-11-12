@@ -2,6 +2,18 @@
 
 Releases cover the Lemma engine, `lemma` CLI, OpenAPI crate, LSP, SDKs and VS Code extension. They all follow the same version everywhere. The release version is `[workspace.package] version` in the root `Cargo.toml`. Git tags follow `lemma-v{version}` (for example `lemma-v0.8.20`); releases before the rename used `cli-v{version}`. Draft notes for the next version quickly by running `cargo changelog` to print `git diff` / `git log` since the latest release tag (`xtask` `versions-diff`). Tip: feed that into an LLM to create a summary for this changelog.
 
+## [0.11.2] - 2026-11-12
+
+`--explain` lists both premises when a full `or` holds false. Irrational `^` uses the documented 28dp Decimal fallback for general exponents, not only square roots. Compound units may combine multiple distinct dynamic scales.
+
+### Fixed
+
+- **`--explain` identity `or`**: when the full authored `or` is false (neither operand absorbs), both walked operands appear as premises instead of short-circuit children.
+- **Irrational `^` fallback**: non-exact powers such as `1.04 ^ (28 / 365)` and `1.04 ^ (1 / 3)` use the documented `Decimal::MAX_SCALE` (28dp) approximation, not only square roots. Exact ℚ powers are unchanged. Negative base with a non-integer exponent still vetoes.
+- **rustix 1.1.6**: clears RUSTSEC-2026-0486 (unsound zero-length xattr buffer) so `cargo deny` passes.
+- **Docker image CA store**: scratch image includes `/etc/ssl/certs/ca-certificates.crt` so `lemma mcp` / `lemma mcp --http` no longer panics at startup with `No CA certificates were loaded from the system`.
+- **Multi-dynamic compound units**: a compound may combine distinct dynamic bases (`usd/consumenteneenheid`). Effective scale is `coefficient * Π settled(t_i)^e_i`. The MeasureUnit wire drops singular `reference` / `scale_exponent` for `scale_factors: [(path, exponent)]` plus optional `factor` coefficient (required when `scale_factors` is empty).
+
 ## [0.11.1] - 2026-11-10
 
 Dynamic measure units work through `uses` and in compounds; OpenAPI /docs and interactive prompts keep list and measure inputs usable; `--explain` expands deferred rule wires.

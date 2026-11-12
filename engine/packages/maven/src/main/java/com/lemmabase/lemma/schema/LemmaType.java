@@ -127,8 +127,10 @@ public sealed interface LemmaType {
     /**
      * MeasureUnit.
      * @param name name
-     * @param factor factor; null when {@code reference} is set
-     * @param reference reference; null when {@code factor} is set
+     * @param factor literal scale, or dynamic coefficient when not 1; required when {@code
+     *     scaleFactors} is empty
+     * @param scaleFactors dynamic scale product {@code (reference, exponent)}; empty for a literal
+     *     unit
      * @param derivedMeasureFactors derivedMeasureFactors
      * @param decomposition decomposition
      * @param minimum minimum
@@ -138,12 +140,19 @@ public sealed interface LemmaType {
   record MeasureUnit(
       String name,
       @Nullable RationalFactor factor,
-      @Nullable String reference,
+      List<ScaleFactor> scaleFactors,
       List<DerivedMeasureFactor> derivedMeasureFactors,
       Map<String, Integer> decomposition,
       @Nullable BigDecimal minimum,
       @Nullable BigDecimal maximum,
       @Nullable BigDecimal suggestion) {
+    /**
+     * ScaleFactor.
+     * @param reference reference path of a number data or rule
+     * @param exponent exponent applied to the settled reference
+     */
+    record ScaleFactor(String reference, int exponent) {}
+
     /**
      * DerivedMeasureFactor.
      * @param measureRef measureRef
@@ -162,7 +171,7 @@ public sealed interface LemmaType {
       JsonReading.expectStartObject(p, "MeasureUnit");
       String name = null;
       RationalFactor factor = null;
-      String reference = null;
+      List<ScaleFactor> scaleFactors = List.of();
       List<DerivedMeasureFactor> derived = null;
       Map<String, Integer> decomposition = null;
       BigDecimal minimum = null;
@@ -174,7 +183,14 @@ public sealed interface LemmaType {
         switch (field) {
           case "name" -> name = JsonReading.readString(p);
           case "factor" -> factor = RationalFactor.read(p);
-          case "reference" -> reference = JsonReading.readString(p);
+          case "scale_factors" ->
+              scaleFactors =
+                  JsonReading.readList(
+                      p,
+                      q -> {
+                        var t = JsonReading.readTuple2(q, JsonReading::readString, JsonReading::readInt);
+                        return new ScaleFactor(t.first(), t.second());
+                      });
           case "derived_measure_factors" ->
               derived =
                   JsonReading.readList(
@@ -193,9 +209,9 @@ public sealed interface LemmaType {
       if (name == null) {
         JsonReading.missingRequired("name", "MeasureUnit");
       }
-      if ((factor == null) == (reference == null)) {
+      if (scaleFactors.isEmpty() && factor == null) {
         throw new LemmaBugError(
-            "BUG: MeasureUnit requires exactly one of 'factor' and 'reference'");
+            "BUG: MeasureUnit with empty scale_factors requires 'factor'");
       }
       if (derived == null) {
         JsonReading.missingRequired("derived_measure_factors", "MeasureUnit");
@@ -204,7 +220,7 @@ public sealed interface LemmaType {
         JsonReading.missingRequired("decomposition", "MeasureUnit");
       }
       return new MeasureUnit(
-          name, factor, reference, derived, decomposition, minimum, maximum, suggestion);
+          name, factor, scaleFactors, derived, decomposition, minimum, maximum, suggestion);
     }
   }
 

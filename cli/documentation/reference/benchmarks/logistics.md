@@ -16,8 +16,8 @@ Numbers are produced by `cargo benchmarks logistics`. Large multi-spec rate-shop
 ## Environment
 
 - Host: `Linux 7.0.0-42-generic x86_64`
-- Lemma git SHA: `83e5179496f8e490ba5f64b7750476f1aa5fc899`
-- Generated (UTC): `2026-11-09T15:32:57Z`
+- Lemma git SHA: `ed698fae7d18748da63701064891fdac4b8eaf7e`
+- Generated (UTC): `2026-11-12T22:27:05Z`
 - Rustc:
 
 ```
@@ -36,10 +36,10 @@ Multi-spec rating workspace: `rates_*` cards with 1050 list rows each (`-> key` 
 
 | Profile | Rate cells | Source | Load | Loaded heap | Eval median |
 |---------|-----------:|-------:|-----:|------------:|------------:|
-| `logistics_ground` | 1050 | 0.1 MiB | 13.745 ms | 5.3 MiB | 58.00 us |
-| `logistics_carrier` | 6300 | 0.5 MiB | 66.606 ms | 27.5 MiB | 263.00 us |
-| `logistics_d2c` | 18900 | 1.5 MiB | 195.462 ms | 80.9 MiB | 1.028 ms |
-| `logistics_enterprise` | 126000 | 9.7 MiB | 1268.418 ms | 535.1 MiB | 6.536 ms |
+| `logistics_ground` | 1050 | 0.1 MiB | 15.942 ms | 5.6 MiB | 86.00 us |
+| `logistics_carrier` | 6300 | 0.5 MiB | 67.584 ms | 28.4 MiB | 301.00 us |
+| `logistics_d2c` | 18900 | 1.5 MiB | 211.144 ms | 83.1 MiB | 933.00 us |
+| `logistics_enterprise` | 126000 | 9.7 MiB | 1363.709 ms | 548.5 MiB | 8.781 ms |
 
 ## Load and eval (external catalog)
 
@@ -47,8 +47,8 @@ Same rate-shop workspace as the embedded ladder, but keyed catalog lists (`cells
 
 | Profile | Rate cells | Source | Load | Loaded heap | Eval median |
 |---------|-----------:|-------:|-----:|------------:|------------:|
-| `logistics_ext_ground` | 1050 | 0.0 MiB | 3.111 ms | 0.8 MiB | 8.170 ms |
-| `logistics_ext_carrier` | 6300 | 0.0 MiB | 9.625 ms | 1.6 MiB | 51.221 ms |
-| `logistics_ext_d2c` | 18900 | 0.0 MiB | 25.000 ms | 3.6 MiB | 157.817 ms |
-| `logistics_ext_enterprise` | 126000 | 0.2 MiB | 168.448 ms | 20.6 MiB | 1028.262 ms |
+| `logistics_ext_ground` | 1050 | 0.0 MiB | 4.456 ms | 1.0 MiB | 7.884 ms |
+| `logistics_ext_carrier` | 6300 | 0.0 MiB | 11.611 ms | 2.0 MiB | 51.292 ms |
+| `logistics_ext_d2c` | 18900 | 0.0 MiB | 33.278 ms | 4.4 MiB | 156.250 ms |
+| `logistics_ext_enterprise` | 126000 | 0.2 MiB | 209.292 ms | 25.0 MiB | 1075.128 ms |
 

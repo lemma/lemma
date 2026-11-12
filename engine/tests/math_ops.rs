@@ -3,6 +3,7 @@ use lemma::DateTimeValue;
 use lemma::Engine;
 use lemma::ValueKind;
 use rust_decimal::Decimal;
+use rust_decimal::MathematicalOps;
 
 fn run(code: &str, rule: &str) -> Result<String, lemma::Errors> {
     let mut engine = Engine::new();
@@ -194,6 +195,80 @@ fn test_power_with_irrational_exponent_plans_symbolically() -> Result<(), lemma:
     )?;
     assert_close_decimal(approx, Decimal::new(1414213562373095, 15), tol(12));
     Ok(())
+}
+
+#[test]
+fn test_compound_day_fraction_power_approximates() {
+    let code = r#"
+    spec test
+    rule interest: 1.04 ^ (28 / 365) - 1
+    rule factor: 1.04 ^ (28 / 365)
+    rule via_exp_log: exp(log(1.04) * 28 / 365)
+    rule exact_cube: 8 ^ (1 / 3)
+    "#;
+    let interest = evaluate_authoritative_decimal(code, "interest");
+    assert!(
+        interest > Decimal::ZERO,
+        "compound day-fraction interest must be positive, got {interest}"
+    );
+    let display = {
+        let mut engine = Engine::new();
+        engine
+            .load([(lemma::SourceType::Volatile, code.to_string())])
+            .expect("load");
+        let now = DateTimeValue::now();
+        let resp = engine
+            .evaluate(
+                None,
+                "test",
+                Some(&now),
+                IndexMap::new(),
+                Some(&["interest".to_string()]),
+                false,
+            )
+            .expect("evaluate");
+        let rule_result = resp.get("interest").expect("interest");
+        assert!(!rule_result.vetoed, "interest must not veto");
+        rule_result.result().expect("display").to_string()
+    };
+    assert!(
+        display.contains('.'),
+        "interest must display as a decimal string, got {display}"
+    );
+    let frac_digits = display.split('.').nth(1).map_or(0, str::len);
+    assert!(
+        frac_digits > 0 && frac_digits <= Decimal::MAX_SCALE as usize,
+        "interest display must be within Decimal::MAX_SCALE digits, got {display}"
+    );
+
+    let factor = evaluate_authoritative_decimal(code, "factor");
+    let via_exp_log = evaluate_authoritative_decimal(code, "via_exp_log");
+    assert_close_decimal(factor, via_exp_log, tol(20));
+    assert_eq!(
+        evaluate_authoritative_decimal(code, "exact_cube"),
+        Decimal::from(2)
+    );
+}
+
+#[test]
+fn test_general_irrational_powers_approximate() {
+    let code = r#"
+    spec test
+    rule cube: 1.04 ^ (1 / 3)
+    rule one_half: 1.04 ^ 1.5
+    rule neg_half: 2 ^ (-1 / 2)
+    "#;
+    assert!(
+        evaluate_authoritative_decimal(code, "cube") > Decimal::ONE,
+        "1.04^(1/3) must approximate above 1"
+    );
+    assert!(
+        evaluate_authoritative_decimal(code, "one_half") > Decimal::ONE,
+        "1.04^1.5 must approximate above 1"
+    );
+    let neg_half = evaluate_authoritative_decimal(code, "neg_half");
+    let expected = Decimal::ONE / Decimal::from(2).sqrt().expect("sqrt(2)");
+    assert_close_decimal(neg_half, expected, tol(20));
 }
 
 #[test]

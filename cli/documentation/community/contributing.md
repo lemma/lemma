@@ -35,7 +35,7 @@ For security audits:
 
 ```bash
 cargo install cargo-deny
-cargo deny check --config .cargo/deny.toml
+cargo deny check -D unmatched-skip -D unmatched-skip-root --config .cargo/deny.toml
 ```
 
 ## Making changes

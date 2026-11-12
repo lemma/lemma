@@ -6334,10 +6334,12 @@ impl LemmaType {
     pub(crate) fn with_scale_import_hop(&self, segment: &PathSegment) -> Self {
         fn prefix_units(units: &mut MeasureUnits, segment: &PathSegment) {
             for unit in units.0.iter_mut() {
-                if let crate::literals::UnitScale::Reference { target, .. } = &mut unit.scale {
-                    match target {
-                        ReferenceTarget::Data(path) => path.segments.insert(0, segment.clone()),
-                        ReferenceTarget::Rule(rule) => rule.segments.insert(0, segment.clone()),
+                if let crate::literals::UnitScale::Reference { factors, .. } = &mut unit.scale {
+                    for (target, _) in factors.iter_mut() {
+                        match target {
+                            ReferenceTarget::Data(path) => path.segments.insert(0, segment.clone()),
+                            ReferenceTarget::Rule(rule) => rule.segments.insert(0, segment.clone()),
+                        }
                     }
                 }
             }
@@ -6360,17 +6362,19 @@ impl LemmaType {
         out
     }
 
-    /// Scale target of `unit_name` when that unit is reference-scaled on this type.
-    /// The target is in the coordinates of the spec that holds this type Arc
-    /// (`uses` hops are already prefixed).
+    /// Scale factors of `unit_name` when that unit is reference-scaled on this type.
+    /// Targets are in the coordinates of the spec that holds this type Arc
+    /// (`uses` hops are already prefixed). Empty when the unit is not dynamic.
     #[must_use]
-    pub(crate) fn unit_scale_target(&self, unit_name: &str) -> Option<&ReferenceTarget> {
+    pub(crate) fn unit_scale_factors(&self, unit_name: &str) -> &[(ReferenceTarget, i32)] {
         self.measure_units_table()
             .and_then(|units| units.get(unit_name).ok())
-            .and_then(MeasureUnit::resolved_scale_target)
+            .map(MeasureUnit::resolved_scale_factors)
+            .unwrap_or(&[])
     }
 
-    /// Every reference-scaled unit on this measure type, in declaration order.
+    /// Every scale target of every reference-scaled unit on this measure type,
+    /// in declaration order (factors flattened per unit).
     #[must_use]
     pub(crate) fn dynamic_scale_targets(&self) -> Vec<ReferenceTarget> {
         let Some(units) = self.measure_units_table() else {
@@ -6378,7 +6382,11 @@ impl LemmaType {
         };
         units
             .iter()
-            .filter_map(|unit| unit.resolved_scale_target().cloned())
+            .flat_map(|unit| {
+                unit.resolved_scale_factors()
+                    .iter()
+                    .map(|(target, _)| target.clone())
+            })
             .collect()
     }
 

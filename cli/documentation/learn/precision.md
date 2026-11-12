@@ -57,8 +57,8 @@ Long conversion chains telescope in ℚ. Example: `37 base` through fourteen pri
 
 | Case | Behavior |
 |------|----------|
-| `^` on irrationals (e.g. `2 ^ 0.5`) | `Decimal::MAX_SCALE` digit fallback when no exact root |
-| `sqrt`, `sin`, `cos`, `log`, … | `Decimal::MAX_SCALE` digit semantics; operands converted via `try_to_decimal` |
+| `^` on irrationals (e.g. `2 ^ 0.5`, `1.04 ^ (28 / 365)`) | `Decimal::MAX_SCALE` digit fallback when no exact root. Non-half exponents use `exp(b · ln(a))` for non-negative bases. Negative base with a non-integer exponent vetoes (not real-valued). Equivalent rewrite: `exp(log(1 + r) * t / 365)` (`log` is natural log) |
+| `sqrt`, `sin`, `cos`, `log`, `exp`, … | `Decimal::MAX_SCALE` digit semantics; operands converted via `try_to_decimal` |
 | `tan` | Computed as `sin / cos` at `Decimal::MAX_SCALE` digit semantics. Near π/2 the relative error is at most about `1e-28 / (π/2 − \|x\|)`, because `cos` is evaluated from the 28-digit π/2 constant. Veto where `cos` is exactly zero or the quotient overflows |
 | ℚ result beyond 32,768 bits | Veto (`numeric result exceeds the maximum of 32768 bits`); planning Error for constant number expressions; no decimal fallback |
 | ℚ allocation failure | Veto (`out of memory`); no decimal fallback |

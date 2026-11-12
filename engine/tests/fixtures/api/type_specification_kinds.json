@@ -19,7 +19,7 @@
       },
       {
         "name": "gbp",
-        "reference": "rate",
+        "scale_factors": [["rate", 1]],
         "derived_measure_factors": [],
         "decomposition": { "tax_bracket.money": 1 }
       }

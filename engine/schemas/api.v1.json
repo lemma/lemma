@@ -51,29 +51,7 @@
         "decomposition"
       ],
       "additionalProperties": false,
-      "description": "One declared unit of a Measure type. Exactly one of `factor` (1 of this unit equals `factor` canonical units) and `reference` (a number data or rule that supplies the factor at evaluation) is present.",
-      "oneOf": [
-        {
-          "required": [
-            "factor"
-          ],
-          "not": {
-            "required": [
-              "reference"
-            ]
-          }
-        },
-        {
-          "required": [
-            "reference"
-          ],
-          "not": {
-            "required": [
-              "factor"
-            ]
-          }
-        }
-      ],
+      "description": "One declared unit of a Measure type. When `scale_factors` is absent or empty, `factor` is required (1 of this unit equals `factor` canonical units). When `scale_factors` is non-empty, the effective scale is `coefficient * Π settled(t_i)^e_i` where optional `factor` is the plan-time coefficient (omitted when 1).",
       "properties": {
         "name": {
           "type": "string"
@@ -81,9 +59,23 @@
         "factor": {
           "$ref": "#/$defs/RationalFactor"
         },
-        "reference": {
-          "type": "string",
-          "description": "Source spelling of the number data or rule that supplies this unit's scale."
+        "scale_factors": {
+          "type": "array",
+          "description": "(reference path, exponent) pairs of a dynamic scale product. Empty or omitted for a literal unit.",
+          "items": {
+            "type": "array",
+            "prefixItems": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "integer"
+              }
+            ],
+            "items": false,
+            "minItems": 2,
+            "maxItems": 2
+          }
         },
         "derived_measure_factors": {
           "type": "array",

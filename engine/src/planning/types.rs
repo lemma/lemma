@@ -1715,7 +1715,7 @@ fn rewrite_unit_path_scale_payloads(
             let Some((segments, name)) = unit.scale_reference_parts() else {
                 continue;
             };
-            if unit.resolved_scale_target().is_some() {
+            if !unit.resolved_scale_factors().is_empty() {
                 continue;
             }
             let reference = ast::Reference {
@@ -2188,10 +2188,16 @@ fn resolve_measure_decompositions(
                     resolved_unit_scales[unit_idx] =
                         Some(ResolvedCompoundScale::Literal(factor.clone()));
                 } else if unit.is_dynamic() {
+                    let factors = unit.resolved_scale_factors().to_vec();
+                    if factors.is_empty() {
+                        panic!(
+                            "BUG: inherited dynamic unit '{}' on '{type_name}' still has unresolved scale factors after the declaring type's resolution",
+                            unit.name
+                        );
+                    }
                     resolved_unit_scales[unit_idx] = Some(ResolvedCompoundScale::Dynamic {
-                        scale: unit.scale.clone(),
+                        factors,
                         coefficient: unit.scale_coefficient(),
-                        exponent: unit.scale_exponent(),
                     });
                 }
                 continue;
@@ -2289,10 +2295,9 @@ fn resolve_measure_decompositions(
                         let u = match resolved_unit_scales[idx].clone() {
                             Some(ResolvedCompoundScale::Literal(factor)) => u.with_factor(factor),
                             Some(ResolvedCompoundScale::Dynamic {
-                                scale,
+                                factors,
                                 coefficient,
-                                exponent,
-                            }) => u.with_dynamic_scale(scale, coefficient, exponent),
+                            }) => u.with_reference_scale(factors, coefficient),
                             None => u,
                         };
                         if resolve_to_simple[idx] {
@@ -2460,12 +2465,11 @@ fn canonicalize_unit_for_measure(unit: MeasureUnit) -> MeasureUnit {
 #[derive(Clone, Debug)]
 enum ResolvedCompoundScale {
     Literal(RationalInteger),
-    /// Inherits a dynamic base unit's reference; effective factor is
-    /// `settled(reference)^exponent * coefficient`.
+    /// Product of dynamic bases; effective factor is
+    /// `coefficient * Π settled(t_i)^e_i`.
     Dynamic {
-        scale: crate::literals::UnitScale,
+        factors: Vec<(crate::planning::semantics::ReferenceTarget, i32)>,
         coefficient: RationalInteger,
-        exponent: i32,
     },
 }
 
@@ -2483,7 +2487,7 @@ fn resolve_compound_unit(
 
     let mut result: BaseMeasureVector = BaseMeasureVector::new();
     let mut coefficient = unit.literal_factor().cloned().unwrap_or_else(rational_one);
-    let mut dynamic: Option<(crate::literals::UnitScale, i32)> = None;
+    let mut dynamic_factors: Vec<(crate::planning::semantics::ReferenceTarget, i32)> = Vec::new();
 
     for (measure_ref, exponent) in &unit.derived_measure_factors {
         let (owning_measure_name, owning_decomp, component) = if let Some(entry) =
@@ -2535,11 +2539,17 @@ fn resolve_compound_unit(
             let component = if let Some(factor) = referenced.literal_factor().cloned() {
                 CompoundComponent::Literal(factor)
             } else {
+                let factors = referenced.resolved_scale_factors();
+                if factors.is_empty() {
+                    panic!(
+                        "BUG: dynamic unit '{bare}' on '{}' must be Reference-scaled before compounds that inherit it resolve",
+                        owning_type.name()
+                    );
+                }
                 CompoundComponent::Dynamic {
-                    scale: referenced.scale.clone(),
                     bare: bare.to_string(),
+                    factors: factors.to_vec(),
                     coefficient: referenced.scale_coefficient(),
-                    exponent: referenced.scale_exponent(),
                 }
             };
             (local_owner_name(owner), decomposition.clone(), component)
@@ -2600,10 +2610,9 @@ fn resolve_compound_unit(
                     })?;
             }
             CompoundComponent::Dynamic {
-                scale,
                 bare,
+                factors: base_factors,
                 coefficient: base_coefficient,
-                exponent: base_exponent,
             } => {
                 let raised_coefficient =
                     checked_pow_integer(&base_coefficient, &BigInt::from_i64(i64::from(*exponent)))
@@ -2627,9 +2636,8 @@ fn resolve_compound_unit(
                         source,
                     )
                 })?;
-                let component_exponent = base_exponent
-                    .checked_mul(*exponent)
-                    .ok_or_else(|| {
+                for (target, base_exponent) in base_factors {
+                    let component_exponent = base_exponent.checked_mul(*exponent).ok_or_else(|| {
                         Error::validation(
                             format!(
                                 "In spec '{spec_name}': unit '{}' in measure type '{declaring_type_name}' overflowed combining dynamic unit '{bare}' exponents.",
@@ -2639,89 +2647,65 @@ fn resolve_compound_unit(
                             None::<String>,
                         )
                     })?;
-                match &mut dynamic {
-                    None => {
-                        dynamic = Some((scale, component_exponent));
-                    }
-                    Some((existing_scale, existing_exponent)) => {
-                        if !same_dynamic_scale_identity(existing_scale, &scale) {
-                            return Err(Error::validation(
-                                format!(
-                                    "In spec '{spec_name}': unit '{}' in measure type '{declaring_type_name}' combines distinct dynamic units in one compound expression.",
-                                    unit.name
-                                ),
-                                source.cloned(),
-                                None::<String>,
-                            ));
-                        }
-                        *existing_exponent = existing_exponent
-                            .checked_add(component_exponent)
-                            .ok_or_else(|| {
-                                Error::validation(
-                                    format!(
-                                        "In spec '{spec_name}': unit '{}' in measure type '{declaring_type_name}' overflowed combining dynamic unit '{bare}' exponents.",
-                                        unit.name
-                                    ),
-                                    source.cloned(),
-                                    None::<String>,
-                                )
-                            })?;
-                    }
+                    dynamic_factors.push((target, component_exponent));
                 }
             }
         }
     }
 
-    let derived_scale = match dynamic {
-        None => ResolvedCompoundScale::Literal(coefficient),
-        Some((scale, exponent)) => ResolvedCompoundScale::Dynamic {
-            scale,
+    let factors = merge_compound_scale_factors(
+        spec_name,
+        declaring_type_name,
+        &unit.name,
+        &dynamic_factors,
+        source,
+    )?;
+    let derived_scale = if factors.is_empty() {
+        ResolvedCompoundScale::Literal(coefficient)
+    } else {
+        ResolvedCompoundScale::Dynamic {
+            factors,
             coefficient,
-            exponent,
-        },
+        }
     };
     Ok((result, derived_scale))
+}
+
+fn merge_compound_scale_factors(
+    spec_name: &str,
+    declaring_type_name: &str,
+    unit_name: &str,
+    factors: &[(crate::planning::semantics::ReferenceTarget, i32)],
+    source: Option<&Source>,
+) -> Result<Vec<(crate::planning::semantics::ReferenceTarget, i32)>, Error> {
+    use std::collections::BTreeMap;
+    let mut accumulator: BTreeMap<crate::planning::semantics::ReferenceTarget, i32> =
+        BTreeMap::new();
+    for (target, exponent) in factors {
+        let entry = accumulator.entry(target.clone()).or_insert(0);
+        *entry = entry.checked_add(*exponent).ok_or_else(|| {
+            Error::validation(
+                format!(
+                    "In spec '{spec_name}': unit '{unit_name}' in measure type '{declaring_type_name}' overflowed combining dynamic scale factor exponents."
+                ),
+                source.cloned(),
+                None::<String>,
+            )
+        })?;
+    }
+    Ok(accumulator
+        .into_iter()
+        .filter(|(_, exponent)| *exponent != 0)
+        .collect())
 }
 
 enum CompoundComponent {
     Literal(RationalInteger),
     Dynamic {
-        scale: crate::literals::UnitScale,
         bare: String,
+        factors: Vec<(crate::planning::semantics::ReferenceTarget, i32)>,
         coefficient: RationalInteger,
-        exponent: i32,
     },
-}
-
-fn same_dynamic_scale_identity(
-    left: &crate::literals::UnitScale,
-    right: &crate::literals::UnitScale,
-) -> bool {
-    match (left, right) {
-        (
-            crate::literals::UnitScale::Unresolved {
-                segments: left_segments,
-                name: left_name,
-                ..
-            },
-            crate::literals::UnitScale::Unresolved {
-                segments: right_segments,
-                name: right_name,
-                ..
-            },
-        ) => left_segments == right_segments && left_name == right_name,
-        (
-            crate::literals::UnitScale::Reference {
-                target: left_target,
-                ..
-            },
-            crate::literals::UnitScale::Reference {
-                target: right_target,
-                ..
-            },
-        ) => left_target == right_target,
-        _ => false,
-    }
 }
 
 fn overflow_to_validation_error(

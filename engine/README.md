@@ -22,7 +22,7 @@ Add the crate:
 
 ```toml
 [dependencies]
-lemma-engine = "0.11.2"
+lemma-engine = "0.11.3"
 ```
 
 ### Minimal example
@@ -245,7 +245,7 @@ Build: `node build.js` (from `engine/packages/npm/`). See [packages/npm/README.m
 <dependency>
   <groupId>com.lemmabase</groupId>
   <artifactId>lemma-engine</artifactId>
-  <version>0.11.2</version>
+  <version>0.11.3</version>
 </dependency>
 ```
 
@@ -254,7 +254,7 @@ Build/test: `cargo build -p lemma_jni` then `./mvnw verify` under `engine/packag
 ### C# / .NET
 
 ```bash
-dotnet add package Lemmabase.Lemma.Engine --version 0.11.2
+dotnet add package Lemmabase.Lemma.Engine --version 0.11.3
 ```
 
 Build/test: `cargo run -p xtask -- nuget-natives` then `dotnet test` under `engine/packages/nuget/` (also via `cargo precommit`). See [packages/nuget/Lemmabase.Lemma.Engine/README.md](packages/nuget/Lemmabase.Lemma.Engine/README.md).

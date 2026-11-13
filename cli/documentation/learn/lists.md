@@ -115,6 +115,46 @@ rule child_count:
 
 `mix.children` is sealed, so evaluation data cannot replace it. Its rows follow the comma order, not declaration order. Repeating an alias is allowed without `-> key`; keyed lists still require unique sealed literal keys. Cyclic wiring between sealed list slots is a planning error.
 
+A list slot may also wire to one list-typed data or rule reference, the same way a scalar slot wires with `-> with y: p.doubled`:
+
+```lemma
+spec row
+
+data n: number
+
+
+spec catalog
+
+uses row
+
+rule rows:
+  row list
+  -> with n: 5
+
+
+spec consumer
+
+uses row
+
+data rows: row list
+
+rule total:
+  rows -> sum n
+
+
+spec root
+
+uses catalog
+
+uses c: consumer
+  -> with rows: catalog.rows
+
+rule out:
+  c.total
+```
+
+Here `catalog.rows` is a list-valued rule. The consumer's `rows` slot is sealed to that list. A sealed data list on another `uses` wires the same way.
+
 ## Keys and `find`
 
 Every list is keyed. With `-> key` (at most once, before the first `-> with`), rows are identified by those fields. Without it, rows are numbered `1` to `n` in row order.

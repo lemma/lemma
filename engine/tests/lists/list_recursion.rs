@@ -1219,23 +1219,25 @@ rule last_name:
 }
 
 #[test]
-fn binding_replacing_instance_list_is_planning_error() {
-    let err = load_planning_err(
+fn uses_wire_list_slot_from_local_data_list() {
+    let engine = load_ok(
         r#"
 spec line
 data qty: number
 spec order
 uses line
 data lines: line list
+rule total: lines -> sum qty
 spec wrapper
 uses o: order
   -> with lines: extras
 uses line
 data extras: line list
   -> with qty: 1
+rule out: o.total
 "#,
     );
-    assert_contains(&err, "binding `o.lines` replaces instance list `lines`");
+    assert_eq!(value(&evaluate(&engine, "wrapper", data(&[])), "out"), "1");
 }
 
 #[test]

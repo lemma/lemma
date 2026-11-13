@@ -2,6 +2,14 @@
 
 Releases cover the Lemma engine, `lemma` CLI, OpenAPI crate, LSP, SDKs and VS Code extension. They all follow the same version everywhere. The release version is `[workspace.package] version` in the root `Cargo.toml`. Git tags follow `lemma-v{version}` (for example `lemma-v0.8.20`); releases before the rename used `cli-v{version}`. Draft notes for the next version quickly by running `cargo changelog` to print `git diff` / `git log` since the latest release tag (`xtask` `versions-diff`). Tip: feed that into an LLM to create a summary for this changelog.
 
+## [0.11.3] - 2026-11-13
+
+Instance-list slots on `uses -> with` accept one list-typed data or rule reference, the same wiring as scalar `-> with y: p.doubled`. Bare local `uses` aliases still copy rows.
+
+### Fixed
+
+- **`uses -> with` list slots from list-typed references**: `-> with rows: catalog.rows` (list-valued rule) and `-> with items: holder.items` (data list) seal the slot via `BindingValue::Reference` / deferred resolution. Comma-separated local `uses` aliases keep copy semantics. Wrong row Spec is a planning Error; evaluation data cannot override a wired list.
+
 ## [0.11.2] - 2026-11-12
 
 `--explain` lists both premises when a full `or` holds false. Irrational `^` uses the documented 28dp Decimal fallback for general exponents, not only square roots. Compound units may combine multiple distinct dynamic scales.

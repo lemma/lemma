@@ -3,7 +3,7 @@
 Lemma rules engine for .NET.
 
 ```bash
-dotnet add package Lemmabase.Lemma.Engine --version 0.11.2
+dotnet add package Lemmabase.Lemma.Engine --version 0.11.3
 ```
 
 See [dotnet.md](https://github.com/lemma/lemma/blob/main/cli/documentation/tools/dotnet.md).

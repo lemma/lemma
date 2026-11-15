@@ -140,6 +140,12 @@
         <groupId>org.apache.maven.plugins</groupId>
         <artifactId>maven-source-plugin</artifactId>
         <version>3.4.0</version>
+        <configuration>
+          <!-- Default is false: any resources under src/main/resources (including a
+               locally copied host JNI native used for tests) would be duplicated into
+               the -sources jar. Published Central jars ship checksums only, not natives. -->
+          <excludeResources>true</excludeResources>
+        </configuration>
         <executions>
           <execution>
             <id>attach-sources</id>

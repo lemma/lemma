@@ -461,19 +461,73 @@ jobs:
         run: cargo publish -p lemma-engine --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
 
       - name: Wait for crates.io index
-        run: sleep 60
+        env:
+          VERSION: ${{ needs.detect-version-changes.outputs.version }}
+        run: |
+          set -euo pipefail
+          url="https://index.crates.io/le/mm/lemma-engine"
+          needle="\"vers\":\"${VERSION}\""
+          for i in $(seq 1 90); do
+            if curl -fsSL -A 'lemma-release' "$url" | grep -Fq "$needle"; then
+              echo "lemma-engine@${VERSION} visible (attempt ${i})"
+              rm -rf "${CARGO_HOME:-$HOME/.cargo}/registry/index" \
+                     "${CARGO_HOME:-$HOME/.cargo}/registry/cache" \
+                     "${CARGO_HOME:-$HOME/.cargo}/registry/src" || true
+              exit 0
+            fi
+            echo "attempt ${i}/90: not visible yet; sleeping 10s"
+            sleep 10
+          done
+          echo "ERROR: lemma-engine@${VERSION} not on sparse index after 15m" >&2
+          exit 1
 
       - name: Publish lemma-lsp
         run: cargo publish -p lemma-lsp --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
 
       - name: Wait for crates.io index
-        run: sleep 60
+        env:
+          VERSION: ${{ needs.detect-version-changes.outputs.version }}
+        run: |
+          set -euo pipefail
+          url="https://index.crates.io/le/mm/lemma-lsp"
+          needle="\"vers\":\"${VERSION}\""
+          for i in $(seq 1 90); do
+            if curl -fsSL -A 'lemma-release' "$url" | grep -Fq "$needle"; then
+              echo "lemma-lsp@${VERSION} visible (attempt ${i})"
+              rm -rf "${CARGO_HOME:-$HOME/.cargo}/registry/index" \
+                     "${CARGO_HOME:-$HOME/.cargo}/registry/cache" \
+                     "${CARGO_HOME:-$HOME/.cargo}/registry/src" || true
+              exit 0
+            fi
+            echo "attempt ${i}/90: not visible yet; sleeping 10s"
+            sleep 10
+          done
+          echo "ERROR: lemma-lsp@${VERSION} not on sparse index after 15m" >&2
+          exit 1
 
       - name: Publish lemma-openapi
         run: cargo publish -p lemma-openapi --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
 
       - name: Wait for crates.io index
-        run: sleep 60
+        env:
+          VERSION: ${{ needs.detect-version-changes.outputs.version }}
+        run: |
+          set -euo pipefail
+          url="https://index.crates.io/le/mm/lemma-openapi"
+          needle="\"vers\":\"${VERSION}\""
+          for i in $(seq 1 90); do
+            if curl -fsSL -A 'lemma-release' "$url" | grep -Fq "$needle"; then
+              echo "lemma-openapi@${VERSION} visible (attempt ${i})"
+              rm -rf "${CARGO_HOME:-$HOME/.cargo}/registry/index" \
+                     "${CARGO_HOME:-$HOME/.cargo}/registry/cache" \
+                     "${CARGO_HOME:-$HOME/.cargo}/registry/src" || true
+              exit 0
+            fi
+            echo "attempt ${i}/90: not visible yet; sleeping 10s"
+            sleep 10
+          done
+          echo "ERROR: lemma-openapi@${VERSION} not on sparse index after 15m" >&2
+          exit 1
 
       - name: Publish lemma
         run: cargo publish -p lemma --token ${{ secrets.CARGO_REGISTRY_TOKEN }}

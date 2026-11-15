@@ -6,11 +6,13 @@
 use crate::deps::{dependency_identifier_from_dependency_path, lemma_deps_dir};
 use lemma::Engine;
 use std::collections::BTreeMap;
+use std::collections::hash_map::DefaultHasher;
 use std::fs;
+use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
 use walkdir::WalkDir;
 
 /// Paths discovered under a workspace root, partitioned by provenance.
@@ -259,15 +261,25 @@ pub fn refresh_workspace_via_update(
     Ok(())
 }
 
-type ModifiedSnapshot = BTreeMap<PathBuf, SystemTime>;
+/// Discover-set fingerprint: path → content hash.
+///
+/// Mtime alone is not enough: on filesystems that keep the same `mtime` across
+/// rapid same-length rewrites, a real content change would look identical and the
+/// watch would never deliver `Ok(())`.
+type DiscoverSnapshot = BTreeMap<PathBuf, u64>;
 
-fn collect_modified_times(workdir: &Path) -> Result<ModifiedSnapshot, WorkspaceDiskError> {
+fn content_fingerprint(path: &Path) -> Result<u64, WorkspaceDiskError> {
+    let bytes = fs::read(path)?;
+    let mut hasher = DefaultHasher::new();
+    bytes.hash(&mut hasher);
+    Ok(hasher.finish())
+}
+
+fn collect_discover_snapshot(workdir: &Path) -> Result<DiscoverSnapshot, WorkspaceDiskError> {
     let discovered = discover_lemma_paths(workdir)?;
     let mut snapshot = BTreeMap::new();
     for path in discovered.all_paths() {
-        let metadata = fs::metadata(path)?;
-        let modified = metadata.modified()?;
-        snapshot.insert(path.clone(), modified);
+        snapshot.insert(path.clone(), content_fingerprint(path)?);
     }
     Ok(snapshot)
 }
@@ -410,8 +422,8 @@ pub fn watch_lemma_workspace(
     workdir: PathBuf,
     on_change: Sender<Result<(), WorkspaceDiskError>>,
 ) -> Result<WatchGuard, WorkspaceDiskError> {
-    let initial_snapshot = collect_modified_times(&workdir)?;
-    let last_snapshot: Arc<Mutex<ModifiedSnapshot>> = Arc::new(Mutex::new(initial_snapshot));
+    let initial_snapshot = collect_discover_snapshot(&workdir)?;
+    let last_snapshot: Arc<Mutex<DiscoverSnapshot>> = Arc::new(Mutex::new(initial_snapshot));
     let currently_watched: Arc<Mutex<std::collections::BTreeSet<WatchTarget>>> =
         Arc::new(Mutex::new(std::collections::BTreeSet::new()));
     let debouncer_slot: Arc<
@@ -435,7 +447,7 @@ pub fn watch_lemma_workspace(
                 return;
             }
 
-            let current_snapshot = match collect_modified_times(&workdir_for_callback) {
+            let current_snapshot = match collect_discover_snapshot(&workdir_for_callback) {
                 Ok(snapshot) => snapshot,
                 Err(error) => {
                     deliver(&on_change_for_callback, Err(error));
@@ -742,6 +754,20 @@ mod tests {
             "gitignored target/*.lemma must not change discover snapshot"
         );
         drop(guard);
+    }
+
+    #[test]
+    fn discover_snapshot_changes_when_content_changes_at_same_mtime() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let app = root.path().join("src/app.lemma");
+        write_file(&app, "spec app\ndata x: 1\n");
+        let before = collect_discover_snapshot(root.path()).expect("snapshot");
+        write_file(&app, "spec app\ndata x: 2\n");
+        let after = collect_discover_snapshot(root.path()).expect("snapshot");
+        assert_ne!(
+            before, after,
+            "same-length rewrite must change the discover fingerprint even when mtime is unchanged"
+        );
     }
 
     #[test]

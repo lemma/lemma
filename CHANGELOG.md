@@ -2,6 +2,15 @@
 
 Releases cover the Lemma engine, `lemma` CLI, OpenAPI crate, LSP, SDKs and VS Code extension. They all follow the same version everywhere. The release version is `[workspace.package] version` in the root `Cargo.toml`. Git tags follow `lemma-v{version}` (for example `lemma-v0.8.20`); releases before the rename used `cli-v{version}`. Draft notes for the next version quickly by running `cargo changelog` to print `git diff` / `git log` since the latest release tag (`xtask` `versions-diff`). Tip: feed that into an LLM to create a summary for this changelog.
 
+## [0.11.4] - 2026-11-15
+
+Crates.io bottom-up publish waits on the sparse index instead of a fixed sleep. Workspace disk watch detects same-length edits when mtime does not move.
+
+### Fixed
+
+- **crates.io index wait**: after each `cargo publish` in the release workflow (`lemma-engine` → `lemma-lsp` → `lemma-openapi` → `lemma`), poll `index.crates.io` until the published version is visible (up to 15 minutes) and clear cargo's local registry cache. Replaces the previous fixed `sleep 60`, which was not enough under sparse-index lag.
+- **Workspace watch content fingerprint**: discover snapshots hash file contents instead of comparing mtime only. Rapid same-length rewrites that leave `mtime` unchanged (common on this class of filesystem) no longer drop the change notification.
+
 ## [0.11.3] - 2026-11-15
 
 Instance-list slots on `uses -> with` accept one list-typed data or rule reference, the same wiring as scalar `-> with y: p.doubled`. Bare local `uses` aliases still copy rows. Contributors use `nix develop -i` (ignore host env) for the full toolchain. Maven builds and ships for JDK 26+; the NuGet package targets `net10.0` (usable from .NET 11+).

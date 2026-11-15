@@ -10,7 +10,7 @@ nix develop
 
 ## Run like CI
 
-Push to `main` runs the full gate, the coverage-report check, then 5 minutes of fuzz total (split evenly across targets):
+Pull requests run the full gate, the coverage-report check, then 5 minutes of fuzz total (split evenly across targets):
 
 ```bash
 cargo precommit --coverage --fuzz

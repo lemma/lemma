@@ -8,6 +8,7 @@ Instance-list slots on `uses -> with` accept one list-typed data or rule referen
 
 ### Changed
 
+- **Quality CI**: pull requests run `cargo precommit --coverage --fuzz` (5 minute budget). Push to `main` runs `cargo precommit --coverage` only (no fuzz on the release gate).
 - **Nix flake**: `nix develop -i` with a small `-k` keep-list is required so the shell does not inherit host/agent env. The flake supplies Rust (from `rust-toolchain.toml`, wasm32 + linked nightly via rustup), cargo-nextest, cargo-deny, cargo-fuzz, cargo-llvm-cov, wasm-pack **0.15.1**, `uniffi-bindgen-cs` `v0.11.0+v0.31.0`, Node 24, Elixir/Hex/rebar3, Temurin JDK 26, .NET 10 SDK, and git. `CARGO_HOME` / `RUSTUP_HOME` live under `~/.cache/lemma-*` so Cargo plugins are not taken from `~/.cargo/bin`. `AGENTS.md` and the README Contributing section document the keep-list.
 - **Optional pre-push hook**: `git config core.hooksPath .githooks` runs `nix develop -i … -c cargo precommit` before every push (opt-in per clone; no skip env).
 - **[breaking] Maven JDK 26+**: `maven.compiler.release` is 26; consumers need JDK 26+. Process flags live in `.mvn/jvm.config` (`--enable-native-access=ALL-UNNAMED`, `--sun-misc-unsafe-memory-access=allow`, `--enable-final-field-mutation=ALL-UNNAMED`); Surefire forks get native access via `argLine`.

@@ -41,7 +41,7 @@ That is per-repo and opt-in. There is no skip env var. CI still runs `cargo prec
    cargo precommit
    ```
 
-   That is the local gate. Pull requests run `cargo precommit --coverage` (same gate, then the committed coverage-report check). Push to `main` runs `cargo precommit --coverage --fuzz`. The gate: versions-verify, Hex `mix precommit`, VS Code `npm ci` + `npm audit --audit-level=low` + package, fmt, clippy (`--all-features`), nextest (including ignored benches), WASM npm build+test, Maven `./mvnw -B verify` (after `lemma_jni` build), NuGet `dotnet test` (after `lemma_dotnet` + UniFFI generate, formatted with CSharpier 1.3.0), cargo-deny. `cargo package --list` of the crates.io crates fails on a `warning:` line (package-set hygiene; release bottom-up publish owns registry compile). `--coverage` runs `cargo coverage all --check`. `--fuzz` runs 5 minutes total across `engine/fuzz` targets. All tools come from `nix develop`. Regenerate coverage with `cargo coverage all` when engine or CLI sources change. `cargo nextest` alone is Rust tests only.
+That is the local gate. Pull requests run `cargo precommit --coverage --fuzz` (same gate, then the committed coverage-report check, then 5 minutes of fuzz). Push to `main` runs `cargo precommit --coverage`. The gate: versions-verify, Hex `mix precommit`, VS Code `npm ci` + `npm audit --audit-level=low` + package, fmt, clippy (`--all-features`), nextest (including ignored benches), WASM npm build+test, Maven `./mvnw -B verify` (after `lemma_jni` build), NuGet `dotnet test` (after `lemma_dotnet` + UniFFI generate, formatted with CSharpier 1.3.0), cargo-deny. `cargo package --list` of the crates.io crates fails on a `warning:` line (package-set hygiene; release bottom-up publish owns registry compile). `--coverage` runs `cargo coverage all --check`. `--fuzz` runs 5 minutes total across `engine/fuzz` targets. All tools come from `nix develop`. Regenerate coverage with `cargo coverage all` when engine or CLI sources change. `cargo nextest` alone is Rust tests only.
 
 ### Release version (maintainers)
 
@@ -54,7 +54,7 @@ Do not hand-edit those copies unless you keep them in sync.
 
 ## Pull requests
 
-A pull request runs `cargo precommit --coverage`. Push to `main` runs `cargo precommit --coverage --fuzz`. That must pass.
+A pull request runs `cargo precommit --coverage --fuzz`. Push to `main` runs `cargo precommit --coverage`. That must pass.
 
 ## Project structure
 
@@ -81,7 +81,7 @@ See [engine/tests/README.md](https://github.com/lemma/lemma/blob/main/engine/tes
 
 ### Fuzz testing
 
-Push to `main` checks committed coverage reports, then runs 5 minutes of fuzz total:
+Pull requests check committed coverage reports, then run 5 minutes of fuzz total:
 
 ```bash
 cargo precommit --coverage --fuzz

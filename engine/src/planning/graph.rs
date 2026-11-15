@@ -146,6 +146,10 @@ type DataBindings = IndexMap<Vec<String>, (BindingValue, Source)>;
 /// itself was written (not the nested target spec). The resolved [`ReferenceTarget`]
 /// is carried through so the nested spec's planning does not need the outer
 /// spec's scope to interpret the reference.
+///
+/// An instance-list slot may be sealed by [`Self::InstanceAliases`] (bare local `uses`
+/// copies) or by [`Self::Reference`] (one list-typed data or rule wire, same as a
+/// scalar `-> with y: p.doubled`).
 #[derive(Debug, Clone)]
 pub(crate) enum BindingValue {
     /// Literal RHS (parsed as a `Value`). Applied as a plain value to the bound data.
@@ -2113,57 +2117,99 @@ impl<'a> Graph<'a> {
 
     /// Rows a read of `end` on row `at` yields: the instance of a `uses` slot, the
     /// rows of a list field, or the instances a spec-valued rule of the row's spec
-    /// returns.
+    /// returns. A deferred list wire follows [`Self::target_landing`] iteratively
+    /// until sealed rows, a plan list, or rule candidates are reached.
     fn end_rows<'s>(&'s self, at: Located<'s>, end: &RowEnd) -> Vec<Located<'s>> {
-        let template = self.template_of_row(at.row);
-        match end {
-            RowEnd::Rule(rule) => template
-                .rule_candidates
-                .get(rule)
-                .unwrap_or_else(|| {
-                    panic!(
-                        "BUG: rule '{rule}' of '{}' has no candidate list",
-                        template.spec_name
-                    )
-                })
-                .instances
-                .iter()
-                .map(|instance| self.locate_instance(Some(at.clone()), instance))
-                .collect(),
-            RowEnd::Data(path) => match template.data.get(path) {
-                Some(DataDefinition::Import { .. }) => vec![self.import_hop(at, path)],
-                Some(DataDefinition::InstanceList { .. }) => {
-                    match at.row.get_binding(template, path) {
-                        Some(RowBinding::Rows { rows, hops, .. }) => {
-                            let owner = at.context_at(*hops);
-                            rows.iter()
-                                .map(|row| Located {
-                                    row,
-                                    context: owner.clone(),
-                                })
-                                .collect()
-                        }
-                        Some(RowBinding::Bound(_)) | None => {
-                            let context = at.inside();
-                            template
-                                .instance_lists
-                                .get(path)
-                                .expect("BUG: template instance list has a source")
-                                .store
-                                .shape_rows()
-                                .map(|row| Located {
-                                    row,
-                                    context: context.clone(),
-                                })
-                                .collect()
-                        }
-                        Some(binding) => {
-                            panic!("BUG: list field '{path}' holds {binding:?}")
+        let mut at = at;
+        let mut end = end.clone();
+        loop {
+            let template = self.template_of_row(at.row);
+            match &end {
+                RowEnd::Rule(rule) => {
+                    break template
+                        .rule_candidates
+                        .get(rule)
+                        .unwrap_or_else(|| {
+                            panic!(
+                                "BUG: rule '{rule}' of '{}' has no candidate list",
+                                template.spec_name
+                            )
+                        })
+                        .instances
+                        .iter()
+                        .map(|instance| self.locate_instance(Some(at.clone()), instance))
+                        .collect();
+                }
+                RowEnd::Data(path) => match template.data.get(path) {
+                    Some(DataDefinition::Import { .. }) => {
+                        break vec![self.import_hop(at, path)];
+                    }
+                    Some(DataDefinition::InstanceList { .. }) => {
+                        match at.row.get_binding(template, path) {
+                            Some(RowBinding::Rows { rows, hops, .. }) => {
+                                let owner = at.context_at(*hops);
+                                break rows
+                                    .iter()
+                                    .map(|row| Located {
+                                        row,
+                                        context: owner.clone(),
+                                    })
+                                    .collect();
+                            }
+                            Some(RowBinding::Deferred { target, hops }) => {
+                                match self.target_landing(at.scope(*hops), target) {
+                                    Landing::Row(ForcedRead {
+                                        at: next,
+                                        end: next_end,
+                                    }) => {
+                                        at = next;
+                                        end = next_end;
+                                    }
+                                    Landing::Plan(RowEnd::Data(path)) => {
+                                        break self.plan_slot_rows(&path);
+                                    }
+                                    Landing::Plan(RowEnd::Rule(rule)) => {
+                                        break match self.rule_candidates.get(&rule) {
+                                            Some(candidates) => candidates
+                                                .instances
+                                                .iter()
+                                                .map(|instance| {
+                                                    self.locate_instance(None, instance)
+                                                })
+                                                .collect(),
+                                            None => {
+                                                assert!(
+                                                    self.dropped_rules.contains(&rule),
+                                                    "BUG: rule '{rule}' is linked but has no candidates"
+                                                );
+                                                Vec::new()
+                                            }
+                                        };
+                                    }
+                                }
+                            }
+                            Some(RowBinding::Bound(_)) | None => {
+                                let context = at.inside();
+                                break template
+                                    .instance_lists
+                                    .get(path)
+                                    .expect("BUG: template instance list has a source")
+                                    .store
+                                    .shape_rows()
+                                    .map(|row| Located {
+                                        row,
+                                        context: context.clone(),
+                                    })
+                                    .collect();
+                            }
+                            Some(binding) => {
+                                panic!("BUG: list field '{path}' holds {binding:?}")
+                            }
                         }
                     }
-                }
-                _ => Vec::new(),
-            },
+                    _ => break Vec::new(),
+                },
+            }
         }
     }
 
@@ -3347,6 +3393,9 @@ fn reference_error(main_spec: &LemmaSpec, source: &Source, message: String) -> E
 ///    `celsius`) share the `Measure` discriminant but are not interchangeable
 ///    values; copying one into the other would silently propagate a
 ///    wrong-domain measure. Ratio / ratio-range refs stay base-kind only.
+/// 3. for Spec and List types, [`LemmaType::same_value_type`] (element Spec
+///    identity and list key). Base-kind alone would accept any Spec or any
+///    List.
 ///
 /// `target_kind_label` distinguishes the two callers ("target" for data
 /// references, "target rule" for rule references) so the message reads
@@ -3359,6 +3408,20 @@ fn reference_kind_mismatch_message<P: fmt::Display>(
     target_kind_label: &str,
 ) -> Option<String> {
     if !lhs.has_same_base_type(target_type) {
+        return Some(format!(
+            "Data reference '{}' type mismatch: declared as '{}' but {} '{}' is '{}'",
+            reference_path,
+            lhs.name(),
+            target_kind_label,
+            target_path,
+            target_type.name(),
+        ));
+    }
+
+    if lhs.is_spec() || lhs.is_list() {
+        if lhs.same_value_type(target_type) {
+            return None;
+        }
         return Some(format!(
             "Data reference '{}' type mismatch: declared as '{}' but {} '{}' is '{}'",
             reference_path,
@@ -4642,7 +4705,7 @@ impl<'a, 'i> GraphBuilder<'a, 'i> {
                         if target_is_instance_list {
                             self.errors.push(Error::validation_with_context(
                                 format!(
-                                    "binding `{path}` replaces instance list `{name}` with a literal; list slots take `uses` aliases",
+                                    "binding `{path}` replaces instance list `{name}` with a literal; list slots take local `uses` aliases or one list-typed data or rule reference",
                                     path = binding_reference,
                                     name = binding_reference.name,
                                 ),
@@ -4656,7 +4719,44 @@ impl<'a, 'i> GraphBuilder<'a, 'i> {
                         BindingValue::Literal(value.clone())
                     }
                     ast::UsesBindingRhs::References { targets } if target_is_instance_list => {
-                        BindingValue::InstanceAliases(targets.clone())
+                        let all_local_uses = targets.iter().all(|alias| {
+                            alias.segments.is_empty()
+                                && spec.data.iter().any(|data| {
+                                    data.reference.is_local()
+                                        && data.reference.name == alias.name
+                                        && matches!(data.value, ParsedDataValue::Import { .. })
+                                })
+                        });
+                        if all_local_uses {
+                            BindingValue::InstanceAliases(targets.clone())
+                        } else {
+                            let [target] = targets.as_slice() else {
+                                self.errors.push(Error::validation_with_context(
+                                    format!(
+                                        "binding `{binding_reference}` replaces instance list `{}` with {} references; list slots take local `uses` aliases or one list-typed data or rule reference",
+                                        binding_reference.name,
+                                        targets.len()
+                                    ),
+                                    Some(binding.source_location.clone()),
+                                    None::<String>,
+                                    Some(self.main_spec),
+                                    None,
+                                ));
+                                continue;
+                            };
+                            let Some(resolved_target) = self.resolve_reference_target_in_spec(
+                                target,
+                                &binding.source_location,
+                                spec,
+                                spec_repository,
+                                effective,
+                            ) else {
+                                continue;
+                            };
+                            BindingValue::Reference {
+                                target: resolved_target,
+                            }
+                        }
                     }
                     ast::UsesBindingRhs::References { targets } => {
                         let [target] = targets.as_slice() else {

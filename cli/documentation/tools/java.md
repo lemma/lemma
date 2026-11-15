@@ -17,17 +17,17 @@ Maven:
 <dependency>
   <groupId>com.lemmabase</groupId>
   <artifactId>lemma-engine</artifactId>
-  <version>0.11.2</version>
+  <version>0.11.3</version>
 </dependency>
 ```
 
 Gradle (Kotlin DSL): consume the published artifact; this repository builds the package with Maven only:
 
 ```kotlin
-implementation("com.lemmabase:lemma-engine:0.11.2")
+implementation("com.lemmabase:lemma-engine:0.11.3")
 ```
 
-Requires JDK 21+.
+Requires JDK 26+. Start the process with `--enable-native-access=ALL-UNNAMED`. The engine loads its JNI library with `System.load`.
 
 ## Java example
 
@@ -165,7 +165,7 @@ The cache path is `~/.cache/lemma-jni/{version}-{triple}/{sha256}/`. Override th
 
 ## ExplanationNode dispatch
 
-`ExplanationNode` is a sealed interface under `com.lemmabase.lemma.schema`. Each variant record implements `ExplanationNode.type()` returning its discriminator (`rule`, `compose`, `data`, `data_unused`, `conversion`, `veto`). Use pattern matching (Java 21+) or switch on `type()`:
+`ExplanationNode` is a sealed interface under `com.lemmabase.lemma.schema`. Each variant record implements `ExplanationNode.type()` returning its discriminator (`rule`, `compose`, `data`, `data_unused`, `conversion`, `veto`). Use pattern matching (Java 26+) or switch on `type()`:
 
 ```java
 switch (node.type()) {

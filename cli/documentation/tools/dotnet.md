@@ -5,12 +5,12 @@ nav_order: 60
 
 # C# / .NET
 
-`Lemmabase.Lemma.Engine` embeds the Lemma engine in .NET 8+ via UniFFI. Prebuilt natives ship for macOS (arm64/x86_64), Linux glibc (x86_64/arm64), and Windows (arm64/x86_64). musl / Alpine is unsupported and fails closed at load.
+`Lemmabase.Lemma.Engine` embeds the Lemma engine in .NET 10+ via UniFFI. Prebuilt natives ship for macOS (arm64/x86_64), Linux glibc (x86_64/arm64), and Windows (arm64/x86_64). musl / Alpine is unsupported and fails closed at load.
 
 ## Install
 
 ```bash
-dotnet add package Lemmabase.Lemma.Engine --version 0.11.2
+dotnet add package Lemmabase.Lemma.Engine --version 0.11.3
 ```
 
 ## Usage

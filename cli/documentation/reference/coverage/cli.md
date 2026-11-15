@@ -23,7 +23,7 @@ Numbers are produced by `cargo coverage cli`.
 
 ## Environment
 
-- Host: `Linux 7.0.0-42-generic x86_64`
+- Host: `Linux 7.2.15-1-omarchy x86_64`
 - Rustc:
 
 ```
@@ -40,9 +40,9 @@ LLVM version: 21.1.3
 
 | Metric | Covered | Total | Percent |
 |--------|--------:|------:|--------:|
-| Lines | 4253 | 7073 | 60.13% |
+| Lines | 4254 | 7073 | 60.14% |
 | Functions | 329 | 582 | 56.53% |
-| Regions | 6419 | 10533 | 60.94% |
+| Regions | 6422 | 10533 | 60.97% |
 
 ## Test run
 
@@ -58,7 +58,7 @@ Sorted by line coverage ascending (weakest first). Only files under `src/` for t
 | Module | Line % | Function % | Region % | Lines covered/total |
 |--------|-------:|-----------:|---------:|--------------------:|
 | `mcp/http.rs` | 7.37 | 9.52 | 9.25 | 25/339 |
-| `server.rs` | 20.99 | 19.70 | 34.20 | 148/705 |
+| `server.rs` | 21.13 | 19.70 | 34.55 | 149/705 |
 | `unit_value_prompt.rs` | 46.90 | 58.82 | 48.31 | 174/371 |
 | `interactive.rs` | 53.55 | 46.72 | 51.57 | 1048/1957 |
 | `main.rs` | 61.99 | 69.35 | 56.48 | 460/742 |
@@ -75,4 +75,4 @@ Sorted by line coverage ascending (weakest first). Only files under `src/` for t
 - [CLI integration test catalog](../../../cli/tests/README.md)
 - [Engine test coverage](engine.md)
 - [CLI benchmarks](../benchmarks/cli.md)
-<!-- coverage-input-digest: 3aac5604fba199ba -->
+<!-- coverage-input-digest: f7e5ee70c6adac47 -->

@@ -15,11 +15,11 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
-  WASM_PACK_VERSION: 0.15.0
+  WASM_PACK_VERSION: 0.15.1
 
 jobs:
   precommit:
-    name: cargo precommit --coverage${{ github.event_name == 'push' && ' --fuzz' || '' }}
+    name: cargo precommit --coverage${{ github.event_name == 'pull_request' && ' --fuzz' || '' }}
     runs-on: ubuntu-latest
     timeout-minutes: 120
     steps:
@@ -33,7 +33,7 @@ jobs:
           components: rustfmt, clippy
 
       - name: Install Rust nightly
-        if: github.event_name == 'push'
+        if: github.event_name == 'pull_request'
         uses: dtolnay/rust-toolchain@nightly
 
       - name: Default toolchain is stable
@@ -77,10 +77,10 @@ jobs:
       - name: Install cargo-deny
         uses: taiki-e/install-action@v2
         with:
-          tool: cargo-deny@0.19.0
+          tool: cargo-deny@0.20.2
 
       - name: Install cargo-fuzz
-        if: github.event_name == 'push'
+        if: github.event_name == 'pull_request'
         run: cargo install cargo-fuzz
 
       - name: Install Elixir
@@ -89,24 +89,24 @@ jobs:
           elixir-version: "1.18"
           otp-version: "27"
 
-      - name: Setup JDK 21
+      - name: Setup JDK 26
         uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: '21'
+          java-version: '26'
 
-      - name: Setup .NET 8
+      - name: Setup .NET 10
         uses: actions/setup-dotnet@v4
         with:
-          dotnet-version: '8.0.x'
+          dotnet-version: '10.0.x'
 
       - name: Install uniffi-bindgen-cs
         run: cargo install uniffi-bindgen-cs --git https://github.com/NordSecurity/uniffi-bindgen-cs --tag v0.11.0+v0.31.0 --force
 
-      - name: cargo precommit --coverage
-        if: github.event_name == 'pull_request'
-        run: cargo precommit --coverage
-
       - name: cargo precommit --coverage --fuzz
-        if: github.event_name == 'push'
+        if: github.event_name == 'pull_request'
         run: cargo precommit --coverage --fuzz
+
+      - name: cargo precommit --coverage
+        if: github.event_name == 'push'
+        run: cargo precommit --coverage

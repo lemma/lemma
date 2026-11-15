@@ -24,7 +24,7 @@ Numbers are produced by `cargo coverage engine`.
 
 ## Environment
 
-- Host: `Linux 7.0.0-42-generic x86_64`
+- Host: `Linux 7.2.15-1-omarchy x86_64`
 - Rustc:
 
 ```
@@ -41,14 +41,14 @@ LLVM version: 21.1.3
 
 | Metric | Covered | Total | Percent |
 |--------|--------:|------:|--------:|
-| Lines | 66857 | 76826 | 87.02% |
-| Functions | 5052 | 5669 | 89.12% |
-| Regions | 98662 | 114493 | 86.17% |
+| Lines | 66909 | 76899 | 87.01% |
+| Functions | 5054 | 5672 | 89.10% |
+| Regions | 98728 | 114589 | 86.16% |
 
 ## Test run
 
-- Total: 4106
-- Passed: 4106
+- Total: 4118
+- Passed: 4118
 - Skipped: 0
 - Failed: 0
 
@@ -74,7 +74,7 @@ Sorted by line coverage ascending (weakest first). Only files under `src/` for t
 | `evaluation/mod.rs` | 81.26 | 75.71 | 80.65 | 789/971 |
 | `planning/semantics.rs` | 81.91 | 84.13 | 81.35 | 5938/7249 |
 | `computation/units.rs` | 82.05 | 100.00 | 79.05 | 192/234 |
-| `planning/graph.rs` | 82.67 | 87.45 | 82.48 | 8574/10371 |
+| `planning/graph.rs` | 82.58 | 87.34 | 82.36 | 8625/10444 |
 | `error.rs` | 83.74 | 83.02 | 78.51 | 443/529 |
 | `api/types.rs` | 85.07 | 93.55 | 87.00 | 302/355 |
 | `planning/execution_plan.rs` | 85.15 | 78.52 | 82.59 | 3382/3972 |
@@ -93,7 +93,7 @@ Sorted by line coverage ascending (weakest first). Only files under `src/` for t
 | `formatting/expression.rs` | 90.15 | 98.04 | 90.64 | 595/660 |
 | `string_distance.rs` | 90.48 | 83.33 | 93.22 | 57/63 |
 | `planning/show_expression.rs` | 90.52 | 91.67 | 91.37 | 382/422 |
-| `evaluation/tree.rs` | 90.59 | 88.98 | 89.17 | 2349/2593 |
+| `evaluation/tree.rs` | 90.63 | 88.98 | 89.30 | 2350/2593 |
 | `evaluation/list_ops.rs` | 90.75 | 100.00 | 87.89 | 353/389 |
 | `api/evaluate_data_json.rs` | 90.76 | 100.00 | 92.16 | 216/238 |
 | `evaluation/explanations.rs` | 91.46 | 91.11 | 90.49 | 632/691 |
@@ -132,4 +132,4 @@ Sorted by line coverage ascending (weakest first). Only files under `src/` for t
 - [Engine integration test catalog](../../../engine/tests/README.md) — qualitative map of scenarios and subsystem overlap clusters
 - [CLI test coverage](cli.md)
 - [Engine benchmarks](../benchmarks/engine.md)
-<!-- coverage-input-digest: f1862912a754541c -->
+<!-- coverage-input-digest: 55678282afac9d6b -->

@@ -14,7 +14,7 @@ rust_decimal.workspace = true
 toml_edit = "0.25"
 
 [dev-dependencies]
-lemma-lsp = { version = "=0.11.2", path = "../engine/lsp" }
+lemma-lsp = { version = "=0.11.3", path = "../engine/lsp" }
 
 [[bin]]
 name = "xtask"

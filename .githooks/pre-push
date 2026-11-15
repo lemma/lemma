@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+# Opt-in: git config core.hooksPath .githooks
+# Runs the local precommit gate inside the flake shell (no host toolchain).
+set -euo pipefail
+
+root="$(git rev-parse --show-toplevel)"
+cd "$root"
+
+if ! command -v nix >/dev/null 2>&1; then
+  echo "pre-push: nix not found on PATH. Install Nix and use the flake shell (see AGENTS.md Toolchain)." >&2
+  exit 1
+fi
+
+echo "pre-push: nix develop -i -c cargo precommit"
+exec nix develop -i \
+  -k HOME -k USER -k TERM -k XDG_CACHE_HOME -k XDG_RUNTIME_DIR -k SSH_AUTH_SOCK \
+  -c cargo precommit

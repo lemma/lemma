@@ -47,7 +47,7 @@ mod tracked {
 }
 
 /// Exact wasm-pack version required by precommit / CI. Keep workflow `WASM_PACK_VERSION` in sync.
-pub const WASM_PACK_VERSION: &str = "0.15.0";
+pub const WASM_PACK_VERSION: &str = "0.15.1";
 
 /// Exact uniffi crate version for lemma_dotnet. Keep with `UNIFFI_BINDGEN_CS_TAG` in nuget_natives.
 pub const UNIFFI_VERSION: &str = "0.31.0";

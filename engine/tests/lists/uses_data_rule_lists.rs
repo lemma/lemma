@@ -8,8 +8,8 @@
 //! - no `uses x list`; instance lists are `data` or a list-valued rule
 
 use crate::lists::{
-    assert_contains, boolean, data, evaluate, evaluate_err, list, lit, load_err, load_ok,
-    load_planning_err, map, missing_data, value,
+    assert_contains, boolean, data, evaluate, evaluate_err, evaluate_explain, list, lit, load_err,
+    load_ok, load_planning_err, map, missing_data, value,
 };
 use indexmap::IndexMap;
 use lemma::{DateTimeValue, Engine, SourceType};
@@ -1198,5 +1198,331 @@ rule total:
     assert_eq!(
         missing_sorted(&response, "total"),
         vec!["ada.bonus".to_string()]
+    );
+}
+
+#[test]
+fn uses_wire_list_slot_from_list_valued_rule() {
+    let engine = load_ok(
+        r#"
+spec row
+data n: number
+
+spec catalog
+uses row
+rule rows: row list -> with n: 5
+
+spec consumer
+uses row
+data rows: row list
+rule total: rows -> sum n
+
+spec root
+uses catalog
+uses c: consumer
+  -> with rows: catalog.rows
+rule out: c.total
+"#,
+    );
+    assert_eq!(value(&evaluate(&engine, "root", data(&[])), "out"), "5");
+}
+
+#[test]
+fn uses_wire_list_slot_from_sealed_data_list() {
+    let engine = load_ok(
+        r#"
+spec item
+data target: number
+
+spec box
+uses item
+data items: item list
+
+spec consumer
+uses item
+data items: item list
+rule total: items -> sum target
+
+spec root
+uses i1: item
+  -> with target: 7
+uses holder: box
+  -> with items: i1
+uses c: consumer
+  -> with items: holder.items
+rule out: c.total
+"#,
+    );
+    assert_eq!(value(&evaluate(&engine, "root", data(&[])), "out"), "7");
+}
+
+#[test]
+fn uses_wire_list_slot_wrong_row_spec_is_planning_error() {
+    let err = load_planning_err(
+        r#"
+spec line
+data qty: number
+spec other
+data name: text
+spec order
+uses line
+data lines: line list
+spec catalog
+uses other
+data rows: other list
+  -> with name: "x"
+spec wrapper
+uses catalog
+uses o: order
+  -> with lines: catalog.rows
+"#,
+    );
+    assert_contains(&err, "type mismatch");
+}
+
+#[test]
+fn uses_wire_list_slot_rejects_evaluate_data() {
+    let engine = load_ok(
+        r#"
+spec row
+data n: number
+
+spec catalog
+uses row
+rule rows: row list -> with n: 5
+
+spec consumer
+uses row
+data rows: row list
+rule total: rows -> sum n
+
+spec root
+uses catalog
+uses c: consumer
+  -> with rows: catalog.rows
+rule out: c.total
+"#,
+    );
+    let err = evaluate_err(
+        &engine,
+        "root",
+        data(&[("c.rows", list(vec![map(&[("n", lit("1"))])]))]),
+    );
+    assert_request_err(&err, "rows");
+}
+
+#[test]
+fn uses_wire_list_slot_mixed_alias_and_reference_is_planning_error() {
+    let err = load_planning_err(
+        r#"
+spec item
+data target: number
+
+spec box
+uses item
+data items: item list
+
+spec root
+uses i1: item
+  -> with target: 1
+uses holder: box
+  -> with items: i1
+uses c: box
+  -> with items: i1, holder.items
+"#,
+    );
+    assert_contains(
+        &err,
+        "list slots take local `uses` aliases or one list-typed",
+    );
+}
+
+#[test]
+fn uses_wire_list_slot_scalar_target_is_planning_error() {
+    let err = load_planning_err(
+        r#"
+spec item
+data target: number
+
+spec box
+uses item
+data items: item list
+
+spec root
+uses src: item
+  -> with target: 9
+uses c: box
+  -> with items: src.target
+"#,
+    );
+    assert_contains(&err, "type mismatch");
+}
+
+#[test]
+fn uses_wire_list_slot_cycle_is_planning_error() {
+    let err = load_planning_err(
+        r#"
+spec item
+data target: number
+
+spec box
+uses item
+data items: item list
+
+spec root
+uses a: box
+  -> with items: b.items
+uses b: box
+  -> with items: a.items
+rule out: a.items -> count
+"#,
+    );
+    assert_contains(&err, "Circular data reference");
+}
+
+#[test]
+fn uses_wire_list_slot_open_data_list_asks_row_fields() {
+    // `data extras: item list` with no rows is empty, never missing data.
+    // Wire copies that list; evaluate data can replace the whole list.
+    let engine = load_ok(
+        r#"
+spec item
+data target: number
+
+spec box
+uses item
+data items: item list
+rule total: items -> sum target
+
+spec root
+uses item
+uses c: box
+  -> with items: extras
+data extras: item list
+rule out: c.total
+"#,
+    );
+    let empty = evaluate(&engine, "root", data(&[]));
+    assert!(
+        missing_data(&empty, "out").is_empty(),
+        "list without rows is empty, not missing: {:?}",
+        missing_data(&empty, "out")
+    );
+    assert_eq!(value(&empty, "out"), "0");
+    let response = evaluate(
+        &engine,
+        "root",
+        data(&[("extras", list(vec![map(&[("target", lit("3"))])]))]),
+    );
+    assert_eq!(value(&response, "out"), "3");
+}
+
+#[test]
+fn uses_wire_list_slot_empty_list_rule_sums_zero() {
+    let engine = load_ok(
+        r#"
+spec item
+data target: number
+
+spec catalog
+uses item
+rule rows: item list
+
+spec consumer
+uses item
+data items: item list
+rule total: items -> sum target
+
+spec root
+uses catalog
+uses c: consumer
+  -> with items: catalog.rows
+rule out: c.total
+"#,
+    );
+    assert_eq!(value(&evaluate(&engine, "root", data(&[])), "out"), "0");
+}
+
+#[test]
+fn uses_wire_list_slot_multi_row_list_rule() {
+    let engine = load_ok(
+        r#"
+spec row
+data n: number
+
+spec catalog
+uses row
+rule rows:
+  row list
+  -> with n: 2
+  -> with n: 3
+
+spec consumer
+uses row
+data rows: row list
+rule total: rows -> sum n
+
+spec root
+uses catalog
+uses c: consumer
+  -> with rows: catalog.rows
+rule out: c.total
+"#,
+    );
+    assert_eq!(value(&evaluate(&engine, "root", data(&[])), "out"), "5");
+}
+
+#[test]
+fn uses_wire_list_slot_chained_deferred_wires() {
+    let engine = load_ok(
+        r#"
+spec item
+data target: number
+
+spec box
+uses item
+data items: item list
+rule total: items -> sum target
+
+spec root
+uses i1: item
+  -> with target: 7
+uses holder: box
+  -> with items: i1
+uses mid: box
+  -> with items: holder.items
+uses c: box
+  -> with items: mid.items
+rule out: c.total
+"#,
+    );
+    assert_eq!(value(&evaluate(&engine, "root", data(&[])), "out"), "7");
+}
+
+#[test]
+fn uses_wire_list_slot_explain_evaluates() {
+    let engine = load_ok(
+        r#"
+spec item
+data target: number
+
+spec box
+uses item
+data items: item list
+rule total: items -> sum target
+
+spec root
+uses i1: item
+  -> with target: 7
+uses holder: box
+  -> with items: i1
+uses c: box
+  -> with items: holder.items
+rule out: c.total
+"#,
+    );
+    assert_eq!(
+        value(&evaluate_explain(&engine, "root", data(&[])), "out"),
+        "7"
     );
 }

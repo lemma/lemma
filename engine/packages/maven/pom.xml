@@ -6,7 +6,7 @@
 
   <groupId>com.lemmabase</groupId>
   <artifactId>lemma-engine</artifactId>
-  <version>0.11.2</version>
+  <version>0.11.3</version>
   <packaging>jar</packaging>
 
   <name>Lemma Engine</name>
@@ -35,7 +35,7 @@
 
   <properties>
     <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
-    <maven.compiler.release>21</maven.compiler.release>
+    <maven.compiler.release>26</maven.compiler.release>
     <junit.version>5.14.4</junit.version>
     <jackson.version>2.22.1</jackson.version>
     <jspecify.version>1.0.0</jspecify.version>
@@ -119,12 +119,16 @@
         <groupId>org.apache.maven.plugins</groupId>
         <artifactId>maven-surefire-plugin</artifactId>
         <version>3.5.6</version>
+        <configuration>
+          <argLine>--enable-native-access=ALL-UNNAMED</argLine>
+        </configuration>
       </plugin>
       <plugin>
         <groupId>org.apache.maven.plugins</groupId>
         <artifactId>maven-jar-plugin</artifactId>
         <version>3.5.1</version>
         <configuration>
+          <forceCreation>true</forceCreation>
           <archive>
             <manifest>
               <addDefaultImplementationEntries>true</addDefaultImplementationEntries>
@@ -179,6 +183,12 @@
                   <artifact>com.fasterxml.jackson.core:jackson-core</artifact>
                   <excludes>
                     <exclude>META-INF/MANIFEST.MF</exclude>
+                    <exclude>META-INF/LICENSE</exclude>
+                    <exclude>META-INF/NOTICE</exclude>
+                    <exclude>META-INF/FastDoubleParser-LICENSE</exclude>
+                    <exclude>META-INF/FastDoubleParser-ThirdParty-LICENSE</exclude>
+                    <exclude>META-INF/Schubfach-LICENSE</exclude>
+                    <exclude>META-INF/maven/**</exclude>
                     <exclude>module-info.class</exclude>
                     <exclude>META-INF/versions/**</exclude>
                     <exclude>META-INF/services/**</exclude>

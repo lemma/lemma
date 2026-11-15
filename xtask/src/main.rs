@@ -14,6 +14,7 @@ mod versions;
 mod versions_diff;
 mod warnings;
 
+use std::path::PathBuf;
 use std::process::Command;
 
 fn cargo_bin() -> String {
@@ -154,16 +155,25 @@ fn require_wasm_pack() {
     }
 }
 
-fn require_nightly() {
-    let status = Command::new("rustup")
-        .args(["run", "nightly", "rustc", "--version"])
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .unwrap_or_else(|e| panic!("failed to invoke rustup for nightly: {e}"));
-    if !status.success() {
-        panic!("Rust nightly toolchain required for --fuzz. Install with: rustup install nightly");
+/// Nightly name for `rustup run`. Prefers the flake-linked `lemma-nightly`
+/// (rustup reserves the channel name `nightly` for custom toolchain links).
+fn nightly_toolchain() -> &'static str {
+    for name in ["lemma-nightly", "nightly"] {
+        let ok = probe_succeeded(
+            Command::new("rustup")
+                .args(["run", name, "rustc", "--version"])
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status(),
+            &format!("rustup run {name} rustc"),
+        );
+        if ok {
+            return name;
+        }
     }
+    panic!(
+        "Rust nightly toolchain required for --fuzz. Use `nix develop`, or: rustup install nightly"
+    );
 }
 
 fn run_npm_wasm_precommit() {
@@ -223,7 +233,7 @@ fn run_vscode_precommit() {
 fn run_maven_precommit() {
     require_command(
         "java",
-        "Install a JDK 21+ (https://adoptium.net/) for the Maven package tests.",
+        "Install a JDK 26+ (https://adoptium.net/) for the Maven package tests.",
     );
     eprintln!("xtask: cargo build --release -p lemma_jni");
     run(&["build", "--release", "-p", "lemma_jni"]);
@@ -287,7 +297,7 @@ fn require_uniffi_bindgen_cs() {
 fn run_nuget_precommit() {
     require_command(
         "dotnet",
-        "Install the .NET 8 SDK (https://dotnet.microsoft.com/download) for the NuGet package tests.",
+        "Install the .NET 10 SDK (https://dotnet.microsoft.com/download) for the NuGet package tests, or use `nix develop`.",
     );
     require_uniffi_bindgen_cs();
     let root = versions::workspace_root();
@@ -316,30 +326,30 @@ fn run_nuget_precommit() {
 fn run_deny_precommit() {
     let config = versions::workspace_root().join(".cargo/deny.toml");
     eprintln!("xtask: deny ({})", config.display());
-    let status = Command::new(cargo_bin())
-        .args([
-            "deny",
-            "check",
-            "-D",
-            "unmatched-skip",
-            "-D",
-            "unmatched-skip-root",
-            "--config",
-        ])
+    // Invoke the binary on PATH. `cargo deny` prefers $CARGO_HOME/bin (often
+    // ~/.cargo/bin) over the flake's cargo-deny and can pick an older release.
+    // cargo-deny 0.20+: `--config` is a top-level flag, not under `check`.
+    require_command(
+        "cargo-deny",
+        "Install cargo-deny 0.20+ or use `nix develop` (flake provides it).",
+    );
+    let status = Command::new("cargo-deny")
+        .arg("--config")
         .arg(&config)
+        .args(["check", "-D", "unmatched-skip", "-D", "unmatched-skip-root"])
         .status()
-        .unwrap_or_else(|e| panic!("failed to run cargo deny: {e}"));
+        .unwrap_or_else(|e| panic!("failed to run cargo-deny: {e}"));
     if !status.success() {
-        exit_for_child_status(status, "cargo deny check");
+        exit_for_child_status(status, "cargo-deny check");
     }
 }
 
 fn run_fuzz(budget_secs: u64) {
     require_command(
         "rustup",
-        "Install rustup (https://rustup.rs/) for the nightly toolchain used by fuzzing.",
+        "Install rustup (https://rustup.rs/) for the nightly toolchain used by fuzzing, or use `nix develop`.",
     );
-    require_nightly();
+    let nightly = nightly_toolchain();
     let fuzz_ok = probe_succeeded(
         Command::new(cargo_bin())
             .args(["fuzz", "--version"])
@@ -349,7 +359,7 @@ fn run_fuzz(budget_secs: u64) {
         "cargo fuzz",
     );
     if !fuzz_ok {
-        panic!("cargo fuzz not available. Install cargo-fuzz: cargo install cargo-fuzz");
+        panic!("cargo fuzz not available. Install cargo-fuzz: cargo install cargo-fuzz (or use `nix develop`)");
     }
 
     let target_count = FUZZ_TARGETS.len() as u64;
@@ -363,12 +373,12 @@ fn run_fuzz(budget_secs: u64) {
     let dict_arg = format!("-dict={FUZZ_DICT}");
     let fuzz_dir = versions::workspace_root().join(FUZZ_PACKAGE_DIR);
     eprintln!(
-        "xtask: fuzz budget {budget_secs}s across {target_count} targets ({per_target_secs}s each)"
+        "xtask: fuzz budget {budget_secs}s across {target_count} targets ({per_target_secs}s each) via rustup run {nightly}"
     );
     for target in FUZZ_TARGETS {
         eprintln!("xtask: fuzz {target} ({max_total_time_arg}, {dict_arg})");
         let mut cmd = Command::new("rustup");
-        cmd.args(["run", "nightly", "cargo", "fuzz", "run", target]);
+        cmd.args(["run", nightly, "cargo", "fuzz", "run", target]);
         if *target == "fuzz_parser" {
             std::fs::create_dir_all(fuzz_dir.join(FUZZ_PARSER_CORPUS)).unwrap_or_else(|e| {
                 panic!(
@@ -381,7 +391,7 @@ fn run_fuzz(budget_secs: u64) {
         cmd.args(["--", max_total_time_arg.as_str(), dict_arg.as_str()]);
         let status = cmd.current_dir(&fuzz_dir).status().unwrap_or_else(|e| {
             panic!(
-                "failed to run rustup run nightly cargo fuzz run {target} in {}: {e}",
+                "failed to run rustup run {nightly} cargo fuzz run {target} in {}: {e}",
                 fuzz_dir.display()
             )
         });
@@ -485,16 +495,19 @@ fn precommit(flags: PrecommitFlags) {
         "warnings",
     ]);
     eprintln!("xtask: clippy wasm32");
-    let installed_targets = Command::new("rustup")
-        .args(["target", "list", "--installed"])
+    let sysroot = Command::new("rustc")
+        .args(["--print", "sysroot"])
         .output()
-        .unwrap_or_else(|e| panic!("failed to run rustup target list: {e}"));
-    let wasm_target_ok = String::from_utf8_lossy(&installed_targets.stdout)
-        .lines()
-        .any(|line| line.trim() == "wasm32-unknown-unknown");
-    if !wasm_target_ok {
+        .unwrap_or_else(|e| panic!("failed to run rustc --print sysroot: {e}"));
+    if !sysroot.status.success() {
+        panic!("rustc --print sysroot failed");
+    }
+    let sysroot_path = String::from_utf8_lossy(&sysroot.stdout).trim().to_owned();
+    let wasm_lib = PathBuf::from(&sysroot_path).join("lib/rustlib/wasm32-unknown-unknown");
+    if !wasm_lib.is_dir() {
         panic!(
-            "wasm32-unknown-unknown target not installed. Install with: rustup target add wasm32-unknown-unknown"
+            "wasm32-unknown-unknown target not present under {}. Use `nix develop`, or: rustup target add wasm32-unknown-unknown",
+            sysroot_path
         );
     }
     run(&[

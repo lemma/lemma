@@ -5,8 +5,7 @@ Fuzz targets for malformed and adversarial Lemma input.
 ## Setup
 
 ```bash
-rustup install nightly
-cargo install cargo-fuzz
+nix develop
 ```
 
 ## Run like CI

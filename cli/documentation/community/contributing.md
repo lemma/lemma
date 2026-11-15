@@ -10,33 +10,26 @@ Open issues, propose language changes, improve docs, or build examples around re
 
 ## Setup
 
+Install [Nix](https://nixos.org/download/), then:
+
 ```bash
 git clone https://github.com/lemma/lemma
 cd lemma
+nix develop
 cargo nextest run --workspace
 ```
 
-### Optional tools
+`nix develop` provides the full toolchain (Rust, Node, Elixir, JDK 26, .NET 10, wasm-pack, uniffi-bindgen-cs, cargo-nextest, cargo-deny, cargo-fuzz, cargo-llvm-cov). Do not mix host mise/pacman/`cargo install` toolchains. See [AGENTS.md](../../../AGENTS.md) (Toolchain) and [flake.nix](../../../flake.nix).
 
-For WASM development:
+### Optional pre-push hook
 
-```bash
-cargo install wasm-pack --version 0.15.0 --locked
-```
-
-For fuzzing (requires nightly Rust):
+To run bare `cargo precommit` (via `nix develop`) before every `git push`:
 
 ```bash
-rustup install nightly
-cargo install cargo-fuzz
+git config core.hooksPath .githooks
 ```
 
-For security audits:
-
-```bash
-cargo install cargo-deny
-cargo deny check -D unmatched-skip -D unmatched-skip-root --config .cargo/deny.toml
-```
+That is per-repo and opt-in. There is no skip env var. CI still runs `cargo precommit --coverage` (PRs) and `--coverage --fuzz` (push to `main`).
 
 ## Making changes
 
@@ -48,7 +41,7 @@ cargo deny check -D unmatched-skip -D unmatched-skip-root --config .cargo/deny.t
    cargo precommit
    ```
 
-   That is the local gate. Pull requests run `cargo precommit --coverage` (same gate, then the committed coverage-report check). Push to `main` runs `cargo precommit --coverage --fuzz`. The gate: versions-verify, Hex `mix precommit`, VS Code `npm ci` + `npm audit --audit-level=low` + package, fmt, clippy (`--all-features`), nextest (including ignored benches), WASM npm build+test, Maven `./mvnw -B verify` (after `lemma_jni` build), NuGet `dotnet test` (after `lemma_dotnet` + UniFFI generate, formatted with CSharpier 1.3.0), cargo-deny. `cargo package --list` of the crates.io crates fails on a `warning:` line (package-set hygiene; release bottom-up publish owns registry compile). `--coverage` runs `cargo coverage all --check`. `--fuzz` runs 5 minutes total across `engine/fuzz` targets. Requires `cargo-nextest`, `cargo-deny`, Elixir/Mix, Node.js, `wasm-pack`, a **JDK 21+**, and the **.NET 8 SDK** (`uniffi-bindgen-cs` tag `v0.11.0+v0.31.0`); `--fuzz` also needs nightly and `cargo-fuzz`. Regenerate coverage with `cargo coverage all` when engine or CLI sources change (`cargo-llvm-cov` required). `cargo nextest` alone is Rust tests only.
+   That is the local gate. Pull requests run `cargo precommit --coverage` (same gate, then the committed coverage-report check). Push to `main` runs `cargo precommit --coverage --fuzz`. The gate: versions-verify, Hex `mix precommit`, VS Code `npm ci` + `npm audit --audit-level=low` + package, fmt, clippy (`--all-features`), nextest (including ignored benches), WASM npm build+test, Maven `./mvnw -B verify` (after `lemma_jni` build), NuGet `dotnet test` (after `lemma_dotnet` + UniFFI generate, formatted with CSharpier 1.3.0), cargo-deny. `cargo package --list` of the crates.io crates fails on a `warning:` line (package-set hygiene; release bottom-up publish owns registry compile). `--coverage` runs `cargo coverage all --check`. `--fuzz` runs 5 minutes total across `engine/fuzz` targets. All tools come from `nix develop`. Regenerate coverage with `cargo coverage all` when engine or CLI sources change. `cargo nextest` alone is Rust tests only.
 
 ### Release version (maintainers)
 

@@ -2,6 +2,23 @@
 
 Releases cover the Lemma engine, `lemma` CLI, OpenAPI crate, LSP, SDKs and VS Code extension. They all follow the same version everywhere. The release version is `[workspace.package] version` in the root `Cargo.toml`. Git tags follow `lemma-v{version}` (for example `lemma-v0.8.20`); releases before the rename used `cli-v{version}`. Draft notes for the next version quickly by running `cargo changelog` to print `git diff` / `git log` since the latest release tag (`xtask` `versions-diff`). Tip: feed that into an LLM to create a summary for this changelog.
 
+## [0.11.3] - 2026-11-15
+
+Instance-list slots on `uses -> with` accept one list-typed data or rule reference, the same wiring as scalar `-> with y: p.doubled`. Bare local `uses` aliases still copy rows. Contributors use `nix develop -i` (ignore host env) for the full toolchain. Maven builds and ships for JDK 26+; the NuGet package targets `net10.0` (usable from .NET 11+).
+
+### Changed
+
+- **Nix flake**: `nix develop -i` with a small `-k` keep-list is required so the shell does not inherit host/agent env. The flake supplies Rust (from `rust-toolchain.toml`, wasm32 + linked nightly via rustup), cargo-nextest, cargo-deny, cargo-fuzz, cargo-llvm-cov, wasm-pack **0.15.1**, `uniffi-bindgen-cs` `v0.11.0+v0.31.0`, Node 24, Elixir/Hex/rebar3, Temurin JDK 26, .NET 10 SDK, and git. `CARGO_HOME` / `RUSTUP_HOME` live under `~/.cache/lemma-*` so Cargo plugins are not taken from `~/.cargo/bin`. `AGENTS.md` and the README Contributing section document the keep-list.
+- **Optional pre-push hook**: `git config core.hooksPath .githooks` runs `nix develop -i … -c cargo precommit` before every push (opt-in per clone; no skip env).
+- **[breaking] Maven JDK 26+**: `maven.compiler.release` is 26; consumers need JDK 26+. Process flags live in `.mvn/jvm.config` (`--enable-native-access=ALL-UNNAMED`, `--sun-misc-unsafe-memory-access=allow`, `--enable-final-field-mutation=ALL-UNNAMED`); Surefire forks get native access via `argLine`.
+- **NuGet `net10.0`**: package and tests target .NET 10 (final SDK in nixpkgs). Apps on .NET 11+ can still reference the package.
+- **cargo-deny 0.20**: CI pin `0.20.2`; xtask runs `cargo-deny` on `PATH` with top-level `--config` (not `cargo deny`, which prefers `$CARGO_HOME/bin`).
+
+### Fixed
+
+- **`uses -> with` list slots from list-typed references**: `-> with rows: catalog.rows` (list-valued rule) and `-> with items: holder.items` (data list) seal the slot via `BindingValue::Reference` / deferred resolution. Comma-separated local `uses` aliases keep copy semantics. Wrong row Spec is a planning Error; evaluation data cannot override a wired list.
+- **Maven warning gate on JDK 26+**: Maven Wrapper 3.9.16; JNI `System.load` goes through one `@SuppressWarnings("restricted")` helper; `maven-jar-plugin` `forceCreation` so a second `verify` does not shade an already-shaded jar and emit overlapping-resource `[WARNING]` lines.
+
 ## [0.11.2] - 2026-11-12
 
 `--explain` lists both premises when a full `or` holds false. Irrational `^` uses the documented 28dp Decimal fallback for general exponents, not only square roots. Compound units may combine multiple distinct dynamic scales.

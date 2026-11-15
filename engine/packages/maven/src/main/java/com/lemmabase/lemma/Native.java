@@ -85,6 +85,12 @@ final class Native {
 
   static native String quality(long handle);
 
+  /** JNI load. {@code System.load} is restricted; the process must enable native access. */
+  @SuppressWarnings("restricted")
+  private static void loadNative(Path library) {
+    System.load(library.toAbsolutePath().toString());
+  }
+
   private static void loadLibrary() {
     String triple = rustTargetTriple();
     String libName = libraryFileName();
@@ -96,7 +102,7 @@ final class Native {
         throw new LemmaNativeException(
             "lemma.native.library set to '" + propertyOverride + "' but it is not a regular file");
       }
-      System.load(overridePath.toAbsolutePath().toString());
+      loadNative(overridePath);
       return;
     }
 
@@ -107,7 +113,7 @@ final class Native {
         throw new LemmaNativeException(
             "LEMMA_JNI_LIBRARY set to '" + envOverride + "' but it is not a regular file");
       }
-      System.load(overridePath.toAbsolutePath().toString());
+      loadNative(overridePath);
       return;
     }
 
@@ -119,7 +125,7 @@ final class Native {
       if ("file".equals(protocol)) {
         try {
           Path filePath = Path.of(resourceUrl.toURI());
-          System.load(filePath.toAbsolutePath().toString());
+          loadNative(filePath);
           return;
         } catch (URISyntaxException e) {
           throw new LemmaNativeException("invalid resource URI: " + resourceUrl, e);
@@ -134,7 +140,7 @@ final class Native {
 
     Path dev = discoverDevLibrary();
     if (dev != null) {
-      System.load(dev.toAbsolutePath().toString());
+      loadNative(dev);
       return;
     }
 
@@ -152,7 +158,7 @@ final class Native {
     String version = getImplementationVersion();
     Path cacheRoot = getCacheRoot();
     Path cachedLib = extractToCache(resourcePath, triple, libName, version, cacheRoot);
-    System.load(cachedLib.toAbsolutePath().toString());
+    loadNative(cachedLib);
   }
 
   static Path extractToCache(

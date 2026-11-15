@@ -64,6 +64,30 @@ Precommit treats warnings as errors across Rust (`clippy -D warnings`), npm (`np
 
 ---
 
+## Toolchain: `nix develop` only
+
+**Every** project command runs inside the flake shell. Host toolchains are forbidden for Lemma work.
+
+```bash
+nix develop -i -k HOME -k USER -k TERM -k XDG_CACHE_HOME -k XDG_RUNTIME_DIR -k SSH_AUTH_SOCK -c cargo precommit
+nix develop -i -k HOME -k USER -k TERM -k XDG_CACHE_HOME -k XDG_RUNTIME_DIR -k SSH_AUTH_SOCK -c cargo nextest run --workspace
+nix develop -i -k HOME -k USER -k TERM -k XDG_CACHE_HOME -k XDG_RUNTIME_DIR -k SSH_AUTH_SOCK -c cargo verify
+```
+
+`-i` / `--ignore-env` is the Alpine model: empty process env, then only the flake shell and `-k` keep-list. Do not inherit host/agent variables. Or enter `nix develop -i …` once (same `-k` set) and run commands there. The shell provides Rust (from `rust-toolchain.toml`, wasm32 + linked nightly), rustup, cargo-nextest, cargo-deny, cargo-fuzz, cargo-llvm-cov, wasm-pack, `uniffi-bindgen-cs`, Node, Elixir/Hex/rebar3, JDK 26, .NET 10 SDK, Python, and git.
+
+**NEVER:**
+
+- Run `cargo`, `rustc`, `npm`, `mix`, `java`, `./mvnw`, `dotnet`, `wasm-pack`, `uniffi-bindgen-cs`, `cargo-deny`, or `cargo precommit` on the host PATH (mise, pacman, `~/.cargo/bin`, system JDK/.NET)
+- `cargo install` tools onto the host to "get unblocked"
+- Mix host and Nix binaries in one session
+
+If `nix` or the flake shell is missing, halt and raise that. Do not fall back to the host. First-run network for Hex, npm, Maven wrapper, or CSharpier caches is fine; a second toolchain is not.
+
+Optional local pre-push: contributors may `git config core.hooksPath .githooks` so every `git push` runs `nix develop -i … -c cargo precommit`. Opt-in per clone; no skip env var. CI still owns `--coverage` / `--fuzz`.
+
+---
+
 ## The 11 Rules
 
 ### 1. Find existing code before writing new code
@@ -132,7 +156,7 @@ If you cannot finish an implementation completely, every unfinished path must ha
 
 ### 10. Use `cargo nextest run`, not `cargo test`
 
-Unit tests go in the same module as the code (to test private functions). Engine integration tests go in `engine/tests/`; CLI integration tests in `cli/tests/`. Hex ExUnit tests live in `engine/packages/hex/test/`. Always run with `cargo nextest run` (Rust tests only). Pull requests run `cargo precommit --coverage`. Push to main runs `cargo precommit --coverage --fuzz`. Local shortcut: `cargo precommit` (no coverage check, no fuzz). The gate: versions-verify, mix/hex, vscode npm ci + `npm audit --audit-level=low` + publish CLI smoke, fmt, recursion-check, clippy `--all-features`, nextest, `cargo package --list` of the four crates.io crates (`lemma-engine`, `lemma-lsp`, `lemma-openapi`, `lemma`; a `warning:` line fails the package step) for package-set hygiene without crates.io resolve (release bottom-up publish owns registry compile), npm WASM build+test+`typecheck:fixtures`, Maven `./mvnw -B verify` after `lemma_jni`, NuGet `dotnet test` after `lemma_dotnet` + UniFFI generate (CSharpier 1.3.0), cargo-deny. `--coverage` then runs coverage `--check`. `--fuzz` then runs `engine/fuzz` for 5 minutes total, split across targets (needs nightly + `cargo-fuzz`). Local long campaigns: `cargo fuzzing` (default 1 hour total; `cargo fuzzing --seconds <n>`). JDK 21+ for Maven. .NET 8 SDK for NuGet. `uniffi-bindgen-cs` tag `v0.11.0+v0.31.0` (uniffi 0.31.0).
+Unit tests go in the same module as the code (to test private functions). Engine integration tests go in `engine/tests/`; CLI integration tests in `cli/tests/`. Hex ExUnit tests live in `engine/packages/hex/test/`. Always run with `cargo nextest run` (Rust tests only). Pull requests run `cargo precommit --coverage`. Push to main runs `cargo precommit --coverage --fuzz`. Local shortcut: `cargo precommit` (no coverage check, no fuzz). The gate: versions-verify, mix/hex, vscode npm ci + `npm audit --audit-level=low` + publish CLI smoke, fmt, recursion-check, clippy `--all-features`, nextest, `cargo package --list` of the four crates.io crates (`lemma-engine`, `lemma-lsp`, `lemma-openapi`, `lemma`; a `warning:` line fails the package step) for package-set hygiene without crates.io resolve (release bottom-up publish owns registry compile), npm WASM build+test+`typecheck:fixtures`, Maven `./mvnw -B verify` after `lemma_jni`, NuGet `dotnet test` after `lemma_dotnet` + UniFFI generate (CSharpier 1.3.0), cargo-deny. `--coverage` then runs coverage `--check`. `--fuzz` then runs `engine/fuzz` for 5 minutes total, split across targets (needs nightly + `cargo-fuzz`). Local long campaigns: `cargo fuzzing` (default 1 hour total; `cargo fuzzing --seconds <n>`). Run all of the above via `nix develop` (see **Toolchain: `nix develop` only**). JDK 26+ for Maven. .NET 10 SDK for NuGet. `uniffi-bindgen-cs` tag `v0.11.0+v0.31.0` (uniffi 0.31.0).
 
 ### 11. Unrelated bugs: halt and raise, never ignore
 
@@ -151,6 +175,7 @@ Halt. Report the bug with location and evidence. Resume only after the user deci
 
 | Resource | Purpose |
 |----------|---------|
+| **flake.nix** | Dev shell: sole toolchain for agents and contributors |
 | **README.md** | Project overview, quick start |
 | **xtask/README.md** | precommit, `cargo bump` / `cargo verify`, release paths |
 | **cli/documentation/learn/readme.md** | Learn guide: language concepts |

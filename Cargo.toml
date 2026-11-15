@@ -33,6 +33,9 @@ rust_decimal = { version = "1.42", features = ["serde", "serde-with-str", "maths
 
 [profile.release]
 overflow-checks = true
+# JNI / NIF / UniFFI natives ship inside SDK packages or release assets; keep
+# release libs lean for Maven Central and NuGet size budgets.
+strip = "symbols"
 
 [profile.dev]
 debug = "line-tables-only"

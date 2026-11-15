@@ -4,12 +4,18 @@ Releases cover the Lemma engine, `lemma` CLI, OpenAPI crate, LSP, SDKs and VS Co
 
 ## [0.11.4] - 2026-11-15
 
-Crates.io bottom-up publish waits on the sparse index instead of a fixed sleep. Workspace disk watch detects same-length edits when mtime does not move.
+Crates.io bottom-up publish waits on the sparse index instead of a fixed sleep. Workspace disk watch detects same-length edits when mtime does not move. Maven Central publishes a thin Java JAR; JNI natives download from GitHub Releases like Hex precompiled NIFs.
+
+### Changed
+
+- **[breaking] Maven Central jar is Java-only**: the published `com.lemmabase:lemma-engine` artifact no longer embeds six platform `lemma_jni` natives. Per-release Central upload drops from ~38 MiB (fat main + sources that duplicated natives) to ~2 MiB (thin main ~0.85 MiB + sources ~60 KiB + javadoc). On first load the SDK downloads the matching `lemma-v{version}` GitHub release asset, verifies `native-checksums.properties`, and caches under `~/.cache/lemma-jni/` (same model as Hex precompiled NIFs). Offline hosts must set `lemma.native.library` or `LEMMA_JNI_LIBRARY`. Local `./mvnw verify` still bundles the host native for tests.
+- **Release binaries**: workspace `profile.release` sets `strip = "symbols"` so JNI / NIF / UniFFI natives ship without symbol tables.
 
 ### Fixed
 
 - **crates.io index wait**: after each `cargo publish` in the release workflow (`lemma-engine` → `lemma-lsp` → `lemma-openapi` → `lemma`), poll `index.crates.io` until the published version is visible (up to 15 minutes) and clear cargo's local registry cache. Replaces the previous fixed `sleep 60`, which was not enough under sparse-index lag.
 - **Workspace watch content fingerprint**: discover snapshots hash file contents instead of comparing mtime only. Rapid same-length rewrites that leave `mtime` unchanged (common on this class of filesystem) no longer drop the change notification.
+- **Maven `-sources` jar**: `excludeResources` so a locally copied host JNI native is not packed into the sources artifact.
 
 ## [0.11.3] - 2026-11-15
 

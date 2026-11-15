@@ -17,14 +17,14 @@ Maven:
 <dependency>
   <groupId>com.lemmabase</groupId>
   <artifactId>lemma-engine</artifactId>
-  <version>0.11.3</version>
+  <version>0.11.4</version>
 </dependency>
 ```
 
 Gradle (Kotlin DSL): consume the published artifact; this repository builds the package with Maven only:
 
 ```kotlin
-implementation("com.lemmabase:lemma-engine:0.11.3")
+implementation("com.lemmabase:lemma-engine:0.11.4")
 ```
 
 Requires JDK 26+. Start the process with `--enable-native-access=ALL-UNNAMED`. The engine loads its JNI library with `System.load`.

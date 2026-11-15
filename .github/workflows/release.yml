@@ -439,8 +439,9 @@ jobs:
           path: dotnet-artifact/
           if-no-files-found: error
 
-  # Publish jobs run in parallel (no dependencies between them). If one fails
-  # (e.g. auth/expired token), update the secret and use "Re-run failed jobs".
+  # Publish jobs run in parallel (no dependencies between them). crates.io publish
+  # is idempotent and polls the sparse index between crates, so "Re-run failed jobs"
+  # can finish a partial release after index lag or a mid-chain failure.
   publish-crates:
     name: Publish to crates.io
     needs: [detect-version-changes, create-release]
@@ -457,26 +458,13 @@ jobs:
         with:
           toolchain: 1.92.0
 
-      - name: Publish lemma-engine
-        run: cargo publish -p lemma-engine --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
-
-      - name: Wait for crates.io index
-        run: sleep 60
-
-      - name: Publish lemma-lsp
-        run: cargo publish -p lemma-lsp --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
-
-      - name: Wait for crates.io index
-        run: sleep 60
-
-      - name: Publish lemma-openapi
-        run: cargo publish -p lemma-openapi --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
-
-      - name: Wait for crates.io index
-        run: sleep 60
-
-      - name: Publish lemma
-        run: cargo publish -p lemma --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
+      - name: Publish crates bottom-up
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          set -euo pipefail
+          chmod +x .github/scripts/publish-crates.sh
+          .github/scripts/publish-crates.sh "${{ needs.detect-version-changes.outputs.version }}"
 
   publish-npm:
     name: Publish to npm

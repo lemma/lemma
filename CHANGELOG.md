@@ -2,6 +2,14 @@
 
 Releases cover the Lemma engine, `lemma` CLI, OpenAPI crate, LSP, SDKs and VS Code extension. They all follow the same version everywhere. The release version is `[workspace.package] version` in the root `Cargo.toml`. Git tags follow `lemma-v{version}` (for example `lemma-v0.8.20`); releases before the rename used `cli-v{version}`. Draft notes for the next version quickly by running `cargo changelog` to print `git diff` / `git log` since the latest release tag (`xtask` `versions-diff`). Tip: feed that into an LLM to create a summary for this changelog.
 
+## [0.11.4] - 2026-11-15
+
+Re-release of 0.11.3 after a partial crates.io publish. `lemma-engine@0.11.3` reached crates.io; `lemma-lsp`, `lemma-openapi`, and `lemma` did not. Yank `0.11.3` on crates.io before relying on this line.
+
+### Fixed
+
+- **crates.io release job**: bottom-up publish no longer uses a fixed `sleep 60` between crates. It polls the sparse index cargo uses, busts the local registry cache, and confirms with `cargo package` of the next crate before continuing. Each `cargo publish` is idempotent (`already exists` continues), so "Re-run failed jobs" can finish a partial release.
+
 ## [0.11.3] - 2026-11-15
 
 Instance-list slots on `uses -> with` accept one list-typed data or rule reference, the same wiring as scalar `-> with y: p.doubled`. Bare local `uses` aliases still copy rows. Contributors use `nix develop -i` (ignore host env) for the full toolchain. Maven builds and ships for JDK 26+; the NuGet package targets `net10.0` (usable from .NET 11+).

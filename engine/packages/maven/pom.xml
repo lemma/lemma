@@ -140,6 +140,12 @@
         <groupId>org.apache.maven.plugins</groupId>
         <artifactId>maven-source-plugin</artifactId>
         <version>3.4.0</version>
+        <configuration>
+          <!-- Default is false: resources (including multi-platform JNI natives under
+               src/main/resources/native/) would be duplicated into the -sources jar and
+               roughly double Maven Central upload size per release. -->
+          <excludeResources>true</excludeResources>
+        </configuration>
         <executions>
           <execution>
             <id>attach-sources</id>

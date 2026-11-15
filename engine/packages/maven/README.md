@@ -21,4 +21,4 @@ cargo build -p lemma_jni
 ./mvnw -B test
 ```
 
-The Maven wrapper copies the host `lemma_jni` shared library into `src/main/resources/native/<triple>/` before tests. That directory is gitignored; release packaging fills all six triples in CI.
+The Maven wrapper copies the host `lemma_jni` shared library into `src/main/resources/native/<triple>/` before tests. That directory is gitignored; release packaging fills all six triples in CI. The published main jar embeds those natives; the `-sources` jar does not (`maven-source-plugin` `excludeResources`).

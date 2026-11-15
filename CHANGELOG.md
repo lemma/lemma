@@ -4,11 +4,13 @@ Releases cover the Lemma engine, `lemma` CLI, OpenAPI crate, LSP, SDKs and VS Co
 
 ## [0.11.4] - 2026-11-15
 
-Re-release of 0.11.3 after a partial crates.io publish. `lemma-engine@0.11.3` reached crates.io; `lemma-lsp`, `lemma-openapi`, and `lemma` did not. Yank `0.11.3` on crates.io before relying on this line.
+Release packaging reliability and smaller Maven Central uploads. Same language and engine behavior as 0.11.3.
 
 ### Fixed
 
 - **crates.io release job**: bottom-up publish no longer uses a fixed `sleep 60` between crates. It polls the sparse index cargo uses, busts the local registry cache, and confirms with `cargo package` of the next crate before continuing. Each `cargo publish` is idempotent (`already exists` continues), so "Re-run failed jobs" can finish a partial release.
+- **Maven `-sources` jar**: `excludeResources` so multi-platform JNI natives under `src/main/resources/native/` are not duplicated into the sources artifact (that duplication roughly doubled each Central upload).
+- **Release binaries**: `strip = "symbols"` on the workspace release profile so JNI / NIF / UniFFI natives ship without symbol tables.
 
 ## [0.11.3] - 2026-11-15
 

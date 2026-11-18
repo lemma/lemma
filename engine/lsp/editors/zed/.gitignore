@@ -1,3 +1,4 @@
 /target
 /grammars/tree-sitter-lemma/build
 *.wasm
+/grammars/lemma

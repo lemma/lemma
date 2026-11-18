@@ -47,7 +47,7 @@ Zed turns LSP semantic tokens off by default. Turn them on for Lemma to get the 
 2. In Zed run **zed: install dev extension** and pick `engine/lsp/editors/zed`. Zed compiles `src/lib.rs` for `wasm32-wasip2` and builds the grammar from the `[grammars.lemma]` `rev` in `extension.toml`.
 3. Open a `.lemma` file. **dev: open language server logs** shows the `lemma lsp` session.
 
-Zed builds the grammar from the committed `rev`, not from your working tree. To try uncommitted grammar edits, temporarily point `[grammars.lemma] repository` at `file:///<absolute repo path>` and `rev` at a local commit.
+Zed clones `[grammars.lemma] repository` into `grammars/lemma/` (gitignored) and checks out `rev`, so the install fails with `failed to fetch revision` until that commit is pushed to GitHub. It builds from the pushed `rev`, not from your working tree. To try an unpushed or uncommitted grammar, temporarily point `[grammars.lemma] repository` at `file:///<absolute repo path>` and `rev` at a local commit.
 
 ## Changing the grammar
 

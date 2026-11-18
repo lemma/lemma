@@ -8,7 +8,7 @@ repository = "https://github.com/lemma/lemma"
 
 [grammars.lemma]
 repository = "https://github.com/lemma/lemma"
-rev = "f1c5ea9ada05972d42675c9a43c0b2848eb78567"
+rev = "3e7524a7b0e6d34920b0a402158dfa90a31bdf22"
 path = "engine/lsp/editors/zed/grammars/tree-sitter-lemma"
 
 [language_servers.lemma]

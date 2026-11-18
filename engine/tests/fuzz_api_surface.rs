@@ -145,11 +145,20 @@ rule band_out: band
             )])
             .unwrap_or_else(|e| panic!("{name} must load: {e:?}"));
         let now = fixed_now();
+        let formatted = lemma::format_source(code, SourceType::Volatile)
+            .unwrap_or_else(|e| panic!("{name} format: {e:?}"));
+        let again = lemma::format_source(&formatted, SourceType::Volatile)
+            .unwrap_or_else(|e| panic!("{name} format again: {e:?}"));
+        assert_eq!(again, formatted, "{name} format must be idempotent");
         let show = engine
             .show(None, name, Some(&now))
             .unwrap_or_else(|e| panic!("{name} show: {e:?}"));
         serde_json::to_string(&lemma::api::show_document(&engine, &show))
             .unwrap_or_else(|e| panic!("{name} Show serialize: {e}"));
+        let text = engine
+            .source(None, Some(name), Some(&now))
+            .unwrap_or_else(|e| panic!("{name} source: {e:?}"));
+        std::hint::black_box(text);
 
         let response = engine
             .evaluate(None, name, Some(&now), IndexMap::new(), None, true)

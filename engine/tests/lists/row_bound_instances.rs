@@ -2,7 +2,7 @@
 //! its fields are read in the row's context and it publishes under the row.
 
 use crate::lists::{
-    data, evaluate, evaluate_at, evaluate_explain, list, lit, load_ok, map, now, value,
+    data, evaluate, evaluate_at, evaluate_explain, list, lit, load_err, load_ok, map, now, value,
 };
 use lemma::format_explanation;
 
@@ -339,4 +339,125 @@ fn rule_bound_field_is_order_independent_across_all_rules() {
     assert_eq!(value(&response, "a_fixed_total"), "500");
     assert_eq!(value(&response, "b_kind_b"), "17");
     assert_eq!(value(&response, "c_all_parts"), "17");
+}
+
+const MISSING_CALLER_RULE: &str = "Reference 'no_such_rule' not found";
+
+fn assert_missing_caller_rule(code: &str) {
+    let message = load_err(code);
+    assert!(
+        message.contains(MISSING_CALLER_RULE),
+        "expected missing reference, got: {message}"
+    );
+}
+
+/// A reached sum must report the caller's missing reference. `label_price` is named
+/// by `-> with`, and `total` reaches `box.primary`.
+const BARE_SUM_SHOW_EDGE: &str = r#"
+spec part
+data price: number
+rule contribution: price
+
+spec assembly
+uses part
+data parts: part list
+rule primary: parts -> sum contribution
+
+spec calc
+uses label: part
+  -> with price: label_price
+uses box: assembly
+  -> with parts: label
+rule label_price: no_such_rule
+rule total: box.primary
+"#;
+
+const WHERE_SUM_SHOW_EDGE: &str = r#"
+spec part
+data kind: text
+data price: number
+rule contribution: price
+
+spec assembly
+uses part
+data parts: part list
+rule primary: parts -> where kind is "Primair" -> sum contribution
+
+spec calc
+uses foil: part
+  -> with kind: "Primair"
+  -> with price: 1
+uses label: part
+  -> with kind: "Secundair"
+  -> with price: label_price
+uses box: assembly
+  -> with parts: foil, label
+rule label_price: no_such_rule
+rule total: box.primary
+"#;
+
+const DIVIDED_SUM_SHOW_EDGE: &str = r#"
+spec part
+data price: number
+rule contribution: price
+
+spec assembly
+uses part
+data parts: part list
+data divisor: number
+rule primary: (parts -> sum contribution) / divisor
+
+spec calc
+uses label: part
+  -> with price: label_price
+uses box: assembly
+  -> with parts: label
+  -> with divisor: 1
+rule label_price: no_such_rule
+rule total: box.primary
+"#;
+
+/// The same binding, once `label_price` converts, is a Show node. Dividing the sum
+/// does not change that: this form loads.
+const DIVIDED_SUM_WITH_CALLER_RULE: &str = r#"
+spec part
+data price: number
+rule contribution: price
+
+spec assembly
+uses part
+data parts: part list
+data divisor: number
+rule primary: (parts -> sum contribution) / divisor
+
+spec calc
+uses label: part
+  -> with price: label_price
+uses box: assembly
+  -> with parts: label
+  -> with divisor: 1
+rule label_price: 2
+rule total: box.primary
+"#;
+
+#[test]
+fn bare_sum_show_edge() {
+    assert_missing_caller_rule(BARE_SUM_SHOW_EDGE);
+}
+
+#[test]
+fn where_sum_show_edge() {
+    assert_missing_caller_rule(WHERE_SUM_SHOW_EDGE);
+}
+
+#[test]
+fn divided_sum_show_edge() {
+    assert_missing_caller_rule(DIVIDED_SUM_SHOW_EDGE);
+}
+
+#[test]
+fn divided_sum_with_caller_rule_loads() {
+    let engine = load_ok(DIVIDED_SUM_WITH_CALLER_RULE);
+    let response = evaluate(&engine, "calc", indexmap::IndexMap::new());
+    assert_eq!(value(&response, "total"), "2");
 }

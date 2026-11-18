@@ -1,0 +1,127 @@
+==================
+spec with effective datetime and commentary
+==================
+
+spec pricing 2026-01-01
+"""
+Pricing rules effective from 2026.
+"""
+
+---
+
+(source_file
+  (spec_header
+    (logical_name))
+  (datetime)
+  (commentary))
+
+==================
+data with constraints
+==================
+
+data money: measure
+  -> unit eur: 1.00
+  -> minimum 0 eur
+
+---
+
+(source_file
+  (data_header
+    (data_path))
+  (punctuation)
+  (identifier)
+  (operator)
+  (identifier)
+  (identifier)
+  (punctuation)
+  (number)
+  (operator)
+  (identifier)
+  (number)
+  (identifier))
+
+==================
+rule with unless branches
+==================
+
+rule age_discount:
+  0%
+  unless age >= 65 then 10%
+
+---
+
+(source_file
+  (rule_header
+    (identifier))
+  (punctuation)
+  (number)
+  (operator)
+  (identifier)
+  (identifier)
+  (operator)
+  (number)
+  (identifier)
+  (number)
+  (operator))
+
+==================
+uses with registry qualifier and binding
+==================
+
+uses @iso/countries alpha2 2026-01-01
+uses employee: base_employee
+  -> with monthly_salary: 7_500
+
+---
+
+(source_file
+  (identifier)
+  (registry_name)
+  (identifier)
+  (datetime)
+  (identifier)
+  (identifier)
+  (punctuation)
+  (identifier)
+  (operator)
+  (identifier)
+  (identifier)
+  (punctuation)
+  (number))
+
+==================
+repo and meta
+==================
+
+repo @lemma/units
+meta directive: "Directive 2003/88/EC, Article 6"
+
+---
+
+(source_file
+  (repo_header
+    (logical_name))
+  (meta_header
+    (identifier))
+  (punctuation)
+  (string))
+
+==================
+keywords are case-insensitive
+==================
+
+SPEC Shipping
+Rule Total:
+  Subtotal * 1.21
+
+---
+
+(source_file
+  (spec_header
+    (logical_name))
+  (rule_header
+    (identifier))
+  (punctuation)
+  (identifier)
+  (operator)
+  (number))

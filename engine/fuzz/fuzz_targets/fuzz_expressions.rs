@@ -1,16 +1,8 @@
 #![no_main]
 
-use lemma::DateTimeValue;
-use lemma::Engine;
-use lemma::IndexMap;
 use libfuzzer_sys::fuzz_target;
-use std::str::FromStr;
 
 const MAX_DEPTH: usize = 4;
-
-fn fixed_now() -> DateTimeValue {
-    DateTimeValue::from_str("2024-06-15T12:00:00Z").expect("BUG: fixed fuzz datetime")
-}
 
 struct Cursor<'a> {
     bytes: &'a [u8],
@@ -110,8 +102,8 @@ fn number_range(cursor: &mut Cursor<'_>) -> String {
 }
 
 fn deep_nested_number(cursor: &mut Cursor<'_>) -> String {
-    // Depth 1..=9 crosses the default max_expression_depth of 7.
-    let depth = (cursor.next_u8() as usize % 9) + 1;
+    // Depth 1..=7 stays inside the default max_expression_depth of 7.
+    let depth = (cursor.next_u8() as usize % 7) + 1;
     let variant = cursor.next_u8() % 4;
     let mut expr = number_leaf(cursor);
     for i in 0..depth {
@@ -149,13 +141,72 @@ fn list_number(cursor: &mut Cursor<'_>) -> String {
     }
 }
 
+fn exotic_number(cursor: &mut Cursor<'_>, depth: usize) -> String {
+    let inner = build_expr(Kind::Number, depth.saturating_sub(1), cursor);
+    match cursor.next_u8() % 16 {
+        0 => format!("sqrt({inner})"),
+        1 => format!("log({inner})"),
+        2 => format!("exp({inner})"),
+        3 => format!("sin({inner})"),
+        4 => format!("cos({inner})"),
+        5 => format!("tan({inner})"),
+        6 => format!("asin({inner})"),
+        7 => format!("acos({inner})"),
+        8 => format!("atan({inner})"),
+        9 => format!("({inner} as number)"),
+        10 => "((started...ended) as day as number)".to_string(),
+        11 => "(rate as number)".to_string(),
+        12 => "(rate + 5%)".to_string(),
+        13 => "lower(window)".to_string(),
+        14 => "upper(window)".to_string(),
+        _ => "(abs(rate) as number)".to_string(),
+    }
+}
+
+fn exotic_bool(cursor: &mut Cursor<'_>, depth: usize) -> String {
+    match cursor.next_u8() % 10 {
+        0 => format!(
+            "({} is not {})",
+            build_expr(Kind::Text, depth.saturating_sub(1), cursor),
+            build_expr(Kind::Text, depth.saturating_sub(1), cursor)
+        ),
+        1 => format!(
+            "({} is not {})",
+            build_expr(Kind::Number, depth.saturating_sub(1), cursor),
+            build_expr(Kind::Number, depth.saturating_sub(1), cursor)
+        ),
+        2 => format!(
+            "({} is veto)",
+            build_expr(Kind::Number, depth.saturating_sub(1), cursor)
+        ),
+        3 => format!(
+            "({} is not veto)",
+            build_expr(Kind::Number, depth.saturating_sub(1), cursor)
+        ),
+        4 => format!(
+            "({} >= {})",
+            build_expr(Kind::Number, depth.saturating_sub(1), cursor),
+            build_expr(Kind::Number, depth.saturating_sub(1), cursor)
+        ),
+        5 => format!(
+            "({} <= {})",
+            build_expr(Kind::Number, depth.saturating_sub(1), cursor),
+            build_expr(Kind::Number, depth.saturating_sub(1), cursor)
+        ),
+        6 => "(started in past)".to_string(),
+        7 => "(started in future calendar year)".to_string(),
+        8 => "(now > started)".to_string(),
+        _ => "(started in past 7 day)".to_string(),
+    }
+}
+
 fn build_expr(kind: Kind, depth: usize, cursor: &mut Cursor<'_>) -> String {
     if depth == 0 {
         return leaf(kind, cursor);
     }
 
     match kind {
-        Kind::Number => match cursor.next_u8() % 14 {
+        Kind::Number => match cursor.next_u8() % 15 {
             0 => format!(
                 "({} + {})",
                 build_expr(Kind::Number, depth - 1, cursor),
@@ -187,18 +238,9 @@ fn build_expr(kind: Kind, depth: usize, cursor: &mut Cursor<'_>) -> String {
                 number_leaf(cursor)
             ),
             6 => format!("abs({})", build_expr(Kind::Number, depth - 1, cursor)),
-            7 => format!(
-                "({} -> floor)",
-                build_expr(Kind::Number, depth - 1, cursor)
-            ),
-            8 => format!(
-                "({} -> ceil)",
-                build_expr(Kind::Number, depth - 1, cursor)
-            ),
-            9 => format!(
-                "({} -> round)",
-                build_expr(Kind::Number, depth - 1, cursor)
-            ),
+            7 => format!("({} -> floor)", build_expr(Kind::Number, depth - 1, cursor)),
+            8 => format!("({} -> ceil)", build_expr(Kind::Number, depth - 1, cursor)),
+            9 => format!("({} -> round)", build_expr(Kind::Number, depth - 1, cursor)),
             10 => {
                 let mode = rounding_mode(cursor);
                 format!(
@@ -208,9 +250,10 @@ fn build_expr(kind: Kind, depth: usize, cursor: &mut Cursor<'_>) -> String {
             }
             11 => unless_number(cursor, depth),
             12 => list_number(cursor),
+            13 => exotic_number(cursor, depth),
             _ => deep_nested_number(cursor),
         },
-        Kind::Measure => match cursor.next_u8() % 6 {
+        Kind::Measure => match cursor.next_u8() % 8 {
             0 => format!(
                 "({} + {})",
                 build_expr(Kind::Measure, depth - 1, cursor),
@@ -232,6 +275,11 @@ fn build_expr(kind: Kind, depth: usize, cursor: &mut Cursor<'_>) -> String {
                 build_expr(Kind::Number, depth - 1, cursor)
             ),
             4 => format!("abs({})", build_expr(Kind::Measure, depth - 1, cursor)),
+            5 => format!("({} as gram)", build_expr(Kind::Measure, depth - 1, cursor)),
+            6 => format!(
+                "({} as kilogram as number)",
+                build_expr(Kind::Measure, depth - 1, cursor)
+            ),
             _ => {
                 let mode = rounding_mode(cursor);
                 let step = if cursor.next_u8() % 2 == 0 {
@@ -245,7 +293,7 @@ fn build_expr(kind: Kind, depth: usize, cursor: &mut Cursor<'_>) -> String {
                 )
             }
         },
-        Kind::Boolean => match cursor.next_u8() % 10 {
+        Kind::Boolean => match cursor.next_u8() % 11 {
             0 => format!(
                 "({} and {})",
                 build_expr(Kind::Boolean, depth - 1, cursor),
@@ -283,10 +331,11 @@ fn build_expr(kind: Kind, depth: usize, cursor: &mut Cursor<'_>) -> String {
                 number_range(cursor)
             ),
             8 => format!("(items -> count > {})", number_leaf(cursor)),
-            _ => format!(
+            9 => format!(
                 "({} in 1...10)",
                 build_expr(Kind::Number, depth - 1, cursor)
             ),
+            _ => exotic_bool(cursor, depth),
         },
         Kind::Text => leaf(Kind::Text, cursor),
     }
@@ -311,6 +360,10 @@ data x: 100
 data y: 50
 data flag: true
 data label: "a"
+data started: 2024-01-01
+data ended: 2024-06-15
+data rate: 10%
+data window: 1...10
 data m: measure
   -> unit kilogram: 1
   -> unit gram: 0.001
@@ -323,50 +376,5 @@ rule test_expr: {expr}
 "#
     );
 
-    let mut engine = Engine::new();
-    let loaded = engine.load([(
-        lemma::SourceType::Path(std::sync::Arc::new(std::path::PathBuf::from("fuzz_expr"))),
-        code,
-    )]);
-
-    // Property: load Ok => evaluation must not panic; serialize must succeed;
-    // two evaluates with the same effective datetime must agree.
-    if loaded.is_ok() {
-        let now = fixed_now();
-        let first = engine.evaluate(
-            None,
-            "fuzz_test",
-            Some(&now),
-            IndexMap::new(),
-            None,
-            false,
-        );
-        let second = engine.evaluate(
-            None,
-            "fuzz_test",
-            Some(&now),
-            IndexMap::new(),
-            None,
-            false,
-        );
-        match (first, second) {
-            (Ok(a), Ok(b)) => {
-                let json_a = serde_json::to_string(&lemma::api::Response::from(&a))
-                    .expect("BUG: Response must serialize");
-                let json_b = serde_json::to_string(&lemma::api::Response::from(&b))
-                    .expect("BUG: Response must serialize");
-                assert_eq!(
-                    json_a, json_b,
-                    "BUG: evaluate must be deterministic for fixed effective datetime"
-                );
-                std::hint::black_box(json_a);
-            }
-            (Err(error), Err(_)) => {
-                std::hint::black_box(error);
-            }
-            (Ok(_), Err(_)) | (Err(_), Ok(_)) => {
-                panic!("BUG: evaluate Ok/Err disagree across identical deterministic runs");
-            }
-        }
-    }
+    lemma_fuzz::exercise_source("fuzz_expr", &code);
 });

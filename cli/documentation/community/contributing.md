@@ -87,7 +87,7 @@ Pull requests to `main` check committed coverage reports, then run 5 minutes of 
 cargo precommit --coverage --fuzz
 ```
 
-Requires nightly Rust and `cargo-fuzz`. Local long campaign (1 hour total across targets, from repo root):
+Requires nightly Rust and `cargo-fuzz`. Local long campaign (1 hour total, half of it on `fuzz_parser`, from repo root):
 
 ```bash
 cargo fuzzing
@@ -100,7 +100,7 @@ Manual single-target run:
 cd engine/fuzz
 cargo +nightly fuzz list
 mkdir -p corpus/fuzz_parser
-cargo +nightly fuzz run fuzz_parser corpus/fuzz_parser seeds/fuzz_parser -- -max_total_time=60 -dict=lemma.dict
+cargo +nightly fuzz run fuzz_parser corpus/fuzz_parser seeds/fuzz_parser -- -max_total_time=60 -dict=lemma.dict -max_len=65536
 ```
 
 ### WASM build and test

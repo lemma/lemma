@@ -159,16 +159,16 @@ jobs:
         shell: bash
         run: |
           if [ "${{ matrix.use-cross }}" == "true" ]; then
-            cross build --release -p lemma --target ${{ matrix.target }}
+            cross build --profile release-stripped -p lemma --target ${{ matrix.target }}
           else
-            cargo build --release -p lemma --target ${{ matrix.target }}
+            cargo build --profile release-stripped -p lemma --target ${{ matrix.target }}
           fi
 
       - name: Verify static Linux binary
         if: contains(matrix.target, 'linux-musl')
         shell: bash
         run: |
-          B="target/${{ matrix.target }}/release/lemma"
+          B="target/${{ matrix.target }}/release-stripped/lemma"
           file "$B"
           file "$B" | grep -Eiq 'statically linked|static-pie' || {
             echo "error: expected static musl binary (scratch Docker)"
@@ -178,7 +178,7 @@ jobs:
       - name: Package binary
         shell: bash
         run: |
-          cd target/${{ matrix.target }}/release
+          cd target/${{ matrix.target }}/release-stripped
           if [ "${{ runner.os }}" == "Windows" ]; then
             7z a ../../../lemma-${{ matrix.target }}.zip lemma.exe
           else
@@ -232,9 +232,9 @@ jobs:
         shell: bash
         run: |
           if [ "${{ matrix.job.use-cross }}" == "true" ]; then
-            cross build --release -p lemma_hex --target ${{ matrix.job.target }}
+            cross build --profile release-stripped -p lemma_hex --target ${{ matrix.job.target }}
           else
-            cargo build --release -p lemma_hex --target ${{ matrix.job.target }}
+            cargo build --profile release-stripped -p lemma_hex --target ${{ matrix.job.target }}
           fi
 
       - name: Package NIF library
@@ -243,7 +243,7 @@ jobs:
           VERSION="${{ needs.detect-version-changes.outputs.version }}"
           NIF_VERSION="${{ matrix.nif }}"
           TARGET="${{ matrix.job.target }}"
-          RELEASE_DIR="target/${TARGET}/release"
+          RELEASE_DIR="target/${TARGET}/release-stripped"
 
           case "${{ runner.os }}" in
             Windows)
@@ -305,9 +305,9 @@ jobs:
         shell: bash
         run: |
           if [ "${{ matrix.job.use-cross }}" == "true" ]; then
-            cross build --release -p lemma_jni --target ${{ matrix.job.target }}
+            cross build --profile release-stripped -p lemma_jni --target ${{ matrix.job.target }}
           else
-            cargo build --release -p lemma_jni --target ${{ matrix.job.target }}
+            cargo build --profile release-stripped -p lemma_jni --target ${{ matrix.job.target }}
           fi
 
       - name: Package JNI library
@@ -315,7 +315,7 @@ jobs:
         run: |
           VERSION="${{ needs.detect-version-changes.outputs.version }}"
           TARGET="${{ matrix.job.target }}"
-          RELEASE_DIR="target/${TARGET}/release"
+          RELEASE_DIR="target/${TARGET}/release-stripped"
 
           case "${{ runner.os }}" in
             Windows)
@@ -391,9 +391,9 @@ jobs:
         shell: bash
         run: |
           if [ "${{ matrix.job.use-cross }}" == "true" ]; then
-            cross build --release -p lemma_dotnet --target ${{ matrix.job.target }}
+            cross build --profile release-stripped -p lemma_dotnet --target ${{ matrix.job.target }}
           else
-            cargo build --release -p lemma_dotnet --target ${{ matrix.job.target }}
+            cargo build --profile release-stripped -p lemma_dotnet --target ${{ matrix.job.target }}
           fi
 
       - name: Package lemma_dotnet library
@@ -401,7 +401,7 @@ jobs:
         run: |
           VERSION="${{ needs.detect-version-changes.outputs.version }}"
           TARGET="${{ matrix.job.target }}"
-          RELEASE_DIR="target/${TARGET}/release"
+          RELEASE_DIR="target/${TARGET}/release-stripped"
 
           case "${{ runner.os }}" in
             Windows)
@@ -461,19 +461,73 @@ jobs:
         run: cargo publish -p lemma-engine --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
 
       - name: Wait for crates.io index
-        run: sleep 60
+        env:
+          VERSION: ${{ needs.detect-version-changes.outputs.version }}
+        run: |
+          set -euo pipefail
+          url="https://index.crates.io/le/mm/lemma-engine"
+          needle="\"vers\":\"${VERSION}\""
+          for i in $(seq 1 90); do
+            if curl -fsSL -A 'lemma-release' "$url" | grep -Fq "$needle"; then
+              echo "lemma-engine@${VERSION} visible (attempt ${i})"
+              rm -rf "${CARGO_HOME:-$HOME/.cargo}/registry/index" \
+                     "${CARGO_HOME:-$HOME/.cargo}/registry/cache" \
+                     "${CARGO_HOME:-$HOME/.cargo}/registry/src" || true
+              exit 0
+            fi
+            echo "attempt ${i}/90: not visible yet; sleeping 10s"
+            sleep 10
+          done
+          echo "ERROR: lemma-engine@${VERSION} not on sparse index after 15m" >&2
+          exit 1
 
       - name: Publish lemma-lsp
         run: cargo publish -p lemma-lsp --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
 
       - name: Wait for crates.io index
-        run: sleep 60
+        env:
+          VERSION: ${{ needs.detect-version-changes.outputs.version }}
+        run: |
+          set -euo pipefail
+          url="https://index.crates.io/le/mm/lemma-lsp"
+          needle="\"vers\":\"${VERSION}\""
+          for i in $(seq 1 90); do
+            if curl -fsSL -A 'lemma-release' "$url" | grep -Fq "$needle"; then
+              echo "lemma-lsp@${VERSION} visible (attempt ${i})"
+              rm -rf "${CARGO_HOME:-$HOME/.cargo}/registry/index" \
+                     "${CARGO_HOME:-$HOME/.cargo}/registry/cache" \
+                     "${CARGO_HOME:-$HOME/.cargo}/registry/src" || true
+              exit 0
+            fi
+            echo "attempt ${i}/90: not visible yet; sleeping 10s"
+            sleep 10
+          done
+          echo "ERROR: lemma-lsp@${VERSION} not on sparse index after 15m" >&2
+          exit 1
 
       - name: Publish lemma-openapi
         run: cargo publish -p lemma-openapi --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
 
       - name: Wait for crates.io index
-        run: sleep 60
+        env:
+          VERSION: ${{ needs.detect-version-changes.outputs.version }}
+        run: |
+          set -euo pipefail
+          url="https://index.crates.io/le/mm/lemma-openapi"
+          needle="\"vers\":\"${VERSION}\""
+          for i in $(seq 1 90); do
+            if curl -fsSL -A 'lemma-release' "$url" | grep -Fq "$needle"; then
+              echo "lemma-openapi@${VERSION} visible (attempt ${i})"
+              rm -rf "${CARGO_HOME:-$HOME/.cargo}/registry/index" \
+                     "${CARGO_HOME:-$HOME/.cargo}/registry/cache" \
+                     "${CARGO_HOME:-$HOME/.cargo}/registry/src" || true
+              exit 0
+            fi
+            echo "attempt ${i}/90: not visible yet; sleeping 10s"
+            sleep 10
+          done
+          echo "ERROR: lemma-openapi@${VERSION} not on sparse index after 15m" >&2
+          exit 1
 
       - name: Publish lemma
         run: cargo publish -p lemma --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
@@ -554,13 +608,28 @@ jobs:
           path: /tmp/lemma-jni
           merge-multiple: true
 
-      - name: Install natives into Maven resources
+      - name: Write native checksums (thin Central jar)
         run: |
           set -euo pipefail
-          DEST="engine/packages/maven/src/main/resources"
-          mkdir -p "${DEST}"
-          cp -a /tmp/lemma-jni/native "${DEST}/"
-          find "${DEST}/native" -type f | sort
+          # Maven Central monthly size budget cannot absorb six platform natives in
+          # every release (plus a duplicated -sources jar). Publish checksums only;
+          # the SDK downloads the matching GitHub release asset on first load.
+          OUT="engine/packages/maven/src/main/resources/com/lemmabase/lemma/native-checksums.properties"
+          mkdir -p "$(dirname "${OUT}")"
+          {
+            echo "# SHA-256 of lemma_jni shared libraries by Rust target triple."
+            echo "# Generated by the release workflow; consumers download from GitHub Releases."
+            find /tmp/lemma-jni/native -type f | sort | while read -r f; do
+              triple="$(basename "$(dirname "${f}")")"
+              hash="$(sha256sum "${f}" | awk '{print $1}')"
+              echo "${triple}=${hash}"
+            done
+          } > "${OUT}"
+          echo "Wrote ${OUT}:"
+          cat "${OUT}"
+          test "$(find /tmp/lemma-jni/native -type f | wc -l)" -eq 6
+          test "$(grep -c '=' "${OUT}")" -eq 6
+          # Intentionally do not copy natives into src/main/resources.
 
       - name: Set up JDK 26
         uses: actions/setup-java@v4
@@ -760,6 +829,27 @@ jobs:
         run: cargo run -p xtask -- lsp publish-openvsx
         env:
           OPEN_VSX_TOKEN: ${{ secrets.OPEN_VSX_TOKEN }}
+
+  publish-zed:
+    name: Publish Zed Extension
+    needs: [detect-version-changes, create-release]
+    # Opens a version-bump PR on zed-industries/extensions from a fork. Requires the
+    # initial registry submission to be merged, repo variable ZED_EXTENSIONS_FORK
+    # (owner/extensions), and secret ZED_COMMITTER_TOKEN (PAT with repo + workflow).
+    if: |
+      !cancelled() &&
+      needs.create-release.result == 'success' &&
+      needs.detect-version-changes.outputs.changed == 'true' &&
+      vars.ZED_EXTENSIONS_FORK != ''
+    runs-on: ubuntu-latest
+    steps:
+      - uses: huacnlee/zed-extension-action@v2
+        with:
+          extension-name: lemma
+          push-to: ${{ vars.ZED_EXTENSIONS_FORK }}
+          tag: lemma-v${{ needs.detect-version-changes.outputs.version }}
+        env:
+          COMMITTER_TOKEN: ${{ secrets.ZED_COMMITTER_TOKEN }}
 
   publish-hex:
     name: Publish to Hex.pm

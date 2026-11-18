@@ -5,7 +5,7 @@ nav_order: 40
 
 # Java / Kotlin
 
-Embed the Lemma engine in Java, Kotlin, or Scala via `com.lemmabase:lemma-engine` on Maven Central. The JAR ships prebuilt `lemma_jni` natives for the same six targets as the Hex package (glibc-only; no musl). Alpine Linux images are unsupported and fail closed at native load.
+Embed the Lemma engine in Java, Kotlin, or Scala via `com.lemmabase:lemma-engine` on Maven Central. The published JAR is Java-only; on first use it downloads the matching prebuilt `lemma_jni` from the GitHub release for this version (same six targets as the Hex package: glibc-only; no musl), verifies a SHA-256 checksum embedded in the JAR, and caches it. Alpine Linux images are unsupported and fail closed at native load.
 
 Decimals use `java.math.BigDecimal` or integer types (`Integer`, `Long`, `Short`, `Byte`, `BigInteger`). `float` / `double` data values are rejected (`pass as string`). Single-unit maps (`Map.of("eur", "84")`) bind measure and ratio data. Map keys must be `String`; keys differing only in case are rejected. A top-level `null` value is rejected (omit the key); nested `null` map values are omitted; a `null` list item is rejected. Rejections are `LemmaException` request errors with `relatedData()` set to the top-level key. See [Precision](../learn/precision.md).
 
@@ -17,14 +17,14 @@ Maven:
 <dependency>
   <groupId>com.lemmabase</groupId>
   <artifactId>lemma-engine</artifactId>
-  <version>0.11.3</version>
+  <version>0.11.4</version>
 </dependency>
 ```
 
 Gradle (Kotlin DSL): consume the published artifact; this repository builds the package with Maven only:
 
 ```kotlin
-implementation("com.lemmabase:lemma-engine:0.11.3")
+implementation("com.lemmabase:lemma-engine:0.11.4")
 ```
 
 Requires JDK 26+. Start the process with `--enable-native-access=ALL-UNNAMED`. The engine loads its JNI library with `System.load`.
@@ -153,15 +153,16 @@ engine.load(Map.of(installed.id(), installed.source()));
 
 ## Native library loading
 
-The JAR embeds `lemma_jni` natives (glibc Linux, macOS, Windows; no musl / Alpine). On first use, the SDK extracts the native for the current platform to a content-hashed cache and loads it. Override the automatic resolution:
+The Maven Central JAR does not embed platform natives (keeps each Central publish small). On first use the SDK downloads `lemma_jni` for the current platform from the matching GitHub release (`lemma-v{version}`), verifies the SHA-256 in the JAR's `native-checksums.properties`, and loads it from a content-hashed cache. Local builds may still bundle a host native under `native/<triple>/` for tests. Override the automatic resolution:
 
 | Priority | Source | Example |
 |----------|--------|---------|
 | 1 | System property `lemma.native.library` | `-Dlemma.native.library=/opt/liblemma_jni.so` |
 | 2 | Environment variable `LEMMA_JNI_LIBRARY` | `LEMMA_JNI_LIBRARY=/opt/liblemma_jni.so` |
-| 3 | Bundled JAR resource (extracted to cache) | Automatic |
+| 3 | Bundled JAR resource (local/dev builds) | Automatic when present |
+| 4 | GitHub release download (checksum-verified) | Automatic for Central artifacts |
 
-The cache path is `~/.cache/lemma-jni/{version}-{triple}/{sha256}/`. Override the cache root with the system property `lemma.native.cache.dir`.
+The cache path is `~/.cache/lemma-jni/{version}-{triple}/{sha256}/`. Override the cache root with `lemma.native.cache.dir`. Point `lemma.native.download.base` at another release host in tests. Set `lemma.native.download=false` to fail closed instead of downloading (air-gapped hosts must use priority 1 or 2).
 
 ## ExplanationNode dispatch
 

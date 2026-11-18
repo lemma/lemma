@@ -1,14 +1,6 @@
 #![no_main]
 
-use lemma::DateTimeValue;
-use lemma::Engine;
-use lemma::IndexMap;
 use libfuzzer_sys::fuzz_target;
-use std::str::FromStr;
-
-fn fixed_now() -> DateTimeValue {
-    DateTimeValue::from_str("2024-06-15T12:00:00Z").expect("BUG: fixed fuzz datetime")
-}
 
 struct Cursor<'a> {
     bytes: &'a [u8],
@@ -38,8 +30,20 @@ impl<'a> Cursor<'a> {
     }
 }
 
+fn long_number(cursor: &mut Cursor<'_>) -> String {
+    let digits = 200 + (cursor.next_u8() as usize % 201);
+    let mut number = String::from("1");
+    for _ in 1..digits {
+        number.push(char::from(b'0' + (cursor.next_u8() % 10)));
+    }
+    if cursor.next_u8() % 2 == 0 {
+        number.insert(0, '-');
+    }
+    number
+}
+
 fn number_literal(cursor: &mut Cursor<'_>) -> String {
-    match cursor.next_u8() % 8 {
+    match cursor.next_u8() % 10 {
         0 => "0".to_string(),
         1 => "1".to_string(),
         2 => "-1".to_string(),
@@ -50,6 +54,7 @@ fn number_literal(cursor: &mut Cursor<'_>) -> String {
             let n = cursor.next_u8() as i16;
             n.to_string()
         }
+        8 => long_number(cursor),
         _ => {
             let whole = cursor.next_u8();
             let frac = cursor.next_u8() % 100;
@@ -102,10 +107,11 @@ fn measure_literal(cursor: &mut Cursor<'_>) -> String {
 }
 
 fn ratio_literal(cursor: &mut Cursor<'_>) -> String {
-    match cursor.next_u8() % 4 {
-        0 => "50%".to_string(),
-        1 => "0%".to_string(),
-        2 => "12.5%".to_string(),
+    match cursor.next_u8() % 5 {
+        0 => "0%".to_string(),
+        1 => "100%".to_string(),
+        2 => "50%".to_string(),
+        3 => "12.5%".to_string(),
         _ => {
             let n = cursor.next_u8() % 101;
             format!("{n}%")
@@ -114,11 +120,13 @@ fn ratio_literal(cursor: &mut Cursor<'_>) -> String {
 }
 
 fn date_literal(cursor: &mut Cursor<'_>) -> String {
-    match cursor.next_u8() % 5 {
-        0 => "2024-01-01".to_string(),
-        1 => "2024-06-15T12:00:00Z".to_string(),
-        2 => "2024-W01".to_string(),
-        3 => "2024".to_string(),
+    match cursor.next_u8() % 7 {
+        0 => "0001-01-01".to_string(),
+        1 => "9999-12-31".to_string(),
+        2 => "2024-01-01".to_string(),
+        3 => "2024-06-15T12:00:00Z".to_string(),
+        4 => "2024-W01".to_string(),
+        5 => "2024".to_string(),
         _ => {
             let year = 2000 + (cursor.next_u8() as u16 % 50);
             let month = (cursor.next_u8() % 12) + 1;
@@ -156,11 +164,7 @@ fn range_literal(cursor: &mut Cursor<'_>) -> String {
         0 => "1...10".to_string(),
         1 => "0...100".to_string(),
         2 => format!("{}...{}", number_literal(cursor), number_literal(cursor)),
-        _ => format!(
-            "{}...{}",
-            measure_literal(cursor),
-            measure_literal(cursor)
-        ),
+        _ => format!("{}...{}", measure_literal(cursor), measure_literal(cursor)),
     }
 }
 
@@ -184,52 +188,5 @@ fuzz_target!(|data: &[u8]| {
     // data declaration into a second full-document parser.
     let code = format!("spec fuzz_test\nuses lemma units\ndata test_value: {literal}\n");
 
-    let mut engine = Engine::new();
-    let loaded = engine.load([(
-        lemma::SourceType::Path(std::sync::Arc::new(std::path::PathBuf::from(
-            "fuzz_literal",
-        ))),
-        code,
-    )]);
-
-    // Property: load Ok => evaluation must not panic; serialize must succeed;
-    // two evaluates with the same effective datetime must agree.
-    if loaded.is_ok() {
-        let now = fixed_now();
-        let first = engine.evaluate(
-            None,
-            "fuzz_test",
-            Some(&now),
-            IndexMap::new(),
-            None,
-            false,
-        );
-        let second = engine.evaluate(
-            None,
-            "fuzz_test",
-            Some(&now),
-            IndexMap::new(),
-            None,
-            false,
-        );
-        match (first, second) {
-            (Ok(a), Ok(b)) => {
-                let json_a = serde_json::to_string(&lemma::api::Response::from(&a))
-                    .expect("BUG: Response must serialize");
-                let json_b = serde_json::to_string(&lemma::api::Response::from(&b))
-                    .expect("BUG: Response must serialize");
-                assert_eq!(
-                    json_a, json_b,
-                    "BUG: evaluate must be deterministic for fixed effective datetime"
-                );
-                std::hint::black_box(json_a);
-            }
-            (Err(error), Err(_)) => {
-                std::hint::black_box(error);
-            }
-            (Ok(_), Err(_)) | (Err(_), Ok(_)) => {
-                panic!("BUG: evaluate Ok/Err disagree across identical deterministic runs");
-            }
-        }
-    }
+    lemma_fuzz::exercise_source("fuzz_literal", &code);
 });

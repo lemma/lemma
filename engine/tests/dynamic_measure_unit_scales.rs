@@ -120,6 +120,49 @@ data money: measure
 }
 
 #[test]
+fn dropped_scale_rule_reports_conversion_error() {
+    let mut engine = Engine::new();
+    let code = r#"
+spec t
+uses lemma units
+data money: measure
+    -> unit eur: 1
+data price: measure
+    -> unit eur_per_kg: basis_eur_per_kg
+rule basis_eur_per_kg:
+    eur / kilogram
+"#;
+    let msg = load_err(&mut engine, code);
+    assert!(
+        msg.contains("Reference 'eur' not found"),
+        "dropped scale rule must report the conversion error, got: {msg}"
+    );
+}
+
+#[test]
+fn dropped_scale_rule_on_used_spec_reports_conversion_error() {
+    let mut engine = Engine::new();
+    let code = r#"
+spec amounts
+uses lemma units
+data money: measure
+    -> unit eur: 1
+data price: measure
+    -> unit eur_per_kg: basis_eur_per_kg
+rule basis_eur_per_kg:
+    eur / kilogram
+
+spec quote
+uses amounts
+"#;
+    let msg = load_err(&mut engine, code);
+    assert!(
+        msg.contains("Reference 'eur' not found"),
+        "uses of a spec with a dropped scale rule must report that conversion error, got: {msg}"
+    );
+}
+
+#[test]
 fn uses_qualified_scale_target_must_be_number() {
     let mut engine = Engine::new();
     let code = r#"

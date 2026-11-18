@@ -11,10 +11,10 @@ members = [
     "openapi",
 ]
 default-members = ["cli"]
-exclude = ["engine/fuzz"]
+exclude = ["engine/fuzz", "engine/lsp/editors/zed"]
 
 [workspace.package]
-version = "0.11.3"
+version = "0.11.4"
 edition = "2021"
 authors = ["Ben Rogmans <ben@lemmabase.com>"]
 description = "A pure, declarative language for business rules."
@@ -33,6 +33,10 @@ rust_decimal = { version = "1.42", features = ["serde", "serde-with-str", "maths
 
 [profile.release]
 overflow-checks = true
+
+[profile.release-stripped]
+inherits = "release"
+strip = "symbols"
 
 [profile.dev]
 debug = "line-tables-only"

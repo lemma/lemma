@@ -136,8 +136,7 @@ data income_verified: boolean
 data has_bankruptcy:  boolean
 
 rule can_approve_loan:
-  credit_score >= 650
-  and income_verified
+  credit_score >= 650 and income_verified
   and not has_bankruptcy
 ```
 

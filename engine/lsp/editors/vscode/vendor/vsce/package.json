@@ -1,0 +1,70 @@
+{
+	"name": "@vscode/vsce",
+	"version": "3.9.2",
+	"description": "VS Code Extensions Manager (vendored from @vscode/vsce 3.9.2 with the unused secretlint dependency removed; see ../README.md)",
+	"repository": {
+		"type": "git",
+		"url": "https://github.com/Microsoft/vsce"
+	},
+	"type": "commonjs",
+	"homepage": "https://code.visualstudio.com",
+	"bugs": "https://github.com/Microsoft/vsce/issues",
+	"keywords": [
+		"vscode",
+		"vsce",
+		"extension"
+	],
+	"publishConfig": {
+		"access": "public"
+	},
+	"contributors": [
+		"Microsoft Corporation"
+	],
+	"author": "Microsoft Corporation",
+	"license": "MIT",
+	"main": "out/api.js",
+	"typings": "dist/vsce.d.ts",
+	"bin": {
+		"vsce": "vsce"
+	},
+	"engines": {
+		"node": ">= 20"
+	},
+	"dependencies": {
+		"@azure/identity": "^4.1.0",
+		"@secretlint/node": "^10.1.2",
+		"@secretlint/secretlint-formatter-sarif": "^10.1.2",
+		"@secretlint/secretlint-rule-no-dotenv": "^10.1.2",
+		"@secretlint/secretlint-rule-preset-recommend": "^10.1.2",
+		"@vscode/vsce-sign": "^2.0.0",
+		"azure-devops-node-api": "^12.5.0",
+		"chalk": "^4.1.2",
+		"cheerio": "^1.0.0-rc.9",
+		"cockatiel": "^3.1.2",
+		"commander": "^12.1.0",
+		"form-data": "^4.0.0",
+		"glob": "^13.0.6",
+		"hosted-git-info": "^4.0.2",
+		"jsonc-parser": "^3.2.0",
+		"leven": "^3.1.0",
+		"markdown-it": "^14.1.0",
+		"mime": "^1.3.4",
+		"minimatch": "^10.2.2",
+		"parse-semver": "^1.1.1",
+		"read": "^1.0.7",
+		"semver": "^7.5.2",
+		"tmp": "^0.2.3",
+		"typed-rest-client": "^1.8.4",
+		"url-join": "^4.0.1",
+		"xml2js": "^0.5.0",
+		"yauzl": "^3.2.1",
+		"yazl": "^2.2.2"
+	},
+	"optionalDependencies": {
+		"keytar": "^7.7.0"
+	},
+	"overrides": {
+		"serialize-javascript": "7.x",
+		"diff": "^9.0.0"
+	}
+}

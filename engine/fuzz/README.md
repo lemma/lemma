@@ -25,32 +25,34 @@ Bare `cargo precommit` skips the coverage check and fuzz. `cargo precommit --fuz
 ```bash
 cd engine/fuzz
 mkdir -p corpus/fuzz_parser
-cargo +nightly fuzz run fuzz_parser corpus/fuzz_parser seeds/fuzz_parser -- -max_total_time=30 -dict=lemma.dict
+cargo +nightly fuzz run fuzz_parser corpus/fuzz_parser seeds/fuzz_parser -- -max_total_time=30 -dict=lemma.dict -max_len=65536
 ```
 
 ### Full Fuzzing Session (1 hour)
 
-From the repo root (all targets, 1 hour total, split evenly):
+From the repo root (all targets, 1 hour total). `fuzz_parser` gets half of that hour. The other four targets share the rest. `cargo precommit --fuzz` still splits its 5 minutes evenly.
 
 ```bash
 cargo fuzzing
 # or: cargo fuzzing --seconds 3600
 ```
 
+`cargo fuzzing` refreshes `seeds/fixtures/` from the real `.lemma` documents under `engine/tests/fixtures`, `engine/documentation/examples`, `engine/benches/specs`, and `cli/tests/integrations/examples`. Documents larger than 32KiB are skipped (`engine/benches/specs/iso_countries.lemma` is a 775KiB catalog). Those fixtures are also embedded in the `fuzz_parser` mutator, so a direct `cargo fuzz run` still starts from them.
+
 Single target for a full hour:
 
 ```bash
 mkdir -p corpus/fuzz_parser
-cargo +nightly fuzz run fuzz_parser corpus/fuzz_parser seeds/fuzz_parser -- -max_total_time=3600 -dict=lemma.dict
+cargo +nightly fuzz run fuzz_parser corpus/fuzz_parser seeds/fuzz_parser -- -max_total_time=3600 -dict=lemma.dict -max_len=65536
 ```
 
 ### Available Targets
 
-1. `fuzz_parser` - Full spec parsing with random input; on successful load, evaluate twice with a fixed effective datetime and `explain: true`, require explanations on non-vetoed results, format explanations, and serialize the API Response (serialize failure fails the fuzzer). Pass writable `corpus/fuzz_parser` first, curated seeds in `seeds/fuzz_parser/` second; pass `-dict=lemma.dict`.
-2. `fuzz_expressions` - Structured typed leaf/operator expressions (numbers, measures, booleans, text), `unless` chains, list pipelines, and deep nesting inside a fixed typed preamble; load then evaluate twice for determinism
-3. `fuzz_literals` - Structured literal generator (number, text, measure, ratio, date, time, boolean, range) spliced into a one-line `data` declaration
-4. `fuzz_data_bindings` - Multi-type and instance-list data overlays: varied keys (dotted, numbered, case-variant, unknown) and Literal/Boolean/Map/List shapes; duplicate map keys black-box the Err and continue
-5. `fuzz_lists_uses` - Structured list pipelines (`where` / `sort` / `sum` / `find` / …) and multi-spec `uses` composition inside a fixed preamble
+1. `fuzz_parser` - Lemma source. About one mutation in four is raw libFuzzer noise. The rest keeps a document that already contains `spec`, or restarts from an embedded fixture, then applies one to three local edits (literals, operators, wrappers, casts, `unless`, types, units, list commands, deleted `->` lines, swapped identifiers, effective dates, date windows, `uses lemma units`, `is veto`). On every input: `format_source` (idempotent when it parses), `load`, then for every loaded spec at `2024-06-15T12:00:00Z` and at that spec's `effective_from` when it differs: `show`, `source`, and `evaluate` twice with `explain: true`. Explanations format, and Show and Response JSON must serialize. Pass writable `corpus/fuzz_parser` first, then `seeds/fuzz_parser/` and `seeds/fixtures/`; pass `-dict=lemma.dict -max_len=65536`.
+2. `fuzz_expressions` - Structured typed expressions inside a fixed preamble: arithmetic, `unless`, list pipelines, `sqrt`/`log`/`exp`/`sin` and the other math prefixes, `as`, `is veto`, `now`/`past`/`future`, `lower`/`upper`, ratios, and `(lo...hi) as day as number`. Depth stays at or below 7. Same format/show/evaluate path as `fuzz_parser`.
+3. `fuzz_literals` - Structured literal generator (number, long digit strings, text, measure, ratio including `0%` and `100%`, far dates, time, boolean, range) spliced into a one-line `data` declaration. Same production path.
+4. `fuzz_data_bindings` - Multi-type and instance-list data overlays: varied keys (dotted, numbered, case-variant, unknown) and Literal/Boolean/Map/List shapes; duplicate map keys black-box the Err and continue. Overlays run through the same show/evaluate path with `explain: true`.
+5. `fuzz_lists_uses` - Instance-list and value-list pipelines (`where` / `sort` / `sum` / `product` / `any` / `all` / `top` / `find` / `first` / `last`, including an empty list) and multi-spec `uses` composition. Same production path.
 
 ### Running Specific Targets
 
@@ -66,7 +68,7 @@ cargo +nightly fuzz run fuzz_lists_uses -- -max_total_time=60 -dict=lemma.dict
 When a crash is found, it's saved to `artifacts/<target>/crash-*`:
 
 ```bash
-cargo +nightly fuzz run fuzz_parser artifacts/fuzz_parser/crash-abc123 -- -dict=lemma.dict
+cargo +nightly fuzz run fuzz_parser artifacts/fuzz_parser/crash-abc123 -- -dict=lemma.dict -max_len=65536
 ```
 
 ### Minimizing Test Cases
@@ -87,7 +89,7 @@ The fuzzer may report memory leaks from global initialization. These are typical
 To run without leak detection:
 
 ```bash
-ASAN_OPTIONS="detect_leaks=0" cargo +nightly fuzz run fuzz_parser corpus/fuzz_parser seeds/fuzz_parser -- -dict=lemma.dict
+ASAN_OPTIONS="detect_leaks=0" cargo +nightly fuzz run fuzz_parser corpus/fuzz_parser seeds/fuzz_parser -- -dict=lemma.dict -max_len=65536
 ```
 
 ## Interpreting Results
@@ -109,7 +111,7 @@ For long-running fuzzing campaigns, put the writable corpus first so new inputs 
 
 ```bash
 mkdir -p corpus/fuzz_parser
-cargo +nightly fuzz run fuzz_parser corpus/fuzz_parser seeds/fuzz_parser -- -max_total_time=86400 -dict=lemma.dict
+cargo +nightly fuzz run fuzz_parser corpus/fuzz_parser seeds/fuzz_parser -- -max_total_time=86400 -dict=lemma.dict -max_len=65536
 ```
 
-This will save interesting inputs under `corpus/` (gitignored) and gradually improve coverage over time.
+`cargo fuzzing --seconds 86400` gives `fuzz_parser` half of that budget and passes `seeds/fixtures` as a third corpus. Interesting inputs land under `corpus/` (gitignored).

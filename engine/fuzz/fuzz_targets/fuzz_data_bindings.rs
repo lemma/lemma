@@ -1,10 +1,8 @@
 #![no_main]
 
-use lemma::DateTimeValue;
 use lemma::Engine;
 use lemma::EvaluateDataValue;
 use libfuzzer_sys::fuzz_target;
-use std::str::FromStr;
 
 const SPEC: &str = r#"
 spec item
@@ -98,10 +96,6 @@ const MAX_MAP_WIDTH: usize = 4;
 const MAX_LIST_LEN: usize = 8;
 const MAX_LITERAL_BYTES: usize = 64;
 
-fn fixed_now() -> DateTimeValue {
-    DateTimeValue::from_str("2024-06-15T12:00:00Z").expect("BUG: fixed fuzz datetime")
-}
-
 struct Cursor<'a> {
     bytes: &'a [u8],
     index: usize,
@@ -192,6 +186,7 @@ fn decode_rules(cursor: &mut Cursor<'_>) -> Option<Vec<String>> {
 }
 
 fuzz_target!(|data: &[u8]| {
+    lemma_fuzz::check_format("fuzz_binding", SPEC);
     let mut engine = Engine::new();
     engine
         .load([(
@@ -220,40 +215,5 @@ fuzz_target!(|data: &[u8]| {
     };
 
     let rules = decode_rules(&mut cursor);
-    let now = fixed_now();
-    let first = engine.evaluate(
-        None,
-        "fuzz_test",
-        Some(&now),
-        bindings.clone(),
-        rules.as_deref(),
-        false,
-    );
-    let second = engine.evaluate(
-        None,
-        "fuzz_test",
-        Some(&now),
-        bindings,
-        rules.as_deref(),
-        false,
-    );
-    match (first, second) {
-        (Ok(a), Ok(b)) => {
-            let json_a = serde_json::to_string(&lemma::api::Response::from(&a))
-                .expect("BUG: Response must serialize");
-            let json_b = serde_json::to_string(&lemma::api::Response::from(&b))
-                .expect("BUG: Response must serialize");
-            assert_eq!(
-                json_a, json_b,
-                "BUG: evaluate must be deterministic for fixed effective datetime"
-            );
-            std::hint::black_box(json_a);
-        }
-        (Err(error), Err(_)) => {
-            std::hint::black_box(error);
-        }
-        (Ok(_), Err(_)) | (Err(_), Ok(_)) => {
-            panic!("BUG: evaluate Ok/Err disagree across identical deterministic runs");
-        }
-    }
+    lemma_fuzz::exercise_loaded(&engine, &bindings, rules.as_deref());
 });

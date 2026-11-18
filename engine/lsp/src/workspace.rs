@@ -37,6 +37,13 @@ struct TrackedFile {
     parse_outcome: ParseOutcome,
 }
 
+/// One tracked file's text, addressable by the [`SourceType`] on a declaration.
+pub struct LoadedSource {
+    pub source_type: SourceType,
+    pub uri: Uri,
+    pub text: String,
+}
+
 /// Per-file diagnostic result after a full workspace validation pass.
 pub struct FileDiagnostics {
     /// The URL of the file.
@@ -312,6 +319,71 @@ impl WorkspaceModel {
     #[must_use]
     pub fn attribute_for_url_public(url: &Uri) -> String {
         Self::attribute_for_url(url)
+    }
+
+    /// Owned snapshot of every tracked file, keyed the way declarations name their source.
+    ///
+    /// Each file is recorded under [`Self::source_type_for_url`] (what the engine
+    /// stored) and, when that differs, under `Path(attribute)` (what the buffer
+    /// parse stored). Two files for one source type means the workspace model is wrong.
+    pub fn definition_sources(&self) -> Vec<LoadedSource> {
+        let urls: Vec<Uri> = self.files.values().map(|file| file.url.clone()).collect();
+        let mut located = Vec::new();
+        for url in &urls {
+            let attribute = Self::attribute_for_url(url);
+            let mut types = vec![self.source_type_for_url(url)];
+            let path_type = SourceType::Path(Arc::new(PathBuf::from(&attribute)));
+            if types[0] != path_type {
+                types.push(path_type);
+            }
+            located.push((attribute, types));
+        }
+        let mut sources: Vec<LoadedSource> = Vec::new();
+        for (attribute, types) in located {
+            let Some(file) = self.files.get(&attribute) else {
+                continue;
+            };
+            for source_type in types {
+                if let Some(existing) = sources
+                    .iter()
+                    .find(|source| source.source_type == source_type)
+                {
+                    if existing.uri != file.url {
+                        panic!("BUG: two workspace files share source {source_type}");
+                    }
+                    continue;
+                }
+                sources.push(LoadedSource {
+                    source_type,
+                    uri: file.url.clone(),
+                    text: file.text.clone(),
+                });
+            }
+        }
+        sources
+    }
+
+    /// Run `f` with the open buffer, its parse, the engine, and [`Self::definition_sources`].
+    ///
+    /// One borrow covers the parse and the engine. `f` must not call back into `self`.
+    pub fn with_parsed_file<T>(
+        &self,
+        url: &Uri,
+        f: impl FnOnce(&str, &ParseResult, &Engine, &[LoadedSource], Option<&std::path::Path>) -> T,
+    ) -> Option<T> {
+        let sources = self.definition_sources();
+        let attribute = Self::attribute_for_url(url);
+        let file = self.files.get(&attribute)?;
+        let ParseOutcome::Success(parse) = &file.parse_outcome else {
+            return None;
+        };
+        Some(f(
+            file.text.as_str(),
+            parse,
+            &self.engine,
+            &sources,
+            self.workspace_root.as_deref(),
+        ))
     }
 
     /// Successful parse tree for a tracked file, if any.

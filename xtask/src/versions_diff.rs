@@ -47,7 +47,7 @@ fn git_fetch_tags(root: &Path) -> Result<(), String> {
     Ok(())
 }
 
-fn git_output(args: &[&str], cwd: &Path) -> Result<Vec<u8>, String> {
+pub(crate) fn git_output(args: &[&str], cwd: &Path) -> Result<Vec<u8>, String> {
     let o = Command::new("git")
         .args(args)
         .current_dir(cwd)

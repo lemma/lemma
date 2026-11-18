@@ -12,6 +12,7 @@ use tower_lsp_server::ls_types::*;
 use tower_lsp_server::{Client, LanguageServer};
 
 use crate::completion;
+use crate::definition;
 use crate::diagnostics;
 use crate::semantic_tokens;
 #[cfg(not(target_arch = "wasm32"))]
@@ -53,6 +54,7 @@ struct SharedState {
 ///
 /// Implements the LSP protocol for Lemma files:
 /// - Diagnostics (parse errors + planning errors) published on file open/change
+/// - Go to definition for data, rule, and spec references
 /// - LemmaBase navigation URLs and local `lemma_deps/` document links from parsed [`SpecRef`] spans
 pub struct LemmaLanguageServer {
     client: Client,
@@ -303,6 +305,7 @@ impl LanguageServer for LemmaLanguageServer {
                     },
                 }),
                 hover_provider: Some(HoverProviderCapability::Simple(true)),
+                definition_provider: Some(OneOf::Left(true)),
                 completion_provider: Some(CompletionOptions {
                     resolve_provider: Some(false),
                     trigger_characters: Some(vec![".".into(), ">".into(), ":".into(), " ".into()]),
@@ -581,6 +584,38 @@ impl LanguageServer for LemmaLanguageServer {
         Ok(None)
     }
 
+    async fn goto_definition(
+        &self,
+        params: GotoDefinitionParams,
+    ) -> Result<Option<GotoDefinitionResponse>> {
+        let uri = params.text_document_position_params.text_document.uri;
+        let position = params.text_document_position_params.position;
+
+        let workspace = self.state.workspace.read().await;
+        let Some(mut locations) =
+            workspace.with_parsed_file(&uri, |text, parse, engine, sources, workspace_root| {
+                let sites =
+                    definition::definitions_at(text, position, parse, engine, |source_type| {
+                        text_for_definition(sources, source_type)
+                    });
+                let mut locations = Vec::new();
+                for site in sites {
+                    if let Some(location) = location_for_site(sources, workspace_root, &site) {
+                        locations.push(location);
+                    }
+                }
+                locations
+            })
+        else {
+            return Ok(None);
+        };
+        Ok(match locations.len() {
+            0 => None,
+            1 => Some(GotoDefinitionResponse::Scalar(locations.remove(0))),
+            _ => Some(GotoDefinitionResponse::Array(locations)),
+        })
+    }
+
     async fn completion(&self, params: CompletionParams) -> Result<Option<CompletionResponse>> {
         let uri = params.text_document_position.text_document.uri;
         let position = params.text_document_position.position;
@@ -619,6 +654,75 @@ impl LanguageServer for LemmaLanguageServer {
             None => Ok(None),
         }
     }
+}
+
+fn text_for_definition<'a>(
+    sources: &'a [crate::workspace::LoadedSource],
+    source_type: &lemma::SourceType,
+) -> Option<&'a str> {
+    if let lemma::SourceType::Dependency(id) = source_type {
+        if id == lemma::EMBEDDED_STDLIB_REPOSITORY {
+            return Some(lemma::UNITS_LEMMA);
+        }
+    }
+    sources
+        .iter()
+        .find(|source| &source.source_type == source_type)
+        .map(|source| source.text.as_str())
+}
+
+fn location_for_site(
+    sources: &[crate::workspace::LoadedSource],
+    workspace_root: Option<&std::path::Path>,
+    site: &definition::DefinitionSite,
+) -> Option<Location> {
+    let text = text_for_definition(sources, &site.source_type)?;
+    let uri = uri_for_definition(sources, workspace_root, &site.source_type)?;
+    Some(Location {
+        uri,
+        range: definition_range(text, site.start, site.end),
+    })
+}
+
+/// Byte span as an LSP range. An exclusive end that lands on a newline stays at
+/// the end of that line. [`diagnostics::span_to_range`] reports that offset as
+/// the first column of the next line, which pulls the newline into the range.
+fn definition_range(text: &str, start: usize, end: usize) -> Range {
+    let mut range = diagnostics::span_to_range(text, start, end);
+    if text.as_bytes().get(end) == Some(&b'\n') {
+        let line_start = text[..end].rfind('\n').map(|index| index + 1).unwrap_or(0);
+        range.end = Position {
+            line: range.end.line.saturating_sub(1),
+            character: text[line_start..end].encode_utf16().count() as u32,
+        };
+    }
+    range
+}
+
+fn uri_for_definition(
+    sources: &[crate::workspace::LoadedSource],
+    workspace_root: Option<&std::path::Path>,
+    source_type: &lemma::SourceType,
+) -> Option<Uri> {
+    if let lemma::SourceType::Dependency(id) = source_type {
+        if id == lemma::EMBEDDED_STDLIB_REPOSITORY {
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                let root = workspace_root?;
+                let path = ensure_embedded_stdlib_view(root)?;
+                return Uri::from_file_path(path);
+            }
+            #[cfg(target_arch = "wasm32")]
+            {
+                let _ = workspace_root;
+                return None;
+            }
+        }
+    }
+    sources
+        .iter()
+        .find(|source| &source.source_type == source_type)
+        .map(|source| source.uri.clone())
 }
 
 /// Return the LSP `Range` of the [`SpecRef`] span that `position` is currently

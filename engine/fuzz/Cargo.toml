@@ -9,6 +9,13 @@ cargo-fuzz = true
 
 [workspace]
 
+[lib]
+name = "lemma_fuzz"
+path = "src/lib.rs"
+test = false
+doc = false
+bench = false
+
 [dependencies]
 libfuzzer-sys = "0.4"
 serde_json = "1"

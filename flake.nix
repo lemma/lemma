@@ -57,6 +57,7 @@
               pkgs.cargo-fuzz
               pkgs.cargo-llvm-cov
               pkgs.wasm-pack
+              pkgs.tree-sitter
               uniffiBindgenCs
               pkgs.nodejs_24
               pkgs.beamPackages.elixir

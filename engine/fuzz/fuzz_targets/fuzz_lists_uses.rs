@@ -1,14 +1,6 @@
 #![no_main]
 
-use lemma::DateTimeValue;
-use lemma::Engine;
-use lemma::IndexMap;
 use libfuzzer_sys::fuzz_target;
-use std::str::FromStr;
-
-fn fixed_now() -> DateTimeValue {
-    DateTimeValue::from_str("2024-06-15T12:00:00Z").expect("BUG: fixed fuzz datetime")
-}
 
 struct Cursor<'a> {
     bytes: &'a [u8],
@@ -45,8 +37,36 @@ fn qty_threshold(cursor: &mut Cursor<'_>) -> String {
     }
 }
 
+fn value_pipeline(cursor: &mut Cursor<'_>) -> String {
+    match cursor.next_u8() % 12 {
+        0 => "fares -> sum".to_string(),
+        1 => "fares -> product".to_string(),
+        2 => "fares -> avg".to_string(),
+        3 => "fares -> min".to_string(),
+        4 => "fares -> max".to_string(),
+        5 => "fares -> where >= 1 -> count".to_string(),
+        6 => "fares -> where in 0...10 -> sum".to_string(),
+        7 => "fares -> any > 0".to_string(),
+        8 => "fares -> all >= 0".to_string(),
+        9 => "fares -> where >= 1 -> sort desc -> top 1 -> first".to_string(),
+        10 => "fares -> last".to_string(),
+        _ => "empty -> count".to_string(),
+    }
+}
+
+fn empty_pipeline(cursor: &mut Cursor<'_>) -> String {
+    match cursor.next_u8() % 6 {
+        0 => "empty -> count".to_string(),
+        1 => "empty -> sum".to_string(),
+        2 => "empty -> avg".to_string(),
+        3 => "empty -> product".to_string(),
+        4 => "empty -> first".to_string(),
+        _ => "empty -> last".to_string(),
+    }
+}
+
 fn list_pipeline(cursor: &mut Cursor<'_>) -> String {
-    match cursor.next_u8() % 10 {
+    match cursor.next_u8() % 14 {
         0 => "items -> count".to_string(),
         1 => "items -> sum qty".to_string(),
         2 => "items -> min qty".to_string(),
@@ -60,6 +80,10 @@ fn list_pipeline(cursor: &mut Cursor<'_>) -> String {
         6 => "(items -> sort qty asc -> first).qty".to_string(),
         7 => "(items -> sort qty desc -> first).qty".to_string(),
         8 => "items -> find wanted".to_string(),
+        9 => "items -> last".to_string(),
+        10 => "items -> product qty".to_string(),
+        11 => "items -> any(qty > 0)".to_string(),
+        12 => "items -> all(qty >= 0)".to_string(),
         _ => {
             let op = qty_cmp(cursor);
             let n = qty_threshold(cursor);
@@ -88,6 +112,8 @@ fn cross_spec_rule(cursor: &mut Cursor<'_>) -> String {
 fuzz_target!(|data: &[u8]| {
     let mut cursor = Cursor::new(data);
     let pipeline = list_pipeline(&mut cursor);
+    let valued = value_pipeline(&mut cursor);
+    let emptied = empty_pipeline(&mut cursor);
     let cross = cross_spec_rule(&mut cursor);
 
     let code = format!(
@@ -112,57 +138,15 @@ data items: item list
   -> with name: "a", qty: 1
   -> with name: "b", qty: 2
   -> with name: "c", qty: 0
+data fares: number list
+  -> with 1, 2, 10
+data empty: number list
 rule listed: {pipeline}
+rule valued: {valued}
+rule emptied: {emptied}
 rule composed: {cross}
 "#
     );
 
-    let mut engine = Engine::new();
-    let loaded = engine.load([(
-        lemma::SourceType::Path(std::sync::Arc::new(std::path::PathBuf::from(
-            "fuzz_lists_uses",
-        ))),
-        code,
-    )]);
-
-    // Property: load Ok => evaluation must not panic; serialize must succeed;
-    // two evaluates with the same effective datetime must agree.
-    if loaded.is_ok() {
-        let now = fixed_now();
-        let first = engine.evaluate(
-            None,
-            "fuzz_test",
-            Some(&now),
-            IndexMap::new(),
-            None,
-            false,
-        );
-        let second = engine.evaluate(
-            None,
-            "fuzz_test",
-            Some(&now),
-            IndexMap::new(),
-            None,
-            false,
-        );
-        match (first, second) {
-            (Ok(a), Ok(b)) => {
-                let json_a = serde_json::to_string(&lemma::api::Response::from(&a))
-                    .expect("BUG: Response must serialize");
-                let json_b = serde_json::to_string(&lemma::api::Response::from(&b))
-                    .expect("BUG: Response must serialize");
-                assert_eq!(
-                    json_a, json_b,
-                    "BUG: evaluate must be deterministic for fixed effective datetime"
-                );
-                std::hint::black_box(json_a);
-            }
-            (Err(error), Err(_)) => {
-                std::hint::black_box(error);
-            }
-            (Ok(_), Err(_)) | (Err(_), Ok(_)) => {
-                panic!("BUG: evaluate Ok/Err disagree across identical deterministic runs");
-            }
-        }
-    }
+    lemma_fuzz::exercise_source("fuzz_lists_uses", &code);
 });

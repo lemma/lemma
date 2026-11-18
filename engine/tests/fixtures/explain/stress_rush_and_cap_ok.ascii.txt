@@ -5,7 +5,7 @@ rush_and_cap_ok: true
    │     ├─ order.is_express: true
    │     └─ order.estimated_delivery_days <= 2
    │        └─ order.estimated_delivery_days: 1
-   │           └─ order.is_express
+   │           └─ order.is_express: true
    └─ discount_within_cap: true
       └─ order.savings_percent <= config.max_discount_cap
          ├─ order.savings_percent: 30%

@@ -2,3 +2,5 @@ node_modules/
 out/
 dist/
 *.vsix
+!vendor/vsce/out/
+!vendor/vsce/dist/

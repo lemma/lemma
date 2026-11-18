@@ -239,6 +239,9 @@ enum Work<'a> {
     },
     CauseChildren {
         children: Vec<&'a ExplanationNode>,
+        /// Cause line already printed. A RuleRef that repeats it is expanded
+        /// without a second header.
+        cause_line: String,
         indent: String,
         next: usize,
     },
@@ -338,6 +341,7 @@ impl<'a> FormatState<'a> {
             let child_indent = Self::child_indent(&indent, connector);
             self.stack.push(Work::CauseChildren {
                 children: visible,
+                cause_line: line.clone(),
                 indent: child_indent,
                 next: 0,
             });
@@ -380,9 +384,10 @@ impl<'a> FormatState<'a> {
                 } => self.step_nodes(siblings, parent_body, indent, next, elide_list_commands),
                 Work::CauseChildren {
                     children,
+                    cause_line,
                     indent,
                     next,
-                } => self.step_cause_children(children, indent, next),
+                } => self.step_cause_children(children, cause_line, indent, next),
                 Work::Conversion {
                     steps,
                     siblings,
@@ -431,23 +436,36 @@ impl<'a> FormatState<'a> {
     fn step_cause_children(
         &mut self,
         children: Vec<&'a ExplanationNode>,
+        cause_line: String,
         indent: String,
         next: usize,
     ) {
         if next >= children.len() {
             return;
         }
-        let connector = if next + 1 == children.len() {
+        let node = children[next];
+        let last = next + 1 == children.len();
+        self.stack.push(Work::CauseChildren {
+            children,
+            cause_line: cause_line.clone(),
+            indent: indent.clone(),
+            next: next + 1,
+        });
+        if let Some((id, result_line)) = rule_ref_restating_cause(node, &cause_line) {
+            if self.expanded.insert(id) {
+                self.stack.push(Work::RuleBody {
+                    id,
+                    result_line,
+                    indent,
+                });
+            }
+            return;
+        }
+        let connector = if last {
             Connector::Last
         } else {
             Connector::Branch
         };
-        let node = children[next];
-        self.stack.push(Work::CauseChildren {
-            children,
-            indent: indent.clone(),
-            next: next + 1,
-        });
         self.emit_node(node, connector, None, indent, false, None);
     }
 
@@ -929,6 +947,25 @@ fn operand_omitted_from_tree(node: &ExplanationNode) -> bool {
         return true;
     }
     is_visually_empty_compose(node)
+}
+
+/// RuleRef whose `name: result` line is the cause line already printed.
+fn rule_ref_restating_cause(
+    node: &ExplanationNode,
+    cause_line: &str,
+) -> Option<(ExplainedRuleId, String)> {
+    let ExplanationNode::RuleRef { id, name, result } = node else {
+        return None;
+    };
+    let result_str = result
+        .result
+        .as_deref()
+        .expect("BUG: ExplanationNode::RuleRef.result.result not filled by eval");
+    if format!("{name}: {result_str}") == cause_line {
+        Some((*id, result_str.to_string()))
+    } else {
+        None
+    }
 }
 
 /// `code is NL` already states the binding; ASCII skips child `code: NL`.

@@ -13,6 +13,7 @@ mod todo_check;
 mod versions;
 mod versions_diff;
 mod warnings;
+mod zed;
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -103,12 +104,25 @@ const FUZZ_TARGETS: &[&str] = &[
 ];
 /// Wall-clock budget for `cargo precommit --fuzz`, split evenly across [`FUZZ_TARGETS`].
 const FUZZ_BUDGET_SECS: u64 = 300;
-/// Default wall-clock budget for `cargo fuzzing`, split evenly across [`FUZZ_TARGETS`].
+/// Default wall-clock budget for `cargo fuzzing`. `fuzz_parser` gets half; the rest is
+/// split across the other targets.
 const FUZZING_DEFAULT_SECS: u64 = 3600;
 const FUZZ_DICT: &str = "lemma.dict";
 /// Writable corpus dir (gitignored). Must be first so libFuzzer writes here, not into seeds.
 const FUZZ_PARSER_CORPUS: &str = "corpus/fuzz_parser";
 const FUZZ_PARSER_SEEDS: &str = "seeds/fuzz_parser";
+const FUZZ_FIXTURE_SEEDS: &str = "seeds/fixtures";
+/// libFuzzer input cap. Real documents are under 8KiB; edits stay inside this.
+const FUZZ_MAX_LEN: &str = "-max_len=65536";
+/// Skip catalogs that would dominate a campaign. `iso_countries.lemma` is about 775KiB.
+/// Directory list matches `FIXTURE_ROOTS` in `engine/fuzz/build.rs`.
+const FIXTURE_MAX_BYTES: u64 = 32 * 1024;
+const FIXTURE_ROOTS: &[&str] = &[
+    "engine/tests/fixtures",
+    "engine/documentation/examples",
+    "engine/benches/specs",
+    "cli/tests/integrations/examples",
+];
 
 fn require_command(name: &str, install_hint: &str) {
     let ok = probe_succeeded(
@@ -344,7 +358,126 @@ fn run_deny_precommit() {
     }
 }
 
-fn run_fuzz(budget_secs: u64) {
+/// Per-target seconds. `weighted` gives `fuzz_parser` half the budget (leftover seconds
+/// from the integer split of the other half go back to it). The even split drops a
+/// remainder smaller than the target count. Every target gets at least one second.
+fn fuzz_target_seconds(budget_secs: u64, weighted: bool) -> Vec<u64> {
+    let count = FUZZ_TARGETS.len() as u64;
+    if budget_secs < count {
+        panic!(
+            "fuzz budget ({budget_secs}s) smaller than target count ({count}); use at least {count} seconds"
+        );
+    }
+    if !weighted {
+        return vec![budget_secs / count; FUZZ_TARGETS.len()];
+    }
+    let others = count - 1;
+    let mut parser = budget_secs / 2;
+    if budget_secs - parser < others {
+        parser = budget_secs - others;
+    }
+    let rest = budget_secs - parser;
+    let each = rest / others;
+    parser += rest % others;
+    FUZZ_TARGETS
+        .iter()
+        .map(|target| {
+            if *target == "fuzz_parser" {
+                parser
+            } else {
+                each
+            }
+        })
+        .collect()
+}
+
+fn refresh_fuzz_fixtures(fuzz_dir: &std::path::Path) {
+    let dest_root = fuzz_dir.join(FUZZ_FIXTURE_SEEDS);
+    if dest_root.exists() {
+        std::fs::remove_dir_all(&dest_root)
+            .unwrap_or_else(|e| panic!("failed to refresh {}: {e}", dest_root.display()));
+    }
+    std::fs::create_dir_all(&dest_root)
+        .unwrap_or_else(|e| panic!("failed to create {}: {e}", dest_root.display()));
+    let workspace = versions::workspace_root();
+    for root in FIXTURE_ROOTS {
+        copy_lemma_files(&workspace.join(root), &workspace, &dest_root);
+    }
+}
+
+fn copy_lemma_files(
+    dir: &std::path::Path,
+    workspace: &std::path::Path,
+    dest_root: &std::path::Path,
+) {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
+        Err(error) => panic!("failed to read {}: {error}", dir.display()),
+    };
+    for entry in entries {
+        let entry =
+            entry.unwrap_or_else(|e| panic!("failed to read entry in {}: {e}", dir.display()));
+        let path = entry.path();
+        let kind = entry
+            .file_type()
+            .unwrap_or_else(|e| panic!("failed to stat {}: {e}", path.display()));
+        if kind.is_dir() {
+            copy_lemma_files(&path, workspace, dest_root);
+            continue;
+        }
+        if !kind.is_file() || path.extension().and_then(|ext| ext.to_str()) != Some("lemma") {
+            continue;
+        }
+        let len = entry
+            .metadata()
+            .unwrap_or_else(|e| panic!("failed to stat {}: {e}", path.display()))
+            .len();
+        if len > FIXTURE_MAX_BYTES {
+            continue;
+        }
+        let rel = path
+            .strip_prefix(workspace)
+            .unwrap_or_else(|e| panic!("fixture {} is outside the workspace: {e}", path.display()));
+        let dest = dest_root.join(rel);
+        if let Some(parent) = dest.parent() {
+            std::fs::create_dir_all(parent)
+                .unwrap_or_else(|e| panic!("failed to create {}: {e}", parent.display()));
+        }
+        std::fs::copy(&path, &dest).unwrap_or_else(|e| {
+            panic!(
+                "failed to copy {} to {}: {e}",
+                path.display(),
+                dest.display()
+            )
+        });
+    }
+}
+
+fn nightly_cargo_path(nightly: &str) -> std::ffi::OsString {
+    let output = Command::new("rustup")
+        .args(["run", nightly, "rustc", "--print", "sysroot"])
+        .env_remove("CARGO")
+        .env_remove("RUSTC")
+        .output()
+        .unwrap_or_else(|e| panic!("failed to locate {nightly} sysroot: {e}"));
+    if !output.status.success() {
+        panic!(
+            "rustup run {nightly} rustc --print sysroot failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    let sysroot = String::from_utf8_lossy(&output.stdout);
+    let bin = std::path::PathBuf::from(sysroot.trim()).join("bin");
+    let mut path = std::ffi::OsString::from(bin);
+    if let Some(existing) = std::env::var_os("PATH") {
+        path.push(":");
+        path.push(existing);
+    }
+    path
+}
+
+fn run_fuzz(budget_secs: u64, weighted: bool) {
     require_command(
         "rustup",
         "Install rustup (https://rustup.rs/) for the nightly toolchain used by fuzzing, or use `nix develop`.",
@@ -362,33 +495,46 @@ fn run_fuzz(budget_secs: u64) {
         panic!("cargo fuzz not available. Install cargo-fuzz: cargo install cargo-fuzz (or use `nix develop`)");
     }
 
-    let target_count = FUZZ_TARGETS.len() as u64;
-    let per_target_secs = budget_secs / target_count;
-    if per_target_secs == 0 {
-        panic!(
-            "fuzz budget ({budget_secs}s) smaller than target count ({target_count}); use at least {target_count} seconds"
-        );
-    }
-    let max_total_time_arg = format!("-max_total_time={per_target_secs}");
+    let nightly_path = nightly_cargo_path(nightly);
+    let seconds = fuzz_target_seconds(budget_secs, weighted);
     let dict_arg = format!("-dict={FUZZ_DICT}");
     let fuzz_dir = versions::workspace_root().join(FUZZ_PACKAGE_DIR);
-    eprintln!(
-        "xtask: fuzz budget {budget_secs}s across {target_count} targets ({per_target_secs}s each) via rustup run {nightly}"
-    );
-    for target in FUZZ_TARGETS {
+    let split = if weighted {
+        "fuzz_parser takes half"
+    } else {
+        "even split"
+    };
+    eprintln!("xtask: fuzz budget {budget_secs}s ({split}) via rustup run {nightly}");
+    for (target, secs) in FUZZ_TARGETS.iter().zip(seconds.iter().copied()) {
+        let max_total_time_arg = format!("-max_total_time={secs}");
         eprintln!("xtask: fuzz {target} ({max_total_time_arg}, {dict_arg})");
         let mut cmd = Command::new("rustup");
+        // The flake PATH lists stable `cargo` before nightly. `rustup run` selects
+        // nightly for this process, but cargo-fuzz spawns `cargo` from PATH and would
+        // rebuild with stable rustc, which rejects the sanitizer flags. Put the
+        // nightly sysroot bin first, and drop CARGO/RUSTC inherited from `cargo fuzzing`.
+        cmd.env("PATH", &nightly_path);
+        cmd.env_remove("CARGO");
+        cmd.env_remove("RUSTC");
+        cmd.env_remove("RUSTDOC");
         cmd.args(["run", nightly, "cargo", "fuzz", "run", target]);
         if *target == "fuzz_parser" {
-            std::fs::create_dir_all(fuzz_dir.join(FUZZ_PARSER_CORPUS)).unwrap_or_else(|e| {
-                panic!(
-                    "failed to create {}: {e}",
-                    fuzz_dir.join(FUZZ_PARSER_CORPUS).display()
-                )
-            });
-            cmd.arg(FUZZ_PARSER_CORPUS).arg(FUZZ_PARSER_SEEDS);
+            let corpus = fuzz_dir.join(FUZZ_PARSER_CORPUS);
+            std::fs::create_dir_all(&corpus)
+                .unwrap_or_else(|e| panic!("failed to create {}: {e}", corpus.display()));
+            refresh_fuzz_fixtures(&fuzz_dir);
+            cmd.arg(FUZZ_PARSER_CORPUS)
+                .arg(FUZZ_PARSER_SEEDS)
+                .arg(FUZZ_FIXTURE_SEEDS);
+            cmd.args([
+                "--",
+                max_total_time_arg.as_str(),
+                dict_arg.as_str(),
+                FUZZ_MAX_LEN,
+            ]);
+        } else {
+            cmd.args(["--", max_total_time_arg.as_str(), dict_arg.as_str()]);
         }
-        cmd.args(["--", max_total_time_arg.as_str(), dict_arg.as_str()]);
         let status = cmd.current_dir(&fuzz_dir).status().unwrap_or_else(|e| {
             panic!(
                 "failed to run rustup run {nightly} cargo fuzz run {target} in {}: {e}",
@@ -429,7 +575,7 @@ fn fuzzing_from_args(args: impl Iterator<Item = String>) {
     match parse_fuzzing_args(args) {
         Ok(budget_secs) => {
             eprintln!("xtask: fuzzing ({budget_secs}s budget across targets)");
-            run_fuzz(budget_secs);
+            run_fuzz(budget_secs, true);
         }
         Err(message) => {
             eprintln!("xtask: {message}");
@@ -528,6 +674,11 @@ fn precommit(flags: PrecommitFlags) {
     run_mix_precommit();
     eprintln!("xtask: vscode ci + compile + package");
     run_vscode_precommit();
+    eprintln!("xtask: zed extension (grammar + wasm)");
+    if let Err(e) = zed::precommit(&versions::workspace_root(), FIXTURE_ROOTS) {
+        eprintln!("zed: {e}");
+        std::process::exit(1);
+    }
     eprintln!("xtask: nextest");
     run(&[
         "nextest",
@@ -556,14 +707,14 @@ fn precommit(flags: PrecommitFlags) {
     }
     if flags.run_fuzz {
         eprintln!("xtask: fuzz (5 minute budget across targets)");
-        run_fuzz(FUZZ_BUDGET_SECS);
+        run_fuzz(FUZZ_BUDGET_SECS, false);
     }
     eprintln!("xtask: done");
 }
 
 fn usage() {
     eprintln!(
-        "usage:\n  cargo precommit [--coverage] [--fuzz] | cargo run -p xtask -- [precommit] [--coverage] [--fuzz]\n  cargo fuzzing [--seconds <n>] | cargo run -p xtask -- fuzzing [--seconds <n>]\n  cargo verify   | cargo run -p xtask -- versions-verify\n  cargo bump <version> | cargo run -p xtask -- versions-bump <version>\n  cargo changelog | cargo run -p xtask -- versions-diff [semver]\n  cargo lsp | cargo run -p xtask -- lsp [vsix|prepare|package|publish-marketplace|publish-openvsx|--help]\n  cargo run -p xtask -- hex-standalone\n  cargo benchmarks <engine|logistics|cli|all> | cargo run -p xtask -- benchmarks <engine|logistics|cli|all>\n  cargo coverage <engine|cli|all> [--check] | cargo run -p xtask -- coverage <engine|cli|all> [--check]\n  cargo run -p xtask -- schema [--check]\n  cargo run -p xtask -- llms\n  cargo run -p xtask -- maven-natives\n  cargo run -p xtask -- nuget-natives\n  cargo run -p xtask -- recursion-check\n  cargo run -p xtask -- todo-check\n\n  --coverage  after the gate, run coverage all --check (CI uses this)\n  --fuzz      after the gate, run engine/fuzz for 5 minutes total (split across targets; CI push uses this)\n  cargo fuzzing  run engine/fuzz only (default 1 hour total, split across targets; optional --seconds <n>)"
+        "usage:\n  cargo precommit [--coverage] [--fuzz] | cargo run -p xtask -- [precommit] [--coverage] [--fuzz]\n  cargo fuzzing [--seconds <n>] | cargo run -p xtask -- fuzzing [--seconds <n>]\n  cargo verify   | cargo run -p xtask -- versions-verify\n  cargo bump <version> | cargo run -p xtask -- versions-bump <version>\n  cargo changelog | cargo run -p xtask -- versions-diff [semver]\n  cargo lsp | cargo run -p xtask -- lsp [vsix|prepare|package|publish-marketplace|publish-openvsx|--help]\n  cargo run -p xtask -- zed <check|grammar-rev|verify-grammar-rev>\n  cargo run -p xtask -- hex-standalone\n  cargo benchmarks <engine|logistics|cli|all> | cargo run -p xtask -- benchmarks <engine|logistics|cli|all>\n  cargo coverage <engine|cli|all> [--check] | cargo run -p xtask -- coverage <engine|cli|all> [--check]\n  cargo run -p xtask -- schema [--check]\n  cargo run -p xtask -- llms\n  cargo run -p xtask -- maven-natives\n  cargo run -p xtask -- nuget-natives\n  cargo run -p xtask -- recursion-check\n  cargo run -p xtask -- todo-check\n\n  --coverage  after the gate, run coverage all --check (CI uses this)\n  --fuzz      after the gate, run engine/fuzz for 5 minutes total (split across targets; CI push uses this)\n  cargo fuzzing  run engine/fuzz only (default 1 hour total; fuzz_parser gets half, the other targets share the rest; optional --seconds <n>)"
     );
 }
 
@@ -622,6 +773,14 @@ fn main() {
             let root = versions::workspace_root();
             if let Err(e) = versions_diff::run_versions_diff(&root, ver.as_deref()) {
                 eprintln!("versions-diff: {e}");
+                std::process::exit(1);
+            }
+        }
+        Some("zed") => {
+            let root = versions::workspace_root();
+            let rest: Vec<String> = args.collect();
+            if let Err(e) = zed::run(&root, &rest, FIXTURE_ROOTS) {
+                eprintln!("zed: {e}");
                 std::process::exit(1);
             }
         }
@@ -750,7 +909,10 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_fuzzing_args, parse_precommit_flags, PrecommitFlags, FUZZING_DEFAULT_SECS};
+    use super::{
+        fuzz_target_seconds, parse_fuzzing_args, parse_precommit_flags, PrecommitFlags,
+        FUZZING_DEFAULT_SECS,
+    };
 
     fn flags(args: &[&str]) -> PrecommitFlags {
         parse_precommit_flags(args.iter().copied().map(str::to_string)).expect("valid flags")
@@ -789,6 +951,27 @@ mod tests {
         let secs = parse_fuzzing_args(["--seconds".into(), "300".into()].into_iter())
             .expect("valid seconds");
         assert_eq!(secs, 300);
+    }
+
+    #[test]
+    fn fuzz_seconds_even_split_is_sixty_at_the_ci_budget() {
+        let seconds = fuzz_target_seconds(300, false);
+        assert_eq!(seconds, vec![60, 60, 60, 60, 60]);
+    }
+
+    #[test]
+    fn fuzz_seconds_long_run_gives_parser_half() {
+        let seconds = fuzz_target_seconds(3600, true);
+        assert_eq!(seconds[0], 1800);
+        assert!(seconds[1..].iter().all(|secs| *secs == 450));
+        assert_eq!(seconds.iter().sum::<u64>(), 3600);
+    }
+
+    #[test]
+    fn fuzz_seconds_tiny_weighted_budget_still_runs_every_target() {
+        let seconds = fuzz_target_seconds(5, true);
+        assert!(seconds.iter().all(|secs| *secs >= 1));
+        assert_eq!(seconds.iter().sum::<u64>(), 5);
     }
 
     #[test]

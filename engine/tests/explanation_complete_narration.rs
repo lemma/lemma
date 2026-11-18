@@ -256,7 +256,7 @@ rule out: 1 unless false then 2 unless x then 3
     );
     let explanation = out_explanation(&response);
     assert_eq!(explanation.body, "3");
-    assert_eq!(cause_pairs(explanation), vec![("x", "true")]);
+    assert_eq!(cause_pairs(explanation), vec![("x: true", "true")]);
 }
 
 #[test]
@@ -1129,7 +1129,7 @@ can_view: true
 └─ type is rental and views_consumed < max_views
    ├─ views_consumed: 3
    └─ max_views: 5
-      └─ premium_member"
+      └─ premium_member: true"
     );
 }
 

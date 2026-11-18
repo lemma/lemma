@@ -1319,6 +1319,13 @@ impl<'a> Graph<'a> {
                 .expect("BUG: spec with a measure type has a source location");
             for unit in units.iter() {
                 for (target, _) in unit.resolved_scale_factors() {
+                    // Conversion of this rule already failed and recorded an error.
+                    // It has no inferred type; the missing-and-not-dropped case stays a bug.
+                    if let ReferenceTarget::Rule(path) = target {
+                        if path.segments.is_empty() && self.dropped_rules.contains(path) {
+                            continue;
+                        }
+                    }
                     let target_type = self.scale_target_lemma_type(target, inferred_types);
                     if !target_type.is_number() {
                         errors.push(engine_error_at_graph(
@@ -1584,9 +1591,15 @@ impl<'a> Graph<'a> {
             while let Some(landing) = landings.pop() {
                 match landing {
                     Landing::Row(read) => reads.push(read),
-                    Landing::Plan(RowEnd::Rule(rule)) => {
-                        edges.insert(rule);
-                    }
+                    Landing::Plan(RowEnd::Rule(rule)) => match self.rule_presence(&rule) {
+                        RulePresence::Present => {
+                            edges.insert(rule);
+                        }
+                        RulePresence::Dropped => {}
+                        RulePresence::Absent => {
+                            panic!("BUG: Show read of rule '{rule}' neither in graph nor dropped")
+                        }
+                    },
                     Landing::Plan(RowEnd::Data(path)) => match self.data.get(&path) {
                         Some(DataDefinition::Reference { .. }) => {
                             match self.reference_ends.get(&path).unwrap_or_else(|| {

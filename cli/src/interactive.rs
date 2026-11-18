@@ -5,10 +5,12 @@ use inquire::validator::Validation;
 use inquire::{Confirm, DateSelect, MultiSelect, Select, Text};
 use lemma::{
     numbered_row_origin, row_field_input_key, DateTimeValue, Engine, EvaluateDataValue, LemmaType,
-    LiteralValue, Show, ShowData, SpecIdentity, SpecVersion, TypeSpecification, ValueKind,
+    LiteralValue, Show, ShowData, SpecIdentity, SpecVersion, TimezoneValue, TypeSpecification,
+    ValueKind,
 };
 use rust_decimal::Decimal;
 use std::collections::{HashSet, VecDeque};
+use std::str::FromStr;
 
 pub(crate) fn repository_loaded(engine: &Engine, name: &str) -> bool {
     engine
@@ -1225,21 +1227,63 @@ fn prompt_date_data(
         "Use arrow keys to navigate, Enter to select"
     };
 
-    let mut ds = DateSelect::new(prompt_title).with_help_message(help_message);
+    let suggested = suggestion.map(|lit| match &lit.value {
+        ValueKind::Date(d) => d,
+        other => panic!("BUG: suggestion for date data '{data_name}' is not a date: {other:?}"),
+    });
 
-    if let Some(lit) = suggestion {
-        if let ValueKind::Date(d) = &lit.value {
-            if let Some(naive) = NaiveDate::from_ymd_opt(d.year, d.month, d.day) {
-                ds = ds.with_default(naive);
-            }
-        }
+    let mut ds = DateSelect::new(prompt_title).with_help_message(help_message);
+    if let Some(d) = suggested {
+        let naive = NaiveDate::from_ymd_opt(d.year, d.month, d.day)
+            .expect("BUG: suggested date literal is a valid calendar date");
+        ds = ds.with_default(naive);
     }
 
     let date = ds
         .prompt()
         .context(format!("Failed to get date for {}", data_name))?;
 
-    Ok(format!("{}T00:00:00Z", date.format("%Y-%m-%d")))
+    let default_timezone = match suggested.and_then(|d| d.timezone.as_ref()) {
+        Some(timezone) => Some(timezone.to_string()),
+        None => local_timezone_at_midnight(date).map(|timezone| timezone.to_string()),
+    };
+    let tz_title = format!("{prompt_title} (UTC offset)");
+    let mut tz_prompt = Text::new(&tz_title)
+        .with_validator(|input: &str| Ok(validate_timezone_input(input)))
+        .with_help_message("UTC offset for this date, e.g. Z or +01:00");
+    if let Some(default) = default_timezone.as_deref() {
+        tz_prompt = tz_prompt.with_default(default);
+    }
+    let timezone_text = tz_prompt
+        .prompt()
+        .context(format!("Failed to get UTC offset for {}", data_name))?;
+    let timezone = TimezoneValue::from_str(&timezone_text)
+        .expect("BUG: UTC offset was accepted by validate_timezone_input");
+
+    Ok(date_literal(date, &timezone))
+}
+
+/// The local UTC offset at midnight on `date`, as a prompt suggestion. `None` when the
+/// local zone has no such midnight or its offset is not whole minutes.
+fn local_timezone_at_midnight(date: NaiveDate) -> Option<TimezoneValue> {
+    use chrono::{Offset, TimeZone};
+    let midnight = date
+        .and_hms_opt(0, 0, 0)
+        .expect("BUG: 00:00:00 is a valid time");
+    let local = chrono::Local.from_local_datetime(&midnight).earliest()?;
+    TimezoneValue::from_offset_seconds(local.offset().fix().local_minus_utc())
+}
+
+fn validate_timezone_input(input: &str) -> Validation {
+    match TimezoneValue::from_str(input) {
+        Ok(_) => Validation::Valid,
+        Err(message) => Validation::Invalid(message.into()),
+    }
+}
+
+/// Date literal for a date picked in the prompt: midnight in `timezone`.
+fn date_literal(date: NaiveDate, timezone: &TimezoneValue) -> String {
+    format!("{}T00:00:00{}", date.format("%Y-%m-%d"), timezone)
 }
 
 fn prompt_boolean_data(
@@ -1579,8 +1623,8 @@ fn prompt_decimal_input(
 #[cfg(test)]
 mod tests {
     use super::{
-        load_static_show, next_prompt_name_from_results, prompt_data, select_rules,
-        spec_picker_label, validate_decimal_input, NumericConstraints,
+        date_literal, load_static_show, next_prompt_name_from_results, prompt_data, select_rules,
+        spec_picker_label, validate_decimal_input, validate_timezone_input, NumericConstraints,
     };
     use indexmap::IndexMap;
     use inquire::validator::Validation;
@@ -2428,5 +2472,56 @@ rule main: expensive unless flag then 0
             Some("flag".to_string()),
             "interactive must ask flag before gated expensive"
         );
+    }
+
+    #[test]
+    fn timezone_input_accepts_utc_and_offsets() {
+        for input in ["Z", "+01:00", "-05:30"] {
+            assert!(
+                matches!(validate_timezone_input(input), Validation::Valid),
+                "expected '{input}' to be a valid UTC offset"
+            );
+        }
+    }
+
+    #[test]
+    fn timezone_input_rejects_malformed_offsets() {
+        for input in ["", "+1", "01:00", "+24:00"] {
+            let message = validation_message(validate_timezone_input(input));
+            assert!(
+                message.contains("Invalid timezone format"),
+                "expected '{input}' to be rejected, got: '{message}'"
+            );
+        }
+    }
+
+    #[test]
+    fn date_literal_is_midnight_in_the_entered_offset() {
+        let date = chrono::NaiveDate::from_ymd_opt(2026, 11, 18).expect("test date");
+        for (offset, minutes) in [("Z", 0), ("+02:00", 120), ("-05:30", -330)] {
+            let timezone = lemma::TimezoneValue::from_str(offset).expect("test offset");
+            let literal = date_literal(date, &timezone);
+            let parsed = DateTimeValue::from_str(&literal).expect("date literal parses");
+            assert_eq!(
+                (parsed.year, parsed.month, parsed.day),
+                (2026, 11, 18),
+                "{literal}"
+            );
+            assert_eq!(
+                (
+                    parsed.hour,
+                    parsed.minute,
+                    parsed.second,
+                    parsed.microsecond
+                ),
+                (0, 0, 0, 0),
+                "{literal}"
+            );
+            assert_eq!(
+                parsed.timezone.expect("offset is kept").offset_minutes,
+                minutes,
+                "{literal}"
+            );
+        }
     }
 }

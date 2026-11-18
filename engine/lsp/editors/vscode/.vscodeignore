@@ -9,3 +9,4 @@ package-lock.json
 esbuild.js
 **/*.map
 *.vsix
+vendor/**

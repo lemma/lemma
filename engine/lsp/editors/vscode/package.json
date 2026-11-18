@@ -2,7 +2,7 @@
   "name": "lemma-language",
   "displayName": "Lemma Language",
   "description": "Language support for Lemma: syntax highlighting, inline diagnostics, and clickable Registry references",
-  "version": "0.11.3",
+  "version": "0.11.4",
   "publisher": "lemma",
   "license": "Apache-2.0",
   "icon": "lemma_128.png",
@@ -137,12 +137,13 @@
   "devDependencies": {
     "@types/node": "^26.0.0",
     "@types/vscode": "^1.91.0",
-    "@vscode/vsce": "3.9.2",
+    "@vscode/vsce": "file:./vendor/vsce",
     "esbuild": "^0.25.0",
     "ovsx": "1.0.2",
     "typescript": "^7.0.2"
   },
   "overrides": {
+    "@vscode/vsce": "$@vscode/vsce",
     "encoding-sniffer": "1.0.2",
     "keytar": "npm:noop2@2.0.0",
     "@azure/identity": "4.14.0",

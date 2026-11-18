@@ -827,7 +827,7 @@ fn unit_command_after_arrow(after: &[TokenKind], tokens: &PrefixTokens) -> bool 
         && !tokens.last_end_at_cursor
 }
 
-fn enclosing_spec<'a>(
+pub(crate) fn enclosing_spec<'a>(
     parse: &'a ParseResult,
     cursor_line: usize,
 ) -> Option<(&'a LemmaRepository, &'a LemmaSpec)> {

@@ -34,6 +34,10 @@ fn lsp_initialize_reports_capabilities() {
         caps.get("completionProvider").is_some(),
         "missing completionProvider: {caps}"
     );
+    assert_eq!(
+        caps["definitionProvider"], true,
+        "missing definitionProvider: {caps}"
+    );
 
     session.shutdown();
 }
@@ -634,6 +638,211 @@ fn lsp_completion_uses_target_from_specs() {
         labels.iter().any(|l| l == "mass_src" || l == "units"),
         "expected uses target from specs(), got: {labels:?}"
     );
+
+    session.shutdown();
+}
+
+fn find_nth(text: &str, needle: &str, nth: usize) -> usize {
+    let mut from = 0;
+    for index in 0..=nth {
+        let rel = text[from..]
+            .find(needle)
+            .unwrap_or_else(|| panic!("missing {needle} #{nth} in {text}"));
+        let at = from + rel;
+        if index == nth {
+            return at;
+        }
+        from = at + needle.len();
+    }
+    unreachable!("loop returns on nth")
+}
+
+fn position_at(text: &str, byte: usize) -> (u32, u32) {
+    let mut line = 0u32;
+    let mut line_start = 0usize;
+    for (index, ch) in text.bytes().enumerate() {
+        if index == byte {
+            break;
+        }
+        if ch == b'\n' {
+            line += 1;
+            line_start = index + 1;
+        }
+    }
+    (line, (byte - line_start) as u32)
+}
+
+fn definition_at(
+    session: &mut LspSession,
+    uri: &str,
+    text: &str,
+    byte: usize,
+) -> serde_json::Value {
+    let (line, character) = position_at(text, byte);
+    session.request(
+        "textDocument/definition",
+        json!({
+            "textDocument": { "uri": uri },
+            "position": { "line": line, "character": character }
+        }),
+    )
+}
+
+fn assert_name_location(
+    result: &serde_json::Value,
+    uri: &str,
+    text: &str,
+    needle: &str,
+    nth: usize,
+) {
+    assert_eq!(result["uri"].as_str(), Some(uri), "location: {result}");
+    let byte = find_nth(text, needle, nth);
+    let (line, character) = position_at(text, byte);
+    assert_eq!(result["range"]["start"]["line"], line, "location: {result}");
+    assert_eq!(
+        result["range"]["start"]["character"], character,
+        "location: {result}"
+    );
+    assert_eq!(result["range"]["end"]["line"], line, "location: {result}");
+    assert_eq!(
+        result["range"]["end"]["character"],
+        character + needle.encode_utf16().count() as u32,
+        "location: {result}"
+    );
+}
+
+#[test]
+fn lsp_definition_local_data_and_rule() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let source = "spec pricing\ndata qty: number\nrule base: qty\nrule total: base\n";
+    let path = write_lemma_file(dir.path(), "pricing.lemma", source);
+    let uri = path_to_uri(&path);
+
+    let mut session = LspSession::spawn_lemma_lsp();
+    session.initialize(None);
+    session.initialized();
+    session.did_open(&uri, source);
+    session.wait_for_diagnostics(&uri);
+
+    let data = definition_at(&mut session, &uri, source, find_nth(source, "qty", 1));
+    assert_name_location(&data, &uri, source, "qty", 0);
+
+    let rule = definition_at(&mut session, &uri, source, find_nth(source, "base", 1));
+    assert_name_location(&rule, &uri, source, "base", 0);
+
+    session.shutdown();
+}
+
+#[test]
+fn lsp_definition_dotted_path() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let employee = "spec employee\ndata salary: number\n";
+    let payroll = "spec payroll\nuses employee\nrule pay: employee.salary\n";
+    let employee_path = write_lemma_file(dir.path(), "employee.lemma", employee);
+    let payroll_path = write_lemma_file(dir.path(), "payroll.lemma", payroll);
+    let employee_uri = path_to_uri(&employee_path);
+    let payroll_uri = path_to_uri(&payroll_path);
+
+    let mut session = LspSession::spawn_lemma_lsp();
+    session.initialize(None);
+    session.initialized();
+    session.did_open(&employee_uri, employee);
+    session.did_open(&payroll_uri, payroll);
+    session.wait_for_diagnostics(&payroll_uri);
+
+    let dotted = find_nth(payroll, "employee.salary", 0);
+    let alias = definition_at(&mut session, &payroll_uri, payroll, dotted);
+    assert_name_location(&alias, &payroll_uri, payroll, "employee", 0);
+
+    let field = definition_at(
+        &mut session,
+        &payroll_uri,
+        payroll,
+        dotted + "employee.".len(),
+    );
+    assert_name_location(&field, &employee_uri, employee, "salary", 0);
+
+    session.shutdown();
+}
+
+#[test]
+fn lsp_definition_uses_spec() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let employee = "spec employee\ndata salary: number\n";
+    let payroll = "spec payroll\nuses employee\n";
+    let employee_path = write_lemma_file(dir.path(), "employee.lemma", employee);
+    let payroll_path = write_lemma_file(dir.path(), "payroll.lemma", payroll);
+    let employee_uri = path_to_uri(&employee_path);
+    let payroll_uri = path_to_uri(&payroll_path);
+
+    let mut session = LspSession::spawn_lemma_lsp();
+    session.initialize(None);
+    session.initialized();
+    session.did_open(&employee_uri, employee);
+    session.did_open(&payroll_uri, payroll);
+    session.wait_for_diagnostics(&payroll_uri);
+
+    let spec = definition_at(
+        &mut session,
+        &payroll_uri,
+        payroll,
+        find_nth(payroll, "employee", 0),
+    );
+    assert_name_location(&spec, &employee_uri, employee, "employee", 0);
+
+    session.shutdown();
+}
+
+#[test]
+fn lsp_definition_type_path() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let bedragen = "spec bedragen\ndata money: measure\n  -> unit eur: 1\n";
+    let payroll = "spec payroll\nuses bedragen\ndata variabel_machinetarief: bedragen.money\n  -> help \"Wat is het variabele machinetarief per uur?\"\n  -> suggest 0 eur\n";
+    let bedragen_path = write_lemma_file(dir.path(), "bedragen.lemma", bedragen);
+    let payroll_path = write_lemma_file(dir.path(), "payroll.lemma", payroll);
+    let bedragen_uri = path_to_uri(&bedragen_path);
+    let payroll_uri = path_to_uri(&payroll_path);
+
+    let mut session = LspSession::spawn_lemma_lsp();
+    session.initialize(None);
+    session.initialized();
+    session.did_open(&bedragen_uri, bedragen);
+    session.did_open(&payroll_uri, payroll);
+    session.wait_for_diagnostics(&payroll_uri);
+
+    let dotted = find_nth(payroll, "bedragen.money", 0);
+    let alias = definition_at(&mut session, &payroll_uri, payroll, dotted);
+    assert_name_location(&alias, &payroll_uri, payroll, "bedragen", 0);
+
+    let money = definition_at(
+        &mut session,
+        &payroll_uri,
+        payroll,
+        dotted + "bedragen.".len(),
+    );
+    assert_name_location(&money, &bedragen_uri, bedragen, "money", 0);
+
+    session.shutdown();
+}
+
+#[test]
+fn lsp_definition_unknown_name_and_keyword() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let source = "spec pricing\ndata qty: number\nrule total: missing\n";
+    let path = write_lemma_file(dir.path(), "pricing.lemma", source);
+    let uri = path_to_uri(&path);
+
+    let mut session = LspSession::spawn_lemma_lsp();
+    session.initialize(None);
+    session.initialized();
+    session.did_open(&uri, source);
+    session.wait_for_diagnostics(&uri);
+
+    let unknown = definition_at(&mut session, &uri, source, find_nth(source, "missing", 0));
+    assert!(unknown.is_null(), "unknown name: {unknown}");
+
+    let keyword = definition_at(&mut session, &uri, source, find_nth(source, "rule", 0));
+    assert!(keyword.is_null(), "keyword: {keyword}");
 
     session.shutdown();
 }

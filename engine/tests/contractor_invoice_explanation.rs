@@ -52,8 +52,8 @@ total: 3856.875 eur
    │     │     ├─ hourly_rate: 85 eur
    │     │     └─ hours_worked: 37.5
    │     └─ rush_surcharge: 0 eur
-   │        ├─ is_rush is false
-   │        └─ is_super_rush is false
+   │        ├─ is_rush: false
+   │        └─ is_super_rush: false
    └─ vat: 669.375 eur
       └─ subtotal * 21%
          └─ subtotal: 3187.5 eur (see above)";
@@ -68,8 +68,8 @@ total: 4821.09375 eur
    │     │     ├─ hourly_rate: 85 eur
    │     │     └─ hours_worked: 37.5
    │     └─ rush_surcharge: 796.875 eur
-   │        ├─ is_super_rush is false
-   │        ├─ is_rush
+   │        ├─ is_super_rush: false
+   │        ├─ is_rush: true
    │        └─ labor * 25%
    │           └─ labor: 3187.5 eur (see above)
    └─ vat: 836.71875 eur
@@ -86,7 +86,7 @@ total: 5785.3125 eur
    │     │     ├─ hourly_rate: 85 eur
    │     │     └─ hours_worked: 37.5
    │     └─ rush_surcharge: 1593.75 eur
-   │        ├─ is_super_rush
+   │        ├─ is_super_rush: true
    │        └─ labor * 50%
    │           └─ labor: 3187.5 eur (see above)
    └─ vat: 1004.0625 eur

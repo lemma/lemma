@@ -1,0 +1,22 @@
+[
+  {
+    "token_type": "controlKeyword",
+    "style": ["keyword.control", "keyword"]
+  },
+  {
+    "token_type": "declarationKeyword",
+    "style": ["keyword"]
+  },
+  {
+    "token_type": "dataBody",
+    "style": ["string.special", "string"]
+  },
+  {
+    "token_type": "punctuation",
+    "style": ["punctuation.delimiter", "punctuation"]
+  },
+  {
+    "token_type": "reference",
+    "style": ["property", "variable"]
+  }
+]

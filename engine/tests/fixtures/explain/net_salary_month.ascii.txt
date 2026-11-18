@@ -39,7 +39,7 @@ net_salary: 2906.1424 eur
    │        │  │              └─ taxable_annual_salary <= 78426 eur
    │        │  │                 └─ taxable_annual_salary: 42000 eur (see above)
    │        │  └─ total_tax_credit: 7945.1265 eur
-   │        │     ├─ payroll_tax_credit
+   │        │     ├─ payroll_tax_credit: true
    │        │     └─ general_tax_credit + employment_tax_credit
    │        │        ├─ general_tax_credit: 2330.104 eur
    │        │        │  ├─ taxable_annual_salary <= 78426 eur

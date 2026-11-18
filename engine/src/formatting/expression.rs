@@ -173,10 +173,7 @@ fn expression_precedence<'a, N: SyntaxNode<'a>>(node: N) -> u8 {
 
 fn view_precedence<'a, N: SyntaxNode<'a>>(view: &SyntaxView<'a, N>) -> u8 {
     match view {
-        SyntaxView::Logical { connective, .. } => match connective {
-            LogicalConnective::And => 2,
-            LogicalConnective::Or => 1,
-        },
+        SyntaxView::Logical { connective, .. } => connective_precedence(*connective),
         SyntaxView::Not(_) | SyntaxView::IsNotVeto(_) | SyntaxView::Negate(_) => 3,
         SyntaxView::Comparison(..)
         | SyntaxView::IsVeto(_)
@@ -196,6 +193,13 @@ fn view_precedence<'a, N: SyntaxNode<'a>>(view: &SyntaxView<'a, N>) -> u8 {
         SyntaxView::ImplicitRowValue => {
             panic!("BUG: implicit row value rendered outside a predicate comparison")
         }
+    }
+}
+
+fn connective_precedence(connective: LogicalConnective) -> u8 {
+    match connective {
+        LogicalConnective::And => 2,
+        LogicalConnective::Or => 1,
     }
 }
 
@@ -510,6 +514,156 @@ pub(crate) fn display_comparison<'a, N: SyntaxNode<'a>>(
     text
 }
 
+/// `+` and `*` join a nested chain of the same operator. `-`, `/`, `mod`, and `^` do not.
+fn joins_arithmetic(op: &ArithmeticComputation) -> bool {
+    matches!(
+        op,
+        ArithmeticComputation::Add | ArithmeticComputation::Multiply
+    )
+}
+
+/// A chain whose every operator is `op`, when `op` joins its own nesting.
+fn uniform_chain<'a, N: SyntaxNode<'a>>(
+    node: N,
+    op: &ArithmeticComputation,
+) -> Option<(Vec<N>, Vec<&'a ArithmeticComputation>)> {
+    match node.view() {
+        SyntaxView::Chain {
+            level,
+            operands,
+            ops,
+        } if joins_arithmetic(op) && level == op && ops.iter().all(|step| *step == op) => {
+            Some((operands, ops))
+        }
+        _ => None,
+    }
+}
+
+/// One chain still waiting to emit its operands. The walk is a stack: a nested sum or
+/// product must not recurse.
+struct ChainFrame<'a, N> {
+    level: &'a ArithmeticComputation,
+    operands: Vec<N>,
+    ops: Vec<&'a ArithmeticComputation>,
+    index: usize,
+}
+
+fn flatten_arithmetic<'a, N: SyntaxNode<'a>>(
+    level: &'a ArithmeticComputation,
+    operands: Vec<N>,
+    ops: Vec<&'a ArithmeticComputation>,
+) -> (Vec<N>, Vec<&'a ArithmeticComputation>) {
+    let mut flat_operands = Vec::with_capacity(operands.len());
+    let mut flat_ops = Vec::with_capacity(ops.len());
+    let mut stack = vec![ChainFrame {
+        level,
+        operands,
+        ops,
+        index: 0,
+    }];
+    while let Some(mut frame) = stack.pop() {
+        if frame.index >= frame.operands.len() {
+            continue;
+        }
+        let index = frame.index;
+        frame.index += 1;
+        let operand = frame.operands[index];
+        let level = frame.level;
+        let incoming = if index == 0 {
+            None
+        } else {
+            Some(
+                frame
+                    .ops
+                    .get(index - 1)
+                    .copied()
+                    .expect("BUG: chain has one operator per operand after the first"),
+            )
+        };
+        if frame.index < frame.operands.len() {
+            stack.push(frame);
+        }
+        match incoming {
+            None => {
+                // A left operand at this precedence prints without parentheses, so the next
+                // parse reads its operators as part of this chain.
+                if let Some((inner_level, inner_operands, inner_ops)) =
+                    open_left_chain(operand, level)
+                {
+                    stack.push(ChainFrame {
+                        level: inner_level,
+                        operands: inner_operands,
+                        ops: inner_ops,
+                        index: 0,
+                    });
+                } else {
+                    flat_operands.push(operand);
+                }
+            }
+            Some(op) => {
+                if let Some((inner_operands, inner_ops)) = uniform_chain(operand, op) {
+                    flat_ops.push(op);
+                    stack.push(ChainFrame {
+                        level: op,
+                        operands: inner_operands,
+                        ops: inner_ops,
+                        index: 0,
+                    });
+                } else {
+                    flat_ops.push(op);
+                    flat_operands.push(operand);
+                }
+            }
+        }
+    }
+    (flat_operands, flat_ops)
+}
+
+/// Left-associative chain at `parent`'s precedence. Its operators are not parenthesized
+/// on the left, so they belong to the parent chain.
+fn open_left_chain<'a, N: SyntaxNode<'a>>(
+    node: N,
+    parent: &ArithmeticComputation,
+) -> Option<(
+    &'a ArithmeticComputation,
+    Vec<N>,
+    Vec<&'a ArithmeticComputation>,
+)> {
+    match node.view() {
+        SyntaxView::Chain {
+            level,
+            operands,
+            ops,
+        } if arithmetic_precedence(level) == arithmetic_precedence(parent)
+            && arithmetic_associativity(level) == Associativity::Left
+            && arithmetic_associativity(parent) == Associativity::Left =>
+        {
+            Some((level, operands, ops))
+        }
+        _ => None,
+    }
+}
+
+fn flatten_logical<'a, N: SyntaxNode<'a>>(
+    connective: LogicalConnective,
+    operands: Vec<N>,
+) -> Vec<N> {
+    let mut flat = Vec::with_capacity(operands.len());
+    let mut pending: Vec<N> = operands.into_iter().rev().collect();
+    while let Some(operand) = pending.pop() {
+        match operand.view() {
+            SyntaxView::Logical {
+                connective: inner,
+                operands: inner_operands,
+            } if inner == connective => {
+                pending.extend(inner_operands.into_iter().rev());
+            }
+            _ => flat.push(operand),
+        }
+    }
+    flat
+}
+
 /// `node` with each top-level `and` / arithmetic operator starting a new line at `indent`.
 pub(crate) fn display_broken<'a, N: SyntaxNode<'a>>(node: N, indent: &str) -> String {
     let mut text = String::new();
@@ -523,6 +677,103 @@ pub(crate) fn display_broken<'a, N: SyntaxNode<'a>>(node: N, indent: &str) -> St
     )
     .expect("BUG: writing to a String cannot fail");
     text
+}
+
+/// A chain or conjunction longer than `max_cols`, filled to the last term that fits.
+/// The operator starts the next line at `indent`. `None` when `node` is not a chain.
+pub(crate) fn display_filled<'a, N: SyntaxNode<'a>>(
+    node: N,
+    max_cols: usize,
+    indent: &str,
+) -> Option<String> {
+    match node.view() {
+        SyntaxView::Chain {
+            level,
+            operands,
+            ops,
+        } => {
+            let parent_prec = arithmetic_precedence(level);
+            let parent_assoc = Some(arithmetic_associativity(level));
+            let (operands, ops) = flatten_arithmetic(level, operands, ops);
+            Some(pack_terms(
+                max_cols,
+                indent,
+                parent_prec,
+                parent_assoc,
+                operands,
+                ops.into_iter().map(ToString::to_string),
+            ))
+        }
+        SyntaxView::Logical {
+            connective,
+            operands,
+        } => {
+            let parent_prec = connective_precedence(connective);
+            let operands = flatten_logical(connective, operands);
+            let gaps = operands.len().saturating_sub(1);
+            let keyword = connective.keyword().to_string();
+            Some(pack_terms(
+                max_cols,
+                indent,
+                parent_prec,
+                Some(Associativity::Left),
+                operands,
+                std::iter::repeat_n(keyword, gaps),
+            ))
+        }
+        _ => None,
+    }
+}
+
+/// Operand text under a chain operator, including parentheses and call form.
+fn display_operand<'a, N: SyntaxNode<'a>>(
+    child: N,
+    parent_prec: u8,
+    side: OperandSide,
+    parent_assoc: Option<Associativity>,
+) -> String {
+    let mut pieces = Vec::new();
+    binary_operand(&mut pieces, child, parent_prec, side, parent_assoc);
+    let mut text = String::new();
+    render(&mut text, pieces, None).expect("BUG: writing to a String cannot fail");
+    text
+}
+
+fn pack_terms<'a, N: SyntaxNode<'a>>(
+    max_cols: usize,
+    indent: &str,
+    parent_prec: u8,
+    parent_assoc: Option<Associativity>,
+    operands: Vec<N>,
+    ops: impl Iterator<Item = String>,
+) -> String {
+    let mut ops = ops;
+    let mut lines = Vec::new();
+    let mut current = String::new();
+    for (i, operand) in operands.into_iter().enumerate() {
+        let side = if i == 0 {
+            OperandSide::Left
+        } else {
+            OperandSide::Right
+        };
+        let text = display_operand(operand, parent_prec, side, parent_assoc);
+        if i == 0 {
+            current = text;
+            continue;
+        }
+        let op = ops
+            .next()
+            .expect("BUG: chain has one operator per operand after the first");
+        let inline = format!(" {op} {text}");
+        if current.len() + inline.len() <= max_cols {
+            current.push_str(&inline);
+        } else {
+            lines.push(std::mem::take(&mut current));
+            current = format!("{op} {text}");
+        }
+    }
+    lines.push(current);
+    lines.join(&format!("\n{indent}"))
 }
 
 fn node_pieces<'a, N: SyntaxNode<'a>>(
@@ -543,6 +794,7 @@ fn node_pieces<'a, N: SyntaxNode<'a>>(
             operands,
             ops,
         } => {
+            let (operands, ops) = flatten_arithmetic(level, operands, ops);
             let assoc = Some(arithmetic_associativity(level));
             let mut ops = ops.into_iter();
             for (i, operand) in operands.into_iter().enumerate() {
@@ -589,6 +841,7 @@ fn node_pieces<'a, N: SyntaxNode<'a>>(
             connective,
             operands,
         } => {
+            let operands = flatten_logical(connective, operands);
             let assoc = Some(Associativity::Left);
             for (i, operand) in operands.into_iter().enumerate() {
                 let side = if i == 0 {
@@ -937,11 +1190,21 @@ mod tests {
     }
 
     #[test]
-    fn nary_wraps_same_precedence_chain_after_first_operand() {
+    fn nary_same_operator_joins_nested_chain() {
         let first = sum(vec![sum(vec![name("a"), name("b")]), name("c")]);
         assert_eq!(print(&first), "a + b + c");
         let later = sum(vec![name("a"), sum(vec![name("b"), name("c")])]);
-        assert_eq!(print(&later), "a + (b + c)");
+        assert_eq!(print(&later), "a + b + c");
+        let factors = product(vec![name("a"), product(vec![name("b"), name("c")])]);
+        assert_eq!(print(&factors), "a * b * c");
+        let difference = Tree::Nary(
+            ArithmeticComputation::Subtract,
+            vec![
+                name("a"),
+                Tree::Nary(ArithmeticComputation::Subtract, vec![name("b"), name("c")]),
+            ],
+        );
+        assert_eq!(print(&difference), "a - (b - c)");
     }
 
     #[test]
@@ -1011,7 +1274,7 @@ mod tests {
     }
 
     #[test]
-    fn broken_conjunction_keeps_nested_chains_flat() {
+    fn broken_conjunction_joins_nested_same_connective() {
         let tree = Tree::And(vec![
             name("a"),
             Tree::And(vec![name("b"), name("c")]),
@@ -1019,7 +1282,26 @@ mod tests {
         ]);
         assert_eq!(
             display_broken(&tree, "    "),
-            "a\n    and (b and c)\n    and d + e"
+            "a\n    and b\n    and c\n    and d + e"
         );
+    }
+
+    #[test]
+    fn filled_chain_parenthesizes_same_precedence_right_operand() {
+        let inner = Tree::Nary(ArithmeticComputation::Subtract, vec![name("b"), name("c")]);
+        let tree = Tree::Nary(ArithmeticComputation::Subtract, vec![name("a"), inner]);
+        assert_eq!(display_filled(&tree, 4, "  ").unwrap(), "a\n  - (b - c)");
+    }
+
+    #[test]
+    fn filled_power_parenthesizes_same_precedence_left_operand() {
+        let tree = power(power(name("a"), name("b")), name("c"));
+        assert_eq!(display_filled(&tree, 4, "  ").unwrap(), "(a ^ b)\n  ^ c");
+    }
+
+    #[test]
+    fn filled_chain_uses_call_form_for_bare_right_operand() {
+        let tree = product(vec![name("n"), Tree::Abs(Box::new(name("x")))]);
+        assert_eq!(display_filled(&tree, 4, "  ").unwrap(), "n\n  * abs(x)");
     }
 }

@@ -203,6 +203,27 @@ fn same_prec_right_subtract_under_subtract_keeps_parens() {
 }
 
 #[test]
+fn wrapped_sum_keeps_parentheses_around_command() {
+    let source = "\
+spec part
+data components: part list
+data quantity: number
+data own_cost: number
+rule unit_cost:
+  own_cost + (components -> sum(components.quantity * components.unit_cost))
+";
+    let formatted = format_source(source, lemma::SourceType::Volatile).unwrap();
+    assert!(
+        formatted.contains(
+            "  own_cost\n  + (components -> sum(components.quantity * components.unit_cost))"
+        ),
+        "{formatted}"
+    );
+    let again = format_source(&formatted, lemma::SourceType::Volatile).unwrap();
+    assert_eq!(again, formatted);
+}
+
+#[test]
 fn same_prec_right_parens_format_idempotent() {
     for expr in ["a - (b + c)", "a - (b - c)", "0 - (a + b)"] {
         let src = format!("spec test data a: 1 data b: 2 data c: 3 rule x: {expr}");

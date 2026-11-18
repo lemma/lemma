@@ -230,8 +230,9 @@ pub mod __test_support {
 
 // Tier 1 — language surface (always)
 pub use parsing::ast::{
-    try_parse_type_constraint_command, CommandArg, DataValue, LemmaData, ParentType, Span, SpecRef,
-    TimezoneValue, TypeConstraintCommand,
+    try_parse_type_constraint_command, CommandArg, DataValue, Expression, ExpressionKind,
+    InstanceListBody, InstanceListKey, InstanceListRow, LemmaData, ParentType, Span, SpecRef,
+    TimezoneValue, TypeConstraintCommand, UsesBindingRhs, WithRhs,
 };
 pub use parsing::lexer::{can_be_label, Lexer, TokenKind, COMPLETION_KEYWORD_LABELS};
 pub use parsing::source::Source;

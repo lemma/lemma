@@ -16,6 +16,7 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   WASM_PACK_VERSION: 0.15.1
+  TREE_SITTER_VERSION: 0.27.1
 
 jobs:
   precommit:
@@ -24,12 +25,15 @@ jobs:
     timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
+        with:
+          # zed grammar rev check (`git merge-base` / `git diff <rev> HEAD`) needs history.
+          fetch-depth: 0
 
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@master
         with:
           toolchain: 1.92.0
-          targets: wasm32-unknown-unknown
+          targets: wasm32-unknown-unknown, wasm32-wasip2
           components: rustfmt, clippy
 
       - name: Install Rust nightly
@@ -70,6 +74,9 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: '24.11.0'
+
+      - name: Install tree-sitter CLI
+        run: npm install -g tree-sitter-cli@${{ env.TREE_SITTER_VERSION }}
 
       - name: Install nextest
         uses: taiki-e/install-action@nextest

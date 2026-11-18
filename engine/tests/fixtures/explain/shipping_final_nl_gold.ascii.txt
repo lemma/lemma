@@ -1,5 +1,5 @@
 final_shipping: 17.6
-├─ free_shipping_eligible is false
+├─ free_shipping_eligible: false
 │  ├─ order_total: 50
 │  └─ destination_country
 └─ shipping_before_discount - shipping_discount_amount
@@ -13,14 +13,14 @@ final_shipping: 17.6
    │     │  └─ item_weight <= 20
    │     │     └─ item_weight: 2
    │     ├─ po_box_fee: 0
-   │     │  └─ is_po_box is false
+   │     │  └─ is_po_box: false
    │     ├─ expedited_fee: 0
-   │     │  ├─ is_expedited is false
+   │     │  ├─ is_expedited: false
    │     │  └─ is_expedited and item_weight > 10 is false
    │     │     ├─ is_expedited: false
    │     │     └─ item_weight
    │     └─ hazardous_fee: 0
-   │        ├─ is_hazardous is false
+   │        ├─ is_hazardous: false
    │        └─ is_hazardous and destination_country is not NL is false
    │           ├─ is_hazardous: false
    │           └─ destination_country

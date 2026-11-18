@@ -11,7 +11,5 @@ if ! command -v nix >/dev/null 2>&1; then
   exit 1
 fi
 
-echo "pre-push: nix develop -i -c cargo precommit"
-exec nix develop -i \
-  -k HOME -k USER -k TERM -k XDG_CACHE_HOME -k XDG_RUNTIME_DIR -k SSH_AUTH_SOCK \
-  -c cargo precommit
+echo "pre-push: nix develop -c cargo precommit"
+exec nix develop -c cargo precommit

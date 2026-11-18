@@ -134,8 +134,8 @@ rule out: 1 unless flag then 2
         .as_ref()
         .expect("explanation");
     assert_eq!(explanation.causes.len(), 1);
-    // The condition `flag` was false; the cause states the fact that held.
-    assert_eq!(explanation.causes[0].condition, "flag is false");
+    // The data `flag` is false. The cause line states that value.
+    assert_eq!(explanation.causes[0].condition, "flag: false");
     assert_eq!(explanation.causes[0].value, "true");
 }
 

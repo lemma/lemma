@@ -444,7 +444,7 @@ See [engine/packages/hex/README.md](engine/packages/hex/README.md) and [cli/docu
 <dependency>
   <groupId>com.lemmabase</groupId>
   <artifactId>lemma-engine</artifactId>
-  <version>0.11.3</version>
+  <version>0.11.4</version>
 </dependency>
 ```
 
@@ -453,7 +453,7 @@ See [engine/packages/maven/README.md](engine/packages/maven/README.md) and [cli/
 ### C# / .NET
 
 ```bash
-dotnet add package Lemmabase.Lemma.Engine --version 0.11.3
+dotnet add package Lemmabase.Lemma.Engine --version 0.11.4
 ```
 
 See [engine/packages/nuget/Lemmabase.Lemma.Engine/README.md](engine/packages/nuget/Lemmabase.Lemma.Engine/README.md) and [cli/documentation/tools/dotnet.md](cli/documentation/tools/dotnet.md).
@@ -499,14 +499,14 @@ Contributions welcome! See [Contributing](cli/documentation/community/contributi
 **Dev toolchain is Nix only.** Install [Nix](https://nixos.org/download/), then from the repo root:
 
 ```bash
-nix develop -i -k HOME -k USER -k TERM -k XDG_CACHE_HOME -k XDG_RUNTIME_DIR -k SSH_AUTH_SOCK
+nix develop
 cargo nextest run --workspace
 cargo precommit
 ```
 
-`-i` clears the host env (Alpine model); `-k` keeps only what the shell still needs. One-shot: `nix develop -i -k HOME -k USER -k TERM -k XDG_CACHE_HOME -k XDG_RUNTIME_DIR -k SSH_AUTH_SOCK -c cargo precommit`. The flake shell provides Rust, Node, Elixir, JDK 26, .NET 10, wasm-pack, uniffi-bindgen-cs, and the rest of the gate. Do not mix host mise/pacman/`cargo install` toolchains. Details: [AGENTS.md](AGENTS.md) (Toolchain), [flake.nix](flake.nix).
+`nix develop` provides Rust, Node, Elixir, JDK 26, .NET 10, wasm-pack, uniffi-bindgen-cs, and the rest of the gate. Do not mix host mise/pacman/`cargo install` toolchains. Details: [AGENTS.md](AGENTS.md) (Toolchain), [flake.nix](flake.nix).
 
-Optional local pre-push gate (opt-in, per clone): `git config core.hooksPath .githooks` runs the same `nix develop -i … -c cargo precommit` on every push. No skip switch.
+Optional local pre-push gate (opt-in, per clone): `git config core.hooksPath .githooks` runs `nix develop -c cargo precommit` on every push. No skip switch.
 
 Pull requests to `main` run `cargo precommit --coverage --fuzz`. Push to `main` runs `cargo precommit --coverage`. Bare `cargo precommit` is the local shortcut: the same gate without the coverage-report check and without fuzz. The gate covers `versions-verify`, Hex `mix precommit`, VS Code `npm precommit`, `fmt --check`, Clippy (`--all-features`), Nextest (`--all-features`), WASM npm `build.js` + `test.js`, Maven `./mvnw -B verify` (after `lemma_jni` build), NuGet `dotnet test` (after `lemma_dotnet` + UniFFI generate), and cargo-deny. `--coverage` checks the committed coverage reports (`cargo coverage all --check`). `--fuzz` runs 5 minutes of fuzz total across [engine/fuzz](engine/fuzz) targets. Regenerate coverage with `cargo coverage all` when engine or CLI sources change. `cargo nextest` alone is Rust tests only. When bumping the workspace release version, use `cargo bump <version>` and `cargo verify` (see [xtask/README.md](xtask/README.md)).
 

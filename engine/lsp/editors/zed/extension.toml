@@ -1,0 +1,22 @@
+id = "lemma"
+name = "Lemma"
+version = "0.11.4"
+schema_version = 1
+authors = ["Ben Rogmans <ben@lemmabase.com>"]
+description = "Lemma language support: syntax highlighting, diagnostics, completion, go to definition, and formatting via the Lemma language server"
+repository = "https://github.com/lemma/lemma"
+
+[grammars.lemma]
+repository = "https://github.com/lemma/lemma"
+rev = "3e7524a7b0e6d34920b0a402158dfa90a31bdf22"
+path = "engine/lsp/editors/zed/grammars/tree-sitter-lemma"
+
+[language_servers.lemma]
+name = "Lemma Language Server"
+languages = ["Lemma"]
+
+# Probe workspace target/{release,debug}/lemma with `--version` (same lookup as the VS Code extension).
+[[capabilities]]
+kind = "process:exec"
+command = "*"
+args = ["--version"]

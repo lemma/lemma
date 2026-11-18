@@ -12,7 +12,7 @@ use crate::parsing::ast::{
 };
 use crate::parsing::{parse, ParseResult};
 use crate::{Error, ResourceLimits};
-use expression::{display_broken, Syntax};
+use expression::{display_broken, display_filled, Syntax};
 
 /// Soft line length limit for prose (`unless`, expression soft-breaks, comma-value lists).
 /// Aligned instance-row tables may exceed this so each `-> with` stays on one padded line.
@@ -716,8 +716,9 @@ fn format_rule(rule: &LemmaRule, max_cols: usize) -> String {
 // Expression wrapping (soft line breaking at max_cols)
 // =============================================================================
 
-/// The expression on one line when it fits `max_cols`; otherwise every top-level `and` /
-/// arithmetic operator starts a new line at `indent`. Operands always print on one line.
+/// The expression on one line when it fits `max_cols`. A chain or conjunction that does
+/// not fit keeps its operator sequence and breaks at the last term that fits, with the
+/// operator at the start of the next line. Other expressions stay on one line.
 /// A sealed-catalog spine (`base`, optional `-> key`, then aligned `-> with` field rows)
 /// prints as a multi-line padded table instead.
 fn format_expr_wrapped(expr: &Expression, max_cols: usize, indent: &str) -> String {
@@ -728,7 +729,8 @@ fn format_expr_wrapped(expr: &Expression, max_cols: usize, indent: &str) -> Stri
     if flat.len() <= max_cols {
         flat
     } else {
-        display_broken(expr.root(), indent)
+        display_filled(expr.root(), max_cols, indent)
+            .unwrap_or_else(|| display_broken(expr.root(), indent))
     }
 }
 
@@ -1443,9 +1445,9 @@ rule can_request_reinstatement:
             format_source(source, crate::parsing::source::SourceType::Volatile).unwrap();
         assert!(
             formatted.contains(
-                "unless days_since_policy_stopped <= 365\n    and arrears_paid\n    and surrender_value_repaid\n    and all_insured_persons_alive\n    then yes"
+                "unless days_since_policy_stopped <= 365\n    and arrears_paid and surrender_value_repaid\n    and all_insured_persons_alive\n    then yes"
             ),
-            "long and chain wraps one operand per line, got:\n{formatted}"
+            "long and chain fills the condition budget, got:\n{formatted}"
         );
         let twice =
             format_source(&formatted, crate::parsing::source::SourceType::Volatile).unwrap();
@@ -1508,7 +1510,7 @@ rule child_auto_covered_service_only:
     }
 
     #[test]
-    fn test_format_long_arithmetic_chain_breaks_before_every_operator() {
+    fn test_format_long_arithmetic_chain_fills_to_max_cols() {
         let source = r#"spec test
 data first_amount: number
 data second_amount: number
@@ -1523,13 +1525,54 @@ rule total: first_amount + second_amount + third_amount + fourth_amount + fifth_
             format_source(source, crate::parsing::source::SourceType::Volatile).unwrap();
         assert!(
             formatted.contains(
-                "rule total:\n  first_amount\n  + second_amount\n  + third_amount\n  + fourth_amount\n  + fifth_amount\n  + sixth_amount\n"
+                "rule total:\n  first_amount + second_amount + third_amount\n  + fourth_amount + fifth_amount + sixth_amount\n"
             ),
-            "overlong chain breaks before every operator, got:\n{formatted}"
+            "overlong chain fills to 56 columns, got:\n{formatted}"
         );
         let twice =
             format_source(&formatted, crate::parsing::source::SourceType::Volatile).unwrap();
         assert_eq!(formatted, twice);
+    }
+
+    #[test]
+    fn test_format_nested_sum_that_fits_is_one_line() {
+        let source = "spec test\nrule total: (0 + 0) + (0 + 0)\n";
+        let formatted =
+            format_source(source, crate::parsing::source::SourceType::Volatile).unwrap();
+        assert!(
+            formatted.contains("rule total:\n  0 + 0 + 0 + 0\n"),
+            "nested sum that fits is one chain, got:\n{formatted}"
+        );
+        let twice =
+            format_source(&formatted, crate::parsing::source::SourceType::Volatile).unwrap();
+        assert_eq!(formatted, twice);
+    }
+
+    #[test]
+    fn test_format_nested_sum_fills_columns() {
+        let source = "spec test\nrule total: ((((0 + 0) + (0 + 0)) + ((0 + 0) + (0 + 0))) + (((0 + 0) + (0 + 0)) + ((0 + 0) + (0 + 0))))\n";
+        let formatted =
+            format_source(source, crate::parsing::source::SourceType::Volatile).unwrap();
+        assert!(
+            formatted.contains(
+                "rule total:\n  0 + 0 + 0 + 0 + 0 + 0 + 0 + 0 + 0 + 0 + 0 + 0 + 0 + 0\n  + 0 + 0\n"
+            ),
+            "sixteen zeros fill 56 columns, got:\n{formatted}"
+        );
+        let twice =
+            format_source(&formatted, crate::parsing::source::SourceType::Volatile).unwrap();
+        assert_eq!(formatted, twice);
+    }
+
+    #[test]
+    fn test_format_subtraction_keeps_right_parentheses() {
+        let source = "spec test\ndata a: 1\ndata b: 2\ndata c: 3\nrule total: a + (b - c)\n";
+        let formatted =
+            format_source(source, crate::parsing::source::SourceType::Volatile).unwrap();
+        assert!(
+            formatted.contains("rule total:\n  a + (b - c)\n"),
+            "subtraction stays grouped, got:\n{formatted}"
+        );
     }
 
     #[test]

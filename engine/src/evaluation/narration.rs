@@ -2357,10 +2357,13 @@ fn cause(
 
     let (condition_text, value) = if show_full_logical {
         let forms = plan.normal_forms.as_slice();
-        (
-            explanation_display(forms, root, qualifier),
-            "false".to_string(),
-        )
+        let displayed = explanation_display(forms, root, qualifier);
+        // A rule use-site displays as the rule name, not the `and` / `or` text.
+        if plan.normal_form(root).rule_ref.is_some() {
+            boolean_name_value(&displayed, false)
+        } else {
+            (displayed, "false".to_string())
+        }
     } else {
         condition_statement(focus, held, plan, qualifier)
     };
@@ -2471,6 +2474,15 @@ fn peel_bool_leaf_origins(condition: NormalFormId, plan: &ExecutionPlan) -> Norm
     }
 }
 
+/// `name: true` or `name: false`. `value` stays `"true"`: the cause line already
+/// states the boolean, and the formatter prints `condition` when the cause held.
+fn boolean_name_value(name: &str, held: bool) -> (String, String) {
+    (
+        format!("{name}: {}", if held { "true" } else { "false" }),
+        "true".to_string(),
+    )
+}
+
 fn condition_statement(
     mut condition: NormalFormId,
     mut held: bool,
@@ -2482,7 +2494,13 @@ fn condition_statement(
         held = !held;
     }
     let forms = plan.normal_forms.as_slice();
-    match &plan.normal_form(condition).kind {
+    let cell = plan.normal_form(condition);
+    // A rule use-site displays as the rule name. Its boolean outcome is that
+    // name's value. A comparison body stays the comparison (`flag is true`).
+    if cell.rule_ref.is_some() && !matches!(cell.kind, NormalFormKind::Comparison(..)) {
+        return boolean_name_value(&explanation_display(forms, condition, qualifier), held);
+    }
+    match &cell.kind {
         NormalFormKind::Comparison(a, op, b) => {
             let op = if held {
                 op.clone()
@@ -2507,14 +2525,9 @@ fn condition_statement(
             )
         }
         NormalFormKind::Not(_) => unreachable!("BUG: Not peeled before the condition match"),
-        NormalFormKind::Leaf(LeafKind::DataPath(path)) => (
-            if held {
-                qualified_input_key(qualifier, path)
-            } else {
-                format!("{} is false", qualified_input_key(qualifier, path))
-            },
-            "true".to_string(),
-        ),
+        NormalFormKind::Leaf(LeafKind::DataPath(path)) => {
+            boolean_name_value(&qualified_input_key(qualifier, path), held)
+        }
         NormalFormKind::Leaf(LeafKind::Literal(literal))
             if matches!(literal.value, ValueKind::Boolean(_)) =>
         {

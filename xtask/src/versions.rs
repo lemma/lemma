@@ -1,4 +1,4 @@
-//! Bump and verify the workspace release version across Rust, Elixir, Maven, docs, and VS Code.
+//! Bump and verify the workspace release version across Rust, Elixir, Maven, docs, VS Code, and Zed.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -334,18 +334,24 @@ pub fn versions_bump(root: &Path, new: &str) -> Result<(), String> {
     let pkg = root.join(tracked::VSCODE_PACKAGE_JSON);
     bump_package_json_version(&pkg, &old, new)?;
 
+    crate::zed::bump_versions(root, &old, new)?;
+    let tree_sitter_json = root.join(crate::zed::TREE_SITTER_JSON_REL);
+    bump_package_json_version(&tree_sitter_json, &old, new)?;
+
     run_cargo_update_workspace(root)?;
+    run_cargo_update_workspace(&root.join(crate::zed::ZED_EXTENSION_REL))?;
     run_mix_deps_get(root)?;
     run_npm_package_lock_only(root)?;
     Ok(())
 }
 
-fn run_cargo_update_workspace(root: &Path) -> Result<(), String> {
-    eprintln!("xtask: cargo update --workspace");
+/// `cargo update --workspace` for the workspace rooted at `dir` (repo root or a standalone crate).
+fn run_cargo_update_workspace(dir: &Path) -> Result<(), String> {
+    eprintln!("xtask: cargo update --workspace ({})", dir.display());
     let cargo = crate::cargo_bin();
     let st = Command::new(&cargo)
         .args(["update", "--workspace"])
-        .current_dir(root)
+        .current_dir(dir)
         .stdout(Stdio::null())
         .stderr(Stdio::inherit())
         .status()
@@ -534,6 +540,43 @@ pub fn versions_verify(root: &Path) -> Result<(), String> {
             Err(e) => errs.push(format!("{}: {e}", pkg.display())),
         },
         Err(e) => errs.push(format!("{}: {e}", pkg.display())),
+    }
+
+    crate::zed::verify_versions(root, &v, &mut errs);
+    let tree_sitter_json = root.join(crate::zed::TREE_SITTER_JSON_REL);
+    match fs::read_to_string(&tree_sitter_json) {
+        Ok(s) => match serde_json::from_str::<serde_json::Value>(&s) {
+            Ok(j) => match j.pointer("/metadata/version").and_then(|x| x.as_str()) {
+                Some(tv) if tv == v => {}
+                Some(tv) => errs.push(format!(
+                    "{}: metadata.version is {tv:?}, expected {v:?}",
+                    tree_sitter_json.display()
+                )),
+                None => errs.push(format!(
+                    "{}: missing metadata.version",
+                    tree_sitter_json.display()
+                )),
+            },
+            Err(e) => errs.push(format!("{}: {e}", tree_sitter_json.display())),
+        },
+        Err(e) => errs.push(format!("{}: {e}", tree_sitter_json.display())),
+    }
+    if let Err(e) = crate::zed::verify_grammar_rev(root) {
+        errs.push(e);
+    }
+
+    let tree_sitter_needle = format!("TREE_SITTER_VERSION: {}", crate::zed::TREE_SITTER_VERSION);
+    let quality = root.join(tracked::QUALITY_YML);
+    match fs::read_to_string(&quality) {
+        Ok(s) => {
+            if !s.contains(&tree_sitter_needle) {
+                errs.push(format!(
+                    "{}: expected `{tree_sitter_needle}` (must match xtask zed::TREE_SITTER_VERSION)",
+                    quality.display()
+                ));
+            }
+        }
+        Err(e) => errs.push(format!("{}: {e}", quality.display())),
     }
 
     let wasm_pack_needle = format!("WASM_PACK_VERSION: {WASM_PACK_VERSION}");

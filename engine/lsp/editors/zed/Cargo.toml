@@ -1,0 +1,21 @@
+[package]
+name = "zed_lemma"
+version = "0.11.4"
+edition = "2021"
+publish = false
+description = "Zed extension for Lemma: language server launcher"
+license = "Apache-2.0"
+repository = "https://github.com/lemma/lemma"
+
+# Standalone workspace: Zed builds this crate for wasm32-wasip2 on its own.
+[workspace]
+
+[lib]
+crate-type = ["cdylib"]
+path = "src/lib.rs"
+
+[lints.rust]
+dead_code = "deny"
+
+[dependencies]
+zed_extension_api = "=0.7.0"
